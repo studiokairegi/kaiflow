@@ -2,7 +2,10 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabaseClient";
 
 const STAGES = [
+  { id: "character_design", label: "Character Design" },
+  { id: "bg_lighting", label: "BG & Lighting Design" },
   { id: "storyboard", label: "Storyboard" },
+  { id: "layout", label: "Layout" },
   { id: "genga", label: "Genga" },
   { id: "douga", label: "Douga" },
   { id: "backgrounds", label: "Backgrounds" },
@@ -17,6 +20,18 @@ const PRIORITY_COLORS = {
   low: "#7FE0D0",
   normal: "#2FBFA6",
   rush: "#F2A65A",
+};
+
+const REVIEW_COLORS = {
+  waiting: "#4A90D9",
+  approved: "#3DDC84",
+  revisions: "#FF4D4D",
+};
+
+const REVIEW_LABELS = {
+  waiting: "Waiting Review",
+  approved: "Approved",
+  revisions: "Requested Revisions",
 };
 
 const LEAD_STAGES = [
@@ -63,6 +78,9 @@ function emptyCard(stage, projectId) {
     priority: "normal",
     notes: "",
     stage,
+    reviewStatus: "waiting",
+    revisions: [],
+    revisionVersion: 1,
   };
 }
 
@@ -75,6 +93,7 @@ function emptyProject(overrides = {}) {
     budget: "",
     deadline: "",
     priority: "normal",
+    archived: false,
     ...overrides,
   };
 }
@@ -90,6 +109,9 @@ function cardFromRow(row) {
     priority: row.priority,
     notes: row.notes,
     stage: row.stage,
+    reviewStatus: row.review_status || "waiting",
+    revisions: Array.isArray(row.revisions) ? row.revisions : [],
+    revisionVersion: row.revision_version || 1,
   };
 }
 
@@ -103,8 +125,17 @@ function cardToRow(card, userId) {
     priority: card.priority,
     notes: card.notes,
     stage: card.stage,
+    review_status: card.reviewStatus || "waiting",
+    revisions: card.revisions || [],
+    revision_version: card.revisionVersion || 1,
     user_id: userId,
   };
+}
+
+function shotFileName(card) {
+  const slug = (card.title || "shot").trim().toLowerCase().replace(/\s+/g, "_");
+  const version = String(card.revisionVersion || 1).padStart(2, "0");
+  return `${slug}_${card.stage}_v${version}`;
 }
 
 function generateShotChecklist(count, projectId, client) {
@@ -235,6 +266,28 @@ const FolderIcon = () => (
   </svg>
 );
 
+const ArchiveIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="4" width="18" height="4" rx="1" />
+    <path d="M5 8v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
+    <path d="M10 12h4" />
+  </svg>
+);
+
+const RestoreIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 12a9 9 0 1 0 3-6.7" />
+    <path d="M3 4v5h5" />
+  </svg>
+);
+
+const CopyIcon = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="9" width="12" height="12" rx="2" />
+    <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
+  </svg>
+);
+
 const DownloadIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
     <path d="M12 4v12m0 0-4-4m4 4 4-4M5 20h14" />
@@ -315,6 +368,7 @@ export default function ShotTracker() {
         budget: p.budget,
         deadline: p.deadline,
         priority: p.priority,
+        archived: p.archived,
       }));
       const nextCards = (shotsRes.data || []).map(cardFromRow);
       const nextLeads = (leadsRes.data || []).map(leadFromRow);
@@ -434,6 +488,7 @@ export default function ShotTracker() {
       const { error } = await supabase.from("projects").delete().eq("id", id);
       if (error) throw error;
       setData((prev) => ({
+        ...prev,
         projects: prev.projects.filter((p) => p.id !== id),
         cards: prev.cards.filter((c) => c.projectId !== id),
       }));
@@ -446,6 +501,22 @@ export default function ShotTracker() {
     if (selectedProjectId === id) {
       setView("projects");
       setSelectedProjectId(null);
+    }
+  };
+
+  const handleToggleArchive = async (id, archived) => {
+    setSaveState("saving");
+    try {
+      const { error } = await supabase.from("projects").update({ archived }).eq("id", id);
+      if (error) throw error;
+      setData((prev) => ({
+        ...prev,
+        projects: prev.projects.map((p) => (p.id === id ? { ...p, archived } : p)),
+      }));
+      flashSave(true);
+    } catch (e) {
+      console.error("Archive toggle failed:", e);
+      flashSave(false);
     }
   };
 
@@ -494,13 +565,22 @@ export default function ShotTracker() {
   };
 
   const moveCardStage = async (id, stage) => {
+    const resetFields = { reviewStatus: "waiting", revisions: [], revisionVersion: 1 };
     setData((prev) => ({
       ...prev,
-      cards: prev.cards.map((c) => (c.id === id ? { ...c, stage } : c)),
+      cards: prev.cards.map((c) => (c.id === id ? { ...c, stage, ...resetFields } : c)),
     }));
     setSaveState("saving");
     try {
-      const { error } = await supabase.from("shots").update({ stage }).eq("id", id);
+      const { error } = await supabase
+        .from("shots")
+        .update({
+          stage,
+          review_status: resetFields.reviewStatus,
+          revisions: resetFields.revisions,
+          revision_version: resetFields.revisionVersion,
+        })
+        .eq("id", id);
       if (error) throw error;
       flashSave(true);
     } catch (e) {
@@ -951,6 +1031,7 @@ export default function ShotTracker() {
           onOpen={openProject}
           onEdit={setEditingProject}
           onNew={() => setEditingProject(emptyProject())}
+          onToggleArchive={handleToggleArchive}
         />
       )}
 
@@ -1062,6 +1143,14 @@ export default function ShotTracker() {
                           }}
                         />
                         <span style={styles.cardTitle}>{card.title || "Untitled shot"}</span>
+                        <span style={{ flex: 1 }} />
+                        <span
+                          title={REVIEW_LABELS[card.reviewStatus] || REVIEW_LABELS.waiting}
+                          style={{
+                            ...styles.reviewDot,
+                            background: REVIEW_COLORS[card.reviewStatus] || REVIEW_COLORS.waiting,
+                          }}
+                        />
                       </div>
                       {card.client && <div style={styles.cardMeta}>{card.client}</div>}
                       <div style={styles.cardFooter}>
@@ -1129,7 +1218,11 @@ export default function ShotTracker() {
   );
 }
 
-function ProjectsGrid({ projects, cards, onOpen, onEdit, onNew }) {
+function ProjectsGrid({ projects, cards, onOpen, onEdit, onNew, onToggleArchive }) {
+  const [showArchived, setShowArchived] = useState(false);
+  const activeProjects = projects.filter((p) => !p.archived);
+  const archivedProjects = projects.filter((p) => p.archived);
+
   if (projects.length === 0) {
     return (
       <div style={styles.projectsEmpty}>
@@ -1144,41 +1237,108 @@ function ProjectsGrid({ projects, cards, onOpen, onEdit, onNew }) {
   }
 
   return (
-    <div style={styles.projectsGrid}>
-      {projects.map((project) => {
-        const projectCards = cards.filter((c) => c.projectId === project.id);
-        const { delivered, percent } = projectProgress(projectCards);
-        return (
-          <div key={project.id} style={styles.projectCard} onClick={() => onOpen(project.id)}>
-            <div style={styles.projectCardTop}>
-              <div style={styles.projectIconMark}><FolderIcon /></div>
-              <button
-                style={styles.iconButton}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onEdit(project);
-                }}
-              >
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 20h9" />
-                  <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
-                </svg>
-              </button>
+    <div>
+      {activeProjects.length === 0 ? (
+        <div style={styles.projectsEmpty}>
+          <div style={styles.projectsEmptyIcon}><FolderIcon /></div>
+          <p style={styles.projectsEmptyText}>No active projects</p>
+          <button style={styles.newButton} onClick={onNew}>
+            <PlusIcon />
+            New project
+          </button>
+        </div>
+      ) : (
+        <div style={styles.projectsGrid}>
+          {activeProjects.map((project) => (
+            <ProjectCard
+              key={project.id}
+              project={project}
+              cards={cards}
+              onOpen={onOpen}
+              onEdit={onEdit}
+              onToggleArchive={onToggleArchive}
+            />
+          ))}
+        </div>
+      )}
+
+      {archivedProjects.length > 0 && (
+        <div style={styles.archiveSection}>
+          <button
+            style={styles.archiveToggle}
+            onClick={() => setShowArchived(!showArchived)}
+          >
+            <ArchiveIcon />
+            {showArchived ? "Hide" : "Show"} archived ({archivedProjects.length})
+          </button>
+          {showArchived && (
+            <div style={styles.projectsGrid}>
+              {archivedProjects.map((project) => (
+                <ProjectCard
+                  key={project.id}
+                  project={project}
+                  cards={cards}
+                  onOpen={onOpen}
+                  onEdit={onEdit}
+                  onToggleArchive={onToggleArchive}
+                  archived
+                />
+              ))}
             </div>
-            <div style={styles.projectName}>{project.name || "Untitled project"}</div>
-            {project.client && <div style={styles.projectClient}>{project.client}</div>}
-            <div style={styles.projectStats}>
-              <span style={styles.progressLabel}>
-                {projectCards.length === 0 ? "No shots yet" : `${delivered} of ${projectCards.length} delivered`}
-              </span>
-              <span style={styles.progressPercent}>{percent}%</span>
-            </div>
-            <div style={styles.progressTrack}>
-              <div style={{ ...styles.progressFill, width: `${percent}%` }} />
-            </div>
-          </div>
-        );
-      })}
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProjectCard({ project, cards, onOpen, onEdit, onToggleArchive, archived }) {
+  const projectCards = cards.filter((c) => c.projectId === project.id);
+  const { delivered, percent } = projectProgress(projectCards);
+  return (
+    <div
+      style={{ ...styles.projectCard, ...(archived ? styles.projectCardArchived : {}) }}
+      onClick={() => onOpen(project.id)}
+    >
+      <div style={styles.projectCardTop}>
+        <div style={styles.projectIconMark}><FolderIcon /></div>
+        <div style={styles.projectCardActions}>
+          <button
+            style={styles.iconButton}
+            onClick={(e) => {
+              e.stopPropagation();
+              onEdit(project);
+            }}
+            title="Edit"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
+            </svg>
+          </button>
+          <button
+            style={styles.iconButton}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleArchive(project.id, !archived);
+            }}
+            title={archived ? "Restore" : "Archive"}
+          >
+            {archived ? <RestoreIcon /> : <ArchiveIcon />}
+          </button>
+        </div>
+      </div>
+      <div style={styles.projectName}>{project.name || "Untitled project"}</div>
+      {project.client && <div style={styles.projectClient}>{project.client}</div>}
+      <div style={styles.projectStats}>
+        <span style={styles.progressLabel}>
+          {projectCards.length === 0 ? "No shots yet" : `${delivered} of ${projectCards.length} delivered`}
+        </span>
+        <span style={styles.progressPercent}>{percent}%</span>
+      </div>
+      <div style={styles.progressTrack}>
+        <div style={{ ...styles.progressFill, width: `${percent}%` }} />
+      </div>
     </div>
   );
 }
@@ -1535,6 +1695,47 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew }) {
   const [form, setForm] = useState(card);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
 
+  const handleSetStatus = (status) => {
+    if (status === "revisions" && form.reviewStatus !== "revisions" && form.revisions.length === 0) {
+      setForm({
+        ...form,
+        reviewStatus: status,
+        revisions: [""],
+        revisionVersion: (form.revisionVersion || 1) + 1,
+      });
+    } else {
+      setForm({ ...form, reviewStatus: status });
+    }
+  };
+
+  const addRevision = () => {
+    setForm({
+      ...form,
+      revisions: [...form.revisions, ""],
+      revisionVersion: (form.revisionVersion || 1) + 1,
+    });
+  };
+
+  const updateRevisionText = (index, text) => {
+    setForm({
+      ...form,
+      revisions: form.revisions.map((r, i) => (i === index ? text : r)),
+    });
+  };
+
+  const [copied, setCopied] = useState(false);
+  const handleCopyFileName = async () => {
+    const name = shotFileName(form);
+    try {
+      await navigator.clipboard.writeText(name);
+    } catch (e) {
+      // clipboard API unavailable, fall back to a manual select prompt
+      window.prompt("Copy the file name:", name);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
   return (
     <div style={styles.overlay} onClick={onCancel}>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -1607,6 +1808,56 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew }) {
             rows={3}
           />
         </div>
+
+        <div style={styles.fieldDivider}>Client Review</div>
+        <div style={styles.reviewStatusRow}>
+          {["waiting", "approved", "revisions"].map((status) => {
+            const active = form.reviewStatus === status;
+            return (
+              <button
+                key={status}
+                type="button"
+                style={{
+                  ...styles.reviewStatusButton,
+                  borderColor: active ? REVIEW_COLORS[status] : border,
+                  color: active ? REVIEW_COLORS[status] : textMuted,
+                  background: active ? `${REVIEW_COLORS[status]}1a` : "transparent",
+                }}
+                onClick={() => handleSetStatus(status)}
+              >
+                <span style={{ ...styles.reviewDot, background: REVIEW_COLORS[status] }} />
+                {REVIEW_LABELS[status]}
+              </button>
+            );
+          })}
+        </div>
+        <div style={styles.fileNameRow}>
+          <span style={styles.fieldHint}>{shotFileName(form)}</span>
+          <button type="button" style={styles.copyButton} onClick={handleCopyFileName}>
+            <CopyIcon />
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
+
+        {form.reviewStatus === "revisions" && (
+          <div style={styles.field}>
+            <label style={styles.label}>Revisions requested</label>
+            {form.revisions.map((text, i) => (
+              <textarea
+                key={i}
+                style={{ ...styles.textarea, marginBottom: 6 }}
+                value={text}
+                onChange={(e) => updateRevisionText(i, e.target.value)}
+                placeholder={`Revision ${i + 1} notes...`}
+                rows={2}
+              />
+            ))}
+            <button type="button" style={styles.addRevisionButton} onClick={addRevision}>
+              <PlusIcon />
+              Add another revision
+            </button>
+          </div>
+        )}
 
         <div style={styles.modalFooter}>
           {!isNew && (
@@ -1901,10 +2152,38 @@ const styles = {
     gap: 10,
     cursor: "pointer",
   },
+  projectCardArchived: {
+    opacity: 0.6,
+  },
   projectCardTop: {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
+  },
+  projectCardActions: {
+    display: "flex",
+    gap: 4,
+  },
+  archiveSection: {
+    padding: "8px 0 32px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 14,
+  },
+  archiveToggle: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    alignSelf: "flex-start",
+    marginLeft: 28,
+    background: "transparent",
+    border: `1px solid ${border}`,
+    borderRadius: 999,
+    color: textMuted,
+    fontSize: 12.5,
+    padding: "8px 14px",
+    cursor: "pointer",
+    fontFamily: "'Inter', sans-serif",
   },
   projectIconMark: {
     width: 32,
@@ -2029,6 +2308,13 @@ const styles = {
     height: 7,
     borderRadius: "50%",
     flexShrink: 0,
+  },
+  reviewDot: {
+    width: 8,
+    height: 8,
+    borderRadius: "50%",
+    flexShrink: 0,
+    cursor: "default",
   },
   cardTitle: {
     fontSize: 13.5,
@@ -2199,6 +2485,56 @@ const styles = {
     fontSize: 13,
     fontWeight: 600,
     padding: "9px 16px",
+    cursor: "pointer",
+    fontFamily: "'Inter', sans-serif",
+  },
+  reviewStatusRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  fileNameRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    justifyContent: "space-between",
+  },
+  copyButton: {
+    display: "flex",
+    alignItems: "center",
+    gap: 5,
+    background: "transparent",
+    border: `1px solid ${border}`,
+    borderRadius: 999,
+    color: teal,
+    fontSize: 11,
+    padding: "4px 10px",
+    cursor: "pointer",
+    fontFamily: "'IBM Plex Mono', monospace",
+    flexShrink: 0,
+  },
+  reviewStatusButton: {
+    display: "flex",
+    alignItems: "center",
+    gap: 7,
+    border: "1px solid",
+    borderRadius: 999,
+    fontSize: 12.5,
+    padding: "7px 13px",
+    cursor: "pointer",
+    fontFamily: "'Inter', sans-serif",
+  },
+  addRevisionButton: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    alignSelf: "flex-start",
+    background: "transparent",
+    border: `1px dashed ${border}`,
+    borderRadius: 999,
+    color: teal,
+    fontSize: 12.5,
+    padding: "8px 14px",
     cursor: "pointer",
     fontFamily: "'Inter', sans-serif",
   },
