@@ -19,6 +19,26 @@ const PRIORITY_COLORS = {
   rush: "#F2A65A",
 };
 
+const LEAD_STAGES = [
+  { id: "pool", label: "Email Pool" },
+  { id: "cold_email", label: "Cold Email" },
+  { id: "no_response", label: "No Response" },
+  { id: "responded", label: "Responded" },
+  { id: "successful", label: "Successful Leads" },
+  { id: "lost", label: "Lost Leads" },
+  { id: "won", label: "Deal Won" },
+  { id: "closed", label: "Deal Closed" },
+];
+
+const LOST_REASONS = [
+  "Budget",
+  "Timing",
+  "Chose another studio",
+  "No longer producing",
+  "No response",
+  "Other",
+];
+
 function stagePercent(stageId) {
   const index = STAGES.findIndex((s) => s.id === stageId);
   if (index === -1) return 0;
@@ -46,12 +66,16 @@ function emptyCard(stage, projectId) {
   };
 }
 
-function emptyProject() {
+function emptyProject(overrides = {}) {
   return {
     name: "",
     client: "",
     notes: "",
     shotCount: "",
+    budget: "",
+    deadline: "",
+    priority: "normal",
+    ...overrides,
   };
 }
 
@@ -96,6 +120,71 @@ function generateShotChecklist(count, projectId, client) {
     notes: "",
     stage: STAGES[0].id,
   }));
+}
+
+function emptyEmails() {
+  return [
+    { label: "Initial Email", message: "", sent: false, dateSent: null },
+    { label: "Follow-up 1", message: "", sent: false, dateSent: null },
+    { label: "Follow-up 2", message: "", sent: false, dateSent: null },
+    { label: "Follow-up 3", message: "", sent: false, dateSent: null },
+  ];
+}
+
+function emptyLead() {
+  return {
+    companyName: "",
+    contactPerson: "",
+    email: "",
+    website: "",
+    country: "",
+    notes: "",
+    stage: "pool",
+    emails: emptyEmails(),
+    proposedBudget: "",
+    estimatedDeadline: "",
+    projectNotes: "",
+    lostReason: "",
+    linkedProjectId: null,
+  };
+}
+
+function leadFromRow(row) {
+  return {
+    id: row.id,
+    companyName: row.company_name,
+    contactPerson: row.contact_person,
+    email: row.email,
+    website: row.website,
+    country: row.country,
+    notes: row.notes,
+    stage: row.stage,
+    emails: row.emails && row.emails.length ? row.emails : emptyEmails(),
+    proposedBudget: row.proposed_budget,
+    estimatedDeadline: row.estimated_deadline,
+    projectNotes: row.project_notes,
+    lostReason: row.lost_reason,
+    linkedProjectId: row.linked_project_id,
+  };
+}
+
+function leadToRow(lead, userId) {
+  return {
+    company_name: lead.companyName,
+    contact_person: lead.contactPerson,
+    email: lead.email,
+    website: lead.website,
+    country: lead.country,
+    notes: lead.notes,
+    stage: lead.stage,
+    emails: lead.emails,
+    proposed_budget: lead.proposedBudget,
+    estimated_deadline: lead.estimatedDeadline,
+    project_notes: lead.projectNotes,
+    lost_reason: lead.lostReason,
+    linked_project_id: lead.linkedProjectId || null,
+    user_id: userId,
+  };
 }
 
 function friendlyAuthError(err) {
@@ -152,12 +241,6 @@ const DownloadIcon = () => (
   </svg>
 );
 
-const UploadIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M12 16V4m0 0 4 4m-4-4-4 4M5 20h14" />
-  </svg>
-);
-
 const SignOutIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
@@ -176,13 +259,16 @@ export default function ShotTracker() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
 
-  const [data, setData] = useState({ projects: [], cards: [] });
-  const { projects, cards } = data;
+  const [data, setData] = useState({ projects: [], cards: [], leads: [] });
+  const { projects, cards, leads } = data;
   const [loading, setLoading] = useState(true);
+  const [workspace, setWorkspace] = useState("projects"); // "projects" | "leads"
   const [view, setView] = useState("projects");
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [editingCard, setEditingCard] = useState(null);
   const [editingProject, setEditingProject] = useState(null);
+  const [editingLead, setEditingLead] = useState(null);
+  const [pendingLeadLinkId, setPendingLeadLinkId] = useState(null);
   const [dragOverStage, setDragOverStage] = useState(null);
   const [dragVisual, setDragVisual] = useState(null);
   const [saveState, setSaveState] = useState("idle");
@@ -190,8 +276,6 @@ export default function ShotTracker() {
   const dataRef = useRef(data);
   const dragStateRef = useRef(null);
   const suppressClickRef = useRef(false);
-  const fileInputRef = useRef(null);
-  const [importMessage, setImportMessage] = useState("");
 
   useEffect(() => {
     dataRef.current = data;
@@ -215,20 +299,26 @@ export default function ShotTracker() {
     if (!userId) return;
     setLoading(true);
     try {
-      const [projectsRes, shotsRes] = await Promise.all([
+      const [projectsRes, shotsRes, leadsRes] = await Promise.all([
         supabase.from("projects").select("*").order("created_at"),
         supabase.from("shots").select("*").order("created_at"),
+        supabase.from("leads").select("*").order("created_at"),
       ]);
       if (projectsRes.error) throw projectsRes.error;
       if (shotsRes.error) throw shotsRes.error;
+      if (leadsRes.error) throw leadsRes.error;
       const nextProjects = (projectsRes.data || []).map((p) => ({
         id: p.id,
         name: p.name,
         client: p.client,
         notes: p.notes,
+        budget: p.budget,
+        deadline: p.deadline,
+        priority: p.priority,
       }));
       const nextCards = (shotsRes.data || []).map(cardFromRow);
-      setData({ projects: nextProjects, cards: nextCards });
+      const nextLeads = (leadsRes.data || []).map(leadFromRow);
+      setData({ projects: nextProjects, cards: nextCards, leads: nextLeads });
     } catch (e) {
       console.error("Shot Tracker load failed:", e);
     } finally {
@@ -238,7 +328,7 @@ export default function ShotTracker() {
 
   useEffect(() => {
     if (userId) loadData();
-    else setData({ projects: [], cards: [] });
+    else setData({ projects: [], cards: [], leads: [] });
   }, [userId, loadData]);
 
   const flashSave = (ok) => {
@@ -252,7 +342,14 @@ export default function ShotTracker() {
       if (project.id) {
         const { error } = await supabase
           .from("projects")
-          .update({ name: project.name, client: project.client, notes: project.notes })
+          .update({
+            name: project.name,
+            client: project.client,
+            notes: project.notes,
+            budget: project.budget,
+            deadline: project.deadline,
+            priority: project.priority,
+          })
           .eq("id", project.id);
         if (error) throw error;
         setData((prev) => ({
@@ -266,6 +363,9 @@ export default function ShotTracker() {
             name: project.name,
             client: project.client,
             notes: project.notes,
+            budget: project.budget,
+            deadline: project.deadline,
+            priority: project.priority,
             user_id: userId,
           })
           .select()
@@ -288,10 +388,37 @@ export default function ShotTracker() {
           ...prev,
           projects: [
             ...prev.projects,
-            { id: inserted.id, name: inserted.name, client: inserted.client, notes: inserted.notes },
+            {
+              id: inserted.id,
+              name: inserted.name,
+              client: inserted.client,
+              notes: inserted.notes,
+              budget: inserted.budget,
+              deadline: inserted.deadline,
+              priority: inserted.priority,
+            },
           ],
           cards: [...prev.cards, ...newCards],
         }));
+
+        if (pendingLeadLinkId) {
+          const linkId = pendingLeadLinkId;
+          setPendingLeadLinkId(null);
+          try {
+            await supabase
+              .from("leads")
+              .update({ linked_project_id: inserted.id })
+              .eq("id", linkId);
+            setData((prev) => ({
+              ...prev,
+              leads: prev.leads.map((l) =>
+                l.id === linkId ? { ...l, linkedProjectId: inserted.id } : l
+              ),
+            }));
+          } catch (linkErr) {
+            console.error("Linking lead to project failed:", linkErr);
+          }
+        }
       }
       flashSave(true);
     } catch (e) {
@@ -387,6 +514,88 @@ export default function ShotTracker() {
     moveCardStageRef.current = moveCardStage;
   });
 
+  const handleSaveLead = async (lead) => {
+    setSaveState("saving");
+    try {
+      if (lead.id) {
+        await supabase.from("leads").update(leadToRow(lead, userId)).eq("id", lead.id);
+        setData((prev) => ({
+          ...prev,
+          leads: prev.leads.map((l) => (l.id === lead.id ? lead : l)),
+        }));
+      } else {
+        const { data: inserted, error } = await supabase
+          .from("leads")
+          .insert(leadToRow(lead, userId))
+          .select()
+          .single();
+        if (error) throw error;
+        setData((prev) => ({ ...prev, leads: [...prev.leads, leadFromRow(inserted)] }));
+      }
+      flashSave(true);
+    } catch (e) {
+      console.error("Lead save failed:", e);
+      flashSave(false);
+    }
+    setEditingLead(null);
+  };
+
+  const handleDeleteLead = async (id) => {
+    setSaveState("saving");
+    try {
+      await supabase.from("leads").delete().eq("id", id);
+      setData((prev) => ({ ...prev, leads: prev.leads.filter((l) => l.id !== id) }));
+      flashSave(true);
+    } catch (e) {
+      console.error("Lead delete failed:", e);
+      flashSave(false);
+    }
+    setEditingLead(null);
+  };
+
+  const moveLeadStage = async (id, stage) => {
+    setData((prev) => ({
+      ...prev,
+      leads: prev.leads.map((l) => (l.id === id ? { ...l, stage } : l)),
+    }));
+    setSaveState("saving");
+    try {
+      await supabase.from("leads").update({ stage }).eq("id", id);
+      flashSave(true);
+    } catch (e) {
+      console.error("Lead stage move failed:", e);
+      flashSave(false);
+    }
+  };
+
+  const moveLeadStageRef = useRef(moveLeadStage);
+  useEffect(() => {
+    moveLeadStageRef.current = moveLeadStage;
+  });
+
+  // Called from the lead editor: saves the lead as "won" and opens a
+  // prefilled New Project form so no data has to be typed twice.
+  const handleMarkWon = async (lead) => {
+    const wonLead = { ...lead, stage: "won" };
+    await handleSaveLead(wonLead);
+    setPendingLeadLinkId(lead.id || null);
+    setWorkspace("projects");
+    setView("projects");
+    setEditingProject(
+      emptyProject({
+        name: lead.companyName,
+        client: lead.contactPerson || lead.companyName,
+        notes: lead.projectNotes || lead.notes,
+        budget: lead.proposedBudget,
+        deadline: lead.estimatedDeadline,
+      })
+    );
+  };
+
+  const handleMarkLost = async (lead, reason) => {
+    await handleSaveLead({ ...lead, stage: "lost", lostReason: reason });
+  };
+
   const handleExport = () => {
     const payload = JSON.stringify(data, null, 2);
     const blob = new Blob([payload], { type: "application/json" });
@@ -399,48 +608,6 @@ export default function ShotTracker() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  };
-
-  const handleImportClick = () => {
-    fileInputRef.current?.click();
-  };
-
-  const handleImportFile = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        const parsed = JSON.parse(reader.result);
-        const importedProjects = Array.isArray(parsed.projects) ? parsed.projects : [];
-        const importedCards = Array.isArray(parsed.cards) ? parsed.cards : [];
-        const idMap = {};
-        for (const p of importedProjects) {
-          const { data: inserted, error } = await supabase
-            .from("projects")
-            .insert({ name: p.name, client: p.client, notes: p.notes, user_id: userId })
-            .select()
-            .single();
-          if (error) throw error;
-          idMap[p.id] = inserted.id;
-        }
-        for (const c of importedCards) {
-          const newProjectId = idMap[c.projectId];
-          if (!newProjectId) continue;
-          await supabase
-            .from("shots")
-            .insert(cardToRow({ ...c, projectId: newProjectId }, userId));
-        }
-        await loadData();
-        setImportMessage(`Imported ${importedProjects.length} projects, ${importedCards.length} shots`);
-      } catch (err) {
-        console.error("Import failed:", err);
-        setImportMessage("Import failed, file wasn't valid backup JSON");
-      }
-      setTimeout(() => setImportMessage(""), 3500);
-    };
-    reader.readAsText(file);
-    e.target.value = "";
   };
 
   const handleAuthSubmit = async (e) => {
@@ -531,7 +698,11 @@ export default function ShotTracker() {
         const columnEl = el && el.closest("[data-stage]");
         const stage = columnEl ? columnEl.getAttribute("data-stage") : null;
         if (stage) {
-          moveCardStageRef.current(ds.id, stage);
+          if (ds.kind === "lead") {
+            moveLeadStageRef.current(ds.id, stage);
+          } else {
+            moveCardStageRef.current(ds.id, stage);
+          }
         }
       }
       endDrag();
@@ -547,13 +718,14 @@ export default function ShotTracker() {
     };
   }, [handlePointerMove, handlePointerUp]);
 
-  const handlePointerDown = (e, card) => {
+  const handlePointerDown = (e, card, kind = "shot") => {
     if (e.button !== undefined && e.button !== 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     dragStateRef.current = {
+      kind,
       id: card.id,
-      title: card.title,
-      client: card.client,
+      title: kind === "lead" ? card.companyName : card.title,
+      client: kind === "lead" ? card.contactPerson : card.client,
       startX: e.clientX,
       startY: e.clientY,
       offsetX: e.clientX - rect.left,
@@ -572,6 +744,14 @@ export default function ShotTracker() {
       return;
     }
     setEditingCard(card);
+  };
+
+  const handleLeadClick = (lead) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    setEditingLead(lead);
   };
 
   const openProject = (id) => {
@@ -593,10 +773,8 @@ export default function ShotTracker() {
         <style>{fontImport}</style>
         <div style={styles.lockScreen}>
           <div style={styles.logoMark}><ClapperIcon /></div>
-          <h1 style={styles.title}>Shot Tracker</h1>
-          <p style={styles.subtitle}>
-            {authMode === "signin" ? "Sign in to your studio" : "Create your studio account"}
-          </p>
+          <h1 style={styles.title}>KaiFlow</h1>
+          <p style={styles.subtitle}>CRM plus Shot Tracker</p>
 
           <button style={styles.googleButton} onClick={handleGoogleSignIn} type="button">
             <svg width="16" height="16" viewBox="0 0 24 24">
@@ -671,6 +849,7 @@ export default function ShotTracker() {
   const selectedProject = projects.find((p) => p.id === selectedProjectId);
   const projectCards = cards.filter((c) => c.projectId === selectedProjectId);
   const { delivered: deliveredCount, percent: overallPercent } = projectProgress(projectCards);
+  const showTabs = view !== "board";
 
   return (
     <div style={styles.app}>
@@ -687,12 +866,14 @@ export default function ShotTracker() {
           )}
           <div>
             <h1 style={styles.title}>
-              {view === "board" ? selectedProject?.name || "Project" : "Shot Tracker"}
+              {view === "board"
+                ? selectedProject?.name || "Project"
+                : workspace === "leads"
+                ? "Leads"
+                : "KaiFlow"}
             </h1>
             <p style={styles.subtitle}>
-              {view === "board"
-                ? selectedProject?.client || "Studio Kairegi"
-                : session.user.email}
+              {view === "board" ? selectedProject?.client || "Studio Kairegi" : session.user.email}
             </p>
           </div>
         </div>
@@ -705,25 +886,10 @@ export default function ShotTracker() {
           <button style={styles.iconButtonGhost} onClick={handleExport} title="Export backup">
             <DownloadIcon />
           </button>
-          <button style={styles.iconButtonGhost} onClick={handleImportClick} title="Import backup">
-            <UploadIcon />
-          </button>
           <button style={styles.iconButtonGhost} onClick={handleSignOut} title="Sign out">
             <SignOutIcon />
           </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="application/json"
-            style={{ display: "none" }}
-            onChange={handleImportFile}
-          />
-          {view === "projects" ? (
-            <button style={styles.newButton} onClick={() => setEditingProject(emptyProject())}>
-              <PlusIcon />
-              New project
-            </button>
-          ) : (
+          {view === "board" ? (
             <button
               style={styles.newButton}
               onClick={() => setEditingCard(emptyCard(STAGES[0].id, selectedProjectId))}
@@ -731,12 +897,35 @@ export default function ShotTracker() {
               <PlusIcon />
               New shot
             </button>
+          ) : workspace === "leads" ? (
+            <button style={styles.newButton} onClick={() => setEditingLead(emptyLead())}>
+              <PlusIcon />
+              New lead
+            </button>
+          ) : (
+            <button style={styles.newButton} onClick={() => setEditingProject(emptyProject())}>
+              <PlusIcon />
+              New project
+            </button>
           )}
         </div>
       </header>
 
-      {importMessage && (
-        <div style={styles.importToast}>{importMessage}</div>
+      {showTabs && (
+        <div style={styles.tabRow}>
+          <button
+            style={{ ...styles.tabButton, ...(workspace === "projects" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("projects")}
+          >
+            Projects
+          </button>
+          <button
+            style={{ ...styles.tabButton, ...(workspace === "leads" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("leads")}
+          >
+            Leads
+          </button>
+        </div>
       )}
 
       {view === "board" && (
@@ -755,7 +944,7 @@ export default function ShotTracker() {
         </div>
       )}
 
-      {view === "projects" && (
+      {view === "projects" && workspace === "projects" && (
         <ProjectsGrid
           projects={projects}
           cards={cards}
@@ -763,6 +952,70 @@ export default function ShotTracker() {
           onEdit={setEditingProject}
           onNew={() => setEditingProject(emptyProject())}
         />
+      )}
+
+      {view === "projects" && workspace === "leads" && (
+        <div style={{ ...styles.board, touchAction: dragVisual ? "none" : "auto" }}>
+          {LEAD_STAGES.map((stage) => {
+            const stageLeads = leads.filter((l) => l.stage === stage.id);
+            const isOver = dragOverStage === stage.id;
+            return (
+              <div
+                key={stage.id}
+                data-stage={stage.id}
+                style={{ ...styles.column, ...(isOver ? styles.columnOver : {}) }}
+              >
+                <div style={styles.columnHeader}>
+                  <span style={styles.columnLabel}>{stage.label}</span>
+                  <span style={styles.columnCount}>{stageLeads.length}</span>
+                </div>
+                <div style={styles.columnBody}>
+                  {stageLeads.length === 0 && (
+                    <button
+                      style={styles.emptyAdd}
+                      onClick={() => setEditingLead(emptyLead())}
+                    >
+                      <PlusIcon />
+                      Add lead
+                    </button>
+                  )}
+                  {stageLeads.map((lead) => {
+                    const sentCount = lead.emails.filter((e) => e.sent).length;
+                    return (
+                      <div
+                        key={lead.id}
+                        onPointerDown={(e) => handlePointerDown(e, lead, "lead")}
+                        onClick={() => handleLeadClick(lead)}
+                        style={{
+                          ...styles.card,
+                          opacity: dragStateRef.current?.id === lead.id && dragVisual ? 0.4 : 1,
+                          touchAction: "none",
+                        }}
+                      >
+                        <div style={styles.cardTop}>
+                          <span style={styles.cardTitle}>
+                            {lead.companyName || "Untitled lead"}
+                          </span>
+                        </div>
+                        {lead.contactPerson && (
+                          <div style={styles.cardMeta}>{lead.contactPerson}</div>
+                        )}
+                        <div style={styles.cardFooter}>
+                          {sentCount > 0 && (
+                            <span style={styles.cardTag}>{sentCount}/4 emails sent</span>
+                          )}
+                          {lead.stage === "lost" && lead.lostReason && (
+                            <span style={styles.cardTag}>{lead.lostReason}</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
 
       {view === "board" && (
@@ -858,6 +1111,18 @@ export default function ShotTracker() {
           onSave={handleSaveProject}
           onDelete={handleDeleteProject}
           isNew={!editingProject.id}
+        />
+      )}
+
+      {editingLead && (
+        <LeadEditor
+          lead={editingLead}
+          onCancel={() => setEditingLead(null)}
+          onSave={handleSaveLead}
+          onDelete={handleDeleteLead}
+          onMarkWon={handleMarkWon}
+          onMarkLost={handleMarkLost}
+          isNew={!editingLead.id}
         />
       )}
     </div>
@@ -971,6 +1236,36 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew }) {
           </div>
         )}
 
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Budget</label>
+            <input
+              style={styles.input}
+              value={form.budget || ""}
+              onChange={set("budget")}
+              placeholder="e.g. $2,000"
+            />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Deadline</label>
+            <input
+              style={styles.input}
+              value={form.deadline || ""}
+              onChange={set("deadline")}
+              placeholder="e.g. Aug 15"
+            />
+          </div>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Priority</label>
+          <select style={styles.input} value={form.priority || "normal"} onChange={set("priority")}>
+            <option value="low">Low</option>
+            <option value="normal">Normal</option>
+            <option value="rush">Rush</option>
+          </select>
+        </div>
+
         <div style={styles.field}>
           <label style={styles.label}>Notes</label>
           <textarea
@@ -998,6 +1293,237 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew }) {
             onClick={() => onSave({ ...form, name: form.name || "Untitled project" })}
           >
             Save project
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LeadEditor({ lead, onCancel, onSave, onDelete, onMarkWon, onMarkLost, isNew }) {
+  const [form, setForm] = useState(lead);
+  const [showLostReasons, setShowLostReasons] = useState(false);
+  const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+
+  const updateEmail = (index, patch) => {
+    const nextEmails = form.emails.map((em, i) => {
+      if (i !== index) return em;
+      const updated = { ...em, ...patch };
+      if (patch.sent === true && !em.sent) {
+        updated.dateSent = new Date().toISOString().slice(0, 10);
+      }
+      if (patch.sent === false) {
+        updated.dateSent = null;
+      }
+      return updated;
+    });
+
+    // Automation: sending the initial email moves a lead out of the pool,
+    // and sending the final follow-up assumes no reply yet, so it moves to
+    // No Response. Either can always be corrected manually afterward.
+    let nextStage = form.stage;
+    if (index === 0 && patch.sent === true && form.stage === "pool") {
+      nextStage = "cold_email";
+    }
+    if (index === 3 && patch.sent === true && (form.stage === "pool" || form.stage === "cold_email")) {
+      nextStage = "no_response";
+    }
+    setForm({ ...form, emails: nextEmails, stage: nextStage });
+  };
+
+  const showNegotiation = !["pool", "cold_email"].includes(form.stage);
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <span style={styles.modalTitle}>{isNew ? "New lead" : "Edit lead"}</span>
+          <button style={styles.iconButton} onClick={onCancel}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Company name</label>
+          <input
+            style={styles.input}
+            value={form.companyName}
+            onChange={set("companyName")}
+            placeholder="e.g. Nightfall Games"
+            autoFocus
+          />
+        </div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Contact person</label>
+            <input
+              style={styles.input}
+              value={form.contactPerson}
+              onChange={set("contactPerson")}
+              placeholder="e.g. Jamie Fox"
+            />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Email</label>
+            <input
+              style={styles.input}
+              value={form.email}
+              onChange={set("email")}
+              placeholder="jamie@studio.com"
+            />
+          </div>
+        </div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Website</label>
+            <input
+              style={styles.input}
+              value={form.website}
+              onChange={set("website")}
+              placeholder="nightfallgames.com"
+            />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Country</label>
+            <input
+              style={styles.input}
+              value={form.country}
+              onChange={set("country")}
+              placeholder="e.g. United States"
+            />
+          </div>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Client notes</label>
+          <textarea
+            style={styles.textarea}
+            value={form.notes}
+            onChange={set("notes")}
+            placeholder="What they do, style, references, budget signals, source of lead..."
+            rows={3}
+          />
+        </div>
+
+        <div style={styles.fieldDivider}>Outreach</div>
+
+        {form.emails.map((em, i) => (
+          <div key={i} style={styles.emailRow}>
+            <div style={styles.emailRowHeader}>
+              <label style={styles.checkboxLabel}>
+                <input
+                  type="checkbox"
+                  checked={em.sent}
+                  onChange={(e) => updateEmail(i, { sent: e.target.checked })}
+                />
+                {em.label}
+              </label>
+              {em.sent && em.dateSent && (
+                <span style={styles.fieldHint}>Sent {em.dateSent}</span>
+              )}
+            </div>
+            <textarea
+              style={styles.textarea}
+              value={em.message}
+              onChange={(e) => updateEmail(i, { message: e.target.value })}
+              placeholder={`${em.label} draft...`}
+              rows={2}
+            />
+          </div>
+        ))}
+
+        {showNegotiation && (
+          <>
+            <div style={styles.fieldDivider}>Negotiation</div>
+            <div style={styles.fieldRow}>
+              <div style={styles.field}>
+                <label style={styles.label}>Proposed budget</label>
+                <input
+                  style={styles.input}
+                  value={form.proposedBudget}
+                  onChange={set("proposedBudget")}
+                  placeholder="e.g. $2,500"
+                />
+              </div>
+              <div style={styles.field}>
+                <label style={styles.label}>Estimated deadline</label>
+                <input
+                  style={styles.input}
+                  value={form.estimatedDeadline}
+                  onChange={set("estimatedDeadline")}
+                  placeholder="e.g. Sept 1"
+                />
+              </div>
+            </div>
+            <div style={styles.field}>
+              <label style={styles.label}>Project notes</label>
+              <textarea
+                style={styles.textarea}
+                value={form.projectNotes}
+                onChange={set("projectNotes")}
+                placeholder="Scope discussed, expectations..."
+                rows={2}
+              />
+            </div>
+          </>
+        )}
+
+        {form.stage === "lost" && form.lostReason && (
+          <p style={styles.fieldHint}>Marked lost: {form.lostReason}</p>
+        )}
+
+        {form.linkedProjectId && (
+          <p style={styles.fieldHint}>Linked to an active project.</p>
+        )}
+
+        {showLostReasons && (
+          <div style={styles.field}>
+            <label style={styles.label}>Reason lost</label>
+            <div style={styles.lostReasonGrid}>
+              {LOST_REASONS.map((reason) => (
+                <button
+                  key={reason}
+                  style={styles.lostReasonButton}
+                  onClick={() => onMarkLost(form, reason)}
+                >
+                  {reason}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div style={styles.modalFooter}>
+          {!isNew && (
+            <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
+              <TrashIcon />
+              Delete
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button style={styles.cancelButton} onClick={onCancel}>
+            Cancel
+          </button>
+          {!showLostReasons && form.stage !== "won" && form.stage !== "closed" && (
+            <button
+              style={styles.cancelButton}
+              onClick={() => setShowLostReasons(true)}
+            >
+              Mark lost
+            </button>
+          )}
+          {form.stage !== "won" && form.stage !== "closed" && (
+            <button style={styles.wonButton} onClick={() => onMarkWon(form)}>
+              Mark won
+            </button>
+          )}
+          <button
+            style={styles.saveButton}
+            onClick={() => onSave({ ...form, companyName: form.companyName || "Untitled lead" })}
+          >
+            Save lead
           </button>
         </div>
       </div>
@@ -1601,6 +2127,80 @@ const styles = {
     color: textMuted,
     margin: "2px 0 0",
     lineHeight: 1.4,
+  },
+  tabRow: {
+    display: "flex",
+    gap: 8,
+    padding: "0 28px 16px",
+  },
+  tabButton: {
+    background: "transparent",
+    border: `1px solid ${border}`,
+    borderRadius: 999,
+    color: textMuted,
+    fontSize: 13,
+    fontWeight: 500,
+    padding: "8px 16px",
+    cursor: "pointer",
+    fontFamily: "'Inter', sans-serif",
+  },
+  tabButtonActive: {
+    background: "rgba(47,191,166,0.12)",
+    borderColor: teal,
+    color: teal,
+  },
+  fieldDivider: {
+    fontSize: 11.5,
+    fontFamily: "'IBM Plex Mono', monospace",
+    color: teal,
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+    borderTop: `1px solid ${border}`,
+    paddingTop: 12,
+    marginTop: 4,
+  },
+  emailRow: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+  emailRowHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  checkboxLabel: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    fontSize: 13,
+    color: paper,
+  },
+  lostReasonGrid: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  lostReasonButton: {
+    background: "rgba(224,122,95,0.1)",
+    border: "1px solid #E07A5F",
+    color: "#E07A5F",
+    borderRadius: 999,
+    padding: "7px 14px",
+    fontSize: 12.5,
+    cursor: "pointer",
+    fontFamily: "'Inter', sans-serif",
+  },
+  wonButton: {
+    background: "rgba(47,191,166,0.15)",
+    border: `1px solid ${teal}`,
+    borderRadius: 999,
+    color: tealLight,
+    fontSize: 13,
+    fontWeight: 600,
+    padding: "9px 16px",
+    cursor: "pointer",
+    fontFamily: "'Inter', sans-serif",
   },
   input: {
     background: "#171d20",
