@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabaseClient";
+import { jsPDF } from "jspdf";
 
 const STAGES = [
   { id: "character_design", label: "Character Design" },
@@ -95,11 +96,148 @@ function emptyProject(overrides = {}) {
     notes: "",
     shotCount: "",
     budget: "",
+    budgetMode: "manual",
     deadline: "",
     priority: "normal",
     archived: false,
     ...overrides,
   };
+}
+
+function parseMoney(value) {
+  const num = parseFloat(String(value || "").replace(/[^0-9.-]/g, ""));
+  return isNaN(num) ? 0 : num;
+}
+
+function formatMoney(value) {
+  const num = parseMoney(value);
+  return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function calculateAutoBudget(projectCards) {
+  return projectCards.reduce((sum, c) => sum + parseMoney(c.rate), 0);
+}
+
+function projectBudgetSummary(project, projectCards, projectInvoices) {
+  const totalBudget =
+    project.budgetMode === "auto"
+      ? calculateAutoBudget(projectCards)
+      : parseMoney(project.budget);
+  const amountPaid = projectInvoices.reduce((sum, inv) => sum + parseMoney(inv.amountPaid), 0);
+  const outstanding = Math.max(0, totalBudget - amountPaid);
+  return { totalBudget, amountPaid, outstanding };
+}
+
+function emptyInvoice(projectId, suggestedNumber) {
+  return {
+    projectId,
+    invoiceNumber: suggestedNumber,
+    description: "",
+    amount: "",
+    amountPaid: "",
+    issueDate: new Date().toISOString().slice(0, 10),
+    dueDate: "",
+    status: "unpaid",
+  };
+}
+
+function invoiceFromRow(row) {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    invoiceNumber: row.invoice_number,
+    description: row.description,
+    amount: row.amount,
+    amountPaid: row.amount_paid,
+    issueDate: row.issue_date,
+    dueDate: row.due_date,
+    status: row.status,
+  };
+}
+
+function invoiceToRow(invoice, userId) {
+  return {
+    project_id: invoice.projectId,
+    invoice_number: invoice.invoiceNumber,
+    description: invoice.description,
+    amount: parseMoney(invoice.amount),
+    amount_paid: parseMoney(invoice.amountPaid),
+    issue_date: invoice.issueDate,
+    due_date: invoice.dueDate,
+    status: invoice.status,
+    user_id: userId,
+  };
+}
+
+function nextInvoiceNumber(existingInvoices) {
+  const max = existingInvoices.reduce((m, inv) => {
+    const match = String(inv.invoiceNumber || "").match(/(\d+)$/);
+    const n = match ? parseInt(match[1], 10) : 0;
+    return Math.max(m, n);
+  }, 0);
+  return `INV-${String(max + 1).padStart(4, "0")}`;
+}
+
+function nextInvoiceNumbers(existingInvoices, count) {
+  const max = existingInvoices.reduce((m, inv) => {
+    const match = String(inv.invoiceNumber || "").match(/(\d+)$/);
+    const n = match ? parseInt(match[1], 10) : 0;
+    return Math.max(m, n);
+  }, 0);
+  return Array.from({ length: count }, (_, i) => `INV-${String(max + i + 1).padStart(4, "0")}`);
+}
+
+const MILESTONE_LABELS = ["Upfront payment", "Mid-project payment", "Delivery payment"];
+const MILESTONE_DEFAULTS = [50, 25, 25];
+
+function downloadInvoicePDF(invoice, project) {
+  const doc = new jsPDF();
+  const balance = parseMoney(invoice.amount) - parseMoney(invoice.amountPaid);
+
+  doc.setFontSize(18);
+  doc.text("Studio Kairegi", 20, 22);
+  doc.setFontSize(11);
+  doc.setTextColor(100);
+  doc.text("Anime-style animation & production", 20, 29);
+
+  doc.setTextColor(0);
+  doc.setFontSize(14);
+  doc.text(`Invoice ${invoice.invoiceNumber}`, 20, 45);
+
+  doc.setFontSize(10);
+  doc.text(`Issue date: ${invoice.issueDate || "-"}`, 20, 53);
+  doc.text(`Due date: ${invoice.dueDate || "-"}`, 20, 59);
+  doc.text(`Status: ${invoice.status === "paid" ? "Paid" : "Unpaid"}`, 20, 65);
+
+  doc.text(`Bill to: ${project?.client || "-"}`, 130, 53);
+  doc.text(`Project: ${project?.name || "-"}`, 130, 59);
+
+  doc.setDrawColor(200);
+  doc.line(20, 74, 190, 74);
+
+  doc.setFontSize(11);
+  doc.text("Description", 20, 84);
+  doc.text("Amount", 170, 84, { align: "right" });
+  doc.setFontSize(10);
+  const descLines = doc.splitTextToSize(invoice.description || "Animation services", 140);
+  doc.text(descLines, 20, 92);
+  doc.text(`$${formatMoney(invoice.amount)}`, 170, 92, { align: "right" });
+
+  const lineY = 92 + descLines.length * 6 + 6;
+  doc.line(20, lineY, 190, lineY);
+
+  doc.setFontSize(10);
+  doc.text("Amount paid", 130, lineY + 10);
+  doc.text(`$${formatMoney(invoice.amountPaid)}`, 170, lineY + 10, { align: "right" });
+  doc.setFontSize(12);
+  doc.text("Balance due", 130, lineY + 20);
+  doc.text(`$${formatMoney(balance)}`, 170, lineY + 20, { align: "right" });
+
+  doc.setFontSize(9);
+  doc.setTextColor(130);
+  doc.text("Thank you for working with Studio Kairegi.", 20, lineY + 40);
+
+  doc.save(`${invoice.invoiceNumber || "invoice"}.pdf`);
 }
 
 function cardFromRow(row) {
@@ -292,6 +430,13 @@ const CopyIcon = () => (
   </svg>
 );
 
+const InvoiceIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M7 3h10a1 1 0 0 1 1 1v16l-3-2-2 2-2-2-2 2-3-2V4a1 1 0 0 1 1-1z" />
+    <path d="M9 8h6M9 12h6M9 16h3" />
+  </svg>
+);
+
 const DownloadIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
     <path d="M12 4v12m0 0-4-4m4 4 4-4M5 20h14" />
@@ -316,15 +461,18 @@ export default function ShotTracker() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
 
-  const [data, setData] = useState({ projects: [], cards: [], leads: [] });
-  const { projects, cards, leads } = data;
+  const [data, setData] = useState({ projects: [], cards: [], leads: [], invoices: [] });
+  const { projects, cards, leads, invoices } = data;
   const [loading, setLoading] = useState(true);
   const [workspace, setWorkspace] = useState("projects"); // "projects" | "leads"
   const [view, setView] = useState("projects");
+  const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices"
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [editingCard, setEditingCard] = useState(null);
   const [editingProject, setEditingProject] = useState(null);
   const [editingLead, setEditingLead] = useState(null);
+  const [editingInvoice, setEditingInvoice] = useState(null);
+  const [showMilestoneModal, setShowMilestoneModal] = useState(false);
   const [pendingLeadLinkId, setPendingLeadLinkId] = useState(null);
   const [dragOverStage, setDragOverStage] = useState(null);
   const [dragVisual, setDragVisual] = useState(null);
@@ -356,27 +504,31 @@ export default function ShotTracker() {
     if (!userId) return;
     setLoading(true);
     try {
-      const [projectsRes, shotsRes, leadsRes] = await Promise.all([
+      const [projectsRes, shotsRes, leadsRes, invoicesRes] = await Promise.all([
         supabase.from("projects").select("*").order("created_at"),
         supabase.from("shots").select("*").order("created_at"),
         supabase.from("leads").select("*").order("created_at"),
+        supabase.from("invoices").select("*").order("created_at"),
       ]);
       if (projectsRes.error) throw projectsRes.error;
       if (shotsRes.error) throw shotsRes.error;
       if (leadsRes.error) throw leadsRes.error;
+      if (invoicesRes.error) throw invoicesRes.error;
       const nextProjects = (projectsRes.data || []).map((p) => ({
         id: p.id,
         name: p.name,
         client: p.client,
         notes: p.notes,
         budget: p.budget,
+        budgetMode: p.budget_mode || "manual",
         deadline: p.deadline,
         priority: p.priority,
         archived: p.archived,
       }));
       const nextCards = (shotsRes.data || []).map(cardFromRow);
       const nextLeads = (leadsRes.data || []).map(leadFromRow);
-      setData({ projects: nextProjects, cards: nextCards, leads: nextLeads });
+      const nextInvoices = (invoicesRes.data || []).map(invoiceFromRow);
+      setData({ projects: nextProjects, cards: nextCards, leads: nextLeads, invoices: nextInvoices });
     } catch (e) {
       console.error("Shot Tracker load failed:", e);
     } finally {
@@ -386,7 +538,7 @@ export default function ShotTracker() {
 
   useEffect(() => {
     if (userId) loadData();
-    else setData({ projects: [], cards: [], leads: [] });
+    else setData({ projects: [], cards: [], leads: [], invoices: [] });
   }, [userId, loadData]);
 
   const flashSave = (ok) => {
@@ -405,6 +557,7 @@ export default function ShotTracker() {
             client: project.client,
             notes: project.notes,
             budget: project.budget,
+            budget_mode: project.budgetMode,
             deadline: project.deadline,
             priority: project.priority,
           })
@@ -422,6 +575,7 @@ export default function ShotTracker() {
             client: project.client,
             notes: project.notes,
             budget: project.budget,
+            budget_mode: project.budgetMode,
             deadline: project.deadline,
             priority: project.priority,
             user_id: userId,
@@ -452,6 +606,7 @@ export default function ShotTracker() {
               client: inserted.client,
               notes: inserted.notes,
               budget: inserted.budget,
+              budgetMode: inserted.budget_mode || "manual",
               deadline: inserted.deadline,
               priority: inserted.priority,
             },
@@ -680,6 +835,72 @@ export default function ShotTracker() {
     await handleSaveLead({ ...lead, stage: "lost", lostReason: reason });
   };
 
+  const handleSaveInvoice = async (invoice) => {
+    setSaveState("saving");
+    try {
+      if (invoice.id) {
+        await supabase.from("invoices").update(invoiceToRow(invoice, userId)).eq("id", invoice.id);
+        setData((prev) => ({
+          ...prev,
+          invoices: prev.invoices.map((inv) => (inv.id === invoice.id ? invoice : inv)),
+        }));
+      } else {
+        const { data: inserted, error } = await supabase
+          .from("invoices")
+          .insert(invoiceToRow(invoice, userId))
+          .select()
+          .single();
+        if (error) throw error;
+        setData((prev) => ({ ...prev, invoices: [...prev.invoices, invoiceFromRow(inserted)] }));
+      }
+      flashSave(true);
+    } catch (e) {
+      console.error("Invoice save failed:", e);
+      flashSave(false);
+    }
+    setEditingInvoice(null);
+  };
+
+  const handleDeleteInvoice = async (id) => {
+    setSaveState("saving");
+    try {
+      await supabase.from("invoices").delete().eq("id", id);
+      setData((prev) => ({ ...prev, invoices: prev.invoices.filter((inv) => inv.id !== id) }));
+      flashSave(true);
+    } catch (e) {
+      console.error("Invoice delete failed:", e);
+      flashSave(false);
+    }
+    setEditingInvoice(null);
+  };
+
+  const handleMarkInvoicePaid = async (invoice) => {
+    const updated = { ...invoice, status: "paid", amountPaid: invoice.amount };
+    await handleSaveInvoice(updated);
+  };
+
+  const handleCreateMilestones = async (percentages) => {
+    const projectInvoices = invoices.filter((inv) => inv.projectId === selectedProjectId);
+    const project = projects.find((p) => p.id === selectedProjectId);
+    const projectShots = cards.filter((c) => c.projectId === selectedProjectId);
+    const { totalBudget } = projectBudgetSummary(project, projectShots, projectInvoices);
+    const numbers = nextInvoiceNumbers(projectInvoices, 3);
+    for (let i = 0; i < 3; i++) {
+      const amount = ((totalBudget * (parseFloat(percentages[i]) || 0)) / 100).toFixed(2);
+      await handleSaveInvoice({
+        projectId: selectedProjectId,
+        invoiceNumber: numbers[i],
+        description: MILESTONE_LABELS[i],
+        amount,
+        amountPaid: "",
+        issueDate: new Date().toISOString().slice(0, 10),
+        dueDate: "",
+        status: "unpaid",
+      });
+    }
+    setShowMilestoneModal(false);
+  };
+
   const handleExport = () => {
     const payload = JSON.stringify(data, null, 2);
     const blob = new Blob([payload], { type: "application/json" });
@@ -841,6 +1062,7 @@ export default function ShotTracker() {
   const openProject = (id) => {
     setSelectedProjectId(id);
     setView("board");
+    setBoardTab("shots");
   };
 
   if (authLoading) {
@@ -973,7 +1195,22 @@ export default function ShotTracker() {
           <button style={styles.iconButtonGhost} onClick={handleSignOut} title="Sign out">
             <SignOutIcon />
           </button>
-          {view === "board" ? (
+          {view === "board" && boardTab === "invoices" ? (
+            <button
+              style={styles.newButton}
+              onClick={() =>
+                setEditingInvoice(
+                  emptyInvoice(
+                    selectedProjectId,
+                    nextInvoiceNumber(invoices.filter((inv) => inv.projectId === selectedProjectId))
+                  )
+                )
+              }
+            >
+              <PlusIcon />
+              New invoice
+            </button>
+          ) : view === "board" ? (
             <button
               style={styles.newButton}
               onClick={() => setEditingCard(emptyCard(STAGES[0].id, selectedProjectId))}
@@ -1013,6 +1250,23 @@ export default function ShotTracker() {
       )}
 
       {view === "board" && (
+        <div style={styles.tabRow}>
+          <button
+            style={{ ...styles.tabButton, ...(boardTab === "shots" ? styles.tabButtonActive : {}) }}
+            onClick={() => setBoardTab("shots")}
+          >
+            Shots
+          </button>
+          <button
+            style={{ ...styles.tabButton, ...(boardTab === "invoices" ? styles.tabButtonActive : {}) }}
+            onClick={() => setBoardTab("invoices")}
+          >
+            Invoices
+          </button>
+        </div>
+      )}
+
+      {view === "board" && boardTab === "shots" && (
         <div style={styles.progressBar}>
           <div style={styles.progressLabelRow}>
             <span style={styles.progressLabel}>
@@ -1103,7 +1357,7 @@ export default function ShotTracker() {
         </div>
       )}
 
-      {view === "board" && (
+      {view === "board" && boardTab === "shots" && (
         <div style={{ ...styles.board, touchAction: dragVisual ? "none" : "auto" }}>
           {STAGES.map((stage) => {
             const stageCards = projectCards.filter((c) => c.stage === stage.id);
@@ -1178,6 +1432,40 @@ export default function ShotTracker() {
         </div>
       )}
 
+      {view === "board" && boardTab === "invoices" && (
+        <InvoicesPanel
+          project={selectedProject}
+          projectCards={projectCards}
+          invoices={invoices.filter((inv) => inv.projectId === selectedProjectId)}
+          onNew={() =>
+            setEditingInvoice(
+              emptyInvoice(
+                selectedProjectId,
+                nextInvoiceNumber(invoices.filter((inv) => inv.projectId === selectedProjectId))
+              )
+            )
+          }
+          onEdit={setEditingInvoice}
+          onMarkPaid={handleMarkInvoicePaid}
+          onDownload={(inv) => downloadInvoicePDF(inv, selectedProject)}
+          onOpenMilestones={() => setShowMilestoneModal(true)}
+        />
+      )}
+
+      {showMilestoneModal && (
+        <MilestoneModal
+          totalBudget={
+            projectBudgetSummary(
+              selectedProject,
+              projectCards,
+              invoices.filter((inv) => inv.projectId === selectedProjectId)
+            ).totalBudget
+          }
+          onCancel={() => setShowMilestoneModal(false)}
+          onCreate={handleCreateMilestones}
+        />
+      )}
+
       {dragVisual && (
         <div style={{ ...styles.dragGhost, left: dragVisual.x, top: dragVisual.y, width: dragVisual.width }}>
           <div style={styles.cardTop}>
@@ -1216,6 +1504,16 @@ export default function ShotTracker() {
           onMarkWon={handleMarkWon}
           onMarkLost={handleMarkLost}
           isNew={!editingLead.id}
+        />
+      )}
+
+      {editingInvoice && (
+        <InvoiceEditor
+          invoice={editingInvoice}
+          onCancel={() => setEditingInvoice(null)}
+          onSave={handleSaveInvoice}
+          onDelete={handleDeleteInvoice}
+          isNew={!editingInvoice.id}
         />
       )}
     </div>
@@ -1347,6 +1645,107 @@ function ProjectCard({ project, cards, onOpen, onEdit, onToggleArchive, archived
   );
 }
 
+function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkPaid, onDownload, onOpenMilestones }) {
+  if (!project) return null;
+  const { totalBudget, amountPaid, outstanding } = projectBudgetSummary(project, projectCards, invoices);
+
+  return (
+    <div style={styles.invoicesWrap}>
+      <div style={styles.budgetSummaryRow}>
+        <div style={styles.budgetStat}>
+          <span style={styles.label}>Total budget</span>
+          <span style={styles.budgetStatValue}>${formatMoney(totalBudget)}</span>
+          <span style={styles.fieldHint}>
+            {project.budgetMode === "auto" ? "Calculated from shot rates" : "Manual"}
+          </span>
+        </div>
+        <div style={styles.budgetStat}>
+          <span style={styles.label}>Amount paid</span>
+          <span style={{ ...styles.budgetStatValue, color: "#3DDC84" }}>${formatMoney(amountPaid)}</span>
+        </div>
+        <div style={styles.budgetStat}>
+          <span style={styles.label}>Outstanding</span>
+          <span style={{ ...styles.budgetStatValue, color: "#F2A65A" }}>${formatMoney(outstanding)}</span>
+        </div>
+      </div>
+
+      {invoices.length === 0 ? (
+        <div style={styles.projectsEmpty}>
+          <div style={styles.projectsEmptyIcon}><InvoiceIcon /></div>
+          <p style={styles.projectsEmptyText}>No invoices yet</p>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button style={styles.newButton} onClick={onNew}>
+              <PlusIcon />
+              New invoice
+            </button>
+            <button style={styles.cancelButton} onClick={onOpenMilestones}>
+              Set up milestones
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <button style={{ ...styles.cancelButton, alignSelf: "flex-start" }} onClick={onOpenMilestones}>
+            Set up milestones
+          </button>
+        </>
+      )}
+
+      {invoices.length > 0 && (
+        <div style={styles.invoiceList}>
+          {invoices.map((inv) => {
+            const balance = parseMoney(inv.amount) - parseMoney(inv.amountPaid);
+            return (
+              <div key={inv.id} style={styles.invoiceCard} onClick={() => onEdit(inv)}>
+                <div style={styles.invoiceCardTop}>
+                  <span style={styles.invoiceNumber}>{inv.invoiceNumber}</span>
+                  <span
+                    style={{
+                      ...styles.invoiceStatusTag,
+                      color: inv.status === "paid" ? "#3DDC84" : "#F2A65A",
+                      borderColor: inv.status === "paid" ? "#3DDC84" : "#F2A65A",
+                    }}
+                  >
+                    {inv.status === "paid" ? "Paid" : "Unpaid"}
+                  </span>
+                </div>
+                {inv.description && <div style={styles.cardMeta}>{inv.description}</div>}
+                <div style={styles.invoiceAmountsRow}>
+                  <span style={styles.fieldHint}>Amount ${formatMoney(inv.amount)}</span>
+                  <span style={styles.fieldHint}>Balance ${formatMoney(balance)}</span>
+                </div>
+                <div style={styles.invoiceActionsRow}>
+                  {inv.status !== "paid" && (
+                    <button
+                      style={styles.cancelButton}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onMarkPaid(inv);
+                      }}
+                    >
+                      Mark as paid
+                    </button>
+                  )}
+                  <button
+                    style={{ ...styles.cancelButton, display: "flex", alignItems: "center", gap: 6 }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDownload(inv);
+                    }}
+                  >
+                    <DownloadIcon />
+                    PDF
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProjectEditor({ project, onCancel, onSave, onDelete, isNew }) {
   const [form, setForm] = useState(project);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
@@ -1400,6 +1799,36 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew }) {
           </div>
         )}
 
+        <div style={styles.field}>
+          <label style={styles.label}>Budget mode</label>
+          <div style={styles.reviewStatusRow}>
+            <button
+              type="button"
+              style={{
+                ...styles.reviewStatusButton,
+                borderColor: (form.budgetMode || "manual") === "manual" ? teal : border,
+                color: (form.budgetMode || "manual") === "manual" ? teal : textMuted,
+                background: (form.budgetMode || "manual") === "manual" ? "rgba(47,191,166,0.1)" : "transparent",
+              }}
+              onClick={() => setForm({ ...form, budgetMode: "manual" })}
+            >
+              Manual
+            </button>
+            <button
+              type="button"
+              style={{
+                ...styles.reviewStatusButton,
+                borderColor: form.budgetMode === "auto" ? teal : border,
+                color: form.budgetMode === "auto" ? teal : textMuted,
+                background: form.budgetMode === "auto" ? "rgba(47,191,166,0.1)" : "transparent",
+              }}
+              onClick={() => setForm({ ...form, budgetMode: "auto" })}
+            >
+              Auto from shot rates
+            </button>
+          </div>
+        </div>
+
         <div style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Budget</label>
@@ -1408,7 +1837,11 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew }) {
               value={form.budget || ""}
               onChange={set("budget")}
               placeholder="e.g. $2,000"
+              disabled={form.budgetMode === "auto"}
             />
+            {form.budgetMode === "auto" && (
+              <p style={styles.fieldHint}>Calculated automatically from each shot's rate.</p>
+            )}
           </div>
           <div style={styles.field}>
             <label style={styles.label}>Deadline</label>
@@ -1886,6 +2319,205 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew }) {
   );
 }
 
+function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew }) {
+  const [form, setForm] = useState(invoice);
+  const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+  const balance = parseMoney(form.amount) - parseMoney(form.amountPaid);
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <span style={styles.modalTitle}>{isNew ? "New invoice" : "Edit invoice"}</span>
+          <button style={styles.iconButton} onClick={onCancel}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Invoice number</label>
+          <input
+            style={styles.input}
+            value={form.invoiceNumber}
+            onChange={set("invoiceNumber")}
+            placeholder="e.g. INV-0001"
+            autoFocus
+          />
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Description</label>
+          <textarea
+            style={styles.textarea}
+            value={form.description}
+            onChange={set("description")}
+            placeholder="e.g. Cleanup and compositing, Cuts 01-12"
+            rows={2}
+          />
+        </div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Amount</label>
+            <input
+              style={styles.input}
+              value={form.amount}
+              onChange={set("amount")}
+              placeholder="e.g. 500"
+            />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Amount paid</label>
+            <input
+              style={styles.input}
+              value={form.amountPaid}
+              onChange={set("amountPaid")}
+              placeholder="e.g. 0"
+            />
+          </div>
+        </div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Issue date</label>
+            <input
+              style={styles.input}
+              type="date"
+              value={form.issueDate || ""}
+              onChange={set("issueDate")}
+            />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Due date</label>
+            <input
+              style={styles.input}
+              type="date"
+              value={form.dueDate || ""}
+              onChange={set("dueDate")}
+            />
+          </div>
+        </div>
+
+        <p style={styles.fieldHint}>Balance due: ${formatMoney(balance)}</p>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Status</label>
+          <div style={styles.reviewStatusRow}>
+            <button
+              type="button"
+              style={{
+                ...styles.reviewStatusButton,
+                borderColor: form.status !== "paid" ? "#F2A65A" : border,
+                color: form.status !== "paid" ? "#F2A65A" : textMuted,
+                background: form.status !== "paid" ? "rgba(242,166,90,0.1)" : "transparent",
+              }}
+              onClick={() => setForm({ ...form, status: "unpaid" })}
+            >
+              Unpaid
+            </button>
+            <button
+              type="button"
+              style={{
+                ...styles.reviewStatusButton,
+                borderColor: form.status === "paid" ? "#3DDC84" : border,
+                color: form.status === "paid" ? "#3DDC84" : textMuted,
+                background: form.status === "paid" ? "rgba(61,220,132,0.1)" : "transparent",
+              }}
+              onClick={() => setForm({ ...form, status: "paid", amountPaid: form.amount })}
+            >
+              Paid
+            </button>
+          </div>
+        </div>
+
+        <div style={styles.modalFooter}>
+          {!isNew && (
+            <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
+              <TrashIcon />
+              Delete
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button style={styles.cancelButton} onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            style={styles.saveButton}
+            onClick={() => onSave({ ...form, invoiceNumber: form.invoiceNumber || "INV-0001" })}
+          >
+            Save invoice
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MilestoneModal({ totalBudget, onCancel, onCreate }) {
+  const [percentages, setPercentages] = useState(MILESTONE_DEFAULTS.map(String));
+  const totalPercent = percentages.reduce((sum, p) => sum + (parseFloat(p) || 0), 0);
+  const setPct = (i) => (e) => {
+    const next = [...percentages];
+    next[i] = e.target.value;
+    setPercentages(next);
+  };
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <span style={styles.modalTitle}>Set up milestone payments</span>
+          <button style={styles.iconButton} onClick={onCancel}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        <p style={styles.fieldHint}>
+          Splits the project's ${formatMoney(totalBudget)} budget into invoices.
+        </p>
+
+        {MILESTONE_LABELS.map((label, i) => (
+          <div key={label} style={styles.fieldRow}>
+            <div style={styles.field}>
+              <label style={styles.label}>{label}</label>
+              <input
+                style={styles.input}
+                type="number"
+                min="0"
+                max="100"
+                value={percentages[i]}
+                onChange={setPct(i)}
+              />
+            </div>
+            <div style={styles.field}>
+              <label style={styles.label}>Amount</label>
+              <input
+                style={styles.input}
+                value={`$${formatMoney((totalBudget * (parseFloat(percentages[i]) || 0)) / 100)}`}
+                disabled
+              />
+            </div>
+          </div>
+        ))}
+
+        <p style={{ ...styles.fieldHint, color: totalPercent === 100 ? "#3DDC84" : "#F2A65A" }}>
+          Total: {totalPercent}%{totalPercent !== 100 ? " — doesn't add up to 100%, invoices will use these amounts anyway" : ""}
+        </p>
+
+        <div style={styles.modalFooter}>
+          <div style={{ flex: 1 }} />
+          <button style={styles.cancelButton} onClick={onCancel}>
+            Cancel
+          </button>
+          <button style={styles.saveButton} onClick={() => onCreate(percentages)}>
+            Create invoices
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const fontImport = `
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 `;
@@ -2188,6 +2820,74 @@ const styles = {
     padding: "8px 14px",
     cursor: "pointer",
     fontFamily: "'Inter', sans-serif",
+  },
+  invoicesWrap: {
+    padding: "0 28px 32px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 20,
+  },
+  budgetSummaryRow: {
+    display: "flex",
+    gap: 14,
+    flexWrap: "wrap",
+  },
+  budgetStat: {
+    flex: "1 1 160px",
+    background: inkSoft,
+    border: `1px solid ${border}`,
+    borderRadius: 14,
+    padding: "14px 16px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+  },
+  budgetStatValue: {
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontSize: 20,
+    fontWeight: 600,
+    color: paper,
+  },
+  invoiceList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+  invoiceCard: {
+    background: inkSoft,
+    border: `1px solid ${border}`,
+    borderRadius: 14,
+    padding: 16,
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    cursor: "pointer",
+  },
+  invoiceCardTop: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  invoiceNumber: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 13,
+    color: paper,
+  },
+  invoiceStatusTag: {
+    fontSize: 11,
+    border: "1px solid",
+    borderRadius: 999,
+    padding: "2px 10px",
+    fontFamily: "'IBM Plex Mono', monospace",
+  },
+  invoiceAmountsRow: {
+    display: "flex",
+    gap: 16,
+  },
+  invoiceActionsRow: {
+    display: "flex",
+    gap: 8,
+    marginTop: 4,
   },
   projectIconMark: {
     width: 32,
