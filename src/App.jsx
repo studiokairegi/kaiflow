@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabaseClient";
 import { jsPDF } from "jspdf";
+import { genShareToken } from "./SharedViews.jsx";
 
 const STAGES = [
   { id: "character_design", label: "Character Design" },
@@ -86,6 +87,9 @@ function emptyCard(stage, projectId) {
     reviewStatus: "in_progress",
     revisions: [],
     revisionVersion: 1,
+    assignedTo: "",
+    shareToken: null,
+    attachments: [],
   };
 }
 
@@ -100,6 +104,8 @@ function emptyProject(overrides = {}) {
     deadline: "",
     priority: "normal",
     archived: false,
+    shareEnabled: false,
+    shareToken: null,
     ...overrides,
   };
 }
@@ -192,6 +198,154 @@ function nextInvoiceNumbers(existingInvoices, count) {
 
 const MILESTONE_LABELS = ["Upfront payment", "Mid-project payment", "Delivery payment"];
 const MILESTONE_DEFAULTS = [50, 25, 25];
+
+const EXPENSE_CATEGORIES = [
+  "Animator Payments",
+  "Background Artist Payments",
+  "Software",
+  "Hardware",
+  "Internet",
+  "Marketing",
+  "Office Costs",
+  "Miscellaneous",
+];
+
+function emptyExpense(projectId = null) {
+  return {
+    projectId,
+    category: EXPENSE_CATEGORIES[0],
+    description: "",
+    amount: "",
+    date: new Date().toISOString().slice(0, 10),
+  };
+}
+
+function expenseFromRow(row) {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    category: row.category,
+    description: row.description,
+    amount: row.amount,
+    date: row.date,
+  };
+}
+
+function expenseToRow(expense, userId) {
+  return {
+    project_id: expense.projectId || null,
+    category: expense.category,
+    description: expense.description,
+    amount: parseMoney(expense.amount),
+    date: expense.date,
+    user_id: userId,
+  };
+}
+
+function monthKey(dateStr) {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return null;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function lastSixMonthKeys() {
+  const keys = [];
+  const now = new Date();
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    keys.push({
+      key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
+      label: d.toLocaleString(undefined, { month: "short" }),
+    });
+  }
+  return keys;
+}
+
+function computeFinanceData(projects, invoices, expenses) {
+  const months = lastSixMonthKeys();
+
+  const revenueByMonth = months.map(({ key, label }) => {
+    const total = invoices
+      .filter((inv) => inv.status === "paid" && monthKey(inv.paidDate) === key)
+      .reduce((sum, inv) => sum + parseMoney(inv.amountPaid), 0);
+    return { label, value: total };
+  });
+
+  const expensesByMonth = months.map(({ key, label }) => {
+    const total = expenses
+      .filter((e) => monthKey(e.date) === key)
+      .reduce((sum, e) => sum + parseMoney(e.amount), 0);
+    return { label, value: total };
+  });
+
+  const profitByMonth = months.map((m, i) => ({
+    label: m.label,
+    value: revenueByMonth[i].value - expensesByMonth[i].value,
+  }));
+
+  // Accounts receivable: every unpaid invoice, with client, due date, and days overdue
+  const now = new Date();
+  const receivables = invoices
+    .filter((inv) => inv.status !== "paid")
+    .map((inv) => {
+      const project = projects.find((p) => p.id === inv.projectId);
+      const due = new Date(inv.dueDate);
+      const daysOverdue = !isNaN(due.getTime()) ? Math.floor((now - due) / 86400000) : null;
+      return {
+        invoiceNumber: inv.invoiceNumber,
+        client: project?.client || "-",
+        projectName: project?.name || "-",
+        amountDue: parseMoney(inv.amount) - parseMoney(inv.amountPaid),
+        dueDate: inv.dueDate,
+        daysOverdue,
+      };
+    })
+    .sort((a, b) => (b.daysOverdue || -999) - (a.daysOverdue || -999));
+
+  // Per-project profitability
+  const profitability = projects
+    .filter((p) => !p.archived)
+    .map((p) => {
+      const projectInvoices = invoices.filter((inv) => inv.projectId === p.id);
+      const revenue = projectInvoices.reduce((sum, inv) => sum + parseMoney(inv.amountPaid), 0);
+      const projectExpenses = expenses
+        .filter((e) => e.projectId === p.id)
+        .reduce((sum, e) => sum + parseMoney(e.amount), 0);
+      const profit = revenue - projectExpenses;
+      const margin = revenue > 0 ? Math.round((profit / revenue) * 100) : null;
+      return { project: p, revenue, expenses: projectExpenses, profit, margin };
+    });
+
+  // Client value: group by client name across all projects
+  const clientMap = {};
+  projects.forEach((p) => {
+    const key = (p.client || "Unknown").trim() || "Unknown";
+    if (!clientMap[key]) clientMap[key] = { client: key, revenue: 0, projectCount: 0, lastDate: null };
+    const projectInvoices = invoices.filter((inv) => inv.projectId === p.id);
+    const revenue = projectInvoices.reduce((sum, inv) => sum + parseMoney(inv.amountPaid), 0);
+    clientMap[key].revenue += revenue;
+    clientMap[key].projectCount += 1;
+    const d = new Date(p.deadline);
+    if (!isNaN(d.getTime()) && (!clientMap[key].lastDate || d > clientMap[key].lastDate)) {
+      clientMap[key].lastDate = d;
+    }
+  });
+  const clientValue = Object.values(clientMap)
+    .map((c) => ({ ...c, avgProjectValue: c.projectCount ? c.revenue / c.projectCount : 0 }))
+    .sort((a, b) => b.revenue - a.revenue);
+
+  const revenueByClient = clientValue.map((c) => ({ label: c.client, value: c.revenue }));
+
+  return {
+    revenueByMonth,
+    expensesByMonth,
+    profitByMonth,
+    receivables,
+    profitability,
+    clientValue,
+    revenueByClient,
+  };
+}
 
 const DEFAULT_SETTINGS = {
   studioName: "Studio Kairegi",
@@ -339,6 +493,9 @@ function cardFromRow(row) {
     reviewStatus: row.review_status || "in_progress",
     revisions: Array.isArray(row.revisions) ? row.revisions : [],
     revisionVersion: row.revision_version || 1,
+    assignedTo: row.assigned_to || "",
+    shareToken: row.share_token || null,
+    attachments: Array.isArray(row.attachments) ? row.attachments : [],
   };
 }
 
@@ -355,6 +512,9 @@ function cardToRow(card, userId) {
     review_status: card.reviewStatus || "in_progress",
     revisions: card.revisions || [],
     revision_version: card.revisionVersion || 1,
+    assigned_to: card.assignedTo || "",
+    share_token: card.shareToken || null,
+    attachments: card.attachments || [],
     user_id: userId,
   };
 }
@@ -553,11 +713,11 @@ export default function ShotTracker() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
 
-  const [data, setData] = useState({ projects: [], cards: [], leads: [], invoices: [] });
-  const { projects, cards, leads, invoices } = data;
+  const [data, setData] = useState({ projects: [], cards: [], leads: [], invoices: [], expenses: [] });
+  const { projects, cards, leads, invoices, expenses } = data;
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
-  const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads"
+  const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance"
   const [view, setView] = useState("projects");
   const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices"
   const [selectedProjectId, setSelectedProjectId] = useState(null);
@@ -565,6 +725,7 @@ export default function ShotTracker() {
   const [editingProject, setEditingProject] = useState(null);
   const [editingLead, setEditingLead] = useState(null);
   const [editingInvoice, setEditingInvoice] = useState(null);
+  const [editingExpense, setEditingExpense] = useState(null);
   const [showMilestoneModal, setShowMilestoneModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [pendingLeadLinkId, setPendingLeadLinkId] = useState(null);
@@ -639,16 +800,18 @@ export default function ShotTracker() {
     if (!userId) return;
     setLoading(true);
     try {
-      const [projectsRes, shotsRes, leadsRes, invoicesRes] = await Promise.all([
+      const [projectsRes, shotsRes, leadsRes, invoicesRes, expensesRes] = await Promise.all([
         supabase.from("projects").select("*").order("created_at"),
         supabase.from("shots").select("*").order("created_at"),
         supabase.from("leads").select("*").order("created_at"),
         supabase.from("invoices").select("*").order("created_at"),
+        supabase.from("expenses").select("*").order("created_at"),
       ]);
       if (projectsRes.error) throw projectsRes.error;
       if (shotsRes.error) throw shotsRes.error;
       if (leadsRes.error) throw leadsRes.error;
       if (invoicesRes.error) throw invoicesRes.error;
+      if (expensesRes.error) throw expensesRes.error;
       const nextProjects = (projectsRes.data || []).map((p) => ({
         id: p.id,
         name: p.name,
@@ -659,11 +822,20 @@ export default function ShotTracker() {
         deadline: p.deadline,
         priority: p.priority,
         archived: p.archived,
+        shareEnabled: p.share_enabled || false,
+        shareToken: p.share_token || null,
       }));
       const nextCards = (shotsRes.data || []).map(cardFromRow);
       const nextLeads = (leadsRes.data || []).map(leadFromRow);
       const nextInvoices = (invoicesRes.data || []).map(invoiceFromRow);
-      setData({ projects: nextProjects, cards: nextCards, leads: nextLeads, invoices: nextInvoices });
+      const nextExpenses = (expensesRes.data || []).map(expenseFromRow);
+      setData({
+        projects: nextProjects,
+        cards: nextCards,
+        leads: nextLeads,
+        invoices: nextInvoices,
+        expenses: nextExpenses,
+      });
     } catch (e) {
       console.error("Shot Tracker load failed:", e);
     } finally {
@@ -673,7 +845,7 @@ export default function ShotTracker() {
 
   useEffect(() => {
     if (userId) loadData();
-    else setData({ projects: [], cards: [], leads: [], invoices: [] });
+    else setData({ projects: [], cards: [], leads: [], invoices: [], expenses: [] });
   }, [userId, loadData]);
 
   const flashSave = (ok) => {
@@ -684,6 +856,7 @@ export default function ShotTracker() {
   const handleSaveProject = async (project) => {
     setSaveState("saving");
     try {
+      const shareToken = project.shareEnabled ? project.shareToken || genShareToken() : project.shareToken;
       if (project.id) {
         const { error } = await supabase
           .from("projects")
@@ -695,12 +868,16 @@ export default function ShotTracker() {
             budget_mode: project.budgetMode,
             deadline: project.deadline,
             priority: project.priority,
+            share_enabled: project.shareEnabled,
+            share_token: shareToken,
           })
           .eq("id", project.id);
         if (error) throw error;
         setData((prev) => ({
           ...prev,
-          projects: prev.projects.map((p) => (p.id === project.id ? project : p)),
+          projects: prev.projects.map((p) =>
+            p.id === project.id ? { ...project, shareToken } : p
+          ),
         }));
       } else {
         const { data: inserted, error } = await supabase
@@ -713,6 +890,8 @@ export default function ShotTracker() {
             budget_mode: project.budgetMode,
             deadline: project.deadline,
             priority: project.priority,
+            share_enabled: project.shareEnabled,
+            share_token: shareToken,
             user_id: userId,
           })
           .select()
@@ -744,6 +923,8 @@ export default function ShotTracker() {
               budgetMode: inserted.budget_mode || "manual",
               deadline: inserted.deadline,
               priority: inserted.priority,
+              shareEnabled: inserted.share_enabled || false,
+              shareToken: inserted.share_token || null,
             },
           ],
           cards: [...prev.cards, ...newCards],
@@ -1041,6 +1222,45 @@ export default function ShotTracker() {
     setShowMilestoneModal(false);
   };
 
+  const handleSaveExpense = async (expense) => {
+    setSaveState("saving");
+    try {
+      if (expense.id) {
+        await supabase.from("expenses").update(expenseToRow(expense, userId)).eq("id", expense.id);
+        setData((prev) => ({
+          ...prev,
+          expenses: prev.expenses.map((e) => (e.id === expense.id ? expense : e)),
+        }));
+      } else {
+        const { data: inserted, error } = await supabase
+          .from("expenses")
+          .insert(expenseToRow(expense, userId))
+          .select()
+          .single();
+        if (error) throw error;
+        setData((prev) => ({ ...prev, expenses: [...prev.expenses, expenseFromRow(inserted)] }));
+      }
+      flashSave(true);
+    } catch (e) {
+      console.error("Expense save failed:", e);
+      flashSave(false);
+    }
+    setEditingExpense(null);
+  };
+
+  const handleDeleteExpense = async (id) => {
+    setSaveState("saving");
+    try {
+      await supabase.from("expenses").delete().eq("id", id);
+      setData((prev) => ({ ...prev, expenses: prev.expenses.filter((e) => e.id !== id) }));
+      flashSave(true);
+    } catch (e) {
+      console.error("Expense delete failed:", e);
+      flashSave(false);
+    }
+    setEditingExpense(null);
+  };
+
   const handleExport = () => {
     const payload = JSON.stringify(data, null, 2);
     const blob = new Blob([payload], { type: "application/json" });
@@ -1318,6 +1538,8 @@ export default function ShotTracker() {
                 ? "Leads"
                 : workspace === "dashboard"
                 ? "Dashboard"
+                : workspace === "finance"
+                ? "Finance"
                 : "KaiFlow"}
             </h1>
             <p style={styles.subtitle}>
@@ -1368,6 +1590,11 @@ export default function ShotTracker() {
               <PlusIcon />
               New lead
             </button>
+          ) : workspace === "finance" ? (
+            <button style={styles.newButton} onClick={() => setEditingExpense(emptyExpense())}>
+              <PlusIcon />
+              New expense
+            </button>
           ) : workspace === "dashboard" ? null : (
             <button style={styles.newButton} onClick={() => setEditingProject(emptyProject())}>
               <PlusIcon />
@@ -1396,6 +1623,12 @@ export default function ShotTracker() {
             onClick={() => setWorkspace("leads")}
           >
             Leads
+          </button>
+          <button
+            style={{ ...styles.tabButton, ...(workspace === "finance" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("finance")}
+          >
+            Finance
           </button>
         </div>
       )}
@@ -1521,6 +1754,16 @@ export default function ShotTracker() {
         </div>
       )}
 
+      {view === "projects" && workspace === "finance" && (
+        <FinancePanel
+          projects={projects}
+          invoices={invoices}
+          expenses={expenses}
+          settings={settings}
+          onEditExpense={setEditingExpense}
+        />
+      )}
+
       {view === "board" && boardTab === "shots" && (
         <div style={{ ...styles.board, touchAction: dragVisual ? "none" : "auto" }}>
           {STAGES.map((stage) => {
@@ -1639,6 +1882,17 @@ export default function ShotTracker() {
           email={session.user.email}
           onCancel={() => setShowSettingsModal(false)}
           onSave={handleSaveSettings}
+        />
+      )}
+
+      {editingExpense && (
+        <ExpenseEditor
+          expense={editingExpense}
+          projects={projects.filter((p) => !p.archived)}
+          onCancel={() => setEditingExpense(null)}
+          onSave={handleSaveExpense}
+          onDelete={handleDeleteExpense}
+          isNew={!editingExpense.id}
         />
       )}
 
@@ -1818,6 +2072,197 @@ function ProjectCard({ project, cards, onOpen, onEdit, onToggleArchive, archived
       <div style={styles.progressTrack}>
         <div style={{ ...styles.progressFill, width: `${percent}%` }} />
       </div>
+    </div>
+  );
+}
+
+function MiniBarChart({ items, currencySymbol = "$", color = teal }) {
+  const max = Math.max(1, ...items.map((i) => i.value));
+  return (
+    <div style={styles.miniChart}>
+      {items.map((item) => (
+        <div key={item.label} style={styles.miniChartRow}>
+          <span style={styles.miniChartLabel}>{item.label}</span>
+          <div style={styles.miniChartTrack}>
+            <div
+              style={{
+                ...styles.miniChartFill,
+                width: `${Math.max(2, (item.value / max) * 100)}%`,
+                background: color,
+              }}
+            />
+          </div>
+          <span style={styles.miniChartValue}>
+            {currencySymbol}
+            {formatMoney(item.value)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FinancePanel({ projects, invoices, expenses, settings, onEditExpense }) {
+  const [tab, setTab] = useState("overview");
+  const cur = settings.currencySymbol || "$";
+  const finance = computeFinanceData(projects, invoices, expenses);
+
+  const subTabs = [
+    { id: "overview", label: "Overview" },
+    { id: "receivable", label: "Receivable" },
+    { id: "profitability", label: "Profitability" },
+    { id: "clients", label: "Client Value" },
+    { id: "expenses", label: "Expenses" },
+  ];
+
+  return (
+    <div style={styles.invoicesWrap}>
+      <div style={styles.tabRow2}>
+        {subTabs.map((t) => (
+          <button
+            key={t.id}
+            style={{ ...styles.tabButton, ...(tab === t.id ? styles.tabButtonActive : {}) }}
+            onClick={() => setTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "overview" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          <div>
+            <div style={styles.fieldDivider}>Revenue by month</div>
+            <MiniBarChart items={finance.revenueByMonth} currencySymbol={cur} color="#3DDC84" />
+          </div>
+          <div>
+            <div style={styles.fieldDivider}>Expenses by month</div>
+            <MiniBarChart items={finance.expensesByMonth} currencySymbol={cur} color="#FF4D4D" />
+          </div>
+          <div>
+            <div style={styles.fieldDivider}>Profit by month</div>
+            <MiniBarChart items={finance.profitByMonth} currencySymbol={cur} color={teal} />
+          </div>
+          <div>
+            <div style={styles.fieldDivider}>Revenue by client</div>
+            {finance.revenueByClient.length === 0 ? (
+              <p style={styles.fieldHint}>No revenue recorded yet.</p>
+            ) : (
+              <MiniBarChart items={finance.revenueByClient} currencySymbol={cur} color="#4A90D9" />
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === "receivable" && (
+        <div style={styles.invoiceList}>
+          {finance.receivables.length === 0 ? (
+            <p style={styles.fieldHint}>No outstanding invoices.</p>
+          ) : (
+            finance.receivables.map((r) => (
+              <div key={r.invoiceNumber} style={styles.invoiceCard}>
+                <div style={styles.invoiceCardTop}>
+                  <span style={styles.invoiceNumber}>{r.invoiceNumber}</span>
+                  <span
+                    style={{
+                      ...styles.invoiceStatusTag,
+                      color: r.daysOverdue > 0 ? "#FF4D4D" : "#F2A65A",
+                      borderColor: r.daysOverdue > 0 ? "#FF4D4D" : "#F2A65A",
+                    }}
+                  >
+                    {r.daysOverdue > 0 ? `${r.daysOverdue}d overdue` : "Not yet due"}
+                  </span>
+                </div>
+                <div style={styles.cardMeta}>{r.client} &middot; {r.projectName}</div>
+                <div style={styles.invoiceAmountsRow}>
+                  <span style={styles.fieldHint}>Amount due {cur}{formatMoney(r.amountDue)}</span>
+                  <span style={styles.fieldHint}>Due {r.dueDate || "-"}</span>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {tab === "profitability" && (
+        <div style={styles.invoiceList}>
+          {finance.profitability.length === 0 ? (
+            <p style={styles.fieldHint}>No active projects yet.</p>
+          ) : (
+            finance.profitability.map((p) => (
+              <div key={p.project.id} style={styles.invoiceCard}>
+                <div style={styles.invoiceCardTop}>
+                  <span style={styles.invoiceNumber}>{p.project.name}</span>
+                  <span style={styles.fieldHint}>
+                    {p.margin === null ? "No revenue yet" : `${p.margin}% margin`}
+                  </span>
+                </div>
+                {p.project.client && <div style={styles.cardMeta}>{p.project.client}</div>}
+                <div style={styles.invoiceAmountsRow}>
+                  <span style={styles.fieldHint}>Revenue {cur}{formatMoney(p.revenue)}</span>
+                  <span style={styles.fieldHint}>Expenses {cur}{formatMoney(p.expenses)}</span>
+                  <span style={styles.fieldHint}>
+                    Profit {cur}
+                    {formatMoney(p.profit)}
+                  </span>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {tab === "clients" && (
+        <div style={styles.invoiceList}>
+          {finance.clientValue.length === 0 ? (
+            <p style={styles.fieldHint}>No clients yet.</p>
+          ) : (
+            finance.clientValue.map((c) => (
+              <div key={c.client} style={styles.invoiceCard}>
+                <div style={styles.invoiceCardTop}>
+                  <span style={styles.invoiceNumber}>{c.client}</span>
+                  <span style={styles.fieldHint}>{c.projectCount} project{c.projectCount === 1 ? "" : "s"}</span>
+                </div>
+                <div style={styles.invoiceAmountsRow}>
+                  <span style={styles.fieldHint}>Total revenue {cur}{formatMoney(c.revenue)}</span>
+                  <span style={styles.fieldHint}>Avg value {cur}{formatMoney(c.avgProjectValue)}</span>
+                  <span style={styles.fieldHint}>
+                    Last project {c.lastDate ? c.lastDate.toISOString().slice(0, 10) : "-"}
+                  </span>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {tab === "expenses" && (
+        <div style={styles.invoiceList}>
+          {expenses.length === 0 ? (
+            <p style={styles.fieldHint}>No expenses logged yet.</p>
+          ) : (
+            expenses
+              .slice()
+              .reverse()
+              .map((e) => {
+                const project = projects.find((p) => p.id === e.projectId);
+                return (
+                  <div key={e.id} style={styles.invoiceCard} onClick={() => onEditExpense(e)}>
+                    <div style={styles.invoiceCardTop}>
+                      <span style={styles.invoiceNumber}>{e.category}</span>
+                      <span style={styles.fieldHint}>{e.date || "-"}</span>
+                    </div>
+                    {e.description && <div style={styles.cardMeta}>{e.description}</div>}
+                    <div style={styles.invoiceAmountsRow}>
+                      <span style={styles.fieldHint}>{cur}{formatMoney(e.amount)}</span>
+                      {project && <span style={styles.fieldHint}>{project.name}</span>}
+                    </div>
+                  </div>
+                );
+              })
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2064,6 +2509,22 @@ function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkP
 function ProjectEditor({ project, onCancel, onSave, onDelete, isNew }) {
   const [form, setForm] = useState(project);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  const shareUrl = form.shareToken
+    ? `${window.location.origin}${window.location.pathname}?share=project&token=${form.shareToken}`
+    : "";
+
+  const handleCopyShareLink = async () => {
+    if (!shareUrl) return;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+    } catch (e) {
+      window.prompt("Copy the client link:", shareUrl);
+    }
+    setLinkCopied(true);
+    setTimeout(() => setLinkCopied(false), 1500);
+  };
 
   return (
     <div style={styles.overlay} onClick={onCancel}>
@@ -2113,6 +2574,35 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew }) {
             </p>
           </div>
         )}
+
+        <div style={styles.field}>
+          <label style={styles.checkboxLabel}>
+            <input
+              type="checkbox"
+              checked={!!form.shareEnabled}
+              onChange={(e) => setForm({ ...form, shareEnabled: e.target.checked })}
+            />
+            Share progress with client
+          </label>
+          {form.shareEnabled && (
+            <>
+              <p style={styles.fieldHint}>
+                {isNew
+                  ? "A link will be ready to copy right after you save."
+                  : "Send this link to your client, no login needed on their end."}
+              </p>
+              {!isNew && shareUrl && (
+                <div style={styles.fileNameRow}>
+                  <span style={{ ...styles.fieldHint, wordBreak: "break-all" }}>{shareUrl}</span>
+                  <button type="button" style={styles.copyButton} onClick={handleCopyShareLink}>
+                    <CopyIcon />
+                    {linkCopied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
 
         <div style={styles.field}>
           <label style={styles.label}>Budget mode</label>
@@ -2488,6 +2978,60 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew }) {
     setTimeout(() => setCopied(false), 1500);
   };
 
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const fileInputRef = useRef(null);
+
+  const handleGenerateShareLink = () => {
+    setForm({ ...form, shareToken: form.shareToken || genShareToken() });
+  };
+
+  const shareUrl = form.shareToken
+    ? `${window.location.origin}${window.location.pathname}?share=shot&token=${form.shareToken}`
+    : "";
+
+  const handleCopyShareLink = async () => {
+    if (!shareUrl) return;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+    } catch (e) {
+      window.prompt("Copy the freelancer link:", shareUrl);
+    }
+    setLinkCopied(true);
+    setTimeout(() => setLinkCopied(false), 1500);
+  };
+
+  const handleFileSelected = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setUploadError("");
+    setUploading(true);
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      const path = `${user.id}/${form.id || "new"}-${Date.now()}-${file.name}`;
+      const { error: uploadErr } = await supabase.storage.from("attachments").upload(path, file);
+      if (uploadErr) throw uploadErr;
+      const { data: publicUrlData } = supabase.storage.from("attachments").getPublicUrl(path);
+      const newAttachment = { name: file.name, path, url: publicUrlData.publicUrl };
+      setForm({ ...form, attachments: [...(form.attachments || []), newAttachment] });
+    } catch (err) {
+      console.error("Upload failed:", err);
+      setUploadError(err.message || "Upload failed");
+    }
+    setUploading(false);
+  };
+
+  const removeAttachment = (index) => {
+    setForm({
+      ...form,
+      attachments: form.attachments.filter((_, i) => i !== index),
+    });
+  };
+
   return (
     <div style={styles.overlay} onClick={onCancel}>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -2611,6 +3155,68 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew }) {
           </div>
         )}
 
+        <div style={styles.fieldDivider}>Freelancer</div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Assigned to</label>
+          <input
+            style={styles.input}
+            value={form.assignedTo || ""}
+            onChange={set("assignedTo")}
+            placeholder="e.g. Kevin (in-betweener)"
+          />
+        </div>
+
+        {isNew ? (
+          <p style={styles.fieldHint}>Save this shot first, then a freelancer link can be generated.</p>
+        ) : !form.shareToken ? (
+          <button type="button" style={styles.addRevisionButton} onClick={handleGenerateShareLink}>
+            <PlusIcon />
+            Generate freelancer link
+          </button>
+        ) : (
+          <div style={styles.fileNameRow}>
+            <span style={{ ...styles.fieldHint, wordBreak: "break-all" }}>{shareUrl}</span>
+            <button type="button" style={styles.copyButton} onClick={handleCopyShareLink}>
+              <CopyIcon />
+              {linkCopied ? "Copied" : "Copy"}
+            </button>
+          </div>
+        )}
+
+        <div style={styles.fieldDivider}>Attachments</div>
+
+        {(form.attachments || []).length === 0 && (
+          <p style={styles.fieldHint}>No files attached yet.</p>
+        )}
+        {(form.attachments || []).map((file, i) => (
+          <div key={i} style={styles.fileNameRow}>
+            <a href={file.url} target="_blank" rel="noreferrer" style={{ ...styles.fieldHint, color: teal }}>
+              {file.name}
+            </a>
+            <button type="button" style={styles.iconButton} onClick={() => removeAttachment(i)}>
+              <TrashIcon />
+            </button>
+          </div>
+        ))}
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          style={{ display: "none" }}
+          onChange={handleFileSelected}
+        />
+        <button
+          type="button"
+          style={styles.addRevisionButton}
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+        >
+          <PlusIcon />
+          {uploading ? "Uploading..." : "Add attachment"}
+        </button>
+        {uploadError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{uploadError}</p>}
+
         <div style={styles.modalFooter}>
           {!isNew && (
             <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
@@ -2627,6 +3233,93 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew }) {
             onClick={() => onSave({ ...form, title: form.title || "Untitled shot" })}
           >
             Save shot
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew }) {
+  const [form, setForm] = useState(expense);
+  const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <span style={styles.modalTitle}>{isNew ? "New expense" : "Edit expense"}</span>
+          <button style={styles.iconButton} onClick={onCancel}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Category</label>
+          <select style={styles.input} value={form.category} onChange={set("category")}>
+            {EXPENSE_CATEGORIES.map((cat) => (
+              <option key={cat} value={cat}>
+                {cat}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Project (optional)</label>
+          <select
+            style={styles.input}
+            value={form.projectId || ""}
+            onChange={(e) => setForm({ ...form, projectId: e.target.value || null })}
+          >
+            <option value="">General studio expense</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Description</label>
+          <input
+            style={styles.input}
+            value={form.description}
+            onChange={set("description")}
+            placeholder="e.g. CSP license renewal"
+          />
+        </div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Amount</label>
+            <input
+              style={styles.input}
+              value={form.amount}
+              onChange={set("amount")}
+              placeholder="e.g. 50"
+            />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Date</label>
+            <input style={styles.input} type="date" value={form.date || ""} onChange={set("date")} />
+          </div>
+        </div>
+
+        <div style={styles.modalFooter}>
+          {!isNew && (
+            <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
+              <TrashIcon />
+              Delete
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button style={styles.cancelButton} onClick={onCancel}>
+            Cancel
+          </button>
+          <button style={styles.saveButton} onClick={() => onSave(form)}>
+            Save expense
           </button>
         </div>
       </div>
@@ -3453,6 +4146,43 @@ const styles = {
     display: "flex",
     gap: 8,
     padding: "0 28px 16px",
+  },
+  tabRow2: {
+    display: "flex",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  miniChart: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  miniChartRow: {
+    display: "grid",
+    gridTemplateColumns: "60px 1fr 70px",
+    alignItems: "center",
+    gap: 10,
+  },
+  miniChartLabel: {
+    fontSize: 11.5,
+    color: textMuted,
+    fontFamily: "'IBM Plex Mono', monospace",
+  },
+  miniChartTrack: {
+    height: 8,
+    borderRadius: 999,
+    background: "rgba(255,255,255,0.06)",
+    overflow: "hidden",
+  },
+  miniChartFill: {
+    height: "100%",
+    borderRadius: 999,
+  },
+  miniChartValue: {
+    fontSize: 11.5,
+    color: paper,
+    fontFamily: "'IBM Plex Mono', monospace",
+    textAlign: "right",
   },
   tabButton: {
     background: "transparent",
