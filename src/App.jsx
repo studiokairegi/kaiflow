@@ -23,16 +23,20 @@ const PRIORITY_COLORS = {
 };
 
 const REVIEW_COLORS = {
+  in_progress: "#5C6B70",
   waiting: "#4A90D9",
   approved: "#3DDC84",
   revisions: "#FF4D4D",
 };
 
 const REVIEW_LABELS = {
+  in_progress: "In Progress",
   waiting: "Waiting Review",
   approved: "Approved",
   revisions: "Requested Revisions",
 };
+
+const REVIEW_STATUS_ORDER = ["in_progress", "waiting", "approved", "revisions"];
 
 const LEAD_STAGES = [
   { id: "pool", label: "Email Pool" },
@@ -78,7 +82,7 @@ function emptyCard(stage, projectId) {
     priority: "normal",
     notes: "",
     stage,
-    reviewStatus: "waiting",
+    reviewStatus: "in_progress",
     revisions: [],
     revisionVersion: 1,
   };
@@ -109,7 +113,7 @@ function cardFromRow(row) {
     priority: row.priority,
     notes: row.notes,
     stage: row.stage,
-    reviewStatus: row.review_status || "waiting",
+    reviewStatus: row.review_status || "in_progress",
     revisions: Array.isArray(row.revisions) ? row.revisions : [],
     revisionVersion: row.revision_version || 1,
   };
@@ -125,7 +129,7 @@ function cardToRow(card, userId) {
     priority: card.priority,
     notes: card.notes,
     stage: card.stage,
-    review_status: card.reviewStatus || "waiting",
+    review_status: card.reviewStatus || "in_progress",
     revisions: card.revisions || [],
     revision_version: card.revisionVersion || 1,
     user_id: userId,
@@ -565,7 +569,7 @@ export default function ShotTracker() {
   };
 
   const moveCardStage = async (id, stage) => {
-    const resetFields = { reviewStatus: "waiting", revisions: [], revisionVersion: 1 };
+    const resetFields = { reviewStatus: "in_progress", revisions: [], revisionVersion: 1 };
     setData((prev) => ({
       ...prev,
       cards: prev.cards.map((c) => (c.id === id ? { ...c, stage, ...resetFields } : c)),
@@ -1811,7 +1815,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew }) {
 
         <div style={styles.fieldDivider}>Client Review</div>
         <div style={styles.reviewStatusRow}>
-          {["waiting", "approved", "revisions"].map((status) => {
+          {REVIEW_STATUS_ORDER.map((status) => {
             const active = form.reviewStatus === status;
             return (
               <button
