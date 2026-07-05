@@ -138,6 +138,7 @@ function emptyInvoice(projectId, suggestedNumber) {
     issueDate: new Date().toISOString().slice(0, 10),
     dueDate: "",
     status: "unpaid",
+    paidDate: "",
   };
 }
 
@@ -152,6 +153,7 @@ function invoiceFromRow(row) {
     issueDate: row.issue_date,
     dueDate: row.due_date,
     status: row.status,
+    paidDate: row.paid_date || "",
   };
 }
 
@@ -165,6 +167,7 @@ function invoiceToRow(invoice, userId) {
     issue_date: invoice.issueDate,
     due_date: invoice.dueDate,
     status: invoice.status,
+    paid_date: invoice.paidDate || "",
     user_id: userId,
   };
 }
@@ -190,15 +193,97 @@ function nextInvoiceNumbers(existingInvoices, count) {
 const MILESTONE_LABELS = ["Upfront payment", "Mid-project payment", "Delivery payment"];
 const MILESTONE_DEFAULTS = [50, 25, 25];
 
-function downloadInvoicePDF(invoice, project) {
+const DEFAULT_SETTINGS = {
+  studioName: "Studio Kairegi",
+  studioTagline: "Anime-style animation & production",
+  currencySymbol: "$",
+  milestoneDefaults: MILESTONE_DEFAULTS,
+};
+
+function settingsFromRow(row) {
+  if (!row) return DEFAULT_SETTINGS;
+  return {
+    studioName: row.studio_name || DEFAULT_SETTINGS.studioName,
+    studioTagline: row.studio_tagline || DEFAULT_SETTINGS.studioTagline,
+    currencySymbol: row.currency_symbol || DEFAULT_SETTINGS.currencySymbol,
+    milestoneDefaults:
+      Array.isArray(row.milestone_defaults) && row.milestone_defaults.length === 3
+        ? row.milestone_defaults
+        : MILESTONE_DEFAULTS,
+  };
+}
+
+function settingsToRow(settings, userId) {
+  return {
+    user_id: userId,
+    studio_name: settings.studioName,
+    studio_tagline: settings.studioTagline,
+    currency_symbol: settings.currencySymbol,
+    milestone_defaults: settings.milestoneDefaults,
+  };
+}
+
+function computeDashboardStats(projects, cards, leads, invoices) {
+  const activeProjects = projects.filter((p) => !p.archived);
+  const activeLeads = leads.filter((l) => !["won", "lost", "closed"].includes(l.stage));
+  const dealsWon = leads.filter((l) => l.stage === "won" || l.stage === "closed").length;
+  const dealsLost = leads.filter((l) => l.stage === "lost").length;
+
+  const now = new Date();
+  const nearDeadline = activeProjects.filter((p) => {
+    if (!p.deadline) return false;
+    const d = new Date(p.deadline);
+    if (isNaN(d.getTime())) return false;
+    const diffDays = (d - now) / 86400000;
+    return diffDays <= 7;
+  });
+
+  const projectsCompleted = activeProjects.filter((p) => {
+    const shots = cards.filter((c) => c.projectId === p.id);
+    return shots.length > 0 && shots.every((s) => s.stage === "delivered");
+  }).length;
+
+  const thisMonth = now.getMonth();
+  const thisYear = now.getFullYear();
+  const revenueThisMonth = invoices.reduce((sum, inv) => {
+    if (inv.status !== "paid" || !inv.paidDate) return sum;
+    const d = new Date(inv.paidDate);
+    if (d.getMonth() === thisMonth && d.getFullYear() === thisYear) {
+      return sum + parseMoney(inv.amountPaid);
+    }
+    return sum;
+  }, 0);
+
+  const unpaidInvoices = invoices.filter((inv) => inv.status !== "paid");
+  const outstandingTotal = unpaidInvoices.reduce(
+    (sum, inv) => sum + (parseMoney(inv.amount) - parseMoney(inv.amountPaid)),
+    0
+  );
+
+  return {
+    activeLeadsCount: activeLeads.length,
+    activeProjectsCount: activeProjects.length,
+    nearDeadline,
+    revenueThisMonth,
+    outstandingCount: unpaidInvoices.length,
+    outstandingTotal,
+    dealsWon,
+    dealsLost,
+    projectsCompleted,
+    totalShots: cards.length,
+  };
+}
+
+function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS) {
   const doc = new jsPDF();
   const balance = parseMoney(invoice.amount) - parseMoney(invoice.amountPaid);
+  const cur = settings.currencySymbol || "$";
 
   doc.setFontSize(18);
-  doc.text("Studio Kairegi", 20, 22);
+  doc.text(settings.studioName || "Studio Kairegi", 20, 22);
   doc.setFontSize(11);
   doc.setTextColor(100);
-  doc.text("Anime-style animation & production", 20, 29);
+  doc.text(settings.studioTagline || "Anime-style animation & production", 20, 29);
 
   doc.setTextColor(0);
   doc.setFontSize(14);
@@ -221,21 +306,21 @@ function downloadInvoicePDF(invoice, project) {
   doc.setFontSize(10);
   const descLines = doc.splitTextToSize(invoice.description || "Animation services", 140);
   doc.text(descLines, 20, 92);
-  doc.text(`$${formatMoney(invoice.amount)}`, 170, 92, { align: "right" });
+  doc.text(`${cur}${formatMoney(invoice.amount)}`, 170, 92, { align: "right" });
 
   const lineY = 92 + descLines.length * 6 + 6;
   doc.line(20, lineY, 190, lineY);
 
   doc.setFontSize(10);
   doc.text("Amount paid", 130, lineY + 10);
-  doc.text(`$${formatMoney(invoice.amountPaid)}`, 170, lineY + 10, { align: "right" });
+  doc.text(`${cur}${formatMoney(invoice.amountPaid)}`, 170, lineY + 10, { align: "right" });
   doc.setFontSize(12);
   doc.text("Balance due", 130, lineY + 20);
-  doc.text(`$${formatMoney(balance)}`, 170, lineY + 20, { align: "right" });
+  doc.text(`${cur}${formatMoney(balance)}`, 170, lineY + 20, { align: "right" });
 
   doc.setFontSize(9);
   doc.setTextColor(130);
-  doc.text("Thank you for working with Studio Kairegi.", 20, lineY + 40);
+  doc.text(`Thank you for working with ${settings.studioName || "Studio Kairegi"}.`, 20, lineY + 40);
 
   doc.save(`${invoice.invoiceNumber || "invoice"}.pdf`);
 }
@@ -451,6 +536,13 @@ const SignOutIcon = () => (
   </svg>
 );
 
+const GearIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+  </svg>
+);
+
 export default function ShotTracker() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -463,8 +555,9 @@ export default function ShotTracker() {
 
   const [data, setData] = useState({ projects: [], cards: [], leads: [], invoices: [] });
   const { projects, cards, leads, invoices } = data;
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
-  const [workspace, setWorkspace] = useState("projects"); // "projects" | "leads"
+  const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads"
   const [view, setView] = useState("projects");
   const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices"
   const [selectedProjectId, setSelectedProjectId] = useState(null);
@@ -473,6 +566,7 @@ export default function ShotTracker() {
   const [editingLead, setEditingLead] = useState(null);
   const [editingInvoice, setEditingInvoice] = useState(null);
   const [showMilestoneModal, setShowMilestoneModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [pendingLeadLinkId, setPendingLeadLinkId] = useState(null);
   const [dragOverStage, setDragOverStage] = useState(null);
   const [dragVisual, setDragVisual] = useState(null);
@@ -499,6 +593,47 @@ export default function ShotTracker() {
   }, []);
 
   const userId = session?.user?.id || null;
+
+  const loadSettings = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const { data: row, error } = await supabase
+        .from("user_settings")
+        .select("*")
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (error) throw error;
+      if (row) {
+        setSettings(settingsFromRow(row));
+      } else {
+        await supabase.from("user_settings").insert(settingsToRow(DEFAULT_SETTINGS, userId));
+        setSettings(DEFAULT_SETTINGS);
+      }
+    } catch (e) {
+      console.error("Settings load failed:", e);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (userId) loadSettings();
+    else setSettings(DEFAULT_SETTINGS);
+  }, [userId, loadSettings]);
+
+  const handleSaveSettings = async (nextSettings) => {
+    setSaveState("saving");
+    try {
+      const { error } = await supabase
+        .from("user_settings")
+        .upsert(settingsToRow(nextSettings, userId), { onConflict: "user_id" });
+      if (error) throw error;
+      setSettings(nextSettings);
+      flashSave(true);
+    } catch (e) {
+      console.error("Settings save failed:", e);
+      flashSave(false);
+    }
+    setShowSettingsModal(false);
+  };
 
   const loadData = useCallback(async () => {
     if (!userId) return;
@@ -875,7 +1010,12 @@ export default function ShotTracker() {
   };
 
   const handleMarkInvoicePaid = async (invoice) => {
-    const updated = { ...invoice, status: "paid", amountPaid: invoice.amount };
+    const updated = {
+      ...invoice,
+      status: "paid",
+      amountPaid: invoice.amount,
+      paidDate: new Date().toISOString().slice(0, 10),
+    };
     await handleSaveInvoice(updated);
   };
 
@@ -1176,10 +1316,12 @@ export default function ShotTracker() {
                 ? selectedProject?.name || "Project"
                 : workspace === "leads"
                 ? "Leads"
+                : workspace === "dashboard"
+                ? "Dashboard"
                 : "KaiFlow"}
             </h1>
             <p style={styles.subtitle}>
-              {view === "board" ? selectedProject?.client || "Studio Kairegi" : session.user.email}
+              {view === "board" ? selectedProject?.client || settings.studioName : session.user.email}
             </p>
           </div>
         </div>
@@ -1191,6 +1333,9 @@ export default function ShotTracker() {
           </span>
           <button style={styles.iconButtonGhost} onClick={handleExport} title="Export backup">
             <DownloadIcon />
+          </button>
+          <button style={styles.iconButtonGhost} onClick={() => setShowSettingsModal(true)} title="Settings">
+            <GearIcon />
           </button>
           <button style={styles.iconButtonGhost} onClick={handleSignOut} title="Sign out">
             <SignOutIcon />
@@ -1223,7 +1368,7 @@ export default function ShotTracker() {
               <PlusIcon />
               New lead
             </button>
-          ) : (
+          ) : workspace === "dashboard" ? null : (
             <button style={styles.newButton} onClick={() => setEditingProject(emptyProject())}>
               <PlusIcon />
               New project
@@ -1234,6 +1379,12 @@ export default function ShotTracker() {
 
       {showTabs && (
         <div style={styles.tabRow}>
+          <button
+            style={{ ...styles.tabButton, ...(workspace === "dashboard" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("dashboard")}
+          >
+            Dashboard
+          </button>
           <button
             style={{ ...styles.tabButton, ...(workspace === "projects" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("projects")}
@@ -1280,6 +1431,19 @@ export default function ShotTracker() {
             <div style={{ ...styles.progressFill, width: `${overallPercent}%` }} />
           </div>
         </div>
+      )}
+
+      {view === "projects" && workspace === "dashboard" && (
+        <DashboardPanel
+          projects={projects}
+          cards={cards}
+          leads={leads}
+          invoices={invoices}
+          settings={settings}
+          onOpenProject={openProject}
+          onGoToProjects={() => setWorkspace("projects")}
+          onGoToLeads={() => setWorkspace("leads")}
+        />
       )}
 
       {view === "projects" && workspace === "projects" && (
@@ -1447,8 +1611,9 @@ export default function ShotTracker() {
           }
           onEdit={setEditingInvoice}
           onMarkPaid={handleMarkInvoicePaid}
-          onDownload={(inv) => downloadInvoicePDF(inv, selectedProject)}
+          onDownload={(inv) => downloadInvoicePDF(inv, selectedProject, settings)}
           onOpenMilestones={() => setShowMilestoneModal(true)}
+          currencySymbol={settings.currencySymbol}
         />
       )}
 
@@ -1461,8 +1626,19 @@ export default function ShotTracker() {
               invoices.filter((inv) => inv.projectId === selectedProjectId)
             ).totalBudget
           }
+          defaultPercentages={settings.milestoneDefaults}
+          currencySymbol={settings.currencySymbol}
           onCancel={() => setShowMilestoneModal(false)}
           onCreate={handleCreateMilestones}
+        />
+      )}
+
+      {showSettingsModal && (
+        <SettingsModal
+          settings={settings}
+          email={session.user.email}
+          onCancel={() => setShowSettingsModal(false)}
+          onSave={handleSaveSettings}
         />
       )}
 
@@ -1514,6 +1690,7 @@ export default function ShotTracker() {
           onSave={handleSaveInvoice}
           onDelete={handleDeleteInvoice}
           isNew={!editingInvoice.id}
+          currencySymbol={settings.currencySymbol}
         />
       )}
     </div>
@@ -1645,7 +1822,145 @@ function ProjectCard({ project, cards, onOpen, onEdit, onToggleArchive, archived
   );
 }
 
-function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkPaid, onDownload, onOpenMilestones }) {
+function DashboardPanel({ projects, cards, leads, invoices, settings, onOpenProject, onGoToProjects, onGoToLeads }) {
+  const stats = computeDashboardStats(projects, cards, leads, invoices);
+  const cur = settings.currencySymbol || "$";
+
+  const statItems = [
+    { label: "Active projects", value: stats.activeProjectsCount, onClick: onGoToProjects },
+    { label: "Active leads", value: stats.activeLeadsCount, onClick: onGoToLeads },
+    { label: "Total shots", value: stats.totalShots },
+    { label: "Projects completed", value: stats.projectsCompleted },
+    { label: "Deals won", value: stats.dealsWon, onClick: onGoToLeads },
+    { label: "Deals lost", value: stats.dealsLost, onClick: onGoToLeads },
+    { label: "Revenue this month", value: `${cur}${formatMoney(stats.revenueThisMonth)}` },
+    {
+      label: "Outstanding invoices",
+      value: `${stats.outstandingCount} \u00b7 ${cur}${formatMoney(stats.outstandingTotal)}`,
+    },
+  ];
+
+  return (
+    <div style={styles.invoicesWrap}>
+      <div style={styles.dashboardGrid}>
+        {statItems.map((item) => (
+          <div
+            key={item.label}
+            style={{ ...styles.budgetStat, cursor: item.onClick ? "pointer" : "default" }}
+            onClick={item.onClick}
+          >
+            <span style={styles.label}>{item.label}</span>
+            <span style={styles.budgetStatValue}>{item.value}</span>
+          </div>
+        ))}
+      </div>
+
+      <div>
+        <div style={styles.fieldDivider}>Projects near deadline</div>
+        {stats.nearDeadline.length === 0 ? (
+          <p style={styles.fieldHint}>Nothing coming up in the next 7 days.</p>
+        ) : (
+          <div style={styles.invoiceList}>
+            {stats.nearDeadline.map((p) => (
+              <div key={p.id} style={styles.invoiceCard} onClick={() => onOpenProject(p.id)}>
+                <div style={styles.invoiceCardTop}>
+                  <span style={styles.invoiceNumber}>{p.name}</span>
+                  <span style={styles.fieldHint}>{p.deadline}</span>
+                </div>
+                {p.client && <div style={styles.cardMeta}>{p.client}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <p style={styles.fieldHint}>
+        Profit and expense tracking will show up here once the Finance module is built.
+      </p>
+    </div>
+  );
+}
+
+function SettingsModal({ settings, email, onCancel, onSave }) {
+  const [form, setForm] = useState(settings);
+  const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+  const setMilestone = (i) => (e) => {
+    const next = [...form.milestoneDefaults];
+    next[i] = e.target.value;
+    setForm({ ...form, milestoneDefaults: next });
+  };
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <span style={styles.modalTitle}>Settings</span>
+          <button style={styles.iconButton} onClick={onCancel}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Account email</label>
+          <p style={styles.fieldHint}>{email}</p>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Studio name</label>
+          <input style={styles.input} value={form.studioName} onChange={set("studioName")} />
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Studio tagline</label>
+          <input style={styles.input} value={form.studioTagline} onChange={set("studioTagline")} />
+          <p style={styles.fieldHint}>Shown on generated invoice PDFs.</p>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Currency symbol</label>
+          <input
+            style={{ ...styles.input, maxWidth: 80 }}
+            value={form.currencySymbol}
+            onChange={set("currencySymbol")}
+          />
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Default milestone split (%)</label>
+          <div style={styles.fieldRow}>
+            {form.milestoneDefaults.map((val, i) => (
+              <input
+                key={i}
+                style={styles.input}
+                type="number"
+                min="0"
+                max="100"
+                value={val}
+                onChange={setMilestone(i)}
+              />
+            ))}
+          </div>
+          <p style={styles.fieldHint}>
+            Upfront / Mid-project / Delivery. Used as the starting point on "Set up milestones."
+          </p>
+        </div>
+
+        <div style={styles.modalFooter}>
+          <div style={{ flex: 1 }} />
+          <button style={styles.cancelButton} onClick={onCancel}>
+            Cancel
+          </button>
+          <button style={styles.saveButton} onClick={() => onSave(form)}>
+            Save settings
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkPaid, onDownload, onOpenMilestones, currencySymbol }) {
+  const cur = currencySymbol || "$";
   if (!project) return null;
   const { totalBudget, amountPaid, outstanding } = projectBudgetSummary(project, projectCards, invoices);
 
@@ -1654,18 +1969,18 @@ function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkP
       <div style={styles.budgetSummaryRow}>
         <div style={styles.budgetStat}>
           <span style={styles.label}>Total budget</span>
-          <span style={styles.budgetStatValue}>${formatMoney(totalBudget)}</span>
+          <span style={styles.budgetStatValue}>{cur}{formatMoney(totalBudget)}</span>
           <span style={styles.fieldHint}>
             {project.budgetMode === "auto" ? "Calculated from shot rates" : "Manual"}
           </span>
         </div>
         <div style={styles.budgetStat}>
           <span style={styles.label}>Amount paid</span>
-          <span style={{ ...styles.budgetStatValue, color: "#3DDC84" }}>${formatMoney(amountPaid)}</span>
+          <span style={{ ...styles.budgetStatValue, color: "#3DDC84" }}>{cur}{formatMoney(amountPaid)}</span>
         </div>
         <div style={styles.budgetStat}>
           <span style={styles.label}>Outstanding</span>
-          <span style={{ ...styles.budgetStatValue, color: "#F2A65A" }}>${formatMoney(outstanding)}</span>
+          <span style={{ ...styles.budgetStatValue, color: "#F2A65A" }}>{cur}{formatMoney(outstanding)}</span>
         </div>
       </div>
 
@@ -1711,8 +2026,8 @@ function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkP
                 </div>
                 {inv.description && <div style={styles.cardMeta}>{inv.description}</div>}
                 <div style={styles.invoiceAmountsRow}>
-                  <span style={styles.fieldHint}>Amount ${formatMoney(inv.amount)}</span>
-                  <span style={styles.fieldHint}>Balance ${formatMoney(balance)}</span>
+                  <span style={styles.fieldHint}>Amount {cur}{formatMoney(inv.amount)}</span>
+                  <span style={styles.fieldHint}>Balance {cur}{formatMoney(balance)}</span>
                 </div>
                 <div style={styles.invoiceActionsRow}>
                   {inv.status !== "paid" && (
@@ -2319,7 +2634,8 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew }) {
   );
 }
 
-function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew }) {
+function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySymbol }) {
+  const cur = currencySymbol || "$";
   const [form, setForm] = useState(invoice);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const balance = parseMoney(form.amount) - parseMoney(form.amountPaid);
@@ -2398,7 +2714,7 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew }) {
           </div>
         </div>
 
-        <p style={styles.fieldHint}>Balance due: ${formatMoney(balance)}</p>
+        <p style={styles.fieldHint}>Balance due: {cur}{formatMoney(balance)}</p>
 
         <div style={styles.field}>
           <label style={styles.label}>Status</label>
@@ -2423,7 +2739,14 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew }) {
                 color: form.status === "paid" ? "#3DDC84" : textMuted,
                 background: form.status === "paid" ? "rgba(61,220,132,0.1)" : "transparent",
               }}
-              onClick={() => setForm({ ...form, status: "paid", amountPaid: form.amount })}
+              onClick={() =>
+                setForm({
+                  ...form,
+                  status: "paid",
+                  amountPaid: form.amount,
+                  paidDate: form.paidDate || new Date().toISOString().slice(0, 10),
+                })
+              }
             >
               Paid
             </button>
@@ -2453,8 +2776,11 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew }) {
   );
 }
 
-function MilestoneModal({ totalBudget, onCancel, onCreate }) {
-  const [percentages, setPercentages] = useState(MILESTONE_DEFAULTS.map(String));
+function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, currencySymbol }) {
+  const cur = currencySymbol || "$";
+  const [percentages, setPercentages] = useState(
+    (defaultPercentages && defaultPercentages.length === 3 ? defaultPercentages : MILESTONE_DEFAULTS).map(String)
+  );
   const totalPercent = percentages.reduce((sum, p) => sum + (parseFloat(p) || 0), 0);
   const setPct = (i) => (e) => {
     const next = [...percentages];
@@ -2473,7 +2799,7 @@ function MilestoneModal({ totalBudget, onCancel, onCreate }) {
         </div>
 
         <p style={styles.fieldHint}>
-          Splits the project's ${formatMoney(totalBudget)} budget into invoices.
+          Splits the project's {cur}{formatMoney(totalBudget)} budget into invoices.
         </p>
 
         {MILESTONE_LABELS.map((label, i) => (
@@ -2493,7 +2819,7 @@ function MilestoneModal({ totalBudget, onCancel, onCreate }) {
               <label style={styles.label}>Amount</label>
               <input
                 style={styles.input}
-                value={`$${formatMoney((totalBudget * (parseFloat(percentages[i]) || 0)) / 100)}`}
+                value={`${cur}${formatMoney((totalBudget * (parseFloat(percentages[i]) || 0)) / 100)}`}
                 disabled
               />
             </div>
@@ -2831,6 +3157,11 @@ const styles = {
     display: "flex",
     gap: 14,
     flexWrap: "wrap",
+  },
+  dashboardGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+    gap: 14,
   },
   budgetStat: {
     flex: "1 1 160px",
