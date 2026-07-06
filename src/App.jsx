@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import { genShareToken } from "./SharedViews.jsx";
+import { DonutBreakdown, RevenueTrendChart } from "./DashboardCharts.jsx";
 
 const STAGES = [
   { id: "character_design", label: "Character Design" },
@@ -2285,6 +2286,24 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, onOpenProj
     },
   ];
 
+  const shotsByStage = STAGES.map((s) => ({
+    label: s.label,
+    value: cards.filter((c) => c.stage === s.id).length,
+  }));
+
+  const leadsByStage = LEAD_STAGES.map((s) => ({
+    label: s.label,
+    value: leads.filter((l) => l.stage === s.id).length,
+  }));
+
+  const months = lastSixMonthKeys();
+  const revenueTrend = months.map(({ key, label }) => ({
+    label,
+    value: invoices
+      .filter((inv) => inv.status === "paid" && monthKey(inv.paidDate) === key)
+      .reduce((sum, inv) => sum + parseMoney(inv.amountPaid), 0),
+  }));
+
   return (
     <div style={styles.invoicesWrap}>
       <div style={styles.dashboardGrid}>
@@ -2298,6 +2317,22 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, onOpenProj
             <span style={styles.budgetStatValue}>{item.value}</span>
           </div>
         ))}
+      </div>
+
+      <div>
+        <div style={styles.fieldDivider}>Revenue trend (6 months)</div>
+        <RevenueTrendChart data={revenueTrend} currencySymbol={cur} />
+      </div>
+
+      <div style={styles.dashboardChartsRow}>
+        <div style={{ flex: "1 1 260px" }}>
+          <div style={styles.fieldDivider}>Shots by stage</div>
+          <DonutBreakdown data={shotsByStage} emptyLabel="No shots yet." />
+        </div>
+        <div style={{ flex: "1 1 260px" }}>
+          <div style={styles.fieldDivider}>Leads by stage</div>
+          <DonutBreakdown data={leadsByStage} emptyLabel="No leads yet." />
+        </div>
       </div>
 
       <div>
@@ -2320,7 +2355,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, onOpenProj
       </div>
 
       <p style={styles.fieldHint}>
-        Profit and expense tracking will show up here once the Finance module is built.
+        For accounts receivable, per-project profitability, and client value, check the Finance tab.
       </p>
     </div>
   );
@@ -3855,6 +3890,11 @@ const styles = {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
     gap: 14,
+  },
+  dashboardChartsRow: {
+    display: "flex",
+    gap: 24,
+    flexWrap: "wrap",
   },
   budgetStat: {
     flex: "1 1 160px",
