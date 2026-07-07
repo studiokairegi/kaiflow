@@ -23,6 +23,29 @@ const REVIEW_LABELS = {
   revisions: "Requested Revisions",
 };
 
+// Mirrors the pipeline order in App.jsx, kept here too since this file is
+// used for public pages that don't import the authenticated app.
+const STAGE_ORDER = [
+  "character_design",
+  "bg_lighting",
+  "storyboard",
+  "layout",
+  "genga",
+  "douga",
+  "backgrounds",
+  "frametest",
+  "cleanup",
+  "compositing",
+  "editing",
+  "delivered",
+];
+
+function stagePosition(stageId) {
+  const i = STAGE_ORDER.indexOf(stageId);
+  if (i === -1) return 0;
+  return Math.round((i / (STAGE_ORDER.length - 1)) * 100);
+}
+
 export function genShareToken() {
   return (
     Math.random().toString(36).slice(2, 10) +
@@ -91,8 +114,9 @@ export function ClientPortalView({ token }) {
     stage: r.shot_stage,
     reviewStatus: r.shot_review_status,
   }));
-  const approved = shots.filter((s) => s.reviewStatus === "approved").length;
-  const percent = shots.length ? Math.round((approved / shots.length) * 100) : 0;
+  const percent = shots.length
+    ? Math.round(shots.reduce((sum, s) => sum + stagePosition(s.stage), 0) / shots.length)
+    : 0;
 
   return (
     <div style={wrapStyle}>
