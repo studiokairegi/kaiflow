@@ -178,22 +178,58 @@ export function ClientPortalView({ token }) {
 export function FreelancerView({ token }) {
   const [shot, setShot] = useState(null);
   const [error, setError] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const [uploadOk, setUploadOk] = useState(false);
+  const fileInputRef = React.useRef(null);
+
+  const loadShot = React.useCallback(async () => {
+    const { data, error } = await supabase.rpc("get_shared_shot", { p_token: token });
+    if (error || !data || data.length === 0) {
+      setError("This link isn't valid or has expired.");
+      return;
+    }
+    setShot(data[0]);
+  }, [token]);
 
   useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase.rpc("get_shared_shot", { p_token: token });
-      if (error || !data || data.length === 0) {
-        setError("This link isn't valid or has expired.");
-        return;
-      }
-      setShot(data[0]);
-    })();
-  }, [token]);
+    loadShot();
+  }, [loadShot]);
+
+  const handleFileSelected = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setUploadError("");
+    setUploadOk(false);
+    setUploading(true);
+    try {
+      const path = `freelancer/${token}/${Date.now()}-${file.name}`;
+      const { error: uploadErr } = await supabase.storage.from("attachments").upload(path, file);
+      if (uploadErr) throw uploadErr;
+      const { data: publicUrlData } = supabase.storage.from("attachments").getPublicUrl(path);
+      const { data: ok, error: rpcErr } = await supabase.rpc("add_shot_deliverable", {
+        p_token: token,
+        p_name: file.name,
+        p_path: path,
+        p_url: publicUrlData.publicUrl,
+      });
+      if (rpcErr || !ok) throw rpcErr || new Error("Couldn't record the upload");
+      setUploadOk(true);
+      await loadShot();
+    } catch (err) {
+      console.error("Upload failed:", err);
+      setUploadError(err.message || "Upload failed, please try again.");
+    }
+    setUploading(false);
+  };
 
   if (error) return <ErrorState message={error} />;
   if (!shot) return <LoadingState />;
 
   const attachments = Array.isArray(shot.attachments) ? shot.attachments : [];
+  const deliverables = Array.isArray(shot.deliverables) ? shot.deliverables : [];
+  const isApproved = shot.review_status === "approved";
 
   return (
     <div style={wrapStyle}>
@@ -206,25 +242,37 @@ export function FreelancerView({ token }) {
         </h1>
         <p style={{ color: textMuted, fontSize: 13.5, marginBottom: 24 }}>{shot.project_name}</p>
 
+        <div
+          style={{
+            ...cardStyle,
+            border: `1px solid ${REVIEW_COLORS[shot.review_status] || border}`,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <span style={{ fontSize: 15, fontWeight: 600, color: REVIEW_COLORS[shot.review_status] || paper }}>
+            {isApproved ? "Approved" : "Not yet approved"}
+          </span>
+          <span
+            style={{
+              fontSize: 11,
+              padding: "3px 10px",
+              borderRadius: 999,
+              border: `1px solid ${REVIEW_COLORS[shot.review_status] || textMuted}`,
+              color: REVIEW_COLORS[shot.review_status] || textMuted,
+            }}
+          >
+            {REVIEW_LABELS[shot.review_status] || "In Progress"}
+          </span>
+        </div>
+
         <div style={cardStyle}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <span style={{ fontSize: 12.5, color: textMuted, textTransform: "capitalize" }}>
-              Stage: {String(shot.stage || "").replace(/_/g, " ")}
-            </span>
-            <span
-              style={{
-                fontSize: 11,
-                padding: "3px 10px",
-                borderRadius: 999,
-                border: `1px solid ${REVIEW_COLORS[shot.review_status] || textMuted}`,
-                color: REVIEW_COLORS[shot.review_status] || textMuted,
-              }}
-            >
-              {REVIEW_LABELS[shot.review_status] || "In Progress"}
-            </span>
-          </div>
+          <p style={{ fontSize: 12.5, color: textMuted, marginBottom: shot.assigned_to ? 6 : 0 }}>
+            Stage: {String(shot.stage || "").replace(/_/g, " ")}
+          </p>
           {shot.assigned_to && (
-            <p style={{ fontSize: 12.5, color: textMuted }}>Assigned to: {shot.assigned_to}</p>
+            <p style={{ fontSize: 12.5, color: textMuted, margin: 0 }}>Assigned to: {shot.assigned_to}</p>
           )}
         </div>
 
@@ -236,7 +284,7 @@ export function FreelancerView({ token }) {
         )}
 
         <p style={{ fontSize: 12.5, color: textMuted, textTransform: "uppercase", letterSpacing: "0.05em", margin: "20px 0 10px" }}>
-          Attachments
+          Attachments from studio
         </p>
         {attachments.length === 0 ? (
           <p style={{ color: textMuted, fontSize: 13.5 }}>No files attached yet.</p>
@@ -262,10 +310,61 @@ export function FreelancerView({ token }) {
           ))
         )}
 
-        <p style={{ fontSize: 12, color: textMuted, marginTop: 20 }}>
-          Uploading finished work back through this link is coming soon. For now, please send completed
-          files back to the studio directly.
+        <p style={{ fontSize: 12.5, color: textMuted, textTransform: "uppercase", letterSpacing: "0.05em", margin: "20px 0 10px" }}>
+          Your uploads
         </p>
+        {deliverables.length === 0 ? (
+          <p style={{ color: textMuted, fontSize: 13.5 }}>Nothing uploaded yet.</p>
+        ) : (
+          deliverables
+            .slice()
+            .reverse()
+            .map((file, i) => (
+              <a
+                key={i}
+                href={file.url}
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  ...cardStyle,
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  color: tealLight,
+                  textDecoration: "none",
+                }}
+              >
+                <span style={{ fontSize: 13.5 }}>{file.name}</span>
+                <span style={{ fontSize: 11, color: textMuted }}>
+                  {file.uploadedAt ? new Date(file.uploadedAt).toLocaleString() : ""}
+                </span>
+              </a>
+            ))
+        )}
+
+        <input ref={fileInputRef} type="file" style={{ display: "none" }} onChange={handleFileSelected} />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+          style={{
+            width: "100%",
+            marginTop: 8,
+            padding: "12px 16px",
+            borderRadius: 12,
+            border: `1px dashed ${teal}`,
+            background: "rgba(47,191,166,0.08)",
+            color: teal,
+            fontSize: 13.5,
+            cursor: uploading ? "default" : "pointer",
+          }}
+        >
+          {uploading ? "Uploading..." : "Upload finished work"}
+        </button>
+        {uploadOk && (
+          <p style={{ fontSize: 12.5, color: "#3DDC84", marginTop: 8 }}>Uploaded, thanks!</p>
+        )}
+        {uploadError && <p style={{ fontSize: 12.5, color: "#FF4D4D", marginTop: 8 }}>{uploadError}</p>}
       </div>
     </div>
   );

@@ -581,6 +581,7 @@ function cardFromRow(row) {
     assignedPaid: row.assigned_paid || false,
     shareToken: row.share_token || null,
     attachments: Array.isArray(row.attachments) ? row.attachments : [],
+    deliverables: Array.isArray(row.deliverables) ? row.deliverables : [],
   };
 }
 
@@ -816,13 +817,14 @@ export default function ShotTracker() {
     invoices: [],
     expenses: [],
     teamMembers: [],
+    activity: [],
   });
-  const { projects, cards, leads, invoices, expenses, teamMembers } = data;
+  const { projects, cards, leads, invoices, expenses, teamMembers, activity } = data;
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
   const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "teams"
   const [view, setView] = useState("projects");
-  const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices"
+  const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices" | "activity"
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [editingCard, setEditingCard] = useState(null);
   const [editingProject, setEditingProject] = useState(null);
@@ -911,13 +913,14 @@ export default function ShotTracker() {
     if (!userId) return;
     setLoading(true);
     try {
-      const [projectsRes, shotsRes, leadsRes, invoicesRes, expensesRes, teamRes] = await Promise.all([
+      const [projectsRes, shotsRes, leadsRes, invoicesRes, expensesRes, teamRes, activityRes] = await Promise.all([
         supabase.from("projects").select("*").order("created_at"),
         supabase.from("shots").select("*").order("created_at"),
         supabase.from("leads").select("*").order("created_at"),
         supabase.from("invoices").select("*").order("created_at"),
         supabase.from("expenses").select("*").order("created_at"),
         supabase.from("team_members").select("*").order("created_at"),
+        supabase.from("activity_log").select("*").order("created_at", { ascending: false }),
       ]);
       if (projectsRes.error) throw projectsRes.error;
       if (shotsRes.error) throw shotsRes.error;
@@ -925,6 +928,7 @@ export default function ShotTracker() {
       if (invoicesRes.error) throw invoicesRes.error;
       if (expensesRes.error) throw expensesRes.error;
       if (teamRes.error) throw teamRes.error;
+      if (activityRes.error) throw activityRes.error;
       const nextProjects = (projectsRes.data || []).map((p) => ({
         id: p.id,
         name: p.name,
@@ -944,6 +948,14 @@ export default function ShotTracker() {
       const nextInvoices = (invoicesRes.data || []).map(invoiceFromRow);
       const nextExpenses = (expensesRes.data || []).map(expenseFromRow);
       const nextTeamMembers = (teamRes.data || []).map(teamMemberFromRow);
+      const nextActivity = (activityRes.data || []).map((a) => ({
+        id: a.id,
+        projectId: a.project_id,
+        shotId: a.shot_id,
+        type: a.event_type,
+        message: a.description,
+        createdAt: a.created_at,
+      }));
       setData({
         projects: nextProjects,
         cards: nextCards,
@@ -951,6 +963,7 @@ export default function ShotTracker() {
         invoices: nextInvoices,
         expenses: nextExpenses,
         teamMembers: nextTeamMembers,
+        activity: nextActivity,
       });
     } catch (e) {
       console.error("Shot Tracker load failed:", e);
@@ -961,7 +974,16 @@ export default function ShotTracker() {
 
   useEffect(() => {
     if (userId) loadData();
-    else setData({ projects: [], cards: [], leads: [], invoices: [], expenses: [], teamMembers: [] });
+    else
+      setData({
+        projects: [],
+        cards: [],
+        leads: [],
+        invoices: [],
+        expenses: [],
+        teamMembers: [],
+        activity: [],
+      });
   }, [userId, loadData]);
 
   const flashSave = (ok) => {
@@ -1118,6 +1140,7 @@ export default function ShotTracker() {
     setSaveState("saving");
     try {
       if (card.id) {
+        const previous = cards.find((c) => c.id === card.id);
         const { error } = await supabase
           .from("shots")
           .update(cardToRow(card, userId))
@@ -1127,6 +1150,40 @@ export default function ShotTracker() {
           ...prev,
           cards: prev.cards.map((c) => (c.id === card.id ? card : c)),
         }));
+        if (previous && previous.reviewStatus !== card.reviewStatus) {
+          if (card.reviewStatus === "approved" || card.reviewStatus === "revisions") {
+            const eventType = card.reviewStatus === "approved" ? "review_approved" : "review_revisions";
+            const message =
+              card.reviewStatus === "approved"
+                ? `${card.title || "Shot"} was approved`
+                : `Revisions requested on ${card.title || "shot"}`;
+            try {
+              await supabase.from("activity_log").insert({
+                user_id: userId,
+                project_id: card.projectId,
+                shot_id: card.id,
+                event_type: eventType,
+                description: message,
+              });
+              setData((prev) => ({
+                ...prev,
+                activity: [
+                  {
+                    id: genShareToken(),
+                    projectId: card.projectId,
+                    shotId: card.id,
+                    type: eventType,
+                    message,
+                    createdAt: new Date().toISOString(),
+                  },
+                  ...prev.activity,
+                ],
+              }));
+            } catch (logErr) {
+              console.error("Activity log failed:", logErr);
+            }
+          }
+        }
       } else {
         const { data: inserted, error } = await supabase
           .from("shots")
@@ -1519,7 +1576,7 @@ export default function ShotTracker() {
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
-    setData({ projects: [], cards: [], leads: [], invoices: [], expenses: [], teamMembers: [] });
+    setData({ projects: [], cards: [], leads: [], invoices: [], expenses: [], teamMembers: [], activity: [] });
     setView("projects");
     setSelectedProjectId(null);
   };
@@ -1782,7 +1839,7 @@ export default function ShotTracker() {
               <PlusIcon />
               New invoice
             </button>
-          ) : view === "board" ? (
+          ) : view === "board" && boardTab === "activity" ? null : view === "board" ? (
             <button
               style={styles.newButton}
               onClick={() =>
@@ -1864,6 +1921,12 @@ export default function ShotTracker() {
             onClick={() => setBoardTab("invoices")}
           >
             Invoices
+          </button>
+          <button
+            style={{ ...styles.tabButton, ...(boardTab === "activity" ? styles.tabButtonActive : {}) }}
+            onClick={() => setBoardTab("activity")}
+          >
+            Activity
           </button>
         </div>
       )}
@@ -2089,6 +2152,14 @@ export default function ShotTracker() {
           onDownload={(inv) => downloadInvoicePDF(inv, selectedProject, settings)}
           onOpenMilestones={() => setShowMilestoneModal(true)}
           currencySymbol={selectedProject?.currency || settings.currencySymbol}
+        />
+      )}
+
+      {view === "board" && boardTab === "activity" && (
+        <ActivityPanel
+          entries={activity.filter((a) => a.projectId === selectedProjectId)}
+          cards={cards}
+          onRefresh={loadData}
         />
       )}
 
@@ -2794,6 +2865,60 @@ function SettingsModal({ settings, email, onCancel, onSave }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+const ACTIVITY_ICONS = {
+  freelancer_upload: "\u2191",
+  review_approved: "\u2713",
+  review_revisions: "\u21bb",
+  note: "\u2022",
+};
+
+function formatActivityTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function ActivityPanel({ entries, cards, onRefresh }) {
+  const sorted = [...entries].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+  return (
+    <div style={styles.invoicesWrap}>
+      <button type="button" style={{ ...styles.cancelButton, alignSelf: "flex-start" }} onClick={onRefresh}>
+        Refresh
+      </button>
+      {sorted.length === 0 ? (
+        <p style={styles.fieldHint}>
+          No activity yet. Freelancer uploads and review decisions will show up here with a timestamp.
+        </p>
+      ) : (
+        <div style={styles.invoiceList}>
+          {sorted.map((entry) => {
+            const shot = cards.find((c) => c.id === entry.shotId);
+            return (
+              <div key={entry.id} style={styles.invoiceCard}>
+                <div style={styles.invoiceCardTop}>
+                  <span style={styles.invoiceNumber}>
+                    {ACTIVITY_ICONS[entry.type] || "\u2022"} {entry.message}
+                  </span>
+                </div>
+                <div style={styles.invoiceAmountsRow}>
+                  <span style={styles.fieldHint}>{formatActivityTime(entry.createdAt)}</span>
+                  {shot && <span style={styles.fieldHint}>{shot.title}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -3669,6 +3794,22 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
           {uploading ? "Uploading..." : "Add attachment"}
         </button>
         {uploadError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{uploadError}</p>}
+
+        {(form.deliverables || []).length > 0 && (
+          <>
+            <div style={styles.fieldDivider}>Freelancer submissions</div>
+            {form.deliverables.map((file, i) => (
+              <div key={i} style={styles.fileNameRow}>
+                <a href={file.url} target="_blank" rel="noreferrer" style={{ ...styles.fieldHint, color: teal }}>
+                  {file.name}
+                </a>
+                <span style={styles.fieldHint}>
+                  {file.uploadedAt ? new Date(file.uploadedAt).toLocaleString() : ""}
+                </span>
+              </div>
+            ))}
+          </>
+        )}
 
         <div style={styles.modalFooter}>
           {!isNew && (
