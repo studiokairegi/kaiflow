@@ -211,6 +211,59 @@ const CURRENCIES = [
   { code: "KES", symbol: "KSh", label: "KES (KSh)" },
 ];
 
+const CURRENCY_CODE_BY_SYMBOL = CURRENCIES.reduce((map, c) => {
+  map[c.symbol] = c.code;
+  return map;
+}, {});
+
+const FX_CACHE_KEY = "kaiflow-fx-rates";
+const FX_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+async function fetchExchangeRates() {
+  try {
+    const cached = localStorage.getItem(FX_CACHE_KEY);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (Date.now() - parsed.fetchedAt < FX_CACHE_MAX_AGE_MS) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    // ignore cache read errors, fall through to a fresh fetch
+  }
+  try {
+    const res = await fetch("https://open.er-api.com/v6/latest/USD");
+    const data = await res.json();
+    if (data.result !== "success") throw new Error("Exchange rate fetch failed");
+    const payload = {
+      rates: data.rates,
+      fetchedAt: Date.now(),
+      updatedAt: data.time_last_update_utc || null,
+    };
+    try {
+      localStorage.setItem(FX_CACHE_KEY, JSON.stringify(payload));
+    } catch (e) {
+      // storage full or unavailable, not critical, we still return live data
+    }
+    return payload;
+  } catch (e) {
+    console.error("Exchange rate fetch failed:", e);
+    return { rates: {}, fetchedAt: Date.now(), updatedAt: null, error: true };
+  }
+}
+
+// Converts an amount in a given currency symbol into USD using live rates.
+// Falls back to returning the amount unconverted if the rate is unavailable,
+// rather than silently producing a wrong number.
+function convertToUSD(amount, currencySymbol, fxRates) {
+  const value = parseMoney(amount);
+  const code = CURRENCY_CODE_BY_SYMBOL[currencySymbol] || "USD";
+  if (code === "USD") return value;
+  const rate = fxRates?.[code];
+  if (!rate) return value;
+  return value / rate;
+}
+
 const MILESTONE_LABELS = ["Upfront payment", "Mid-project payment", "Delivery payment"];
 const MILESTONE_DEFAULTS = [50, 25, 25];
 
@@ -220,18 +273,22 @@ const EXPENSE_CATEGORIES = [
   "Software",
   "Hardware",
   "Internet",
+  "Rent",
+  "Utilities",
   "Marketing",
   "Office Costs",
   "Miscellaneous",
 ];
 
-function emptyExpense(projectId = null) {
+function emptyExpense(projectId = null, overrides = {}) {
   return {
     projectId,
     category: EXPENSE_CATEGORIES[0],
     description: "",
     amount: "",
+    currency: "$",
     date: new Date().toISOString().slice(0, 10),
+    ...overrides,
   };
 }
 
@@ -242,6 +299,7 @@ function expenseFromRow(row) {
     category: row.category,
     description: row.description,
     amount: row.amount,
+    currency: row.currency || "$",
     date: row.date,
   };
 }
@@ -252,6 +310,7 @@ function expenseToRow(expense, userId) {
     category: expense.category,
     description: expense.description,
     amount: parseMoney(expense.amount),
+    currency: expense.currency || "$",
     date: expense.date,
     user_id: userId,
   };
@@ -335,20 +394,20 @@ function lastSixMonthKeys() {
   return keys;
 }
 
-function computeFinanceData(projects, invoices, expenses) {
+function computeFinanceData(projects, invoices, expenses, fxRates = {}) {
   const months = lastSixMonthKeys();
 
   const revenueByMonth = months.map(({ key, label }) => {
     const total = invoices
       .filter((inv) => inv.status === "paid" && monthKey(inv.paidDate) === key)
-      .reduce((sum, inv) => sum + parseMoney(inv.amountPaid), 0);
+      .reduce((sum, inv) => sum + convertToUSD(inv.amountPaid, inv.currency, fxRates), 0);
     return { label, value: total };
   });
 
   const expensesByMonth = months.map(({ key, label }) => {
     const total = expenses
       .filter((e) => monthKey(e.date) === key)
-      .reduce((sum, e) => sum + parseMoney(e.amount), 0);
+      .reduce((sum, e) => sum + convertToUSD(e.amount, e.currency, fxRates), 0);
     return { label, value: total };
   });
 
@@ -369,34 +428,42 @@ function computeFinanceData(projects, invoices, expenses) {
         invoiceNumber: inv.invoiceNumber,
         client: project?.client || "-",
         projectName: project?.name || "-",
-        amountDue: parseMoney(inv.amount) - parseMoney(inv.amountPaid),
+        amountDue:
+          convertToUSD(inv.amount, inv.currency, fxRates) - convertToUSD(inv.amountPaid, inv.currency, fxRates),
         dueDate: inv.dueDate,
         daysOverdue,
       };
     })
     .sort((a, b) => (b.daysOverdue || -999) - (a.daysOverdue || -999));
 
-  // Per-project profitability
+  // Per-project profitability, converted to USD so projects in different
+  // currencies can be compared side by side.
   const profitability = projects
     .filter((p) => !p.archived)
     .map((p) => {
       const projectInvoices = invoices.filter((inv) => inv.projectId === p.id);
-      const revenue = projectInvoices.reduce((sum, inv) => sum + parseMoney(inv.amountPaid), 0);
+      const revenue = projectInvoices.reduce(
+        (sum, inv) => sum + convertToUSD(inv.amountPaid, inv.currency, fxRates),
+        0
+      );
       const projectExpenses = expenses
         .filter((e) => e.projectId === p.id)
-        .reduce((sum, e) => sum + parseMoney(e.amount), 0);
+        .reduce((sum, e) => sum + convertToUSD(e.amount, e.currency, fxRates), 0);
       const profit = revenue - projectExpenses;
       const margin = revenue > 0 ? Math.round((profit / revenue) * 100) : null;
       return { project: p, revenue, expenses: projectExpenses, profit, margin };
     });
 
-  // Client value: group by client name across all projects
+  // Client value: group by client name across all projects, converted to USD
   const clientMap = {};
   projects.forEach((p) => {
     const key = (p.client || "Unknown").trim() || "Unknown";
     if (!clientMap[key]) clientMap[key] = { client: key, revenue: 0, projectCount: 0, lastDate: null };
     const projectInvoices = invoices.filter((inv) => inv.projectId === p.id);
-    const revenue = projectInvoices.reduce((sum, inv) => sum + parseMoney(inv.amountPaid), 0);
+    const revenue = projectInvoices.reduce(
+      (sum, inv) => sum + convertToUSD(inv.amountPaid, inv.currency, fxRates),
+      0
+    );
     clientMap[key].revenue += revenue;
     clientMap[key].projectCount += 1;
     const d = new Date(p.deadline);
@@ -460,7 +527,7 @@ function settingsToRow(settings, userId) {
   };
 }
 
-function computeDashboardStats(projects, cards, leads, invoices) {
+function computeDashboardStats(projects, cards, leads, invoices, fxRates = {}) {
   const activeProjects = projects.filter((p) => !p.archived);
   const activeLeads = leads.filter((l) => !["won", "lost", "closed"].includes(l.stage));
   const dealsWon = leads.filter((l) => l.stage === "won" || l.stage === "closed").length;
@@ -486,14 +553,15 @@ function computeDashboardStats(projects, cards, leads, invoices) {
     if (inv.status !== "paid" || !inv.paidDate) return sum;
     const d = new Date(inv.paidDate);
     if (d.getMonth() === thisMonth && d.getFullYear() === thisYear) {
-      return sum + parseMoney(inv.amountPaid);
+      return sum + convertToUSD(inv.amountPaid, inv.currency, fxRates);
     }
     return sum;
   }, 0);
 
   const unpaidInvoices = invoices.filter((inv) => inv.status !== "paid");
   const outstandingTotal = unpaidInvoices.reduce(
-    (sum, inv) => sum + (parseMoney(inv.amount) - parseMoney(inv.amountPaid)),
+    (sum, inv) =>
+      sum + (convertToUSD(inv.amount, inv.currency, fxRates) - convertToUSD(inv.amountPaid, inv.currency, fxRates)),
     0
   );
 
@@ -821,6 +889,8 @@ export default function ShotTracker() {
   });
   const { projects, cards, leads, invoices, expenses, teamMembers, activity } = data;
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [fxRates, setFxRates] = useState({});
+  const [fxUpdatedAt, setFxUpdatedAt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "teams"
   const [view, setView] = useState("projects");
@@ -861,6 +931,16 @@ export default function ShotTracker() {
   }, []);
 
   const userId = session?.user?.id || null;
+
+  const refreshFxRates = useCallback(async () => {
+    const result = await fetchExchangeRates();
+    setFxRates(result.rates || {});
+    setFxUpdatedAt(result.updatedAt);
+  }, []);
+
+  useEffect(() => {
+    if (userId) refreshFxRates();
+  }, [userId, refreshFxRates]);
 
   const loadSettings = useCallback(async () => {
     if (!userId) return;
@@ -1954,6 +2034,7 @@ export default function ShotTracker() {
           leads={leads}
           invoices={invoices}
           settings={settings}
+          fxRates={fxRates}
           onOpenProject={openProject}
           onGoToProjects={() => setWorkspace("projects")}
           onGoToLeads={() => setWorkspace("leads")}
@@ -2042,6 +2123,10 @@ export default function ShotTracker() {
           expenses={expenses}
           settings={settings}
           onEditExpense={setEditingExpense}
+          onNewExpense={() => setEditingExpense(emptyExpense(null, { category: "Rent" }))}
+          fxRates={fxRates}
+          fxUpdatedAt={fxUpdatedAt}
+          onRefreshRates={refreshFxRates}
         />
       )}
 
@@ -2417,10 +2502,10 @@ function MiniBarChart({ items, currencySymbol = "$", color = teal }) {
   );
 }
 
-function FinancePanel({ projects, invoices, expenses, settings, onEditExpense }) {
+function FinancePanel({ projects, invoices, expenses, settings, onEditExpense, onNewExpense, fxRates, fxUpdatedAt, onRefreshRates }) {
   const [tab, setTab] = useState("overview");
-  const cur = settings.currencySymbol || "$";
-  const finance = computeFinanceData(projects, invoices, expenses);
+  const cur = "$"; // Finance always reports in USD, the studio's base currency
+  const finance = computeFinanceData(projects, invoices, expenses, fxRates);
 
   const subTabs = [
     { id: "overview", label: "Overview" },
@@ -2442,6 +2527,16 @@ function FinancePanel({ projects, invoices, expenses, settings, onEditExpense })
             {t.label}
           </button>
         ))}
+      </div>
+
+      <div style={styles.fxNoteRow}>
+        <span style={styles.fieldHint}>
+          All figures shown in USD, converted live from each project's currency.
+          {fxUpdatedAt ? ` Rates as of ${new Date(fxUpdatedAt).toLocaleString()}.` : ""}
+        </span>
+        <button type="button" style={styles.copyButton} onClick={onRefreshRates}>
+          Refresh rates
+        </button>
       </div>
 
       {tab === "overview" && (
@@ -2552,30 +2647,43 @@ function FinancePanel({ projects, invoices, expenses, settings, onEditExpense })
       )}
 
       {tab === "expenses" && (
-        <div style={styles.invoiceList}>
-          {expenses.length === 0 ? (
-            <p style={styles.fieldHint}>No expenses logged yet.</p>
-          ) : (
-            expenses
-              .slice()
-              .reverse()
-              .map((e) => {
-                const project = projects.find((p) => p.id === e.projectId);
-                return (
-                  <div key={e.id} style={styles.invoiceCard} onClick={() => onEditExpense(e)}>
-                    <div style={styles.invoiceCardTop}>
-                      <span style={styles.invoiceNumber}>{e.category}</span>
-                      <span style={styles.fieldHint}>{e.date || "-"}</span>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <button
+            type="button"
+            style={{ ...styles.newButton, alignSelf: "flex-start" }}
+            onClick={onNewExpense}
+          >
+            <PlusIcon />
+            Operational costs
+          </button>
+          <div style={styles.invoiceList}>
+            {expenses.length === 0 ? (
+              <p style={styles.fieldHint}>No expenses logged yet.</p>
+            ) : (
+              expenses
+                .slice()
+                .reverse()
+                .map((e) => {
+                  const project = projects.find((p) => p.id === e.projectId);
+                  return (
+                    <div key={e.id} style={styles.invoiceCard} onClick={() => onEditExpense(e)}>
+                      <div style={styles.invoiceCardTop}>
+                        <span style={styles.invoiceNumber}>{e.category}</span>
+                        <span style={styles.fieldHint}>{e.date || "-"}</span>
+                      </div>
+                      {e.description && <div style={styles.cardMeta}>{e.description}</div>}
+                      <div style={styles.invoiceAmountsRow}>
+                        <span style={styles.fieldHint}>
+                          {cur}
+                          {formatMoney(convertToUSD(e.amount, e.currency, fxRates))}
+                        </span>
+                        <span style={styles.fieldHint}>{project ? project.name : "General / operational"}</span>
+                      </div>
                     </div>
-                    {e.description && <div style={styles.cardMeta}>{e.description}</div>}
-                    <div style={styles.invoiceAmountsRow}>
-                      <span style={styles.fieldHint}>{cur}{formatMoney(e.amount)}</span>
-                      {project && <span style={styles.fieldHint}>{project.name}</span>}
-                    </div>
-                  </div>
-                );
-              })
-          )}
+                  );
+                })
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -2658,9 +2766,9 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew }) {
   );
 }
 
-function DashboardPanel({ projects, cards, leads, invoices, settings, onOpenProject, onGoToProjects, onGoToLeads }) {
-  const stats = computeDashboardStats(projects, cards, leads, invoices);
-  const cur = settings.currencySymbol || "$";
+function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToLeads }) {
+  const stats = computeDashboardStats(projects, cards, leads, invoices, fxRates);
+  const cur = "$"; // Dashboard totals are always USD-converted for cross-project consistency
 
   const statItems = [
     { label: "Active projects", value: stats.activeProjectsCount, onClick: onGoToProjects },
@@ -2691,11 +2799,14 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, onOpenProj
     label,
     value: invoices
       .filter((inv) => inv.status === "paid" && monthKey(inv.paidDate) === key)
-      .reduce((sum, inv) => sum + parseMoney(inv.amountPaid), 0),
+      .reduce((sum, inv) => sum + convertToUSD(inv.amountPaid, inv.currency, fxRates), 0),
   }));
 
   return (
     <div style={styles.invoicesWrap}>
+      <p style={styles.fieldHint}>
+        Dollar figures below are converted live from each project's own currency to USD.
+      </p>
       <div style={styles.dashboardGrid}>
         {statItems.map((item) => (
           <div
@@ -3896,9 +4007,20 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
             />
           </div>
           <div style={styles.field}>
-            <label style={styles.label}>Date</label>
-            <input style={styles.input} type="date" value={form.date || ""} onChange={set("date")} />
+            <label style={styles.label}>Currency</label>
+            <select style={styles.input} value={form.currency || "$"} onChange={set("currency")}>
+              {CURRENCIES.map((c) => (
+                <option key={c.code} value={c.symbol}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
           </div>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Date</label>
+          <input style={styles.input} type="date" value={form.date || ""} onChange={set("date")} />
         </div>
 
         <div style={styles.modalFooter}>
