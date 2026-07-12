@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { supabase } from "./supabaseClient";
+import { supabase, functionUrl } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import { genShareToken } from "./SharedViews.jsx";
 import { DonutBreakdown, RevenueTrendChart } from "./DashboardCharts.jsx";
@@ -110,6 +110,9 @@ function emptyProject(overrides = {}) {
     archived: false,
     shareEnabled: false,
     shareToken: null,
+    driveFolderId: null,
+    driveFolderUrl: null,
+    driveDeliverablesFolderId: null,
     ...overrides,
   };
 }
@@ -705,7 +708,7 @@ function emptyEmails() {
   ];
 }
 
-function emptyLead() {
+function emptyLead(stage = "pool") {
   return {
     companyName: "",
     contactPerson: "",
@@ -713,7 +716,7 @@ function emptyLead() {
     website: "",
     country: "",
     notes: "",
-    stage: "pool",
+    stage,
     emails: emptyEmails(),
     proposedBudget: "",
     estimatedDeadline: "",
@@ -891,6 +894,8 @@ export default function ShotTracker() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [fxRates, setFxRates] = useState({});
   const [fxUpdatedAt, setFxUpdatedAt] = useState(null);
+  const [driveEmail, setDriveEmail] = useState(null);
+  const [driveNotice, setDriveNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "teams"
   const [view, setView] = useState("projects");
@@ -941,6 +946,81 @@ export default function ShotTracker() {
   useEffect(() => {
     if (userId) refreshFxRates();
   }, [userId, refreshFxRates]);
+
+  const loadDriveStatus = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const { data: row } = await supabase
+        .from("google_drive_connections")
+        .select("connected_email")
+        .eq("user_id", userId)
+        .maybeSingle();
+      setDriveEmail(row?.connected_email || null);
+    } catch (e) {
+      console.error("Drive status check failed:", e);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (userId) loadDriveStatus();
+  }, [userId, loadDriveStatus]);
+
+  // Picks up ?drive=connected or ?drive=needs_reconsent after the OAuth
+  // redirect lands back on the app, shows a quick notice, then tidies the URL.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const driveResult = params.get("drive");
+    if (!driveResult) return;
+    if (driveResult === "connected") {
+      setDriveNotice("Google Drive connected.");
+      loadDriveStatus();
+    } else if (driveResult === "needs_reconsent") {
+      setDriveNotice(
+        "Google didn't return a fresh connection. Try disconnecting in your Google Account's third-party access settings, then connect again."
+      );
+    }
+    params.delete("drive");
+    const cleanUrl = `${window.location.pathname}${params.toString() ? "?" + params.toString() : ""}`;
+    window.history.replaceState({}, "", cleanUrl);
+    setTimeout(() => setDriveNotice(""), 6000);
+  }, [loadDriveStatus]);
+
+  const handleConnectDrive = async () => {
+    const {
+      data: { session: currentSession },
+    } = await supabase.auth.getSession();
+    if (!currentSession) return;
+    window.location.href = `${functionUrl("google-drive-connect")}?token=${currentSession.access_token}`;
+  };
+
+  const handleCreateDriveFolders = async (projectId, projectName) => {
+    const {
+      data: { session: currentSession },
+    } = await supabase.auth.getSession();
+    if (!currentSession) throw new Error("Not signed in");
+
+    const res = await fetch(functionUrl("google-drive-create-folders"), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${currentSession.access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ projectId, projectName }),
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result?.error || "Couldn't create Drive folders");
+
+    const driveFields = {
+      driveFolderId: result.folderId,
+      driveFolderUrl: result.folderUrl,
+      driveDeliverablesFolderId: result.deliverablesFolderId,
+    };
+    setData((prev) => ({
+      ...prev,
+      projects: prev.projects.map((p) => (p.id === projectId ? { ...p, ...driveFields } : p)),
+    }));
+    return driveFields;
+  };
 
   const loadSettings = useCallback(async () => {
     if (!userId) return;
@@ -1022,6 +1102,9 @@ export default function ShotTracker() {
         archived: p.archived,
         shareEnabled: p.share_enabled || false,
         shareToken: p.share_token || null,
+        driveFolderId: p.drive_folder_id || null,
+        driveFolderUrl: p.drive_folder_url || null,
+        driveDeliverablesFolderId: p.drive_deliverables_folder_id || null,
       }));
       const nextCards = (shotsRes.data || []).map(cardFromRow);
       const nextLeads = (leadsRes.data || []).map(leadFromRow);
@@ -1146,6 +1229,9 @@ export default function ShotTracker() {
               priority: inserted.priority,
               shareEnabled: inserted.share_enabled || false,
               shareToken: inserted.share_token || null,
+              driveFolderId: inserted.drive_folder_id || null,
+              driveFolderUrl: inserted.drive_folder_url || null,
+              driveDeliverablesFolderId: inserted.drive_deliverables_folder_id || null,
             },
           ],
           cards: [...prev.cards, ...newCards],
@@ -1155,10 +1241,11 @@ export default function ShotTracker() {
           const linkId = pendingLeadLinkId;
           setPendingLeadLinkId(null);
           try {
-            await supabase
+            const { error: linkError } = await supabase
               .from("leads")
               .update({ linked_project_id: inserted.id })
               .eq("id", linkId);
+            if (linkError) throw linkError;
             setData((prev) => ({
               ...prev,
               leads: prev.leads.map((l) =>
@@ -1351,7 +1438,8 @@ export default function ShotTracker() {
     setSaveState("saving");
     try {
       if (lead.id) {
-        await supabase.from("leads").update(leadToRow(lead, userId)).eq("id", lead.id);
+        const { error } = await supabase.from("leads").update(leadToRow(lead, userId)).eq("id", lead.id);
+        if (error) throw error;
         setData((prev) => ({
           ...prev,
           leads: prev.leads.map((l) => (l.id === lead.id ? lead : l)),
@@ -1376,7 +1464,8 @@ export default function ShotTracker() {
   const handleDeleteLead = async (id) => {
     setSaveState("saving");
     try {
-      await supabase.from("leads").delete().eq("id", id);
+      const { error } = await supabase.from("leads").delete().eq("id", id);
+      if (error) throw error;
       setData((prev) => ({ ...prev, leads: prev.leads.filter((l) => l.id !== id) }));
       flashSave(true);
     } catch (e) {
@@ -1393,7 +1482,8 @@ export default function ShotTracker() {
     }));
     setSaveState("saving");
     try {
-      await supabase.from("leads").update({ stage }).eq("id", id);
+      const { error } = await supabase.from("leads").update({ stage }).eq("id", id);
+      if (error) throw error;
       flashSave(true);
     } catch (e) {
       console.error("Lead stage move failed:", e);
@@ -2071,7 +2161,7 @@ export default function ShotTracker() {
                   {stageLeads.length === 0 && (
                     <button
                       style={styles.emptyAdd}
-                      onClick={() => setEditingLead(emptyLead())}
+                      onClick={() => setEditingLead(emptyLead(stage.id))}
                     >
                       <PlusIcon />
                       Add lead
@@ -2268,6 +2358,8 @@ export default function ShotTracker() {
         <SettingsModal
           settings={settings}
           email={session.user.email}
+          driveEmail={driveEmail}
+          onConnectDrive={handleConnectDrive}
           onCancel={() => setShowSettingsModal(false)}
           onSave={handleSaveSettings}
         />
@@ -2322,6 +2414,8 @@ export default function ShotTracker() {
           onSave={handleSaveProject}
           onDelete={handleDeleteProject}
           isNew={!editingProject.id}
+          driveEmail={driveEmail}
+          onCreateDriveFolders={handleCreateDriveFolders}
         />
       )}
 
@@ -2862,7 +2956,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   );
 }
 
-function SettingsModal({ settings, email, onCancel, onSave }) {
+function SettingsModal({ settings, email, driveEmail, onConnectDrive, onCancel, onSave }) {
   const [form, setForm] = useState(settings);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const setMilestone = (i) => (e) => {
@@ -2884,6 +2978,23 @@ function SettingsModal({ settings, email, onCancel, onSave }) {
         <div style={styles.field}>
           <label style={styles.label}>Account email</label>
           <p style={styles.fieldHint}>{email}</p>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Google Drive</label>
+          {driveEmail ? (
+            <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>Connected as {driveEmail}</p>
+          ) : (
+            <>
+              <p style={styles.fieldHint}>
+                Connect to auto-create project folders and let freelancer uploads land straight in
+                Drive.
+              </p>
+              <button type="button" style={styles.addRevisionButton} onClick={onConnectDrive}>
+                Connect Google Drive
+              </button>
+            </>
+          )}
         </div>
 
         <div style={styles.field}>
@@ -3142,10 +3253,12 @@ function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkP
   );
 }
 
-function ProjectEditor({ project, onCancel, onSave, onDelete, isNew }) {
+function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders }) {
   const [form, setForm] = useState(project);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const [linkCopied, setLinkCopied] = useState(false);
+  const [creatingFolders, setCreatingFolders] = useState(false);
+  const [driveError, setDriveError] = useState("");
 
   const shareUrl = form.shareToken
     ? `${window.location.origin}${window.location.pathname}?share=project&token=${form.shareToken}`
@@ -3160,6 +3273,18 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew }) {
     }
     setLinkCopied(true);
     setTimeout(() => setLinkCopied(false), 1500);
+  };
+
+  const handleCreateFolders = async () => {
+    setDriveError("");
+    setCreatingFolders(true);
+    try {
+      const result = await onCreateDriveFolders(form.id, form.name || "Untitled project");
+      setForm({ ...form, ...result });
+    } catch (err) {
+      setDriveError(err.message || "Couldn't create Drive folders");
+    }
+    setCreatingFolders(false);
   };
 
   return (
@@ -3238,6 +3363,36 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew }) {
               )}
             </>
           )}
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Google Drive</label>
+          {!driveEmail ? (
+            <p style={styles.fieldHint}>
+              Connect Google Drive in Settings first, then come back here to create this project's folders.
+            </p>
+          ) : isNew ? (
+            <p style={styles.fieldHint}>Save this project first, then folders can be created for it.</p>
+          ) : form.driveFolderUrl ? (
+            <a
+              href={form.driveFolderUrl}
+              target="_blank"
+              rel="noreferrer"
+              style={{ ...styles.fieldHint, color: teal }}
+            >
+              Open Drive folder
+            </a>
+          ) : (
+            <button
+              type="button"
+              style={styles.addRevisionButton}
+              onClick={handleCreateFolders}
+              disabled={creatingFolders}
+            >
+              {creatingFolders ? "Creating..." : "Create Drive folders"}
+            </button>
+          )}
+          {driveError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{driveError}</p>}
         </div>
 
         <div style={styles.field}>

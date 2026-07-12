@@ -10,3 +10,5 @@ if (!supabaseUrl || !supabaseAnonKey) {
 }
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const SUPABASE_URL = supabaseUrl;
+export const functionUrl = (name) => `${supabaseUrl}/functions/v1/${name}`;

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { supabase } from "./supabaseClient";
+import { supabase, functionUrl } from "./supabaseClient";
 
 const ink = "#14191c";
 const inkSoft = "#1c2327";
@@ -204,17 +204,34 @@ export function FreelancerView({ token }) {
     setUploadOk(false);
     setUploading(true);
     try {
-      const path = `freelancer/${token}/${Date.now()}-${file.name}`;
-      const { error: uploadErr } = await supabase.storage.from("attachments").upload(path, file);
-      if (uploadErr) throw uploadErr;
-      const { data: publicUrlData } = supabase.storage.from("attachments").getPublicUrl(path);
-      const { data: ok, error: rpcErr } = await supabase.rpc("add_shot_deliverable", {
-        p_token: token,
-        p_name: file.name,
-        p_path: path,
-        p_url: publicUrlData.publicUrl,
+      const form = new FormData();
+      form.append("token", token);
+      form.append("file", file);
+
+      const res = await fetch(functionUrl("freelancer-drive-upload"), {
+        method: "POST",
+        body: form,
       });
-      if (rpcErr || !ok) throw rpcErr || new Error("Couldn't record the upload");
+      const result = await res.json().catch(() => ({}));
+
+      if (result?.error === "not_connected") {
+        // This project hasn't been set up with Drive folders yet, fall back
+        // to storing the file directly so the upload still works.
+        const path = `freelancer/${token}/${Date.now()}-${file.name}`;
+        const { error: uploadErr } = await supabase.storage.from("attachments").upload(path, file);
+        if (uploadErr) throw uploadErr;
+        const { data: publicUrlData } = supabase.storage.from("attachments").getPublicUrl(path);
+        const { data: ok, error: rpcErr } = await supabase.rpc("add_shot_deliverable", {
+          p_token: token,
+          p_name: file.name,
+          p_path: path,
+          p_url: publicUrlData.publicUrl,
+        });
+        if (rpcErr || !ok) throw rpcErr || new Error("Couldn't record the upload");
+      } else if (!res.ok || !result?.success) {
+        throw new Error(result?.error || result?.message || "Upload failed");
+      }
+
       setUploadOk(true);
       await loadShot();
     } catch (err) {
