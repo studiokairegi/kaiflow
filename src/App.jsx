@@ -1039,7 +1039,10 @@ export default function ShotTracker() {
           hasAppliedLandingTab.current = true;
         }
       } else {
-        await supabase.from("user_settings").insert(settingsToRow(DEFAULT_SETTINGS, userId));
+        const { error: insertError } = await supabase
+          .from("user_settings")
+          .insert(settingsToRow(DEFAULT_SETTINGS, userId));
+        if (insertError) throw insertError;
         setSettings(DEFAULT_SETTINGS);
         hasAppliedLandingTab.current = true;
       }
@@ -1325,13 +1328,14 @@ export default function ShotTracker() {
                 ? `${card.title || "Shot"} was approved`
                 : `Revisions requested on ${card.title || "shot"}`;
             try {
-              await supabase.from("activity_log").insert({
+              const { error: logError } = await supabase.from("activity_log").insert({
                 user_id: userId,
                 project_id: card.projectId,
                 shot_id: card.id,
                 event_type: eventType,
                 description: message,
               });
+              if (logError) throw logError;
               setData((prev) => ({
                 ...prev,
                 activity: [
@@ -1524,7 +1528,11 @@ export default function ShotTracker() {
     setSaveState("saving");
     try {
       if (invoice.id) {
-        await supabase.from("invoices").update(invoiceToRow(invoice, userId)).eq("id", invoice.id);
+        const { error } = await supabase
+          .from("invoices")
+          .update(invoiceToRow(invoice, userId))
+          .eq("id", invoice.id);
+        if (error) throw error;
         setData((prev) => ({
           ...prev,
           invoices: prev.invoices.map((inv) => (inv.id === invoice.id ? invoice : inv)),
@@ -1549,7 +1557,8 @@ export default function ShotTracker() {
   const handleDeleteInvoice = async (id) => {
     setSaveState("saving");
     try {
-      await supabase.from("invoices").delete().eq("id", id);
+      const { error } = await supabase.from("invoices").delete().eq("id", id);
+      if (error) throw error;
       setData((prev) => ({ ...prev, invoices: prev.invoices.filter((inv) => inv.id !== id) }));
       flashSave(true);
     } catch (e) {
@@ -1596,7 +1605,11 @@ export default function ShotTracker() {
     setSaveState("saving");
     try {
       if (expense.id) {
-        await supabase.from("expenses").update(expenseToRow(expense, userId)).eq("id", expense.id);
+        const { error } = await supabase
+          .from("expenses")
+          .update(expenseToRow(expense, userId))
+          .eq("id", expense.id);
+        if (error) throw error;
         setData((prev) => ({
           ...prev,
           expenses: prev.expenses.map((e) => (e.id === expense.id ? expense : e)),
@@ -1642,7 +1655,11 @@ export default function ShotTracker() {
     setSaveState("saving");
     try {
       if (member.id) {
-        await supabase.from("team_members").update(teamMemberToRow(member, userId)).eq("id", member.id);
+        const { error } = await supabase
+          .from("team_members")
+          .update(teamMemberToRow(member, userId))
+          .eq("id", member.id);
+        if (error) throw error;
         setData((prev) => ({
           ...prev,
           teamMembers: prev.teamMembers.map((m) => (m.id === member.id ? member : m)),
@@ -1667,7 +1684,8 @@ export default function ShotTracker() {
   const handleDeleteTeamMember = async (id) => {
     setSaveState("saving");
     try {
-      await supabase.from("team_members").delete().eq("id", id);
+      const { error } = await supabase.from("team_members").delete().eq("id", id);
+      if (error) throw error;
       setData((prev) => ({ ...prev, teamMembers: prev.teamMembers.filter((m) => m.id !== id) }));
       flashSave(true);
     } catch (e) {
@@ -1680,7 +1698,8 @@ export default function ShotTracker() {
   const handleDeleteExpense = async (id) => {
     setSaveState("saving");
     try {
-      await supabase.from("expenses").delete().eq("id", id);
+      const { error } = await supabase.from("expenses").delete().eq("id", id);
+      if (error) throw error;
       setData((prev) => ({ ...prev, expenses: prev.expenses.filter((e) => e.id !== id) }));
       flashSave(true);
     } catch (e) {
@@ -2524,6 +2543,7 @@ function ProjectCard({ project, cards, onOpen, onEdit, onToggleArchive, archived
   const { delivered, percent } = projectProgress(projectCards);
   return (
     <div
+      className="kf-card"
       style={{ ...styles.projectCard, ...(archived ? styles.projectCardArchived : {}) }}
       onClick={() => onOpen(project.id)}
     >
@@ -2760,7 +2780,7 @@ function FinancePanel({ projects, invoices, expenses, settings, onEditExpense, o
                 .map((e) => {
                   const project = projects.find((p) => p.id === e.projectId);
                   return (
-                    <div key={e.id} style={styles.invoiceCard} onClick={() => onEditExpense(e)}>
+                    <div key={e.id} className="kf-card" style={styles.invoiceCard} onClick={() => onEditExpense(e)}>
                       <div style={styles.invoiceCardTop}>
                         <span style={styles.invoiceNumber}>{e.category}</span>
                         <span style={styles.fieldHint}>{e.date || "-"}</span>
@@ -2808,7 +2828,7 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew }) {
         {teamMembers.map((member) => {
           const { shots, pending, paid } = computeMemberShots(member, cards, projects);
           return (
-            <div key={member.id} style={styles.invoiceCard} onClick={() => onEdit(member)}>
+            <div key={member.id} className="kf-card" style={styles.invoiceCard} onClick={() => onEdit(member)}>
               <div style={styles.invoiceCardTop}>
                 <span style={styles.invoiceNumber}>{member.name || "Untitled member"}</span>
                 <span
@@ -2937,7 +2957,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         ) : (
           <div style={styles.invoiceList}>
             {stats.nearDeadline.map((p) => (
-              <div key={p.id} style={styles.invoiceCard} onClick={() => onOpenProject(p.id)}>
+              <div key={p.id} className="kf-card" style={styles.invoiceCard} onClick={() => onOpenProject(p.id)}>
                 <div style={styles.invoiceCardTop}>
                   <span style={styles.invoiceNumber}>{p.name}</span>
                   <span style={styles.fieldHint}>{p.deadline}</span>
@@ -3197,7 +3217,7 @@ function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkP
           {invoices.map((inv) => {
             const balance = parseMoney(inv.amount) - parseMoney(inv.amountPaid);
             return (
-              <div key={inv.id} style={styles.invoiceCard} onClick={() => onEdit(inv)}>
+              <div key={inv.id} className="kf-card" style={styles.invoiceCard} onClick={() => onEdit(inv)}>
                 <div style={styles.invoiceCardTop}>
                   <span style={styles.invoiceNumber}>{inv.invoiceNumber}</span>
                   <span
@@ -4540,15 +4560,76 @@ function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, c
 
 const fontImport = `
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+* {
+  box-sizing: border-box;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #33414a;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3d4d57;
+}
+
+input, textarea, select {
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: #2FBFA6 !important;
+  box-shadow: 0 0 0 3px rgba(47,191,166,0.16);
+}
+
+button {
+  transition: filter 0.15s ease, transform 0.08s ease, box-shadow 0.15s ease;
+}
+button:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+a {
+  transition: opacity 0.15s ease;
+}
+a:hover {
+  opacity: 0.82;
+}
+
+.kf-card {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.kf-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.45), 0 4px 12px rgba(0,0,0,0.3);
+}
 `;
 
 const ink = "#14191c";
 const inkSoft = "#1c2327";
+const inkElevated = "#232b30";
 const paper = "#EDEAE3";
 const teal = "#2FBFA6";
 const tealLight = "#7FE0D0";
 const border = "#2a3338";
 const textMuted = "#8b9a98";
+const shadowSoft = "0 1px 3px rgba(0,0,0,0.24), 0 1px 2px rgba(0,0,0,0.16)";
+const shadowLifted = "0 12px 32px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.24)";
+const shadowGlow = "0 4px 14px rgba(47,191,166,0.28)";
 
 const styles = {
   app: {
@@ -4648,6 +4729,7 @@ const styles = {
     alignItems: "center",
     padding: "20px 28px",
     borderBottom: `1px solid ${border}`,
+    boxShadow: "0 1px 0 rgba(0,0,0,0.3)",
     flexWrap: "wrap",
     gap: 12,
   },
@@ -4660,7 +4742,9 @@ const styles = {
     width: 38,
     height: 38,
     borderRadius: 10,
-    background: "rgba(47,191,166,0.12)",
+    background: "rgba(47,191,166,0.14)",
+    border: "1px solid rgba(47,191,166,0.3)",
+    boxShadow: "0 0 16px rgba(47,191,166,0.18)",
     color: teal,
     display: "flex",
     alignItems: "center",
@@ -4682,10 +4766,10 @@ const styles = {
   },
   title: {
     fontFamily: "'Space Grotesk', sans-serif",
-    fontSize: 19,
-    fontWeight: 600,
+    fontSize: 20,
+    fontWeight: 700,
     margin: 0,
-    letterSpacing: "-0.01em",
+    letterSpacing: "-0.015em",
   },
   subtitle: {
     fontSize: 12.5,
@@ -4718,6 +4802,7 @@ const styles = {
     fontWeight: 600,
     fontFamily: "'Inter', sans-serif",
     cursor: "pointer",
+    boxShadow: shadowGlow,
   },
   iconButtonGhost: {
     width: 36,
@@ -4791,8 +4876,15 @@ const styles = {
     color: textMuted,
   },
   projectsEmptyIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 16,
+    background: "rgba(47,191,166,0.1)",
+    border: "1px solid rgba(47,191,166,0.22)",
     color: teal,
-    opacity: 0.6,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
   },
   projectsEmptyText: {
     fontSize: 14,
@@ -4807,6 +4899,8 @@ const styles = {
     flexDirection: "column",
     gap: 10,
     cursor: "pointer",
+    boxShadow: shadowSoft,
+    transition: "transform 0.15s ease, box-shadow 0.15s ease",
   },
   projectCardArchived: {
     opacity: 0.6,
@@ -4871,6 +4965,7 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     gap: 4,
+    boxShadow: shadowSoft,
   },
   budgetStatValue: {
     fontFamily: "'Space Grotesk', sans-serif",
@@ -4892,6 +4987,7 @@ const styles = {
     flexDirection: "column",
     gap: 8,
     cursor: "pointer",
+    boxShadow: shadowSoft,
   },
   invoiceCardTop: {
     display: "flex",
@@ -5022,6 +5118,7 @@ const styles = {
     userSelect: "none",
     WebkitUserSelect: "none",
     WebkitTouchCallout: "none",
+    boxShadow: shadowSoft,
   },
   dragGhost: {
     position: "fixed",
@@ -5096,7 +5193,8 @@ const styles = {
   overlay: {
     position: "fixed",
     inset: 0,
-    background: "rgba(10,14,15,0.7)",
+    background: "rgba(8,11,12,0.78)",
+    backdropFilter: "blur(2px)",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -5104,7 +5202,7 @@ const styles = {
     zIndex: 100,
   },
   modal: {
-    background: inkSoft,
+    background: inkElevated,
     borderRadius: 18,
     border: `1px solid ${border}`,
     width: "100%",
@@ -5115,6 +5213,7 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     gap: 14,
+    boxShadow: shadowLifted,
   },
   modalHeader: {
     display: "flex",
@@ -5211,9 +5310,11 @@ const styles = {
     fontFamily: "'Inter', sans-serif",
   },
   tabButtonActive: {
-    background: "rgba(47,191,166,0.12)",
+    background: "rgba(47,191,166,0.14)",
     borderColor: teal,
-    color: teal,
+    color: tealLight,
+    fontWeight: 600,
+    boxShadow: "0 0 0 1px rgba(47,191,166,0.25)",
   },
   fieldDivider: {
     fontSize: 11.5,
