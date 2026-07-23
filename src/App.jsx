@@ -2,7 +2,13 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { supabase, functionUrl } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import { genShareToken } from "./SharedViews.jsx";
-import { DonutBreakdown, RevenueTrendChart } from "./DashboardCharts.jsx";
+import {
+  DonutBreakdown,
+  RevenueTrendChart,
+  MonthlyFinanceChart,
+  RevenueByClientBarChart,
+  ProjectComparisonChart,
+} from "./DashboardCharts.jsx";
 
 const STAGES = [
   { id: "character_design", label: "Character Design" },
@@ -2590,32 +2596,6 @@ function ProjectCard({ project, cards, onOpen, onEdit, onToggleArchive, archived
   );
 }
 
-function MiniBarChart({ items, currencySymbol = "$", color = teal }) {
-  const max = Math.max(1, ...items.map((i) => i.value));
-  return (
-    <div style={styles.miniChart}>
-      {items.map((item) => (
-        <div key={item.label} style={styles.miniChartRow}>
-          <span style={styles.miniChartLabel}>{item.label}</span>
-          <div style={styles.miniChartTrack}>
-            <div
-              style={{
-                ...styles.miniChartFill,
-                width: `${Math.max(2, (item.value / max) * 100)}%`,
-                background: color,
-              }}
-            />
-          </div>
-          <span style={styles.miniChartValue}>
-            {currencySymbol}
-            {formatMoney(item.value)}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function FinancePanel({ projects, invoices, expenses, settings, onEditExpense, onNewExpense, fxRates, fxUpdatedAt, onRefreshRates }) {
   const [tab, setTab] = useState("overview");
   const cur = "$"; // Finance always reports in USD, the studio's base currency
@@ -2654,26 +2634,19 @@ function FinancePanel({ projects, invoices, expenses, settings, onEditExpense, o
       </div>
 
       {tab === "overview" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
           <div>
-            <div style={styles.fieldDivider}>Revenue by month</div>
-            <MiniBarChart items={finance.revenueByMonth} currencySymbol={cur} color="#3DDC84" />
-          </div>
-          <div>
-            <div style={styles.fieldDivider}>Expenses by month</div>
-            <MiniBarChart items={finance.expensesByMonth} currencySymbol={cur} color="#FF4D4D" />
-          </div>
-          <div>
-            <div style={styles.fieldDivider}>Profit by month</div>
-            <MiniBarChart items={finance.profitByMonth} currencySymbol={cur} color={teal} />
+            <div style={styles.fieldDivider}>Revenue, expenses & profit (6 months)</div>
+            <MonthlyFinanceChart
+              revenueByMonth={finance.revenueByMonth}
+              expensesByMonth={finance.expensesByMonth}
+              profitByMonth={finance.profitByMonth}
+              currencySymbol={cur}
+            />
           </div>
           <div>
             <div style={styles.fieldDivider}>Revenue by client</div>
-            {finance.revenueByClient.length === 0 ? (
-              <p style={styles.fieldHint}>No revenue recorded yet.</p>
-            ) : (
-              <MiniBarChart items={finance.revenueByClient} currencySymbol={cur} color="#4A90D9" />
-            )}
+            <RevenueByClientBarChart data={finance.revenueByClient} currencySymbol={cur} />
           </div>
         </div>
       )}
@@ -2709,30 +2682,44 @@ function FinancePanel({ projects, invoices, expenses, settings, onEditExpense, o
       )}
 
       {tab === "profitability" && (
-        <div style={styles.invoiceList}>
-          {finance.profitability.length === 0 ? (
-            <p style={styles.fieldHint}>No active projects yet.</p>
-          ) : (
-            finance.profitability.map((p) => (
-              <div key={p.project.id} style={styles.invoiceCard}>
-                <div style={styles.invoiceCardTop}>
-                  <span style={styles.invoiceNumber}>{p.project.name}</span>
-                  <span style={styles.fieldHint}>
-                    {p.margin === null ? "No revenue yet" : `${p.margin}% margin`}
-                  </span>
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          <div>
+            <div style={styles.fieldDivider}>Revenue vs expenses vs profit, by project</div>
+            <ProjectComparisonChart
+              data={finance.profitability.map((p) => ({
+                label: p.project.name || "Untitled project",
+                revenue: p.revenue,
+                expenses: p.expenses,
+                profit: p.profit,
+              }))}
+              currencySymbol={cur}
+            />
+          </div>
+          <div style={styles.invoiceList}>
+            {finance.profitability.length === 0 ? (
+              <p style={styles.fieldHint}>No active projects yet.</p>
+            ) : (
+              finance.profitability.map((p) => (
+                <div key={p.project.id} style={styles.invoiceCard}>
+                  <div style={styles.invoiceCardTop}>
+                    <span style={styles.invoiceNumber}>{p.project.name}</span>
+                    <span style={styles.fieldHint}>
+                      {p.margin === null ? "No revenue yet" : `${p.margin}% margin`}
+                    </span>
+                  </div>
+                  {p.project.client && <div style={styles.cardMeta}>{p.project.client}</div>}
+                  <div style={styles.invoiceAmountsRow}>
+                    <span style={styles.fieldHint}>Revenue {cur}{formatMoney(p.revenue)}</span>
+                    <span style={styles.fieldHint}>Expenses {cur}{formatMoney(p.expenses)}</span>
+                    <span style={styles.fieldHint}>
+                      Profit {cur}
+                      {formatMoney(p.profit)}
+                    </span>
+                  </div>
                 </div>
-                {p.project.client && <div style={styles.cardMeta}>{p.project.client}</div>}
-                <div style={styles.invoiceAmountsRow}>
-                  <span style={styles.fieldHint}>Revenue {cur}{formatMoney(p.revenue)}</span>
-                  <span style={styles.fieldHint}>Expenses {cur}{formatMoney(p.expenses)}</span>
-                  <span style={styles.fieldHint}>
-                    Profit {cur}
-                    {formatMoney(p.profit)}
-                  </span>
-                </div>
-              </div>
-            ))
-          )}
+              ))
+            )}
+          </div>
         </div>
       )}
 

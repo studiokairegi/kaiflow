@@ -7,6 +7,10 @@ import {
   ResponsiveContainer,
   AreaChart,
   Area,
+  ComposedChart,
+  BarChart,
+  Bar,
+  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -101,6 +105,125 @@ export function DonutBreakdown({ data, emptyLabel = "Nothing here yet" }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function LegendSwatches({ payload }) {
+  if (!payload) return null;
+  return (
+    <div style={{ display: "flex", gap: 16, justifyContent: "center", marginTop: 6, flexWrap: "wrap" }}>
+      {payload.map((entry, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+          <span style={{ width: 9, height: 9, borderRadius: 2, background: entry.color }} />
+          <span style={{ color: textMuted }}>{entry.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function MonthlyFinanceChart({ revenueByMonth, expensesByMonth, profitByMonth, currencySymbol = "$" }) {
+  const data = revenueByMonth.map((r, i) => ({
+    label: r.label,
+    Revenue: r.value,
+    Expenses: expensesByMonth[i]?.value || 0,
+    Profit: profitByMonth[i]?.value || 0,
+  }));
+  const hasData = data.some((d) => d.Revenue > 0 || d.Expenses > 0);
+
+  return (
+    <div style={{ width: "100%", height: 260 }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <ComposedChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+          <CartesianGrid stroke={border} strokeDasharray="3 3" vertical={false} />
+          <XAxis dataKey="label" stroke={textMuted} fontSize={11} tickLine={false} axisLine={{ stroke: border }} />
+          <YAxis stroke={textMuted} fontSize={11} tickLine={false} axisLine={false} width={44} />
+          <Tooltip content={<ChartTooltip currencySymbol={currencySymbol} />} />
+          <Legend content={<LegendSwatches />} />
+          <Bar dataKey="Revenue" fill="#3DDC84" radius={[4, 4, 0, 0]} maxBarSize={28} />
+          <Bar dataKey="Expenses" fill="#FF4D4D" radius={[4, 4, 0, 0]} maxBarSize={28} />
+          <Line type="monotone" dataKey="Profit" stroke="#2FBFA6" strokeWidth={2.5} dot={{ r: 3, fill: "#2FBFA6" }} />
+        </ComposedChart>
+      </ResponsiveContainer>
+      {!hasData && (
+        <p style={{ color: textMuted, fontSize: 12, marginTop: -8, textAlign: "center" }}>
+          No paid invoices or expenses yet, this fills in as they come through.
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function RevenueByClientBarChart({ data, currencySymbol = "$" }) {
+  const filtered = data.filter((d) => d.value > 0);
+  if (filtered.length === 0) {
+    return <p style={{ color: textMuted, fontSize: 13, margin: 0 }}>No revenue recorded yet.</p>;
+  }
+  const height = Math.max(120, filtered.length * 42);
+  return (
+    <div style={{ width: "100%", height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart
+          data={filtered}
+          layout="vertical"
+          margin={{ top: 4, right: 24, left: 8, bottom: 4 }}
+        >
+          <CartesianGrid stroke={border} strokeDasharray="3 3" horizontal={false} />
+          <XAxis type="number" stroke={textMuted} fontSize={11} tickLine={false} axisLine={{ stroke: border }} />
+          <YAxis
+            type="category"
+            dataKey="label"
+            stroke={textMuted}
+            fontSize={12}
+            tickLine={false}
+            axisLine={false}
+            width={110}
+          />
+          <Tooltip content={<ChartTooltip currencySymbol={currencySymbol} />} />
+          <Bar dataKey="value" name="Revenue" radius={[0, 6, 6, 0]} maxBarSize={22}>
+            {filtered.map((entry, i) => (
+              <Cell key={entry.label} fill={PALETTE[i % PALETTE.length]} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+export function ProjectComparisonChart({ data, currencySymbol = "$" }) {
+  const filtered = data.filter((d) => d.revenue > 0 || d.expenses > 0);
+  if (filtered.length === 0) {
+    return <p style={{ color: textMuted, fontSize: 13, margin: 0 }}>No revenue or expenses logged yet.</p>;
+  }
+  const height = Math.max(140, filtered.length * 56);
+  return (
+    <div style={{ width: "100%", height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart
+          data={filtered}
+          layout="vertical"
+          margin={{ top: 4, right: 24, left: 8, bottom: 4 }}
+        >
+          <CartesianGrid stroke={border} strokeDasharray="3 3" horizontal={false} />
+          <XAxis type="number" stroke={textMuted} fontSize={11} tickLine={false} axisLine={{ stroke: border }} />
+          <YAxis
+            type="category"
+            dataKey="label"
+            stroke={textMuted}
+            fontSize={12}
+            tickLine={false}
+            axisLine={false}
+            width={130}
+          />
+          <Tooltip content={<ChartTooltip currencySymbol={currencySymbol} />} />
+          <Legend content={<LegendSwatches />} />
+          <Bar dataKey="revenue" name="Revenue" fill="#3DDC84" radius={[0, 6, 6, 0]} maxBarSize={14} />
+          <Bar dataKey="expenses" name="Expenses" fill="#FF4D4D" radius={[0, 6, 6, 0]} maxBarSize={14} />
+          <Bar dataKey="profit" name="Profit" fill="#2FBFA6" radius={[0, 6, 6, 0]} maxBarSize={14} />
+        </BarChart>
+      </ResponsiveContainer>
     </div>
   );
 }
