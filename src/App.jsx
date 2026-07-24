@@ -505,6 +505,7 @@ const DEFAULT_SETTINGS = {
   defaultLandingTab: "dashboard",
   defaultShotPriority: "normal",
   logoUrl: "",
+  hasSeenTutorial: false,
 };
 
 function settingsFromRow(row) {
@@ -520,6 +521,7 @@ function settingsFromRow(row) {
     defaultLandingTab: row.default_landing_tab || DEFAULT_SETTINGS.defaultLandingTab,
     defaultShotPriority: row.default_shot_priority || DEFAULT_SETTINGS.defaultShotPriority,
     logoUrl: row.logo_url || "",
+    hasSeenTutorial: row.has_seen_tutorial || false,
   };
 }
 
@@ -533,6 +535,7 @@ function settingsToRow(settings, userId) {
     default_landing_tab: settings.defaultLandingTab,
     default_shot_priority: settings.defaultShotPriority,
     logo_url: settings.logoUrl,
+    has_seen_tutorial: settings.hasSeenTutorial,
   };
 }
 
@@ -915,6 +918,7 @@ export default function ShotTracker() {
   const [editingTeamMember, setEditingTeamMember] = useState(null);
   const [showMilestoneModal, setShowMilestoneModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showTutorial, setShowTutorial] = useState(false);
   const [pendingLeadLinkId, setPendingLeadLinkId] = useState(null);
   const [dragOverStage, setDragOverStage] = useState(null);
   const [dragVisual, setDragVisual] = useState(null);
@@ -924,6 +928,7 @@ export default function ShotTracker() {
   const dragStateRef = useRef(null);
   const suppressClickRef = useRef(false);
   const hasAppliedLandingTab = useRef(false);
+  const hasCheckedTutorial = useRef(false);
 
   useEffect(() => {
     dataRef.current = data;
@@ -1044,6 +1049,10 @@ export default function ShotTracker() {
           setWorkspace(loaded.defaultLandingTab || "dashboard");
           hasAppliedLandingTab.current = true;
         }
+        if (!hasCheckedTutorial.current) {
+          if (!loaded.hasSeenTutorial) setShowTutorial(true);
+          hasCheckedTutorial.current = true;
+        }
       } else {
         const { error: insertError } = await supabase
           .from("user_settings")
@@ -1051,6 +1060,10 @@ export default function ShotTracker() {
         if (insertError) throw insertError;
         setSettings(DEFAULT_SETTINGS);
         hasAppliedLandingTab.current = true;
+        if (!hasCheckedTutorial.current) {
+          setShowTutorial(true);
+          hasCheckedTutorial.current = true;
+        }
       }
     } catch (e) {
       console.error("Settings load failed:", e);
@@ -1076,6 +1089,26 @@ export default function ShotTracker() {
       flashSave(false);
     }
     setShowSettingsModal(false);
+  };
+
+  const handleCompleteTutorial = async () => {
+    setShowTutorial(false);
+    if (settings.hasSeenTutorial) return;
+    const next = { ...settings, hasSeenTutorial: true };
+    setSettings(next);
+    try {
+      const { error } = await supabase
+        .from("user_settings")
+        .upsert(settingsToRow(next, userId), { onConflict: "user_id" });
+      if (error) throw error;
+    } catch (e) {
+      console.error("Couldn't save tutorial status:", e);
+    }
+  };
+
+  const handleReplayTutorial = () => {
+    setShowSettingsModal(false);
+    setShowTutorial(true);
   };
 
   const loadData = useCallback(async () => {
@@ -2385,10 +2418,13 @@ export default function ShotTracker() {
           email={session.user.email}
           driveEmail={driveEmail}
           onConnectDrive={handleConnectDrive}
+          onReplayTutorial={handleReplayTutorial}
           onCancel={() => setShowSettingsModal(false)}
           onSave={handleSaveSettings}
         />
       )}
+
+      {showTutorial && <TutorialModal onComplete={handleCompleteTutorial} />}
 
       {editingExpense && (
         <ExpenseEditor
@@ -2963,7 +2999,92 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   );
 }
 
-function SettingsModal({ settings, email, driveEmail, onConnectDrive, onCancel, onSave }) {
+const TUTORIAL_STEPS = [
+  {
+    title: "Welcome to KaiFlow",
+    body: "A production and client management system built for Studio Kairegi, from first contact with a client through delivery and payment. This quick walkthrough covers the pieces you'll use most.",
+  },
+  {
+    title: "Dashboard",
+    body: "Your home base. Active projects, leads, revenue this month, and charts for shots by stage and revenue trend, all at a glance. Tap any tile to jump straight to that area.",
+  },
+  {
+    title: "Projects & shots",
+    body: "Create a project and optionally generate a starting checklist of shots automatically. Drag shots across the pipeline as work progresses, each one tracks review status, revisions, and file versioning.",
+  },
+  {
+    title: "Leads (CRM)",
+    body: "Track outreach through Email Pool, Cold Email, Responded, and beyond. Mark a deal Won and KaiFlow pre-fills a new project from that lead, no retyping client details.",
+  },
+  {
+    title: "Invoicing & Finance",
+    body: "Create invoices per project, generate a 50/25/25 milestone split in one tap, and log expenses. Finance rolls everything up into USD automatically, even across projects billed in different currencies.",
+  },
+  {
+    title: "Client & freelancer links",
+    body: "Every project can generate a read-only progress link for clients, no login needed. Every shot can generate a link for the assigned freelancer to view the brief, download files, and upload their work back.",
+  },
+  {
+    title: "Settings",
+    body: "Set your studio name and logo, default currency, default milestone split, and where you land when you open the app. You can replay this tutorial any time from here.",
+  },
+];
+
+function TutorialModal({ onComplete }) {
+  const [step, setStep] = useState(0);
+  const isLast = step === TUTORIAL_STEPS.length - 1;
+  const current = TUTORIAL_STEPS[step];
+
+  return (
+    <div style={styles.overlay}>
+      <div style={{ ...styles.modal, maxWidth: 440 }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <span style={styles.modalTitle}>{current.title}</span>
+          <button style={styles.iconButton} onClick={onComplete}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        <p style={{ fontSize: 14, lineHeight: 1.6, color: paper, margin: 0 }}>{current.body}</p>
+
+        <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 4 }}>
+          {TUTORIAL_STEPS.map((_, i) => (
+            <span
+              key={i}
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: i === step ? teal : border,
+              }}
+            />
+          ))}
+        </div>
+
+        <div style={styles.modalFooter}>
+          {step > 0 ? (
+            <button style={styles.cancelButton} onClick={() => setStep(step - 1)}>
+              Back
+            </button>
+          ) : (
+            <button style={styles.cancelButton} onClick={onComplete}>
+              Skip
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button
+            style={styles.saveButton}
+            onClick={() => (isLast ? onComplete() : setStep(step + 1))}
+          >
+            {isLast ? "Get started" : "Next"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({ settings, email, driveEmail, onConnectDrive, onReplayTutorial, onCancel, onSave }) {
   const [form, setForm] = useState(settings);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const setMilestone = (i) => (e) => {
@@ -2985,6 +3106,13 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, onCancel, 
         <div style={styles.field}>
           <label style={styles.label}>Account email</label>
           <p style={styles.fieldHint}>{email}</p>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Help</label>
+          <button type="button" style={styles.addRevisionButton} onClick={onReplayTutorial}>
+            Replay tutorial
+          </button>
         </div>
 
         <div style={styles.field}>
