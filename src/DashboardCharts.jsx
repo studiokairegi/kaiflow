@@ -61,14 +61,15 @@ function ChartTooltip({ active, payload, label, currencySymbol }) {
   );
 }
 
-export function DonutBreakdown({ data, emptyLabel = "Nothing here yet" }) {
+export function DonutBreakdown({ data, emptyLabel = "Nothing here yet", centerLabel = "Total" }) {
   const filtered = data.filter((d) => d.value > 0);
   if (filtered.length === 0) {
     return <p style={{ color: textMuted, fontSize: 13, margin: 0 }}>{emptyLabel}</p>;
   }
+  const total = filtered.reduce((sum, d) => sum + d.value, 0);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-      <div style={{ width: 160, height: 160, flexShrink: 0 }}>
+      <div style={{ width: 160, height: 160, flexShrink: 0, position: "relative" }}>
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
             <Pie
@@ -87,6 +88,24 @@ export function DonutBreakdown({ data, emptyLabel = "Nothing here yet" }) {
             <Tooltip content={<ChartTooltip />} />
           </PieChart>
         </ResponsiveContainer>
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            pointerEvents: "none",
+          }}
+        >
+          <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, color: paper }}>
+            {total}
+          </span>
+          <span style={{ fontSize: 10.5, color: textMuted, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+            {centerLabel}
+          </span>
+        </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1, minWidth: 140 }}>
         {filtered.map((entry, i) => (

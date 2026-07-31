@@ -561,6 +561,10 @@ function computeDashboardStats(projects, cards, leads, invoices, fxRates = {}) {
 
   const thisMonth = now.getMonth();
   const thisYear = now.getFullYear();
+  const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const lastMonth = lastMonthDate.getMonth();
+  const lastMonthYear = lastMonthDate.getFullYear();
+
   const revenueThisMonth = invoices.reduce((sum, inv) => {
     if (inv.status !== "paid" || !inv.paidDate) return sum;
     const d = new Date(inv.paidDate);
@@ -569,6 +573,22 @@ function computeDashboardStats(projects, cards, leads, invoices, fxRates = {}) {
     }
     return sum;
   }, 0);
+
+  const revenueLastMonth = invoices.reduce((sum, inv) => {
+    if (inv.status !== "paid" || !inv.paidDate) return sum;
+    const d = new Date(inv.paidDate);
+    if (d.getMonth() === lastMonth && d.getFullYear() === lastMonthYear) {
+      return sum + convertToUSD(inv.amountPaid, inv.currency, fxRates);
+    }
+    return sum;
+  }, 0);
+
+  const revenueDelta =
+    revenueLastMonth > 0
+      ? Math.round(((revenueThisMonth - revenueLastMonth) / revenueLastMonth) * 100)
+      : revenueThisMonth > 0
+      ? 100
+      : null;
 
   const unpaidInvoices = invoices.filter((inv) => inv.status !== "paid");
   const outstandingTotal = unpaidInvoices.reduce(
@@ -582,6 +602,7 @@ function computeDashboardStats(projects, cards, leads, invoices, fxRates = {}) {
     activeProjectsCount: activeProjects.length,
     nearDeadline,
     revenueThisMonth,
+    revenueDelta,
     outstandingCount: unpaidInvoices.length,
     outstandingTotal,
     dealsWon,
@@ -880,6 +901,34 @@ const GearIcon = () => (
   </svg>
 );
 
+const TargetIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="9" />
+    <circle cx="12" cy="12" r="5" />
+    <circle cx="12" cy="12" r="1" fill="currentColor" />
+  </svg>
+);
+
+const CheckCircleIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="9" />
+    <path d="m8 12 2.5 2.5L16 9" />
+  </svg>
+);
+
+const XCircleIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="9" />
+    <path d="m9 9 6 6m0-6-6 6" />
+  </svg>
+);
+
+const TrendIcon = ({ direction = "up" }) => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+    {direction === "up" ? <path d="M4 17 10 11 14 15 20 7M14 7h6v6" /> : <path d="M4 7 10 13 14 9 20 17M14 17h6v-6" />}
+  </svg>
+);
+
 export default function ShotTracker() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -919,6 +968,7 @@ export default function ShotTracker() {
   const [showMilestoneModal, setShowMilestoneModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showTutorial, setShowTutorial] = useState(false);
+  const [tutorialHighlightTarget, setTutorialHighlightTarget] = useState(null);
   const [pendingLeadLinkId, setPendingLeadLinkId] = useState(null);
   const [dragOverStage, setDragOverStage] = useState(null);
   const [dragVisual, setDragVisual] = useState(null);
@@ -1093,6 +1143,7 @@ export default function ShotTracker() {
 
   const handleCompleteTutorial = async () => {
     setShowTutorial(false);
+    setTutorialHighlightTarget(null);
     if (settings.hasSeenTutorial) return;
     const next = { ...settings, hasSeenTutorial: true };
     setSettings(next);
@@ -1109,6 +1160,14 @@ export default function ShotTracker() {
   const handleReplayTutorial = () => {
     setShowSettingsModal(false);
     setShowTutorial(true);
+  };
+
+  const handleTutorialStepChange = (targetTab) => {
+    setTutorialHighlightTarget(targetTab);
+    if (targetTab && targetTab !== "settings") {
+      setView("projects"); // make sure the tab row is visible, not stuck inside a project board
+      setWorkspace(targetTab);
+    }
   };
 
   const loadData = useCallback(async () => {
@@ -2008,6 +2067,15 @@ export default function ShotTracker() {
     <div style={styles.app}>
       <style>{fontImport}</style>
 
+      {driveNotice && (
+        <div style={styles.driveToast}>
+          <span>{driveNotice}</span>
+          <button style={styles.iconButton} onClick={() => setDriveNotice("")}>
+            <CloseIcon />
+          </button>
+        </div>
+      )}
+
       <header style={styles.header}>
         <div style={styles.headerLeft}>
           {view === "board" ? (
@@ -2045,7 +2113,12 @@ export default function ShotTracker() {
           <button style={styles.iconButtonGhost} onClick={handleExport} title="Export backup">
             <DownloadIcon />
           </button>
-          <button style={styles.iconButtonGhost} onClick={() => setShowSettingsModal(true)} title="Settings">
+          <button
+            className={tutorialHighlightTarget === "settings" ? "kf-tutorial-highlight" : undefined}
+            style={styles.iconButtonGhost}
+            onClick={() => setShowSettingsModal(true)}
+            title="Settings"
+          >
             <GearIcon />
           </button>
           <button style={styles.iconButtonGhost} onClick={handleSignOut} title="Sign out">
@@ -2104,30 +2177,35 @@ export default function ShotTracker() {
       {showTabs && (
         <div style={styles.tabRow}>
           <button
+            className={tutorialHighlightTarget === "dashboard" ? "kf-tutorial-highlight" : undefined}
             style={{ ...styles.tabButton, ...(workspace === "dashboard" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("dashboard")}
           >
             Dashboard
           </button>
           <button
+            className={tutorialHighlightTarget === "projects" ? "kf-tutorial-highlight" : undefined}
             style={{ ...styles.tabButton, ...(workspace === "projects" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("projects")}
           >
             Projects
           </button>
           <button
+            className={tutorialHighlightTarget === "leads" ? "kf-tutorial-highlight" : undefined}
             style={{ ...styles.tabButton, ...(workspace === "leads" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("leads")}
           >
             Leads
           </button>
           <button
+            className={tutorialHighlightTarget === "finance" ? "kf-tutorial-highlight" : undefined}
             style={{ ...styles.tabButton, ...(workspace === "finance" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("finance")}
           >
             Finance
           </button>
           <button
+            className={tutorialHighlightTarget === "teams" ? "kf-tutorial-highlight" : undefined}
             style={{ ...styles.tabButton, ...(workspace === "teams" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("teams")}
           >
@@ -2424,7 +2502,9 @@ export default function ShotTracker() {
         />
       )}
 
-      {showTutorial && <TutorialModal onComplete={handleCompleteTutorial} />}
+      {showTutorial && (
+        <TutorialModal onComplete={handleCompleteTutorial} onStepChange={handleTutorialStepChange} />
+      )}
 
       {editingExpense && (
         <ExpenseEditor
@@ -2908,16 +2988,24 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   const cur = "$"; // Dashboard totals are always USD-converted for cross-project consistency
 
   const statItems = [
-    { label: "Active projects", value: stats.activeProjectsCount, onClick: onGoToProjects },
-    { label: "Active leads", value: stats.activeLeadsCount, onClick: onGoToLeads },
-    { label: "Total shots", value: stats.totalShots },
-    { label: "Projects completed", value: stats.projectsCompleted },
-    { label: "Deals won", value: stats.dealsWon, onClick: onGoToLeads },
-    { label: "Deals lost", value: stats.dealsLost, onClick: onGoToLeads },
-    { label: "Revenue this month", value: `${cur}${formatMoney(stats.revenueThisMonth)}` },
+    { label: "Active projects", value: stats.activeProjectsCount, icon: <FolderIcon />, color: teal, onClick: onGoToProjects },
+    { label: "Active leads", value: stats.activeLeadsCount, icon: <TargetIcon />, color: "#4A90D9", onClick: onGoToLeads },
+    { label: "Total shots", value: stats.totalShots, icon: <ClapperIcon />, color: "#9B8AD8" },
+    { label: "Projects completed", value: stats.projectsCompleted, icon: <CheckCircleIcon />, color: "#3DDC84" },
+    { label: "Deals won", value: stats.dealsWon, icon: <CheckCircleIcon />, color: "#3DDC84", onClick: onGoToLeads },
+    { label: "Deals lost", value: stats.dealsLost, icon: <XCircleIcon />, color: "#FF4D4D", onClick: onGoToLeads },
+    {
+      label: "Revenue this month",
+      value: `${cur}${formatMoney(stats.revenueThisMonth)}`,
+      icon: <InvoiceIcon />,
+      color: "#3DDC84",
+      delta: stats.revenueDelta,
+    },
     {
       label: "Outstanding invoices",
       value: `${stats.outstandingCount} \u00b7 ${cur}${formatMoney(stats.outstandingTotal)}`,
+      icon: <InvoiceIcon />,
+      color: "#F2A65A",
     },
   ];
 
@@ -2948,9 +3036,26 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         {statItems.map((item) => (
           <div
             key={item.label}
+            className="kf-card"
             style={{ ...styles.budgetStat, cursor: item.onClick ? "pointer" : "default" }}
             onClick={item.onClick}
           >
+            <div style={styles.dashboardStatTop}>
+              <div style={{ ...styles.dashboardStatIcon, color: item.color, background: `${item.color}1f` }}>
+                {item.icon}
+              </div>
+              {item.delta !== undefined && item.delta !== null && (
+                <span
+                  style={{
+                    ...styles.dashboardDelta,
+                    color: item.delta >= 0 ? "#3DDC84" : "#FF4D4D",
+                  }}
+                >
+                  <TrendIcon direction={item.delta >= 0 ? "up" : "down"} />
+                  {Math.abs(item.delta)}%
+                </span>
+              )}
+            </div>
             <span style={styles.label}>{item.label}</span>
             <span style={styles.budgetStatValue}>{item.value}</span>
           </div>
@@ -2965,11 +3070,11 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       <div style={styles.dashboardChartsRow}>
         <div style={{ flex: "1 1 260px" }}>
           <div style={styles.fieldDivider}>Shots by stage</div>
-          <DonutBreakdown data={shotsByStage} emptyLabel="No shots yet." />
+          <DonutBreakdown data={shotsByStage} emptyLabel="No shots yet." centerLabel="Shots" />
         </div>
         <div style={{ flex: "1 1 260px" }}>
           <div style={styles.fieldDivider}>Leads by stage</div>
-          <DonutBreakdown data={leadsByStage} emptyLabel="No leads yet." />
+          <DonutBreakdown data={leadsByStage} emptyLabel="No leads yet." centerLabel="Leads" />
         </div>
       </div>
 
@@ -3003,37 +3108,48 @@ const TUTORIAL_STEPS = [
   {
     title: "Welcome to KaiFlow",
     body: "A production and client management system built for Studio Kairegi, from first contact with a client through delivery and payment. This quick walkthrough covers the pieces you'll use most.",
+    targetTab: "dashboard",
   },
   {
     title: "Dashboard",
     body: "Your home base. Active projects, leads, revenue this month, and charts for shots by stage and revenue trend, all at a glance. Tap any tile to jump straight to that area.",
+    targetTab: "dashboard",
   },
   {
     title: "Projects & shots",
     body: "Create a project and optionally generate a starting checklist of shots automatically. Drag shots across the pipeline as work progresses, each one tracks review status, revisions, and file versioning.",
+    targetTab: "projects",
   },
   {
     title: "Leads (CRM)",
     body: "Track outreach through Email Pool, Cold Email, Responded, and beyond. Mark a deal Won and KaiFlow pre-fills a new project from that lead, no retyping client details.",
+    targetTab: "leads",
   },
   {
     title: "Invoicing & Finance",
     body: "Create invoices per project, generate a 50/25/25 milestone split in one tap, and log expenses. Finance rolls everything up into USD automatically, even across projects billed in different currencies.",
+    targetTab: "finance",
   },
   {
     title: "Client & freelancer links",
     body: "Every project can generate a read-only progress link for clients, no login needed. Every shot can generate a link for the assigned freelancer to view the brief, download files, and upload their work back.",
+    targetTab: "projects",
   },
   {
     title: "Settings",
     body: "Set your studio name and logo, default currency, default milestone split, and where you land when you open the app. You can replay this tutorial any time from here.",
+    targetTab: "settings",
   },
 ];
 
-function TutorialModal({ onComplete }) {
+function TutorialModal({ onComplete, onStepChange }) {
   const [step, setStep] = useState(0);
   const isLast = step === TUTORIAL_STEPS.length - 1;
   const current = TUTORIAL_STEPS[step];
+
+  useEffect(() => {
+    onStepChange?.(current.targetTab);
+  }, [step]);
 
   return (
     <div style={styles.overlay}>
@@ -4732,6 +4848,18 @@ a:hover {
   transform: translateY(-2px);
   box-shadow: 0 16px 40px rgba(0,0,0,0.45), 0 4px 12px rgba(0,0,0,0.3);
 }
+
+@keyframes kf-tutorial-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(47,191,166,0.55); }
+  50% { box-shadow: 0 0 0 8px rgba(47,191,166,0); }
+}
+.kf-tutorial-highlight {
+  position: relative;
+  z-index: 101;
+  border-color: #2FBFA6 !important;
+  color: #7FE0D0 !important;
+  animation: kf-tutorial-pulse 1.4s ease-in-out infinite;
+}
 `;
 
 const ink = "#14191c";
@@ -5071,6 +5199,28 @@ const styles = {
     gap: 24,
     flexWrap: "wrap",
   },
+  dashboardStatTop: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 2,
+  },
+  dashboardStatIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dashboardDelta: {
+    display: "flex",
+    alignItems: "center",
+    gap: 3,
+    fontSize: 11.5,
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontWeight: 500,
+  },
   budgetStat: {
     flex: "1 1 160px",
     background: inkSoft,
@@ -5304,6 +5454,24 @@ const styles = {
     borderRadius: 999,
     background: teal,
     transition: "width 0.3s ease",
+  },
+  driveToast: {
+    position: "fixed",
+    top: 16,
+    left: "50%",
+    transform: "translateX(-50%)",
+    zIndex: 200,
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    background: inkElevated,
+    border: `1px solid ${teal}`,
+    borderRadius: 12,
+    padding: "10px 14px",
+    boxShadow: shadowLifted,
+    fontSize: 13,
+    color: paper,
+    maxWidth: "90vw",
   },
   overlay: {
     position: "fixed",
