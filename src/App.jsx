@@ -1974,7 +1974,7 @@ export default function ShotTracker() {
   if (authLoading) {
     return (
       <div style={styles.loadingScreen}>
-        <div style={styles.loadingClap}><ClapperIcon /></div>
+        <img src="/logo.png" alt="KaiFlow" style={{ ...styles.loadingClap, width: 48, height: 48, objectFit: "contain" }} />
       </div>
     );
   }
@@ -2053,7 +2053,7 @@ export default function ShotTracker() {
   if (loading) {
     return (
       <div style={styles.loadingScreen}>
-        <div style={styles.loadingClap}><ClapperIcon /></div>
+        <img src="/logo.png" alt="KaiFlow" style={{ ...styles.loadingClap, width: 48, height: 48, objectFit: "contain" }} />
       </div>
     );
   }
