@@ -75,9 +75,12 @@ Deno.serve(async (req) => {
       if (infoRes.ok) {
         const info = await infoRes.json();
         email = info.email || "";
+      } else {
+        console.error("userinfo request failed:", infoRes.status, await infoRes.text());
       }
-    } catch {
+    } catch (e) {
       // non-fatal, connection still works without the display email
+      console.error("userinfo request threw:", e.message);
     }
 
     const encryptionKey = Deno.env.get("DRIVE_TOKEN_ENCRYPTION_KEY")!;

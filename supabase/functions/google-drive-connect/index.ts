@@ -50,7 +50,7 @@ Deno.serve(async (req) => {
     googleUrl.searchParams.set("response_type", "code");
     googleUrl.searchParams.set("access_type", "offline");
     googleUrl.searchParams.set("prompt", "consent");
-    googleUrl.searchParams.set("scope", "https://www.googleapis.com/auth/drive.file");
+    googleUrl.searchParams.set("scope", "openid email https://www.googleapis.com/auth/drive.file");
     googleUrl.searchParams.set("state", state);
 
     return Response.redirect(googleUrl.toString(), 302);

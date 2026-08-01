@@ -1984,7 +1984,7 @@ export default function ShotTracker() {
       <div style={styles.app}>
         <style>{fontImport}</style>
         <div style={styles.lockScreen}>
-          <div style={styles.logoMark}><ClapperIcon /></div>
+          <div style={styles.logoMark}><img src="/logo.png" alt="KaiFlow" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
           <h1 style={styles.title}>KaiFlow</h1>
           <p style={styles.subtitle}>CRM plus Shot Tracker</p>
 
@@ -2083,7 +2083,7 @@ export default function ShotTracker() {
               <BackIcon />
             </button>
           ) : (
-            <div style={styles.logoMark}><ClapperIcon /></div>
+            <div style={styles.logoMark}><img src="/logo.png" alt="KaiFlow" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
           )}
           <div>
             <h1 style={styles.title}>

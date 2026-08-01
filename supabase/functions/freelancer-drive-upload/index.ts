@@ -98,15 +98,35 @@ Deno.serve(async (req) => {
       },
     ];
 
-    await supabase.from("shots").update({ deliverables: nextDeliverables }).eq("id", shot.id);
+    const { error: updateError } = await supabase
+      .from("shots")
+      .update({ deliverables: nextDeliverables })
+      .eq("id", shot.id);
 
-    await supabase.from("activity_log").insert({
+    if (updateError) {
+      // The file made it to Drive but we couldn't record it against the
+      // shot, don't tell the freelancer this succeeded since the studio
+      // won't see it anywhere in KaiFlow.
+      return new Response(
+        JSON.stringify({
+          error: "The file uploaded to Drive but couldn't be recorded, please tell the studio directly.",
+        }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const { error: logError } = await supabase.from("activity_log").insert({
       user_id: shot.user_id,
       project_id: shot.project_id,
       shot_id: shot.id,
       event_type: "freelancer_upload",
       description: `${shot.assigned_to || "A freelancer"} uploaded "${file.name}" to Drive for ${shot.title}`,
     });
+    if (logError) {
+      // Non-fatal, the deliverable is safely recorded above, this is just
+      // the activity feed entry.
+      console.error("Activity log insert failed:", logError.message);
+    }
 
     return new Response(JSON.stringify({ success: true, url: uploaded.url }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },

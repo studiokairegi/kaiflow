@@ -75,10 +75,16 @@ Deno.serve(async (req) => {
     if (!rootFolderId) {
       const root = await createDriveFolder(accessToken, "KaiFlow Projects");
       rootFolderId = root.id;
-      await supabase
+      const { error: rootUpdateError } = await supabase
         .from("google_drive_connections")
         .update({ root_folder_id: rootFolderId })
         .eq("user_id", user.id);
+      if (rootUpdateError) {
+        // Not fatal for this run since we already have the id in memory,
+        // but log it since a repeat failure here would create a new
+        // "KaiFlow Projects" folder every time instead of reusing this one.
+        console.error("Failed to save root_folder_id:", rootUpdateError.message);
+      }
     }
 
     const projectFolder = await createDriveFolder(accessToken, projectName, rootFolderId);
@@ -88,7 +94,7 @@ Deno.serve(async (req) => {
       createDriveFolder(accessToken, "Deliverables", projectFolder.id),
     ]);
 
-    await supabase
+    const { error: projectUpdateError } = await supabase
       .from("projects")
       .update({
         drive_folder_id: projectFolder.id,
@@ -97,6 +103,18 @@ Deno.serve(async (req) => {
       })
       .eq("id", projectId)
       .eq("user_id", user.id);
+
+    if (projectUpdateError) {
+      // The folders exist in Drive at this point, but weren't saved against
+      // the project, so don't report success, the app would show a folder
+      // link that disappears on next reload.
+      return new Response(
+        JSON.stringify({
+          error: "Folders were created in Drive but couldn't be saved to this project, please try again.",
+        }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     return new Response(
       JSON.stringify({
