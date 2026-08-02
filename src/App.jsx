@@ -506,6 +506,8 @@ const DEFAULT_SETTINGS = {
   defaultShotPriority: "normal",
   logoUrl: "",
   hasSeenTutorial: false,
+  plan: "free",
+  isAdmin: false,
 };
 
 function settingsFromRow(row) {
@@ -522,6 +524,8 @@ function settingsFromRow(row) {
     defaultShotPriority: row.default_shot_priority || DEFAULT_SETTINGS.defaultShotPriority,
     logoUrl: row.logo_url || "",
     hasSeenTutorial: row.has_seen_tutorial || false,
+    plan: row.plan || "free",
+    isAdmin: row.is_admin || false,
   };
 }
 
@@ -536,6 +540,8 @@ function settingsToRow(settings, userId) {
     default_shot_priority: settings.defaultShotPriority,
     logo_url: settings.logoUrl,
     has_seen_tutorial: settings.hasSeenTutorial,
+    plan: settings.plan,
+    is_admin: settings.isAdmin,
   };
 }
 
@@ -891,6 +897,13 @@ const SignOutIcon = () => (
     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
     <path d="m16 17 5-5-5-5" />
     <path d="M21 12H9" />
+  </svg>
+);
+
+const LockIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="4" y="11" width="16" height="9" rx="2" />
+    <path d="M8 11V7a4 4 0 0 1 8 0v4" />
   </svg>
 );
 
@@ -2062,6 +2075,7 @@ export default function ShotTracker() {
   const projectCards = cards.filter((c) => c.projectId === selectedProjectId);
   const { delivered: deliveredCount, percent: overallPercent } = projectProgress(projectCards);
   const showTabs = view !== "board";
+  const hasProAccess = settings.isAdmin || settings.plan === "pro";
 
   return (
     <div style={styles.app}>
@@ -2342,7 +2356,10 @@ export default function ShotTracker() {
         </div>
       )}
 
-      {view === "projects" && workspace === "finance" && (
+      {view === "projects" && workspace === "finance" && !hasProAccess && (
+        <ProUpgradePrompt feature="Finance" />
+      )}
+      {view === "projects" && workspace === "finance" && hasProAccess && (
         <FinancePanel
           projects={projects}
           invoices={invoices}
@@ -2356,7 +2373,10 @@ export default function ShotTracker() {
         />
       )}
 
-      {view === "projects" && workspace === "teams" && (
+      {view === "projects" && workspace === "teams" && !hasProAccess && (
+        <ProUpgradePrompt feature="Teams" />
+      )}
+      {view === "projects" && workspace === "teams" && hasProAccess && (
         <TeamsPanel
           teamMembers={teamMembers}
           cards={cards}
@@ -2463,6 +2483,7 @@ export default function ShotTracker() {
           onDownload={(inv) => downloadInvoicePDF(inv, selectedProject, settings)}
           onOpenMilestones={() => setShowMilestoneModal(true)}
           currencySymbol={selectedProject?.currency || settings.currencySymbol}
+          hasProAccess={hasProAccess}
         />
       )}
 
@@ -2545,6 +2566,7 @@ export default function ShotTracker() {
           isNew={!editingCard.id}
           onPersistShareToken={handlePersistShotShareToken}
           onLogExpense={handleLogShotExpense}
+          hasProAccess={hasProAccess}
         />
       )}
 
@@ -2557,6 +2579,7 @@ export default function ShotTracker() {
           isNew={!editingProject.id}
           driveEmail={driveEmail}
           onCreateDriveFolders={handleCreateDriveFolders}
+          hasProAccess={hasProAccess}
         />
       )}
 
@@ -3142,6 +3165,25 @@ const TUTORIAL_STEPS = [
   },
 ];
 
+function ProUpgradePrompt({ feature, inline }) {
+  const content = (
+    <>
+      <div style={styles.proLockIcon}>
+        <LockIcon />
+      </div>
+      <p style={{ fontSize: 14, fontWeight: 600, color: paper, margin: 0 }}>{feature} is a Pro feature</p>
+      <p style={{ ...styles.fieldHint, textAlign: "center", maxWidth: 320 }}>
+        KaiFlow Pro unlocks this along with the rest of the studio toolkit. Paid plans are launching soon,
+        reach out if you'd like early access.
+      </p>
+    </>
+  );
+  if (inline) {
+    return <div style={{ ...styles.proLockWrap, padding: "16px 0" }}>{content}</div>;
+  }
+  return <div style={styles.proLockWrap}>{content}</div>;
+}
+
 function TutorialModal({ onComplete, onStepChange }) {
   const [step, setStep] = useState(0);
   const isLast = step === TUTORIAL_STEPS.length - 1;
@@ -3222,6 +3264,23 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, onReplayTu
         <div style={styles.field}>
           <label style={styles.label}>Account email</label>
           <p style={styles.fieldHint}>{email}</p>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Plan</label>
+          {settings.isAdmin ? (
+            <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>Admin {"\u2014"} full access</p>
+          ) : settings.plan === "pro" ? (
+            <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>Pro</p>
+          ) : (
+            <>
+              <p style={styles.fieldHint}>Free</p>
+              <p style={styles.fieldHint}>
+                Finance, Teams, Client Portal, Freelancer links, milestones, and Google Drive are Pro features.
+                Paid plans are launching soon.
+              </p>
+            </>
+          )}
         </div>
 
         <div style={styles.field}>
@@ -3396,7 +3455,7 @@ function ActivityPanel({ entries, cards, onRefresh }) {
   );
 }
 
-function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkPaid, onDownload, onOpenMilestones, currencySymbol }) {
+function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkPaid, onDownload, onOpenMilestones, currencySymbol, hasProAccess }) {
   const cur = currencySymbol || "$";
   if (!project) return null;
   const { totalBudget, amountPaid, outstanding } = projectBudgetSummary(project, projectCards, invoices);
@@ -3430,17 +3489,19 @@ function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkP
               <PlusIcon />
               New invoice
             </button>
-            <button style={styles.cancelButton} onClick={onOpenMilestones}>
-              Set up milestones
-            </button>
+            {hasProAccess && (
+              <button style={styles.cancelButton} onClick={onOpenMilestones}>
+                Set up milestones
+              </button>
+            )}
           </div>
         </div>
       ) : (
-        <>
+        hasProAccess && (
           <button style={{ ...styles.cancelButton, alignSelf: "flex-start" }} onClick={onOpenMilestones}>
             Set up milestones
           </button>
-        </>
+        )
       )}
 
       {invoices.length > 0 && (
@@ -3504,7 +3565,7 @@ function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkP
   );
 }
 
-function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders }) {
+function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders, hasProAccess }) {
   const [form, setForm] = useState(project);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const [linkCopied, setLinkCopied] = useState(false);
@@ -3588,37 +3649,50 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
         )}
 
         <div style={styles.field}>
-          <label style={styles.checkboxLabel}>
-            <input
-              type="checkbox"
-              checked={!!form.shareEnabled}
-              onChange={(e) => setForm({ ...form, shareEnabled: e.target.checked })}
-            />
-            Share progress with client
+          <label style={styles.label}>
+            Client sharing <span style={styles.proBadge}>PRO</span>
           </label>
-          {form.shareEnabled && (
+          {!hasProAccess ? (
+            <ProUpgradePrompt feature="Client Portal" inline />
+          ) : (
             <>
-              <p style={styles.fieldHint}>
-                {isNew
-                  ? "A link will be ready to copy right after you save."
-                  : "Send this link to your client, no login needed on their end."}
-              </p>
-              {!isNew && shareUrl && (
-                <div style={styles.fileNameRow}>
-                  <span style={{ ...styles.fieldHint, wordBreak: "break-all" }}>{shareUrl}</span>
-                  <button type="button" style={styles.copyButton} onClick={handleCopyShareLink}>
-                    <CopyIcon />
-                    {linkCopied ? "Copied" : "Copy"}
-                  </button>
-                </div>
+              <label style={styles.checkboxLabel}>
+                <input
+                  type="checkbox"
+                  checked={!!form.shareEnabled}
+                  onChange={(e) => setForm({ ...form, shareEnabled: e.target.checked })}
+                />
+                Share progress with client
+              </label>
+              {form.shareEnabled && (
+                <>
+                  <p style={styles.fieldHint}>
+                    {isNew
+                      ? "A link will be ready to copy right after you save."
+                      : "Send this link to your client, no login needed on their end."}
+                  </p>
+                  {!isNew && shareUrl && (
+                    <div style={styles.fileNameRow}>
+                      <span style={{ ...styles.fieldHint, wordBreak: "break-all" }}>{shareUrl}</span>
+                      <button type="button" style={styles.copyButton} onClick={handleCopyShareLink}>
+                        <CopyIcon />
+                        {linkCopied ? "Copied" : "Copy"}
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}
         </div>
 
         <div style={styles.field}>
-          <label style={styles.label}>Google Drive</label>
-          {!driveEmail ? (
+          <label style={styles.label}>
+            Google Drive <span style={styles.proBadge}>PRO</span>
+          </label>
+          {!hasProAccess ? (
+            <ProUpgradePrompt feature="Google Drive integration" inline />
+          ) : !driveEmail ? (
             <p style={styles.fieldHint}>
               Connect Google Drive in Settings first, then come back here to create this project's folders.
             </p>
@@ -3986,7 +4060,7 @@ function LeadEditor({ lead, onCancel, onSave, onDelete, onMarkWon, onMarkLost, i
   );
 }
 
-function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense }) {
+function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess }) {
   const [form, setForm] = useState(card);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
 
@@ -4262,7 +4336,12 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
           <p style={styles.fieldHint}>Save this shot first before logging the payment as an expense.</p>
         )}
 
-        {isNew ? (
+        <div style={styles.fieldDivider}>
+          Freelancer link <span style={styles.proBadge}>PRO</span>
+        </div>
+        {!hasProAccess ? (
+          <ProUpgradePrompt feature="Freelancer links" inline />
+        ) : isNew ? (
           <p style={styles.fieldHint}>Save this shot first, then a freelancer link can be generated.</p>
         ) : !form.shareToken ? (
           <button type="button" style={styles.addRevisionButton} onClick={handleGenerateShareLink}>
@@ -5193,6 +5272,37 @@ const styles = {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
     gap: 14,
+  },
+  proLockWrap: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    padding: "48px 20px",
+    textAlign: "center",
+  },
+  proLockIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    background: "rgba(242,166,90,0.14)",
+    border: "1px solid rgba(242,166,90,0.32)",
+    color: "#F2A65A",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  proBadge: {
+    fontSize: 10.5,
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontWeight: 600,
+    color: "#F2A65A",
+    background: "rgba(242,166,90,0.14)",
+    border: "1px solid rgba(242,166,90,0.32)",
+    borderRadius: 999,
+    padding: "2px 8px",
+    letterSpacing: "0.04em",
   },
   dashboardChartsRow: {
     display: "flex",
