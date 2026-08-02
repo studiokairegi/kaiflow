@@ -1014,6 +1014,24 @@ export default function ShotTracker() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
+  // Google (and other OAuth) sign-in failures come back as ?error=... or
+  // #error=... on the redirect, not as a thrown exception, since the actual
+  // failure happens on Google's or Supabase's side after the browser has
+  // already navigated away. Without this, a failed OAuth attempt silently
+  // dumps the user back on a blank login screen with no explanation.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const errorDescription =
+      params.get("error_description") || hashParams.get("error_description") || params.get("error") || hashParams.get("error");
+    if (errorDescription) {
+      setAuthError(decodeURIComponent(errorDescription).replace(/\+/g, " "));
+      const cleanUrl = window.location.pathname;
+      window.history.replaceState({}, "", cleanUrl);
+    }
+  }, []);
+
+
   const userId = session?.user?.id || null;
 
   const refreshFxRates = useCallback(async () => {
