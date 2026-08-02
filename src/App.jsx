@@ -47,6 +47,8 @@ const REVIEW_LABELS = {
 
 const REVIEW_STATUS_ORDER = ["in_progress", "waiting", "approved", "revisions"];
 
+const FREE_PROJECT_LIMIT = 3;
+
 const LEAD_STAGES = [
   { id: "pool", label: "Email Pool" },
   { id: "cold_email", label: "Cold Email" },
@@ -225,7 +227,7 @@ const CURRENCY_CODE_BY_SYMBOL = CURRENCIES.reduce((map, c) => {
   return map;
 }, {});
 
-const FX_CACHE_KEY = "kaiflow-fx-rates";
+const FX_CACHE_KEY = "kairil-fx-rates";
 const FX_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 async function fetchExchangeRates() {
@@ -1292,6 +1294,10 @@ export default function ShotTracker() {
   };
 
   const handleSaveProject = async (project) => {
+    if (!project.id && atProjectLimit) {
+      flashSave(false);
+      return;
+    }
     setSaveState("saving");
     try {
       const shareToken = project.shareEnabled ? project.shareToken || genShareToken() : project.shareToken;
@@ -2045,7 +2051,7 @@ export default function ShotTracker() {
   if (authLoading) {
     return (
       <div style={styles.loadingScreen}>
-        <img src="/logo.png" alt="KaiFlow" style={{ ...styles.loadingClap, width: 48, height: 48, objectFit: "contain" }} />
+        <img src="/logo.png" alt="Kairil" style={{ ...styles.loadingClap, width: 48, height: 48, objectFit: "contain" }} />
       </div>
     );
   }
@@ -2055,7 +2061,7 @@ export default function ShotTracker() {
       <div style={styles.app}>
         <style>{fontImport}</style>
         <div style={styles.lockScreen}>
-          <div style={styles.logoMark}><img src="/logo.png" alt="KaiFlow" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
+          <div style={styles.logoMark}><img src="/logo.png" alt="Kairil" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
           <h1 style={styles.title}>Set a new password</h1>
           <p style={styles.subtitle}>Choose a new password for your account.</p>
 
@@ -2088,8 +2094,8 @@ export default function ShotTracker() {
       <div style={styles.app}>
         <style>{fontImport}</style>
         <div style={styles.lockScreen}>
-          <div style={styles.logoMark}><img src="/logo.png" alt="KaiFlow" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
-          <h1 style={styles.title}>KaiFlow</h1>
+          <div style={styles.logoMark}><img src="/logo.png" alt="Kairil" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
+          <h1 style={styles.title}>Kairil</h1>
           <p style={styles.subtitle}>CRM plus Shot Tracker</p>
 
           {authMode === "reset" ? (
@@ -2206,7 +2212,7 @@ export default function ShotTracker() {
   if (loading) {
     return (
       <div style={styles.loadingScreen}>
-        <img src="/logo.png" alt="KaiFlow" style={{ ...styles.loadingClap, width: 48, height: 48, objectFit: "contain" }} />
+        <img src="/logo.png" alt="Kairil" style={{ ...styles.loadingClap, width: 48, height: 48, objectFit: "contain" }} />
       </div>
     );
   }
@@ -2216,6 +2222,8 @@ export default function ShotTracker() {
   const { delivered: deliveredCount, percent: overallPercent } = projectProgress(projectCards);
   const showTabs = view !== "board";
   const hasProAccess = settings.isAdmin || settings.plan === "pro";
+  const activeProjectCount = projects.filter((p) => !p.archived).length;
+  const atProjectLimit = !hasProAccess && activeProjectCount >= FREE_PROJECT_LIMIT;
 
   return (
     <div style={styles.app}>
@@ -2237,7 +2245,7 @@ export default function ShotTracker() {
               <BackIcon />
             </button>
           ) : (
-            <div style={styles.logoMark}><img src="/logo.png" alt="KaiFlow" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
+            <div style={styles.logoMark}><img src="/logo.png" alt="Kairil" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
           )}
           <div>
             <h1 style={styles.title}>
@@ -2251,7 +2259,7 @@ export default function ShotTracker() {
                 ? "Finance"
                 : workspace === "teams"
                 ? "Teams"
-                : "KaiFlow"}
+                : "Kairil"}
             </h1>
             <p style={styles.subtitle}>
               {view === "board" ? selectedProject?.client || settings.studioName : session.user.email}
@@ -2320,7 +2328,12 @@ export default function ShotTracker() {
               New member
             </button>
           ) : workspace === "dashboard" ? null : (
-            <button style={styles.newButton} onClick={() => setEditingProject(emptyProject({ currency: settings.currencySymbol }))}>
+            <button
+              style={styles.newButton}
+              onClick={() => setEditingProject(emptyProject({ currency: settings.currencySymbol }))}
+              disabled={atProjectLimit}
+              title={atProjectLimit ? `Free plan is limited to ${FREE_PROJECT_LIMIT} active projects. Archive one or upgrade to Pro.` : undefined}
+            >
               <PlusIcon />
               New project
             </button>
@@ -2496,10 +2509,7 @@ export default function ShotTracker() {
         </div>
       )}
 
-      {view === "projects" && workspace === "finance" && !hasProAccess && (
-        <ProUpgradePrompt feature="Finance" />
-      )}
-      {view === "projects" && workspace === "finance" && hasProAccess && (
+      {view === "projects" && workspace === "finance" && (
         <FinancePanel
           projects={projects}
           invoices={invoices}
@@ -2720,6 +2730,7 @@ export default function ShotTracker() {
           driveEmail={driveEmail}
           onCreateDriveFolders={handleCreateDriveFolders}
           hasProAccess={hasProAccess}
+          atProjectLimit={atProjectLimit}
         />
       )}
 
@@ -3270,7 +3281,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
 
 const TUTORIAL_STEPS = [
   {
-    title: "Welcome to KaiFlow",
+    title: "Welcome to Kairil",
     body: "A production and client management system built for Studio Kairegi, from first contact with a client through delivery and payment. This quick walkthrough covers the pieces you'll use most.",
     targetTab: "dashboard",
   },
@@ -3286,7 +3297,7 @@ const TUTORIAL_STEPS = [
   },
   {
     title: "Leads (CRM)",
-    body: "Track outreach through Email Pool, Cold Email, Responded, and beyond. Mark a deal Won and KaiFlow pre-fills a new project from that lead, no retyping client details.",
+    body: "Track outreach through Email Pool, Cold Email, Responded, and beyond. Mark a deal Won and Kairil pre-fills a new project from that lead, no retyping client details.",
     targetTab: "leads",
   },
   {
@@ -3314,7 +3325,7 @@ function ProUpgradePrompt({ feature, inline }) {
       </div>
       <p style={{ fontSize: 14, fontWeight: 600, color: paper, margin: 0 }}>{feature} is a Pro feature</p>
       <p style={{ ...styles.fieldHint, textAlign: "center", maxWidth: 320 }}>
-        KaiFlow Pro unlocks this along with the rest of the studio toolkit. Paid plans are launching soon,
+        Kairil Pro unlocks this along with the rest of the studio toolkit. Paid plans are launching soon,
         reach out if you'd like early access.
       </p>
     </>
@@ -3417,7 +3428,8 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, onReplayTu
             <>
               <p style={styles.fieldHint}>Free</p>
               <p style={styles.fieldHint}>
-                Finance, Teams, Client Portal, Freelancer links, milestones, and Google Drive are Pro features.
+                Teams, Client Portal, Freelancer links, milestones, and multiple currencies are Pro features.
+                Free accounts are also limited to {FREE_PROJECT_LIMIT} active projects.
                 Paid plans are launching soon.
               </p>
             </>
@@ -3706,7 +3718,7 @@ function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkP
   );
 }
 
-function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders, hasProAccess }) {
+function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders, hasProAccess, atProjectLimit }) {
   const [form, setForm] = useState(project);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const [linkCopied, setLinkCopied] = useState(false);
@@ -3750,6 +3762,10 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
           </button>
         </div>
 
+        {isNew && atProjectLimit ? (
+          <ProUpgradePrompt feature={`More than ${FREE_PROJECT_LIMIT} active projects`} />
+        ) : (
+          <>
         <div style={styles.field}>
           <label style={styles.label}>Project name</label>
           <input
@@ -3828,12 +3844,8 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
         </div>
 
         <div style={styles.field}>
-          <label style={styles.label}>
-            Google Drive <span style={styles.proBadge}>PRO</span>
-          </label>
-          {!hasProAccess ? (
-            <ProUpgradePrompt feature="Google Drive integration" inline />
-          ) : !driveEmail ? (
+          <label style={styles.label}>Google Drive</label>
+          {!driveEmail ? (
             <p style={styles.fieldHint}>
               Connect Google Drive in Settings first, then come back here to create this project's folders.
             </p>
@@ -3974,6 +3986,8 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
             Save project
           </button>
         </div>
+        </>
+        )}
       </div>
     </div>
   );
@@ -5451,9 +5465,10 @@ const styles = {
     width: 44,
     height: 44,
     borderRadius: 12,
-    background: "rgba(242,166,90,0.14)",
-    border: "1px solid rgba(242,166,90,0.32)",
-    color: "#F2A65A",
+    background: "rgba(47,191,166,0.14)",
+    border: "1px solid rgba(47,191,166,0.32)",
+    boxShadow: "0 0 16px rgba(47,191,166,0.18)",
+    color: teal,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -5462,9 +5477,9 @@ const styles = {
     fontSize: 10.5,
     fontFamily: "'IBM Plex Mono', monospace",
     fontWeight: 600,
-    color: "#F2A65A",
-    background: "rgba(242,166,90,0.14)",
-    border: "1px solid rgba(242,166,90,0.32)",
+    color: tealLight,
+    background: "rgba(47,191,166,0.14)",
+    border: "1px solid rgba(47,191,166,0.32)",
     borderRadius: 999,
     padding: "2px 8px",
     letterSpacing: "0.04em",
