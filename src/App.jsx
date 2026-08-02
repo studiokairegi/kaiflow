@@ -951,6 +951,8 @@ export default function ShotTracker() {
   const [authError, setAuthError] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
 
   const [data, setData] = useState({
     projects: [],
@@ -1005,6 +1007,9 @@ export default function ShotTracker() {
     });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
+      if (_event === "PASSWORD_RECOVERY") {
+        setIsPasswordRecovery(true);
+      }
     });
     return () => listener.subscription.unsubscribe();
   }, []);
@@ -1861,6 +1866,41 @@ export default function ShotTracker() {
     }
   };
 
+  const handleRequestPasswordReset = async (e) => {
+    e.preventDefault();
+    setAuthError("");
+    setAuthNotice("");
+    setAuthBusy(true);
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(authEmail, {
+        redirectTo: window.location.origin,
+      });
+      if (error) throw error;
+      setAuthNotice("If an account exists for that email, a reset link is on its way.");
+    } catch (err) {
+      setAuthError(friendlyAuthError(err));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleSetNewPassword = async (e) => {
+    e.preventDefault();
+    setAuthError("");
+    setAuthBusy(true);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+      setIsPasswordRecovery(false);
+      setNewPassword("");
+      setAuthNotice("Password updated.");
+    } catch (err) {
+      setAuthError(friendlyAuthError(err));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
   const handleGoogleSignIn = async () => {
     setAuthError("");
     try {
@@ -1992,6 +2032,39 @@ export default function ShotTracker() {
     );
   }
 
+  if (isPasswordRecovery) {
+    return (
+      <div style={styles.app}>
+        <style>{fontImport}</style>
+        <div style={styles.lockScreen}>
+          <div style={styles.logoMark}><img src="/logo.png" alt="KaiFlow" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
+          <h1 style={styles.title}>Set a new password</h1>
+          <p style={styles.subtitle}>Choose a new password for your account.</p>
+
+          <form onSubmit={handleSetNewPassword} style={styles.lockForm}>
+            <input
+              style={styles.input}
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="New password"
+              autoComplete="new-password"
+              minLength={6}
+              autoFocus
+              required
+            />
+            <button type="submit" style={styles.newButton} disabled={authBusy}>
+              {authBusy ? "Please wait..." : "Update password"}
+            </button>
+          </form>
+
+          {authError && <p style={styles.lockError}>{authError}</p>}
+          {authNotice && <p style={styles.lockNotice}>{authNotice}</p>}
+        </div>
+      </div>
+    );
+  }
+
   if (!session) {
     return (
       <div style={styles.app}>
@@ -2001,63 +2074,112 @@ export default function ShotTracker() {
           <h1 style={styles.title}>KaiFlow</h1>
           <p style={styles.subtitle}>CRM plus Shot Tracker</p>
 
-          <button style={styles.googleButton} onClick={handleGoogleSignIn} type="button">
-            <svg width="16" height="16" viewBox="0 0 24 24">
-              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" />
-              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.99.67-2.26 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.85A11 11 0 0 0 12 23z" />
-              <path fill="#FBBC05" d="M5.84 14.1a6.6 6.6 0 0 1 0-4.2V7.05H2.18a11 11 0 0 0 0 9.9z" />
-              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1a11 11 0 0 0-9.82 6.05l3.66 2.85C6.71 7.3 9.14 5.38 12 5.38z" />
-            </svg>
-            Continue with Google
-          </button>
+          {authMode === "reset" ? (
+            <>
+              <form onSubmit={handleRequestPasswordReset} style={styles.lockForm}>
+                <input
+                  style={styles.input}
+                  type="email"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  placeholder="Email"
+                  autoComplete="email"
+                  autoFocus
+                  required
+                />
+                <button type="submit" style={styles.newButton} disabled={authBusy}>
+                  {authBusy ? "Please wait..." : "Send reset link"}
+                </button>
+              </form>
 
-          <div style={styles.dividerRow}>
-            <div style={styles.dividerLine} />
-            <span style={styles.dividerText}>or</span>
-            <div style={styles.dividerLine} />
-          </div>
+              {authError && <p style={styles.lockError}>{authError}</p>}
+              {authNotice && <p style={styles.lockNotice}>{authNotice}</p>}
 
-          <form onSubmit={handleAuthSubmit} style={styles.lockForm}>
-            <input
-              style={styles.input}
-              type="email"
-              value={authEmail}
-              onChange={(e) => setAuthEmail(e.target.value)}
-              placeholder="Email"
-              autoComplete="email"
-              autoFocus
-              required
-            />
-            <input
-              style={styles.input}
-              type="password"
-              value={authPassword}
-              onChange={(e) => setAuthPassword(e.target.value)}
-              placeholder="Password"
-              autoComplete={authMode === "signin" ? "current-password" : "new-password"}
-              minLength={6}
-              required
-            />
-            <button type="submit" style={styles.newButton} disabled={authBusy}>
-              {authBusy ? "Please wait..." : authMode === "signin" ? "Sign in" : "Create account"}
-            </button>
-          </form>
+              <button
+                style={styles.switchModeButton}
+                onClick={() => {
+                  setAuthMode("signin");
+                  setAuthError("");
+                  setAuthNotice("");
+                }}
+              >
+                Back to sign in
+              </button>
+            </>
+          ) : (
+            <>
+              <button style={styles.googleButton} onClick={handleGoogleSignIn} type="button">
+                <svg width="16" height="16" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" />
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.99.67-2.26 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.85A11 11 0 0 0 12 23z" />
+                  <path fill="#FBBC05" d="M5.84 14.1a6.6 6.6 0 0 1 0-4.2V7.05H2.18a11 11 0 0 0 0 9.9z" />
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1a11 11 0 0 0-9.82 6.05l3.66 2.85C6.71 7.3 9.14 5.38 12 5.38z" />
+                </svg>
+                Continue with Google
+              </button>
 
-          {authError && <p style={styles.lockError}>{authError}</p>}
-          {authNotice && <p style={styles.lockNotice}>{authNotice}</p>}
+              <div style={styles.dividerRow}>
+                <div style={styles.dividerLine} />
+                <span style={styles.dividerText}>or</span>
+                <div style={styles.dividerLine} />
+              </div>
 
-          <button
-            style={styles.switchModeButton}
-            onClick={() => {
-              setAuthMode(authMode === "signin" ? "signup" : "signin");
-              setAuthError("");
-              setAuthNotice("");
-            }}
-          >
-            {authMode === "signin"
-              ? "Need an account? Sign up"
-              : "Already have an account? Sign in"}
-          </button>
+              <form onSubmit={handleAuthSubmit} style={styles.lockForm}>
+                <input
+                  style={styles.input}
+                  type="email"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  placeholder="Email"
+                  autoComplete="email"
+                  autoFocus
+                  required
+                />
+                <input
+                  style={styles.input}
+                  type="password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder="Password"
+                  autoComplete={authMode === "signin" ? "current-password" : "new-password"}
+                  minLength={6}
+                  required
+                />
+                <button type="submit" style={styles.newButton} disabled={authBusy}>
+                  {authBusy ? "Please wait..." : authMode === "signin" ? "Sign in" : "Create account"}
+                </button>
+              </form>
+
+              {authError && <p style={styles.lockError}>{authError}</p>}
+              {authNotice && <p style={styles.lockNotice}>{authNotice}</p>}
+
+              {authMode === "signin" && (
+                <button
+                  style={styles.switchModeButton}
+                  onClick={() => {
+                    setAuthMode("reset");
+                    setAuthError("");
+                    setAuthNotice("");
+                  }}
+                >
+                  Forgot password?
+                </button>
+              )}
+
+              <button
+                style={styles.switchModeButton}
+                onClick={() => {
+                  setAuthMode(authMode === "signin" ? "signup" : "signin");
+                  setAuthError("");
+                  setAuthNotice("");
+                }}
+              >
+                {authMode === "signin"
+                  ? "Need an account? Sign up"
+                  : "Already have an account? Sign in"}
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
@@ -2603,6 +2725,7 @@ export default function ShotTracker() {
           onDelete={handleDeleteInvoice}
           isNew={!editingInvoice.id}
           currencySymbol={settings.currencySymbol}
+          hasProAccess={hasProAccess}
         />
       )}
     </div>
@@ -3765,14 +3888,23 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
             )}
           </div>
           <div style={styles.field}>
-            <label style={styles.label}>Currency</label>
-            <select style={styles.input} value={form.currency || "$"} onChange={set("currency")}>
-              {CURRENCIES.map((c) => (
-                <option key={c.code} value={c.symbol}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
+            <label style={styles.label}>
+              Currency {!hasProAccess && <span style={styles.proBadge}>PRO</span>}
+            </label>
+            {hasProAccess ? (
+              <select style={styles.input} value={form.currency || "$"} onChange={set("currency")}>
+                {CURRENCIES.map((c) => (
+                  <option key={c.code} value={c.symbol}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <>
+                <p style={styles.fieldHint}>{form.currency || "$"} (studio default)</p>
+                <p style={styles.fieldHint}>Multiple currencies are a Pro feature.</p>
+              </>
+            )}
           </div>
         </div>
 
@@ -4646,11 +4778,17 @@ function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew }) {
   );
 }
 
-function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySymbol }) {
+function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySymbol, hasProAccess }) {
   const [form, setForm] = useState({ currency: currencySymbol || "$", ...invoice });
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const balance = parseMoney(form.amount) - parseMoney(form.amountPaid);
   const cur = form.currency || currencySymbol || "$";
+
+  useEffect(() => {
+    if (!hasProAccess && form.currency !== (currencySymbol || "$")) {
+      setForm((f) => ({ ...f, currency: currencySymbol || "$" }));
+    }
+  }, [hasProAccess]);
 
   return (
     <div style={styles.overlay} onClick={onCancel}>
@@ -4674,14 +4812,23 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
             />
           </div>
           <div style={styles.field}>
-            <label style={styles.label}>Currency</label>
-            <select style={styles.input} value={form.currency || "$"} onChange={set("currency")}>
-              {CURRENCIES.map((c) => (
-                <option key={c.code} value={c.symbol}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
+            <label style={styles.label}>
+              Currency {!hasProAccess && <span style={styles.proBadge}>PRO</span>}
+            </label>
+            {hasProAccess ? (
+              <select style={styles.input} value={form.currency || "$"} onChange={set("currency")}>
+                {CURRENCIES.map((c) => (
+                  <option key={c.code} value={c.symbol}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <>
+                <p style={styles.fieldHint}>{currencySymbol} (studio default)</p>
+                <p style={styles.fieldHint}>Multiple currencies are a Pro feature.</p>
+              </>
+            )}
           </div>
         </div>
 
