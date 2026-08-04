@@ -106,7 +106,7 @@ Deno.serve(async (req) => {
     if (updateError) {
       // The file made it to Drive but we couldn't record it against the
       // shot, don't tell the freelancer this succeeded since the studio
-      // won't see it anywhere in KaiFlow.
+      // won't see it anywhere in Kairil.
       return new Response(
         JSON.stringify({
           error: "The file uploaded to Drive but couldn't be recorded, please tell the studio directly.",

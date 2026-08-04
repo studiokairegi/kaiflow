@@ -947,7 +947,9 @@ const TrendIcon = ({ direction = "up" }) => (
 export default function ShotTracker() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [authMode, setAuthMode] = useState("signin");
+  const [authMode, setAuthMode] = useState(() =>
+    new URLSearchParams(window.location.search).get("signup") === "1" ? "signup" : "signin"
+  );
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState("");
@@ -971,6 +973,9 @@ export default function ShotTracker() {
   const [fxUpdatedAt, setFxUpdatedAt] = useState(null);
   const [driveEmail, setDriveEmail] = useState(null);
   const [driveNotice, setDriveNotice] = useState("");
+  const [patreonEmail, setPatreonEmail] = useState(null);
+  const [patreonIsPro, setPatreonIsPro] = useState(false);
+  const [patreonNotice, setPatreonNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "teams"
   const [view, setView] = useState("projects");
@@ -1033,6 +1038,15 @@ export default function ShotTracker() {
     }
   }, []);
 
+  // Tidy up ?signup=1 from the URL once we've used it to pick the initial
+  // auth mode, no need for it to linger in the address bar.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("signup") === "1") {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
 
   const userId = session?.user?.id || null;
 
@@ -1090,6 +1104,62 @@ export default function ShotTracker() {
     } = await supabase.auth.getSession();
     if (!currentSession) return;
     window.location.href = `${functionUrl("google-drive-connect")}?token=${currentSession.access_token}`;
+  };
+
+  const loadPatreonStatus = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const { data: row } = await supabase
+        .from("patreon_connections")
+        .select("connected_email, is_pro")
+        .eq("user_id", userId)
+        .maybeSingle();
+      setPatreonEmail(row?.connected_email || null);
+      setPatreonIsPro(row?.is_pro || false);
+    } catch (e) {
+      console.error("Patreon status check failed:", e);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (userId) loadPatreonStatus();
+  }, [userId, loadPatreonStatus]);
+
+  // Picks up ?patreon=connected after the OAuth redirect lands back on the
+  // app. The callback function already updated user_settings.plan on the
+  // server, this just refreshes local state to match and shows a notice.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const patreonResult = params.get("patreon");
+    if (!patreonResult) return;
+    if (patreonResult === "connected") {
+      setPatreonNotice("Patreon connected.");
+      loadPatreonStatus();
+      // Refresh settings directly rather than depending on loadSettings,
+      // which is declared further down this component.
+      supabase
+        .from("user_settings")
+        .select("*")
+        .eq("user_id", userId)
+        .maybeSingle()
+        .then(({ data: row }) => {
+          if (row) setSettings(settingsFromRow(row));
+        });
+    } else if (patreonResult === "error") {
+      setPatreonNotice("Couldn't connect Patreon, please try again from Settings.");
+    }
+    params.delete("patreon");
+    const cleanUrl = `${window.location.pathname}${params.toString() ? "?" + params.toString() : ""}`;
+    window.history.replaceState({}, "", cleanUrl);
+    setTimeout(() => setPatreonNotice(""), 6000);
+  }, [loadPatreonStatus]);
+
+  const handleConnectPatreon = async () => {
+    const {
+      data: { session: currentSession },
+    } = await supabase.auth.getSession();
+    if (!currentSession) return;
+    window.location.href = `${functionUrl("patreon-connect")}?token=${currentSession.access_token}`;
   };
 
   const handleCreateDriveFolders = async (projectId, projectName) => {
@@ -2238,6 +2308,15 @@ export default function ShotTracker() {
         </div>
       )}
 
+      {patreonNotice && (
+        <div style={styles.driveToast}>
+          <span>{patreonNotice}</span>
+          <button style={styles.iconButton} onClick={() => setPatreonNotice("")}>
+            <CloseIcon />
+          </button>
+        </div>
+      )}
+
       <header style={styles.header}>
         <div style={styles.headerLeft}>
           {view === "board" ? (
@@ -2667,6 +2746,9 @@ export default function ShotTracker() {
           email={session.user.email}
           driveEmail={driveEmail}
           onConnectDrive={handleConnectDrive}
+          patreonEmail={patreonEmail}
+          patreonIsPro={patreonIsPro}
+          onConnectPatreon={handleConnectPatreon}
           onReplayTutorial={handleReplayTutorial}
           onCancel={() => setShowSettingsModal(false)}
           onSave={handleSaveSettings}
@@ -3394,7 +3476,7 @@ function TutorialModal({ onComplete, onStepChange }) {
   );
 }
 
-function SettingsModal({ settings, email, driveEmail, onConnectDrive, onReplayTutorial, onCancel, onSave }) {
+function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEmail, patreonIsPro, onConnectPatreon, onReplayTutorial, onCancel, onSave }) {
   const [form, setForm] = useState(settings);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const setMilestone = (i) => (e) => {
@@ -3430,8 +3512,30 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, onReplayTu
               <p style={styles.fieldHint}>
                 Teams, Client Portal, Freelancer links, milestones, and multiple currencies are Pro features.
                 Free accounts are also limited to {FREE_PROJECT_LIMIT} active projects.
-                Paid plans are launching soon.
               </p>
+            </>
+          )}
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Patreon</label>
+          {patreonEmail ? (
+            <>
+              <p style={{ ...styles.fieldHint, color: patreonIsPro ? "#3DDC84" : undefined }}>
+                Connected as {patreonEmail} {patreonIsPro ? "\u00b7 Pro member" : "\u00b7 not currently a Pro member"}
+              </p>
+              <button type="button" style={styles.addRevisionButton} onClick={onConnectPatreon}>
+                Refresh status
+              </button>
+            </>
+          ) : (
+            <>
+              <p style={styles.fieldHint}>
+                Connect your Patreon account to unlock Pro automatically if you're subscribed to the Pro tier.
+              </p>
+              <button type="button" style={styles.addRevisionButton} onClick={onConnectPatreon}>
+                Connect Patreon
+              </button>
             </>
           )}
         </div>

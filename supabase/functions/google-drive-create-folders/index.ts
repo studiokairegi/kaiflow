@@ -3,7 +3,7 @@
 // Body: { projectId: string, projectName: string }
 //
 // Creates References / Cuts / Deliverables subfolders under a per-project
-// folder, itself under a shared "KaiFlow Projects" folder in the studio's
+// folder, itself under a shared "Kairil Projects" folder in the studio's
 // Drive. Returns the folder ids/urls so the app can save them on the
 // project row and link to them.
 
@@ -73,7 +73,7 @@ Deno.serve(async (req) => {
 
     let rootFolderId = connection.root_folder_id;
     if (!rootFolderId) {
-      const root = await createDriveFolder(accessToken, "KaiFlow Projects");
+      const root = await createDriveFolder(accessToken, "Kairil Projects");
       rootFolderId = root.id;
       const { error: rootUpdateError } = await supabase
         .from("google_drive_connections")
@@ -82,7 +82,7 @@ Deno.serve(async (req) => {
       if (rootUpdateError) {
         // Not fatal for this run since we already have the id in memory,
         // but log it since a repeat failure here would create a new
-        // "KaiFlow Projects" folder every time instead of reusing this one.
+        // "Kairil Projects" folder every time instead of reusing this one.
         console.error("Failed to save root_folder_id:", rootUpdateError.message);
       }
     }
