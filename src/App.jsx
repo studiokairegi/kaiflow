@@ -48,6 +48,15 @@ const REVIEW_LABELS = {
 const REVIEW_STATUS_ORDER = ["in_progress", "waiting", "approved", "revisions"];
 
 const FREE_PROJECT_LIMIT = 3;
+const FREE_BUDGET_PLANNER_LIMIT = 3;
+
+const PROFIT_PRESETS = [10, 15, 20, 25, 30, 40, 50, 60];
+
+// Direct checkout link for the Pro tier, built from the values pulled out
+// of the real checkout URL. Worth a live click-through test since Patreon's
+// URL shape isn't officially documented, this is reverse-engineered.
+const PATREON_CHECKOUT_URL = "https://www.patreon.com/checkout/11039549?rid=29264433";
+const PATREON_MANAGE_URL = "https://www.patreon.com/settings/memberships";
 
 const LEAD_STAGES = [
   { id: "pool", label: "Email Pool" },
@@ -325,6 +334,60 @@ function expenseToRow(expense, userId) {
     date: expense.date,
     user_id: userId,
   };
+}
+
+function emptyBudgetPlanner(overrides = {}) {
+  return {
+    name: "",
+    clientName: "",
+    projectType: "",
+    budget: "",
+    currency: "$",
+    targetProfitPercent: 25,
+    notes: "",
+    ...overrides,
+  };
+}
+
+function budgetPlannerFromRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    clientName: row.client_name || "",
+    projectType: row.project_type || "",
+    budget: row.budget,
+    currency: row.currency || "$",
+    targetProfitPercent: row.target_profit_percent,
+    notes: row.notes || "",
+    createdAt: row.created_at,
+  };
+}
+
+function budgetPlannerToRow(plan, userId) {
+  return {
+    name: plan.name || "Untitled plan",
+    client_name: plan.clientName,
+    project_type: plan.projectType,
+    budget: parseMoney(plan.budget),
+    currency: plan.currency || "$",
+    target_profit_percent: parseMoney(plan.targetProfitPercent),
+    notes: plan.notes,
+    user_id: userId,
+  };
+}
+
+// Phase 5: live recalculation, this is the math the whole planner hinges on.
+// Budget is treated as the client-facing price; production budget is what's
+// left to actually spend once the target profit is carved out.
+function computeBudgetPlan(plan) {
+  const budget = parseMoney(plan.budget);
+  const profitPercent = parseMoney(plan.targetProfitPercent);
+  const profit = budget * (profitPercent / 100);
+  const productionBudget = budget - profit;
+  let health = "green";
+  if (profitPercent < 10) health = "red";
+  else if (profitPercent < 20) health = "yellow";
+  return { budget, profitPercent, profit, productionBudget, health };
 }
 
 const AVAILABILITY_OPTIONS = ["available", "busy", "unavailable"];
@@ -966,8 +1029,9 @@ export default function ShotTracker() {
     expenses: [],
     teamMembers: [],
     activity: [],
+    budgetPlanners: [],
   });
-  const { projects, cards, leads, invoices, expenses, teamMembers, activity } = data;
+  const { projects, cards, leads, invoices, expenses, teamMembers, activity, budgetPlanners } = data;
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [fxRates, setFxRates] = useState({});
   const [fxUpdatedAt, setFxUpdatedAt] = useState(null);
@@ -986,10 +1050,12 @@ export default function ShotTracker() {
   const [editingLead, setEditingLead] = useState(null);
   const [editingInvoice, setEditingInvoice] = useState(null);
   const [editingExpense, setEditingExpense] = useState(null);
+  const [editingBudgetPlanner, setEditingBudgetPlanner] = useState(null);
   const [editingTeamMember, setEditingTeamMember] = useState(null);
   const [showMilestoneModal, setShowMilestoneModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showTutorial, setShowTutorial] = useState(false);
+  const [showSupportModal, setShowSupportModal] = useState(false);
   const [tutorialHighlightTarget, setTutorialHighlightTarget] = useState(null);
   const [pendingLeadLinkId, setPendingLeadLinkId] = useState(null);
   const [dragOverStage, setDragOverStage] = useState(null);
@@ -1124,6 +1190,29 @@ export default function ShotTracker() {
   useEffect(() => {
     if (userId) loadPatreonStatus();
   }, [userId, loadPatreonStatus]);
+
+  // "Become a Patron" opens Patreon's checkout in a new tab, there's no
+  // redirect back into the app with a query param the way the OAuth connect
+  // flow has, so this is what closes that gap: if someone's connected but
+  // not yet Pro, re-check silently whenever they return to this tab, rather
+  // than making them remember to hit "Refresh status" themselves.
+  useEffect(() => {
+    if (!userId || patreonIsPro || !patreonEmail) return;
+    const handleVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      loadPatreonStatus();
+      supabase
+        .from("user_settings")
+        .select("*")
+        .eq("user_id", userId)
+        .maybeSingle()
+        .then(({ data: row }) => {
+          if (row) setSettings(settingsFromRow(row));
+        });
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [userId, patreonIsPro, patreonEmail, loadPatreonStatus]);
 
   // Picks up ?patreon=connected after the OAuth redirect lands back on the
   // app. The callback function already updated user_settings.plan on the
@@ -1270,6 +1359,16 @@ export default function ShotTracker() {
     setShowTutorial(true);
   };
 
+  const handleSubmitSupportMessage = async (message) => {
+    const { error } = await supabase.from("support_messages").insert({
+      user_id: userId,
+      email: session?.user?.email || "",
+      message,
+      page_context: `${workspace}${view === "board" ? " / board" : ""}`,
+    });
+    if (error) throw error;
+  };
+
   const handleTutorialStepChange = (targetTab) => {
     setTutorialHighlightTarget(targetTab);
     if (targetTab && targetTab !== "settings") {
@@ -1282,7 +1381,7 @@ export default function ShotTracker() {
     if (!userId) return;
     setLoading(true);
     try {
-      const [projectsRes, shotsRes, leadsRes, invoicesRes, expensesRes, teamRes, activityRes] = await Promise.all([
+      const [projectsRes, shotsRes, leadsRes, invoicesRes, expensesRes, teamRes, activityRes, plannersRes] = await Promise.all([
         supabase.from("projects").select("*").order("created_at"),
         supabase.from("shots").select("*").order("created_at"),
         supabase.from("leads").select("*").order("created_at"),
@@ -1290,6 +1389,7 @@ export default function ShotTracker() {
         supabase.from("expenses").select("*").order("created_at"),
         supabase.from("team_members").select("*").order("created_at"),
         supabase.from("activity_log").select("*").order("created_at", { ascending: false }),
+        supabase.from("budget_planners").select("*").order("created_at", { ascending: false }),
       ]);
       if (projectsRes.error) throw projectsRes.error;
       if (shotsRes.error) throw shotsRes.error;
@@ -1298,6 +1398,7 @@ export default function ShotTracker() {
       if (expensesRes.error) throw expensesRes.error;
       if (teamRes.error) throw teamRes.error;
       if (activityRes.error) throw activityRes.error;
+      if (plannersRes.error) throw plannersRes.error;
       const nextProjects = (projectsRes.data || []).map((p) => ({
         id: p.id,
         name: p.name,
@@ -1328,6 +1429,7 @@ export default function ShotTracker() {
         message: a.description,
         createdAt: a.created_at,
       }));
+      const nextBudgetPlanners = (plannersRes.data || []).map(budgetPlannerFromRow);
       setData({
         projects: nextProjects,
         cards: nextCards,
@@ -1336,6 +1438,7 @@ export default function ShotTracker() {
         expenses: nextExpenses,
         teamMembers: nextTeamMembers,
         activity: nextActivity,
+        budgetPlanners: nextBudgetPlanners,
       });
     } catch (e) {
       console.error("Shot Tracker load failed:", e);
@@ -1919,6 +2022,57 @@ export default function ShotTracker() {
     setEditingExpense(null);
   };
 
+  const handleSaveBudgetPlanner = async (plan) => {
+    if (!plan.id && atBudgetPlannerLimit) {
+      flashSave(false);
+      return;
+    }
+    setSaveState("saving");
+    try {
+      if (plan.id) {
+        const { error } = await supabase
+          .from("budget_planners")
+          .update(budgetPlannerToRow(plan, userId))
+          .eq("id", plan.id);
+        if (error) throw error;
+        setData((prev) => ({
+          ...prev,
+          budgetPlanners: prev.budgetPlanners.map((p) => (p.id === plan.id ? { ...plan } : p)),
+        }));
+      } else {
+        const { data: inserted, error } = await supabase
+          .from("budget_planners")
+          .insert(budgetPlannerToRow(plan, userId))
+          .select()
+          .single();
+        if (error) throw error;
+        setData((prev) => ({
+          ...prev,
+          budgetPlanners: [budgetPlannerFromRow(inserted), ...prev.budgetPlanners],
+        }));
+      }
+      flashSave(true);
+    } catch (e) {
+      console.error("Budget planner save failed:", e);
+      flashSave(false);
+    }
+    setEditingBudgetPlanner(null);
+  };
+
+  const handleDeleteBudgetPlanner = async (id) => {
+    setSaveState("saving");
+    try {
+      const { error } = await supabase.from("budget_planners").delete().eq("id", id);
+      if (error) throw error;
+      setData((prev) => ({ ...prev, budgetPlanners: prev.budgetPlanners.filter((p) => p.id !== id) }));
+      flashSave(true);
+    } catch (e) {
+      console.error("Budget planner delete failed:", e);
+      flashSave(false);
+    }
+    setEditingBudgetPlanner(null);
+  };
+
   const handleExport = () => {
     const payload = JSON.stringify(data, null, 2);
     const blob = new Blob([payload], { type: "application/json" });
@@ -2010,7 +2164,7 @@ export default function ShotTracker() {
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
-    setData({ projects: [], cards: [], leads: [], invoices: [], expenses: [], teamMembers: [], activity: [] });
+    setData({ projects: [], cards: [], leads: [], invoices: [], expenses: [], teamMembers: [], activity: [], budgetPlanners: [] });
     setView("projects");
     setSelectedProjectId(null);
   };
@@ -2294,6 +2448,7 @@ export default function ShotTracker() {
   const hasProAccess = settings.isAdmin || settings.plan === "pro";
   const activeProjectCount = projects.filter((p) => !p.archived).length;
   const atProjectLimit = !hasProAccess && activeProjectCount >= FREE_PROJECT_LIMIT;
+  const atBudgetPlannerLimit = !hasProAccess && budgetPlanners.length >= FREE_BUDGET_PLANNER_LIMIT;
 
   return (
     <div style={styles.app}>
@@ -2406,6 +2561,20 @@ export default function ShotTracker() {
               <PlusIcon />
               New member
             </button>
+          ) : workspace === "planner" ? (
+            <button
+              style={styles.newButton}
+              onClick={() => setEditingBudgetPlanner(emptyBudgetPlanner({ currency: settings.currencySymbol }))}
+              disabled={atBudgetPlannerLimit}
+              title={
+                atBudgetPlannerLimit
+                  ? `Free plan is limited to ${FREE_BUDGET_PLANNER_LIMIT} budget plans. Delete one or upgrade to Pro.`
+                  : undefined
+              }
+            >
+              <PlusIcon />
+              New plan
+            </button>
           ) : workspace === "dashboard" ? null : (
             <button
               style={styles.newButton}
@@ -2456,6 +2625,12 @@ export default function ShotTracker() {
             onClick={() => setWorkspace("teams")}
           >
             Teams
+          </button>
+          <button
+            style={{ ...styles.tabButton, ...(workspace === "planner" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("planner")}
+          >
+            Planner
           </button>
         </div>
       )}
@@ -2616,6 +2791,15 @@ export default function ShotTracker() {
         />
       )}
 
+      {view === "projects" && workspace === "planner" && (
+        <BudgetPlannerPanel
+          plans={budgetPlanners}
+          settings={settings}
+          onEdit={setEditingBudgetPlanner}
+          atLimit={atBudgetPlannerLimit}
+        />
+      )}
+
       {view === "board" && boardTab === "shots" && (
         <div style={{ ...styles.board, touchAction: dragVisual ? "none" : "auto" }}>
           {STAGES.map((stage) => {
@@ -2750,6 +2934,10 @@ export default function ShotTracker() {
           patreonIsPro={patreonIsPro}
           onConnectPatreon={handleConnectPatreon}
           onReplayTutorial={handleReplayTutorial}
+          onOpenSupport={() => {
+            setShowSettingsModal(false);
+            setShowSupportModal(true);
+          }}
           onCancel={() => setShowSettingsModal(false)}
           onSave={handleSaveSettings}
         />
@@ -2757,6 +2945,14 @@ export default function ShotTracker() {
 
       {showTutorial && (
         <TutorialModal onComplete={handleCompleteTutorial} onStepChange={handleTutorialStepChange} />
+      )}
+
+      {showSupportModal && (
+        <SupportModal
+          email={session.user.email}
+          onSubmit={handleSubmitSupportMessage}
+          onCancel={() => setShowSupportModal(false)}
+        />
       )}
 
       {editingExpense && (
@@ -2767,6 +2963,16 @@ export default function ShotTracker() {
           onSave={handleSaveExpense}
           onDelete={handleDeleteExpense}
           isNew={!editingExpense.id}
+        />
+      )}
+
+      {editingBudgetPlanner && (
+        <BudgetPlannerEditor
+          plan={editingBudgetPlanner}
+          onCancel={() => setEditingBudgetPlanner(null)}
+          onSave={handleSaveBudgetPlanner}
+          onDelete={handleDeleteBudgetPlanner}
+          isNew={!editingBudgetPlanner.id}
         />
       )}
 
@@ -3240,6 +3446,67 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew }) {
   );
 }
 
+function BudgetPlannerPanel({ plans, settings, onEdit, atLimit }) {
+  if (plans.length === 0) {
+    return (
+      <div style={styles.invoicesWrap}>
+        <div style={styles.projectsEmpty}>
+          <div style={styles.projectsEmptyIcon}><InvoiceIcon /></div>
+          <p style={styles.projectsEmptyText}>No budget plans yet</p>
+          <p style={styles.fieldHint}>
+            Sketch out a project's numbers before you commit to it, budget, target profit, and what's actually
+            left to spend on production.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.invoicesWrap}>
+      {atLimit && (
+        <p style={styles.fieldHint}>
+          You're at the free plan's limit of {FREE_BUDGET_PLANNER_LIMIT} budget plans. Delete one or upgrade
+          to Pro for unlimited plans.
+        </p>
+      )}
+      <div style={styles.invoiceList}>
+        {plans.map((plan) => {
+          const calc = computeBudgetPlan(plan);
+          const cur = plan.currency || settings.currencySymbol || "$";
+          const healthColor =
+            calc.health === "green" ? "#3DDC84" : calc.health === "yellow" ? "#F2A65A" : "#FF4D4D";
+          return (
+            <div key={plan.id} className="kf-card" style={styles.invoiceCard} onClick={() => onEdit(plan)}>
+              <div style={styles.invoiceCardTop}>
+                <span style={styles.invoiceNumber}>{plan.name || "Untitled plan"}</span>
+                <span style={{ ...styles.invoiceStatusTag, color: healthColor, borderColor: healthColor }}>
+                  {calc.profitPercent}% profit
+                </span>
+              </div>
+              {plan.clientName && <div style={styles.cardMeta}>{plan.clientName}</div>}
+              <div style={styles.invoiceAmountsRow}>
+                <span style={styles.fieldHint}>
+                  Budget {cur}
+                  {formatMoney(calc.budget)}
+                </span>
+                <span style={styles.fieldHint}>
+                  Production {cur}
+                  {formatMoney(calc.productionBudget)}
+                </span>
+                <span style={{ ...styles.fieldHint, color: healthColor }}>
+                  Profit {cur}
+                  {formatMoney(calc.profit)}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToLeads }) {
   const stats = computeDashboardStats(projects, cards, leads, invoices, fxRates);
   const cur = "$"; // Dashboard totals are always USD-converted for cross-project consistency
@@ -3407,8 +3674,13 @@ function ProUpgradePrompt({ feature, inline }) {
       </div>
       <p style={{ fontSize: 14, fontWeight: 600, color: paper, margin: 0 }}>{feature} is a Pro feature</p>
       <p style={{ ...styles.fieldHint, textAlign: "center", maxWidth: 320 }}>
-        Kairil Pro unlocks this along with the rest of the studio toolkit. Paid plans are launching soon,
-        reach out if you'd like early access.
+        Kairil Pro unlocks this along with the rest of the studio toolkit.
+      </p>
+      <a href={PATREON_CHECKOUT_URL} target="_blank" rel="noreferrer" style={styles.newButton}>
+        Upgrade with Patreon
+      </a>
+      <p style={{ ...styles.fieldHint, fontSize: 12 }}>
+        Already subscribed? Connect Patreon in Settings to unlock it.
       </p>
     </>
   );
@@ -3416,6 +3688,74 @@ function ProUpgradePrompt({ feature, inline }) {
     return <div style={{ ...styles.proLockWrap, padding: "16px 0" }}>{content}</div>;
   }
   return <div style={styles.proLockWrap}>{content}</div>;
+}
+
+function SupportModal({ email, onSubmit, onCancel }) {
+  const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSend = async () => {
+    if (!message.trim()) return;
+    setSending(true);
+    setError("");
+    try {
+      await onSubmit(message.trim());
+      setSent(true);
+    } catch (e) {
+      setError("Couldn't send that, please try again or email support@kairil.studiokairegi.com directly.");
+    }
+    setSending(false);
+  };
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <span style={styles.modalTitle}>{sent ? "Message sent" : "Report a problem"}</span>
+          <button style={styles.iconButton} onClick={onCancel}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        {sent ? (
+          <p style={{ fontSize: 14, lineHeight: 1.6, color: paper, margin: 0 }}>
+            Thanks, that's been sent through. If it's urgent, you can also reach out directly at
+            support@kairil.studiokairegi.com.
+          </p>
+        ) : (
+          <>
+            <p style={styles.fieldHint}>
+              Tell us what happened, we'll see it against your account ({email}) along with which part of the
+              app you were in.
+            </p>
+            <textarea
+              style={styles.textarea}
+              rows={5}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder="What went wrong, or what would you like to see?"
+              autoFocus
+            />
+            {error && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{error}</p>}
+          </>
+        )}
+
+        <div style={styles.modalFooter}>
+          <button style={styles.cancelButton} onClick={onCancel}>
+            {sent ? "Close" : "Cancel"}
+          </button>
+          <div style={{ flex: 1 }} />
+          {!sent && (
+            <button style={styles.saveButton} onClick={handleSend} disabled={sending || !message.trim()}>
+              {sending ? "Sending..." : "Send"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function TutorialModal({ onComplete, onStepChange }) {
@@ -3476,13 +3816,26 @@ function TutorialModal({ onComplete, onStepChange }) {
   );
 }
 
-function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEmail, patreonIsPro, onConnectPatreon, onReplayTutorial, onCancel, onSave }) {
+function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEmail, patreonIsPro, onConnectPatreon, onReplayTutorial, onOpenSupport, onCancel, onSave }) {
   const [form, setForm] = useState(settings);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const setMilestone = (i) => (e) => {
     const next = [...form.milestoneDefaults];
     next[i] = e.target.value;
     setForm({ ...form, milestoneDefaults: next });
+  };
+
+  const [supportMessages, setSupportMessages] = useState(null);
+  const [loadingInbox, setLoadingInbox] = useState(false);
+  const loadSupportInbox = async () => {
+    setLoadingInbox(true);
+    const { data } = await supabase
+      .from("support_messages")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(30);
+    setSupportMessages(data || []);
+    setLoadingInbox(false);
   };
 
   return (
@@ -3503,7 +3856,7 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
         <div style={styles.field}>
           <label style={styles.label}>Plan</label>
           {settings.isAdmin ? (
-            <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>Admin {"\u2014"} full access</p>
+            <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>{"\ud83d\udc51"} Admin {"\u2014"} full access</p>
           ) : settings.plan === "pro" ? (
             <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>Pro</p>
           ) : (
@@ -3519,16 +3872,12 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
 
         <div style={styles.field}>
           <label style={styles.label}>Patreon</label>
-          {patreonEmail ? (
-            <>
-              <p style={{ ...styles.fieldHint, color: patreonIsPro ? "#3DDC84" : undefined }}>
-                Connected as {patreonEmail} {patreonIsPro ? "\u00b7 Pro member" : "\u00b7 not currently a Pro member"}
-              </p>
-              <button type="button" style={styles.addRevisionButton} onClick={onConnectPatreon}>
-                Refresh status
-              </button>
-            </>
-          ) : (
+          {settings.isAdmin ? (
+            <p style={styles.fieldHint}>
+              {patreonEmail ? `Connected as ${patreonEmail}` : "Not connected"}, admin override enabled so this
+              doesn't affect your access either way.
+            </p>
+          ) : !patreonEmail ? (
             <>
               <p style={styles.fieldHint}>
                 Connect your Patreon account to unlock Pro automatically if you're subscribed to the Pro tier.
@@ -3537,15 +3886,72 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
                 Connect Patreon
               </button>
             </>
+          ) : patreonIsPro ? (
+            <>
+              <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>
+                {"\u2713"} Connected as {patreonEmail} {"\u00b7"} Pro member
+              </p>
+              <a
+                href={PATREON_MANAGE_URL}
+                target="_blank"
+                rel="noreferrer"
+                style={{ ...styles.fieldHint, color: teal }}
+              >
+                Manage membership on Patreon
+              </a>
+            </>
+          ) : (
+            <>
+              <p style={styles.fieldHint}>Connected as {patreonEmail}, not currently subscribed to Pro.</p>
+              <div style={styles.fieldRow}>
+                <a href={PATREON_CHECKOUT_URL} target="_blank" rel="noreferrer" style={styles.newButton}>
+                  Become a Patron
+                </a>
+                <button type="button" style={styles.addRevisionButton} onClick={onConnectPatreon}>
+                  Refresh status
+                </button>
+              </div>
+            </>
           )}
         </div>
 
         <div style={styles.field}>
           <label style={styles.label}>Help</label>
-          <button type="button" style={styles.addRevisionButton} onClick={onReplayTutorial}>
-            Replay tutorial
-          </button>
+          <div style={styles.fieldRow}>
+            <button type="button" style={styles.addRevisionButton} onClick={onReplayTutorial}>
+              Replay tutorial
+            </button>
+            <button type="button" style={styles.addRevisionButton} onClick={onOpenSupport}>
+              Report a problem
+            </button>
+          </div>
         </div>
+
+        {settings.isAdmin && (
+          <div style={styles.field}>
+            <label style={styles.label}>Support inbox</label>
+            {supportMessages === null ? (
+              <button type="button" style={styles.addRevisionButton} onClick={loadSupportInbox} disabled={loadingInbox}>
+                {loadingInbox ? "Loading..." : "Load recent messages"}
+              </button>
+            ) : supportMessages.length === 0 ? (
+              <p style={styles.fieldHint}>Nothing's come in yet.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 220, overflowY: "auto" }}>
+                {supportMessages.map((m) => (
+                  <div key={m.id} style={{ ...styles.fileNameRow, flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
+                      <span style={{ ...styles.fieldHint, color: paper }}>{m.email}</span>
+                      <span style={styles.fieldHint}>{new Date(m.created_at).toLocaleDateString()}</span>
+                    </div>
+                    <p style={{ fontSize: 13, color: paper, margin: 0 }}>{m.message}</p>
+                    {m.page_context && <span style={styles.fieldHint}>from: {m.page_context}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div style={styles.field}>
           <label style={styles.label}>Google Drive</label>
@@ -4789,6 +5195,147 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
           </button>
           <button style={styles.saveButton} onClick={() => onSave(form)}>
             Save expense
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BudgetPlannerEditor({ plan, onCancel, onSave, onDelete, isNew }) {
+  const [form, setForm] = useState(plan);
+  const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+  const setPreset = (percent) => setForm({ ...form, targetProfitPercent: percent });
+
+  const calc = computeBudgetPlan(form);
+  const cur = form.currency || "$";
+  const healthColor = calc.health === "green" ? "#3DDC84" : calc.health === "yellow" ? "#F2A65A" : "#FF4D4D";
+  const healthLabel = calc.health === "green" ? "Healthy" : calc.health === "yellow" ? "Warning" : "Low profit";
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <span style={styles.modalTitle}>{isNew ? "New budget plan" : "Edit budget plan"}</span>
+          <button style={styles.iconButton} onClick={onCancel}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Plan name</label>
+          <input
+            style={styles.input}
+            value={form.name}
+            onChange={set("name")}
+            placeholder="e.g. 15s Anime Trailer"
+            autoFocus
+          />
+        </div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Client name</label>
+            <input style={styles.input} value={form.clientName} onChange={set("clientName")} placeholder="Optional" />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Project type</label>
+            <input
+              style={styles.input}
+              value={form.projectType}
+              onChange={set("projectType")}
+              placeholder="e.g. Trailer"
+            />
+          </div>
+        </div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Budget</label>
+            <input style={styles.input} value={form.budget} onChange={set("budget")} placeholder="e.g. 5000" />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Currency</label>
+            <select style={styles.input} value={form.currency || "$"} onChange={set("currency")}>
+              {CURRENCIES.map((c) => (
+                <option key={c.code} value={c.symbol}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Target profit</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+            {PROFIT_PRESETS.map((p) => (
+              <button
+                key={p}
+                type="button"
+                style={{
+                  ...styles.tabButton,
+                  ...(Number(form.targetProfitPercent) === p ? styles.tabButtonActive : {}),
+                }}
+                onClick={() => setPreset(p)}
+              >
+                {p}%{p === 25 ? " (recommended)" : ""}
+              </button>
+            ))}
+          </div>
+          <input
+            style={styles.input}
+            value={form.targetProfitPercent}
+            onChange={set("targetProfitPercent")}
+            placeholder="Custom %"
+          />
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Notes</label>
+          <textarea
+            style={styles.textarea}
+            rows={3}
+            value={form.notes}
+            onChange={set("notes")}
+            placeholder="Anything worth remembering about this plan..."
+          />
+        </div>
+
+        <div style={styles.fieldDivider}>Live summary</div>
+        <div style={styles.budgetSummaryRow}>
+          <div style={styles.budgetStat}>
+            <span style={styles.label}>Production budget</span>
+            <span style={styles.budgetStatValue}>
+              {cur}
+              {formatMoney(calc.productionBudget)}
+            </span>
+            <span style={styles.fieldHint}>What's left to actually spend on production</span>
+          </div>
+          <div style={styles.budgetStat}>
+            <span style={styles.label}>Expected profit</span>
+            <span style={{ ...styles.budgetStatValue, color: healthColor }}>
+              {cur}
+              {formatMoney(calc.profit)}
+            </span>
+            <span style={{ ...styles.fieldHint, color: healthColor }}>
+              {healthLabel} {"\u00b7"} {calc.profitPercent}% margin
+            </span>
+          </div>
+        </div>
+
+        <div style={styles.modalFooter}>
+          {!isNew && (
+            <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
+              Delete
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button style={styles.cancelButton} onClick={onCancel}>
+            Cancel
+          </button>
+          <button style={styles.saveButton} onClick={() => onSave({ ...form, name: form.name || "Untitled plan" })}>
+            Save plan
           </button>
         </div>
       </div>
