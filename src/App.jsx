@@ -1039,6 +1039,7 @@ export default function ShotTracker() {
   const [driveNotice, setDriveNotice] = useState("");
   const [patreonEmail, setPatreonEmail] = useState(null);
   const [patreonIsPro, setPatreonIsPro] = useState(false);
+  const [patreonConnected, setPatreonConnected] = useState(false);
   const [patreonNotice, setPatreonNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "teams"
@@ -1180,6 +1181,7 @@ export default function ShotTracker() {
         .select("connected_email, is_pro")
         .eq("user_id", userId)
         .maybeSingle();
+      setPatreonConnected(!!row);
       setPatreonEmail(row?.connected_email || null);
       setPatreonIsPro(row?.is_pro || false);
     } catch (e) {
@@ -1197,7 +1199,7 @@ export default function ShotTracker() {
   // not yet Pro, re-check silently whenever they return to this tab, rather
   // than making them remember to hit "Refresh status" themselves.
   useEffect(() => {
-    if (!userId || patreonIsPro || !patreonEmail) return;
+    if (!userId || patreonIsPro || !patreonConnected) return;
     const handleVisibility = () => {
       if (document.visibilityState !== "visible") return;
       loadPatreonStatus();
@@ -1212,7 +1214,7 @@ export default function ShotTracker() {
     };
     document.addEventListener("visibilitychange", handleVisibility);
     return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, [userId, patreonIsPro, patreonEmail, loadPatreonStatus]);
+  }, [userId, patreonIsPro, patreonConnected, loadPatreonStatus]);
 
   // Picks up ?patreon=connected after the OAuth redirect lands back on the
   // app. The callback function already updated user_settings.plan on the
@@ -2931,6 +2933,7 @@ export default function ShotTracker() {
           driveEmail={driveEmail}
           onConnectDrive={handleConnectDrive}
           patreonEmail={patreonEmail}
+          patreonConnected={patreonConnected}
           patreonIsPro={patreonIsPro}
           onConnectPatreon={handleConnectPatreon}
           onReplayTutorial={handleReplayTutorial}
@@ -3816,7 +3819,7 @@ function TutorialModal({ onComplete, onStepChange }) {
   );
 }
 
-function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEmail, patreonIsPro, onConnectPatreon, onReplayTutorial, onOpenSupport, onCancel, onSave }) {
+function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEmail, patreonIsPro, patreonConnected, onConnectPatreon, onReplayTutorial, onOpenSupport, onCancel, onSave }) {
   const [form, setForm] = useState(settings);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const setMilestone = (i) => (e) => {
@@ -3874,10 +3877,10 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
           <label style={styles.label}>Patreon</label>
           {settings.isAdmin ? (
             <p style={styles.fieldHint}>
-              {patreonEmail ? `Connected as ${patreonEmail}` : "Not connected"}, admin override enabled so this
-              doesn't affect your access either way.
+              {patreonConnected ? `Connected${patreonEmail ? ` as ${patreonEmail}` : ""}` : "Not connected"}, admin
+              override enabled so this doesn't affect your access either way.
             </p>
-          ) : !patreonEmail ? (
+          ) : !patreonConnected ? (
             <>
               <p style={styles.fieldHint}>
                 Connect your Patreon account to unlock Pro automatically if you're subscribed to the Pro tier.
@@ -3889,7 +3892,7 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
           ) : patreonIsPro ? (
             <>
               <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>
-                {"\u2713"} Connected as {patreonEmail} {"\u00b7"} Pro member
+                {"\u2713"} Connected{patreonEmail ? ` as ${patreonEmail}` : ""} {"\u00b7"} Pro member
               </p>
               <a
                 href={PATREON_MANAGE_URL}
@@ -3902,7 +3905,9 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
             </>
           ) : (
             <>
-              <p style={styles.fieldHint}>Connected as {patreonEmail}, not currently subscribed to Pro.</p>
+              <p style={styles.fieldHint}>
+                Connected{patreonEmail ? ` as ${patreonEmail}` : ""}, not currently subscribed to Pro.
+              </p>
               <div style={styles.fieldRow}>
                 <a href={PATREON_CHECKOUT_URL} target="_blank" rel="noreferrer" style={styles.newButton}>
                   Become a Patron
