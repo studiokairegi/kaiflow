@@ -1,7 +1,7 @@
 # Google Drive integration setup
 
 This feature needs three things: a Google Cloud OAuth app, some Supabase secrets,
-and deploying the Edge Functions. More steps than anything else in KaiFlow so far,
+and deploying the Edge Functions. More steps than anything else in Kairil so far,
 but each one is small.
 
 ## 1. Google Cloud Console
@@ -10,7 +10,7 @@ but each one is small.
 2. **APIs & Services > Library**, search for "Google Drive API", click **Enable**.
 3. **APIs & Services > OAuth consent screen**:
    - User type: External
-   - App name: KaiFlow (or Studio Kairegi)
+   - App name: Kairil (or Studio Kairegi)
    - Scopes: add `https://www.googleapis.com/auth/drive.file`
    - Add yourself as a test user if the app stays in "Testing" mode (fine for just your own studio use)
 4. **APIs & Services > Credentials > Create Credentials > OAuth client ID**:
@@ -47,13 +47,18 @@ supabase secrets set DRIVE_TOKEN_ENCRYPTION_KEY=$(openssl rand -base64 32)
 
 From the project folder (where the `supabase/` folder lives):
 ```
-supabase functions deploy google-drive-connect
-supabase functions deploy google-drive-callback
+supabase functions deploy google-drive-connect --no-verify-jwt
+supabase functions deploy google-drive-callback --no-verify-jwt
 supabase functions deploy google-drive-create-folders
 supabase functions deploy freelancer-drive-upload --no-verify-jwt
 ```
 
-That last flag matters: `freelancer-drive-upload` is called by freelancers who have no login at all, so it has to skip Supabase's usual JWT check. The other three are called by you while signed in, so they keep the default verification.
+Three of these need `--no-verify-jwt`, and it's not the one you'd guess by default:
+- `google-drive-connect` is triggered by a plain browser redirect (`window.location.href`), which carries no `Authorization` header at all.
+- `google-drive-callback` is hit by Google's own OAuth redirect, Google will never send a Supabase session token.
+- `freelancer-drive-upload` is called by freelancers with no account at all.
+
+Only `google-drive-create-folders` is called with a proper `Authorization: Bearer <session token>` header from the signed-in app, so it's the one function that keeps Supabase's default JWT check. If you deploy the other three without that flag, Supabase's own gateway will reject the request with a 401 before your code ever runs, and the whole connect flow will fail at the very first click.
 
 ## 4. Run the database migration
 
@@ -61,8 +66,8 @@ That last flag matters: `freelancer-drive-upload` is called by freelancers who h
 
 ## 5. Try it
 
-1. In KaiFlow, open Settings, click **Connect Google Drive**, sign in and grant access.
-2. Open any project, click **Create Drive folders**. A "KaiFlow Projects" folder appears in your Drive, with this project's folder inside it (References / Cuts / Deliverables).
+1. In Kairil, open Settings, click **Connect Google Drive**, sign in and grant access.
+2. Open any project, click **Create Drive folders**. A "Kairil Projects" folder appears in your Drive, with this project's folder inside it (References / Cuts / Deliverables).
 3. Open a shot, generate its freelancer link, and try uploading a test file from that link. It should land directly in that project's Deliverables folder.
 
 If a project hasn't had its Drive folders created yet, freelancer uploads for it will automatically fall back to the in-app storage instead of failing, so nothing breaks for projects you haven't set up yet.

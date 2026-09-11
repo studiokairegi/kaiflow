@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { supabase, functionUrl } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import { genShareToken } from "./SharedViews.jsx";
@@ -8,6 +8,7 @@ import {
   MonthlyFinanceChart,
   RevenueByClientBarChart,
   ProjectComparisonChart,
+  LeadOutreachTrendChart,
 } from "./DashboardCharts.jsx";
 
 const STAGES = [
@@ -58,16 +59,62 @@ const PROFIT_PRESETS = [10, 15, 20, 25, 30, 40, 50, 60];
 const PATREON_CHECKOUT_URL = "https://www.patreon.com/checkout/11039549?rid=29264433";
 const PATREON_MANAGE_URL = "https://www.patreon.com/settings/memberships";
 
+// Active pipeline, in lifecycle order. A lead moves left-to-right through
+// these as outreach progresses.
 const LEAD_STAGES = [
-  { id: "pool", label: "Email Pool" },
-  { id: "cold_email", label: "Cold Email" },
-  { id: "no_response", label: "No Response" },
+  { id: "pool", label: "New" },
+  { id: "cold_email", label: "Cold Email Sent" },
   { id: "responded", label: "Responded" },
-  { id: "successful", label: "Successful Leads" },
-  { id: "lost", label: "Lost Leads" },
-  { id: "won", label: "Deal Won" },
-  { id: "closed", label: "Deal Closed" },
+  { id: "qualified", label: "Qualified" },
+  { id: "proposal", label: "Proposal Sent" },
+  { id: "negotiation", label: "Negotiation" },
+  { id: "won", label: "Won" },
 ];
+
+// Terminal outcomes. A lead lands in exactly one of these when outreach
+// ends, instead of continuing through the active pipeline. No Response is
+// deliberately separate from Lost: one means "went quiet", the other means
+// "said no" or "we walked away".
+const LEAD_TERMINAL_STAGES = [
+  { id: "no_response", label: "No Response" },
+  { id: "lost", label: "Lost" },
+  { id: "disqualified", label: "Disqualified" },
+  { id: "closed", label: "Closed" },
+];
+
+const ALL_LEAD_STAGES = [...LEAD_STAGES, ...LEAD_TERMINAL_STAGES];
+
+// "Active outreach" for dashboard purposes: everyone already contacted,
+// not counting the untouched pool or any terminal outcome.
+const ACTIVE_OUTREACH_STAGE_IDS = ["cold_email", "responded", "qualified", "proposal", "negotiation", "won"];
+
+const LEAD_PRIORITIES = [
+  { id: "hot", label: "Hot", icon: "\u{1F525}" },
+  { id: "warm", label: "Warm", icon: "\u{1F7E1}" },
+  { id: "cold", label: "Cold", icon: "\u26AA" },
+];
+
+// Default cadence for the 4 automatic follow-ups after the initial cold
+// email (day 0). Stored per-studio on settings.followupSchedule so the
+// timing can be changed without a code change.
+const DEFAULT_FOLLOWUP_SCHEDULE = [
+  { label: "Initial email", dayOffset: 0 },
+  { label: "Follow-up #1", dayOffset: 3 },
+  { label: "Follow-up #2", dayOffset: 7 },
+  { label: "Follow-up #3", dayOffset: 14 },
+  { label: "Follow-up #4", dayOffset: 21 },
+];
+
+// How long a terminal lead sits before it's auto-archived. Mirrors the
+// defaults enforced server-side in migration_crm_v2.sql; kept here too so
+// the UI can explain the policy without a round trip.
+const DEFAULT_ARCHIVE_DAYS = {
+  won: 30,
+  lost: 60,
+  no_response: 60,
+  disqualified: 30,
+  closed: 30,
+};
 
 const LOST_REASONS = [
   "Budget",
@@ -77,6 +124,12 @@ const LOST_REASONS = [
   "No response",
   "Other",
 ];
+
+// Starting set of lead channels, editable and extendable per-studio via
+// Settings (or inline from the lead editor's "+" button). Stored on
+// user_settings so the same list is shared across the CRM board and the
+// dashboard breakdown.
+const DEFAULT_LEAD_CHANNELS = ["Referral", "Cold Email", "Instagram", "Website"];
 
 function stagePercent(stageId) {
   const index = STAGES.findIndex((s) => s.id === stageId);
@@ -336,6 +389,186 @@ function expenseToRow(expense, userId) {
   };
 }
 
+const PLANNER_STATUSES = [
+  { id: "draft", label: "Draft" },
+  { id: "proposal_sent", label: "Proposal Sent" },
+  { id: "negotiating", label: "Negotiating" },
+  { id: "approved", label: "Approved" },
+  { id: "rejected", label: "Rejected" },
+  { id: "converted", label: "Converted to Project" },
+];
+
+const PLANNER_STATUS_LABELS = PLANNER_STATUSES.reduce((map, s) => {
+  map[s.id] = s.label;
+  return map;
+}, {});
+
+// Departments used for Phase 4 department-budget distribution. Percentages
+// are defaults only, the user can override every one of them per plan.
+const PLANNER_DEPARTMENTS = [
+  { id: "preproduction", label: "Pre-production", defaultPercent: 5 },
+  { id: "storyboard", label: "Storyboard / Animatic", defaultPercent: 8 },
+  { id: "character_design", label: "Character Design", defaultPercent: 8 },
+  { id: "backgrounds", label: "Background Art", defaultPercent: 12 },
+  { id: "layout", label: "Layout", defaultPercent: 10 },
+  { id: "key_animation", label: "Key Animation", defaultPercent: 30 },
+  { id: "cleanup", label: "In-between / Cleanup", defaultPercent: 15 },
+  { id: "compositing", label: "Compositing", defaultPercent: 10 },
+  { id: "editing", label: "Editing", defaultPercent: 5 },
+  { id: "sound", label: "Sound", defaultPercent: 3 },
+  { id: "contingency", label: "Contingency", defaultPercent: 7 },
+];
+
+const CREW_RATE_TYPES = [
+  { id: "per_shot", label: "Per shot" },
+  { id: "per_second", label: "Per second" },
+  { id: "per_hour", label: "Per hour" },
+  { id: "per_day", label: "Per day" },
+  { id: "fixed", label: "Fixed project fee" },
+];
+
+const CREW_AVAILABILITY_OPTIONS = [
+  { id: "available", label: "Available" },
+  { id: "partial", label: "Partially available" },
+  { id: "unavailable", label: "Unavailable" },
+];
+
+// Maps a Team roster member onto a Planner crew-row shape. This is a
+// snapshot, not a live reference: everything copied here stays editable
+// per-plan afterward (a studio owner might pay someone a different rate
+// on a rush job), but starting from the roster means the skill/dependability/
+// capacity data entered once in Team doesn't have to be retyped by hand
+// for every plan. teamMemberId is kept only so the row can show it's linked
+// and so a "resync from roster" action is possible later - it's never
+// required and a manually-typed row works exactly as before.
+const TEAM_TO_CREW_RATE_TYPE = { hour: "per_hour", day: "per_day", shot: "per_shot", second: "per_second", fixed: "fixed" };
+const TEAM_TO_CREW_AVAILABILITY = { available: "available", busy: "partial", unavailable: "unavailable" };
+// TEAM_DEPARTMENT_OPTIONS stores full labels ("Character Design"),
+// PLANNER_DEPARTMENTS keys off short ids ("character_design") - these are
+// two independently-built lists (Team roster vs. Planner), not the same
+// list twice, so a roster department has to be translated to the
+// matching Planner id rather than passed through as-is. "Other" (Team's
+// catch-all) has no Planner equivalent, so it - and anything unrecognized
+// - falls back to the Planner's first department rather than silently
+// saving a department value the dropdown can't display.
+const TEAM_TO_PLANNER_DEPARTMENT = {
+  "Pre-production": "preproduction",
+  "Storyboard / Animatic": "storyboard",
+  "Character Design": "character_design",
+  "Background Art": "backgrounds",
+  "Layout": "layout",
+  "Key Animation": "key_animation",
+  "In-between / Cleanup": "cleanup",
+  "Compositing": "compositing",
+  "Editing": "editing",
+  "Sound": "sound",
+};
+function crewRowFromTeamMember(tm) {
+  return {
+    id: `c${Date.now()}`,
+    teamMemberId: tm.id,
+    name: tm.name || "",
+    role: tm.role || "",
+    department: TEAM_TO_PLANNER_DEPARTMENT[tm.department] || PLANNER_DEPARTMENTS[0].id,
+    rateType: TEAM_TO_CREW_RATE_TYPE[tm.rateType] || "per_hour",
+    rate: tm.rateAmount ? String(tm.rateAmount) : "",
+    units: "",
+    skillLevel: tm.skillLevel || 3,
+    dependability: tm.dependabilityScore ?? 75,
+    availability: TEAM_TO_CREW_AVAILABILITY[tm.availability] || "available",
+    // Team's capacity is a general weekly/monthly figure (capacityValue +
+    // capacityUnit, e.g. "40 hours/week"); the Planner's capacityUnits is
+    // this plan's own cap, a different, plan-specific number. The roster
+    // value is only a sensible starting point here, not the same field -
+    // still fully editable, same as everything else on the row.
+    capacityUnits: tm.capacityValue ? String(tm.capacityValue) : "",
+  };
+}
+
+const SKILL_LEVELS = [
+  { value: 1, label: "1 · Beginner" },
+  { value: 2, label: "2 · Junior" },
+  { value: 3, label: "3 · Intermediate" },
+  { value: 4, label: "4 · Senior" },
+  { value: 5, label: "5 · Expert" },
+];
+
+// Phase 3 — built-in starting templates. These are not stored server-side;
+// a user's own saved templates (Phase 11) live in planner_templates and are
+// merged with this list when picking a starting point for a new plan.
+const BUILT_IN_PLANNER_TEMPLATES = [
+  {
+    id: "builtin_anime_trailer",
+    builtin: true,
+    name: "Anime Trailer",
+    projectType: "Anime Trailer",
+    targetProfitPercent: 25,
+    departmentAllocations: null, // falls back to PLANNER_DEPARTMENTS defaults
+    scope: { complexity: "medium", targetFps: 24 },
+  },
+  {
+    id: "builtin_anime_short",
+    builtin: true,
+    name: "Anime Short",
+    projectType: "Anime Short",
+    targetProfitPercent: 25,
+    departmentAllocations: null,
+    scope: { complexity: "medium", targetFps: 24 },
+  },
+  {
+    id: "builtin_commercial",
+    builtin: true,
+    name: "Commercial",
+    projectType: "Commercial",
+    targetProfitPercent: 30,
+    departmentAllocations: {
+      preproduction: 8, storyboard: 10, character_design: 4, backgrounds: 10,
+      layout: 8, key_animation: 20, cleanup: 12, compositing: 15, editing: 8, sound: 5, contingency: 7,
+    },
+    scope: { complexity: "low", targetFps: 24 },
+  },
+  {
+    id: "builtin_music_video",
+    builtin: true,
+    name: "Music Video",
+    projectType: "Music Video",
+    targetProfitPercent: 25,
+    departmentAllocations: {
+      preproduction: 5, storyboard: 8, character_design: 6, backgrounds: 14,
+      layout: 8, key_animation: 22, cleanup: 12, compositing: 14, editing: 6, sound: 5, contingency: 7,
+    },
+    scope: { complexity: "medium", targetFps: 24 },
+  },
+  {
+    id: "builtin_game_trailer",
+    builtin: true,
+    name: "Game Trailer",
+    projectType: "Game Trailer",
+    targetProfitPercent: 30,
+    departmentAllocations: {
+      preproduction: 5, storyboard: 7, character_design: 8, backgrounds: 8,
+      layout: 7, key_animation: 25, cleanup: 12, compositing: 16, editing: 6, sound: 6, contingency: 7,
+    },
+    scope: { complexity: "high", targetFps: 24 },
+  },
+  {
+    id: "builtin_custom",
+    builtin: true,
+    name: "Custom",
+    projectType: "",
+    targetProfitPercent: 25,
+    departmentAllocations: null,
+    scope: {},
+  },
+];
+
+function defaultDepartmentAllocations() {
+  return PLANNER_DEPARTMENTS.reduce((map, d) => {
+    map[d.id] = d.defaultPercent;
+    return map;
+  }, {});
+}
+
 function emptyBudgetPlanner(overrides = {}) {
   return {
     name: "",
@@ -345,6 +578,22 @@ function emptyBudgetPlanner(overrides = {}) {
     currency: "$",
     targetProfitPercent: 25,
     notes: "",
+    status: "draft",
+    deadline: "",
+    startDate: "",
+    contingencyPercent: 7,
+    departmentAllocations: defaultDepartmentAllocations(),
+    crew: [],
+    scope: {
+      complexity: "medium",
+      durationSeconds: "",
+      estimatedShots: "",
+      characters: "",
+      backgrounds: "",
+      targetFps: 24,
+    },
+    templateId: null,
+    convertedProjectId: null,
     ...overrides,
   };
 }
@@ -359,6 +608,15 @@ function budgetPlannerFromRow(row) {
     currency: row.currency || "$",
     targetProfitPercent: row.target_profit_percent,
     notes: row.notes || "",
+    status: row.status || "draft",
+    deadline: row.deadline || "",
+    startDate: row.start_date || "",
+    contingencyPercent: row.contingency_percent ?? 7,
+    departmentAllocations: row.department_allocations || defaultDepartmentAllocations(),
+    crew: row.crew || [],
+    scope: row.scope || { complexity: "medium" },
+    templateId: row.template_id || null,
+    convertedProjectId: row.converted_project_id || null,
     createdAt: row.created_at,
   };
 }
@@ -372,6 +630,41 @@ function budgetPlannerToRow(plan, userId) {
     currency: plan.currency || "$",
     target_profit_percent: parseMoney(plan.targetProfitPercent),
     notes: plan.notes,
+    status: plan.status || "draft",
+    deadline: plan.deadline || null,
+    start_date: plan.startDate || null,
+    contingency_percent: parseMoney(plan.contingencyPercent),
+    department_allocations: plan.departmentAllocations || defaultDepartmentAllocations(),
+    crew: plan.crew || [],
+    scope: plan.scope || {},
+    template_id: plan.templateId || null,
+    converted_project_id: plan.convertedProjectId || null,
+    user_id: userId,
+  };
+}
+
+function plannerTemplateFromRow(row) {
+  return {
+    id: row.id,
+    builtin: false,
+    name: row.name,
+    projectType: row.project_type || "",
+    targetProfitPercent: row.target_profit_percent,
+    departmentAllocations: row.department_allocations || null,
+    crew: row.crew || [],
+    scope: row.scope || {},
+    createdAt: row.created_at,
+  };
+}
+
+function plannerTemplateToRow(template, userId) {
+  return {
+    name: template.name || "Untitled template",
+    project_type: template.projectType || "",
+    target_profit_percent: parseMoney(template.targetProfitPercent),
+    department_allocations: template.departmentAllocations || null,
+    crew: template.crew || [],
+    scope: template.scope || {},
     user_id: userId,
   };
 }
@@ -390,20 +683,554 @@ function computeBudgetPlan(plan) {
   return { budget, profitPercent, profit, productionBudget, health };
 }
 
+// ---------------------------------------------------------------------------
+// Planner Intelligence (spec: planner_i.txt / planner_crew_allocation.txt)
+// Deterministic, rule-based only. No AI. Every function here is small,
+// pure, and traceable back to the inputs that produced its output so the
+// UI can always explain *why* a warning fired.
+// ---------------------------------------------------------------------------
+
+// 1. Financial health — actual planned margin vs target, using real crew +
+// department costs when available instead of the flat target-only estimate.
+function computePlannerFinancialHealth(plan, totalCrewCost) {
+  const budget = parseMoney(plan.budget);
+  const targetProfitPercent = parseMoney(plan.targetProfitPercent);
+  const expectedProfit = budget * (targetProfitPercent / 100);
+  const productionBudget = budget - expectedProfit;
+  const plannedCosts = totalCrewCost; // crew is the concrete planned cost we know about
+  const actualMargin = budget > 0 ? ((budget - plannedCosts) / budget) * 100 : 0;
+  const compareMargin = Math.max(targetProfitPercent, 20);
+  let state = "green";
+  if (actualMargin < 10) state = "red";
+  else if (actualMargin < 20) state = "yellow";
+  const meetsTarget = actualMargin >= targetProfitPercent;
+  return {
+    budget,
+    targetProfitPercent,
+    expectedProfit,
+    productionBudget,
+    actualMargin,
+    state,
+    meetsTarget,
+    differencePoints: actualMargin - targetProfitPercent,
+    compareMargin,
+  };
+}
+
+// 2. Department allocation intelligence
+function computeAllocationState(departmentAllocations) {
+  const totalPercent = Object.values(departmentAllocations || {}).reduce(
+    (sum, v) => sum + parseMoney(v),
+    0
+  );
+  const rounded = Math.round(totalPercent * 100) / 100;
+  if (rounded > 100) return { totalPercent: rounded, state: "over", diffPercent: rounded - 100 };
+  if (rounded < 100) return { totalPercent: rounded, state: "under", diffPercent: 100 - rounded };
+  return { totalPercent: rounded, state: "exact", diffPercent: 0 };
+}
+
+// 3. Contingency intelligence
+function recommendedContingencyPercent(complexity) {
+  if (complexity === "high" || complexity === "very_high") return 10;
+  if (complexity === "medium") return 7.5;
+  return 5;
+}
+
+function computeContingencyState(contingencyPercent, complexity) {
+  const recommended = recommendedContingencyPercent(complexity);
+  const value = parseMoney(contingencyPercent);
+  if (value <= 0) return { state: "none", recommended, value };
+  if (value < recommended) return { state: "below", recommended, value };
+  return { state: "ok", recommended, value };
+}
+
+// 4/12. Crew cost calculation + ratio
+function computeCrewMemberCost(person) {
+  const rate = parseMoney(person.rate);
+  const units = parseMoney(person.units);
+  if (person.rateType === "fixed") return rate;
+  return rate * units;
+}
+
+function computeTotalCrewCost(crew) {
+  return (crew || []).reduce((sum, p) => sum + computeCrewMemberCost(p), 0);
+}
+
+function computeCrewCostRatio(totalCrewCost, productionBudget) {
+  const ratio = productionBudget > 0 ? (totalCrewCost / productionBudget) * 100 : 0;
+  let state = "healthy";
+  if (ratio > 75) state = "critical";
+  else if (ratio > 60) state = "watch";
+  return { ratio, state };
+}
+
+// ---------------------------------------------------------------------------
+// Crew allocation intelligence (spec: planner_crew_allocation.txt)
+// Deterministic scoring + explanation per crew member — not a full
+// combinatorial optimizer, but every score is traceable to the same inputs
+// the spec calls out: skill fit, availability, dependability, deadline
+// pressure and cost.
+// ---------------------------------------------------------------------------
+
+function dependabilityLabel(value) {
+  const v = parseMoney(value);
+  if (v >= 90) return { label: "Highly dependable", tier: "high" };
+  if (v >= 75) return { label: "Reliable", tier: "good" };
+  if (v >= 60) return { label: "Variable", tier: "watch" };
+  return { label: "Risky", tier: "risk" };
+}
+
+// Overload check (spec section 16): assigned units vs the person's declared
+// capacity for this plan.
+function computeCrewCapacityState(person) {
+  const capacity = parseMoney(person.capacityUnits);
+  const assigned = parseMoney(person.units);
+  if (!capacity) return { state: "unknown" };
+  if (assigned > capacity) return { state: "over", overBy: assigned - capacity };
+  return { state: "ok" };
+}
+
+// Deadline weighting (spec section 10/14): which factors matter most
+// changes with how tight the schedule is.
+function deadlineWeighting(deadlineRiskState) {
+  if (deadlineRiskState === "risk") {
+    return { availability: 3, speed: 3, dependability: 2.5, skill: 1.5, cost: 0.5 };
+  }
+  if (deadlineRiskState === "tight") {
+    return { availability: 2, speed: 2, skill: 1.5, dependability: 1.5, cost: 1 };
+  }
+  return { availability: 1, speed: 1, skill: 1.5, dependability: 1, cost: 1.5 }; // comfortable/unknown
+}
+
+// A single crew member's fit score for this plan + a human-readable
+// explanation, in the spirit of spec section 23 ("Recommended: Jane —
+// strong match because...") rather than an opaque number.
+function computeCrewMemberFit(person, deadlineRiskState) {
+  const weights = deadlineWeighting(deadlineRiskState);
+  const skill = parseMoney(person.skillLevel) || 3;
+  const dependability = parseMoney(person.dependability) || 75;
+  const availability = person.availability || "available";
+  const dep = dependabilityLabel(dependability);
+  const capacity = computeCrewCapacityState(person);
+
+  let score = 0;
+  const reasons = [];
+
+  if (availability === "available") { score += weights.availability * 20; reasons.push({ type: "ok", text: "Available for the project" }); }
+  else if (availability === "partial") { score += weights.availability * 10; reasons.push({ type: "warn", text: "Only partially available" }); }
+  else { reasons.push({ type: "warn", text: "Marked unavailable" }); }
+
+  score += weights.skill * (skill * 4);
+  reasons.push({ type: "ok", text: `Skill level ${skill}/5` });
+
+  score += weights.dependability * (dependability / 5);
+  reasons.push({ type: dep.tier === "risk" ? "warn" : "ok", text: `${dep.label} (${dependability}/100)` });
+
+  if (capacity.state === "over") {
+    score -= 15;
+    reasons.push({ type: "warn", text: `Exceeds declared capacity by ${capacity.overBy} unit(s)` });
+  }
+
+  const cost = computeCrewMemberCost(person);
+  if (cost > 0) score += weights.cost * Math.max(0, 20 - Math.log2(cost + 1));
+
+  return { score: Math.round(score), reasons, capacity, dependabilityInfo: dep };
+}
+
+// 5. Double-spending detection between a department's allocation and the
+// crew cost assigned to that same department.
+function computeDepartmentSpend(plan, productionBudget) {
+  const allocations = plan.departmentAllocations || {};
+  const crew = plan.crew || [];
+  return PLANNER_DEPARTMENTS.map((dept) => {
+    const allocatedAmount = (parseMoney(allocations[dept.id]) / 100) * productionBudget;
+    const crewCost = crew
+      .filter((p) => p.department === dept.id)
+      .reduce((sum, p) => sum + computeCrewMemberCost(p), 0);
+    let state = "ok";
+    if (allocatedAmount > 0 && crewCost > allocatedAmount) state = "over";
+    else if (allocatedAmount > 0 && crewCost >= allocatedAmount * 0.9) state = "close";
+    return { ...dept, allocatedAmount, crewCost, state };
+  });
+}
+
+// 7/10. Production complexity score (transparent, additive)
+function computeComplexityScore(scope) {
+  let score = 1;
+  const factors = [];
+  const shotsPerSecond = scopeShotsPerSecond(scope);
+  if (shotsPerSecond !== null && shotsPerSecond > 3) {
+    score += 0.5;
+    factors.push("High shot density (>3 shots/sec)");
+  }
+  if (parseMoney(scope.characters) > 1) {
+    score += 0.5;
+    factors.push("Multiple main characters");
+  }
+  if (scope.complexMovement) {
+    score += 0.5;
+    factors.push("Complex character movement");
+  }
+  const bgPerSecond = scopeBackgroundsPerSecond(scope);
+  if (bgPerSecond !== null && bgPerSecond > 0.5) {
+    score += 0.5;
+    factors.push("High background count relative to duration");
+  }
+  if (scope.heavyEffects) {
+    score += 0.5;
+    factors.push("Heavy effects work");
+  }
+  if (scope.cameraMovement) {
+    score += 0.5;
+    factors.push("Significant camera movement");
+  }
+  if (scope.dialogueHeavy) {
+    score += 0.5;
+    factors.push("Dialogue-heavy");
+  }
+  let label = "Low";
+  if (score >= 4) label = "Very High";
+  else if (score >= 3) label = "High";
+  else if (score >= 2) label = "Medium";
+  return { score, label, factors };
+}
+
+function scopeShotsPerSecond(scope) {
+  const shots = parseMoney(scope.estimatedShots);
+  const duration = parseMoney(scope.durationSeconds);
+  if (!shots || !duration) return null;
+  return shots / duration;
+}
+
+function scopeBackgroundsPerSecond(scope) {
+  const backgrounds = parseMoney(scope.backgrounds);
+  const duration = parseMoney(scope.durationSeconds);
+  if (!backgrounds || !duration) return null;
+  return backgrounds / duration;
+}
+
+// 11. Timeline intelligence — transparent phase-by-phase estimate, in
+// production days, driven only by shots/complexity/crew size the user
+// entered. Always labelled as a starting point, never a promise.
+const TIMELINE_PHASES = [
+  { id: "preproduction", label: "Pre-production", baseShare: 0.08 },
+  { id: "storyboard", label: "Storyboard / Animatic", baseShare: 0.1 },
+  { id: "design", label: "Design", baseShare: 0.08 },
+  { id: "layout", label: "Layout", baseShare: 0.1 },
+  { id: "animation", label: "Animation", baseShare: 0.28 },
+  { id: "cleanup", label: "Cleanup", baseShare: 0.14 },
+  { id: "backgrounds", label: "Backgrounds", baseShare: 0.08 },
+  { id: "compositing", label: "Compositing", baseShare: 0.08 },
+  { id: "editing", label: "Editing", baseShare: 0.04 },
+  { id: "review", label: "Review / Revisions", baseShare: 0.02 },
+];
+
+function computeTimelineEstimate(scope, crewCount) {
+  const shots = parseMoney(scope.estimatedShots) || 0;
+  const complexity = computeComplexityScore(scope).score;
+  const crew = Math.max(1, crewCount || 1);
+  // Base rule: ~0.6 production days per shot at complexity 1, scaled by
+  // complexity, then divided across available crew with diminishing
+  // returns (sqrt) since more people rarely means linear speedup.
+  const baseDaysPerShot = 0.6 * complexity;
+  const rawDays = shots > 0 ? shots * baseDaysPerShot : 10 * complexity;
+  const estimatedDays = Math.max(3, Math.round(rawDays / Math.sqrt(crew)));
+  const phases = TIMELINE_PHASES.map((phase) => ({
+    ...phase,
+    days: Math.max(1, Math.round(estimatedDays * phase.baseShare)),
+  }));
+  return { estimatedDays, phases };
+}
+
+// 12/13. Deadline risk
+function computeDeadlineRisk(estimatedDays, availableDays) {
+  if (availableDays === null || availableDays === undefined) return { state: "unknown" };
+  if (availableDays >= estimatedDays * 1.2) return { state: "healthy", estimatedDays, availableDays };
+  if (availableDays >= estimatedDays) return { state: "tight", estimatedDays, availableDays };
+  return { state: "risk", estimatedDays, availableDays };
+}
+
+function daysBetween(startDate, endDate) {
+  if (!startDate || !endDate) return null;
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  if (isNaN(start) || isNaN(end)) return null;
+  return Math.round((end - start) / (1000 * 60 * 60 * 24));
+}
+
+// 15. Minimum viable price
+function computeMinimumPrice(estimatedProductionCosts, targetMarginPercent) {
+  const margin = parseMoney(targetMarginPercent) / 100;
+  if (margin >= 1 || margin < 0) return null;
+  return estimatedProductionCosts / (1 - margin);
+}
+
+// 20. Overall deal score — deterministic, always explained.
+function computeDealScore(plan, derived) {
+  const reasons = [];
+  let score = 100;
+
+  if (derived.financial.actualMargin < derived.financial.targetProfitPercent) {
+    score -= 15;
+    reasons.push({ type: "warn", text: "Below target profit margin" });
+  } else {
+    reasons.push({ type: "ok", text: "Profit target met" });
+  }
+
+  if (derived.allocation.state === "over") {
+    score -= 20;
+    reasons.push({ type: "warn", text: `Department budget overallocated by ${derived.allocation.diffPercent.toFixed(1)}%` });
+  } else if (derived.allocation.state === "under") {
+    score -= 5;
+    reasons.push({ type: "warn", text: `${derived.allocation.diffPercent.toFixed(1)}% of production budget unallocated` });
+  } else {
+    reasons.push({ type: "ok", text: "Budget fully allocated" });
+  }
+
+  if (derived.crewCostRatio.state === "critical") {
+    score -= 20;
+    reasons.push({ type: "warn", text: `Crew costs are ${derived.crewCostRatio.ratio.toFixed(0)}% of production budget` });
+  } else if (derived.crewCostRatio.state === "watch") {
+    score -= 8;
+    reasons.push({ type: "warn", text: `Crew costs are ${derived.crewCostRatio.ratio.toFixed(0)}% of production budget` });
+  }
+
+  if (derived.deadlineRisk.state === "risk") {
+    score -= 20;
+    reasons.push({ type: "warn", text: "Deadline is at risk" });
+  } else if (derived.deadlineRisk.state === "tight") {
+    score -= 8;
+    reasons.push({ type: "warn", text: "Deadline is tight" });
+  }
+
+  if (derived.contingency.state === "none") {
+    score -= 10;
+    reasons.push({ type: "warn", text: "No contingency reserve" });
+  } else if (derived.contingency.state === "below") {
+    score -= 5;
+    reasons.push({ type: "warn", text: `Contingency is only ${derived.contingency.value}%` });
+  }
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  let label = "Critical";
+  if (score >= 90) label = "Excellent";
+  else if (score >= 75) label = "Healthy";
+  else if (score >= 60) label = "Watch";
+  else if (score >= 40) label = "Risk";
+  return { score, label, reasons };
+}
+
+// Aggregates every rule above into one object the UI reads from. Nothing
+// here mutates the plan or makes a decision, it only calculates and
+// explains.
+function computePlannerIntelligence(plan) {
+  const crew = plan.crew || [];
+  const scope = plan.scope || {};
+  const totalCrewCost = computeTotalCrewCost(crew);
+  const financial = computePlannerFinancialHealth(plan, totalCrewCost);
+  const allocation = computeAllocationState(plan.departmentAllocations);
+  const crewCostRatio = computeCrewCostRatio(totalCrewCost, financial.productionBudget);
+  const departmentSpend = computeDepartmentSpend(plan, financial.productionBudget);
+  const complexity = computeComplexityScore(scope);
+  const contingency = computeContingencyState(plan.contingencyPercent, complexity.label.toLowerCase().replace(" ", "_"));
+  const timeline = computeTimelineEstimate(scope, crew.length);
+  const availableDays = daysBetween(plan.startDate, plan.deadline);
+  const deadlineRisk = computeDeadlineRisk(timeline.estimatedDays, availableDays);
+  const minimumPrice = computeMinimumPrice(financial.productionBudget, plan.targetProfitPercent);
+  const shotsPerSecond = scopeShotsPerSecond(scope);
+
+  // Crew fit scoring, weighted by how tight the deadline is (section 10/14),
+  // plus overload/capacity checks (section 16).
+  const crewFit = crew.map((person) => ({ person, fit: computeCrewMemberFit(person, deadlineRisk.state) }));
+  const overloadedCrew = crewFit.filter((c) => c.fit.capacity.state === "over");
+
+  // Critical crew (section 20): first department, in production order, that
+  // has an allocation but no crew assigned yet — a simple stand-in for
+  // "this is currently the schedule risk" without a full dependency graph.
+  const departmentsWithAllocation = PLANNER_DEPARTMENTS.filter((d) => parseMoney((plan.departmentAllocations || {})[d.id]) > 0 && d.id !== "contingency");
+  const criticalDepartment = departmentsWithAllocation.find((d) => !crew.some((p) => p.department === d.id)) || null;
+
+  const derived = { financial, allocation, crewCostRatio, departmentSpend, complexity, contingency, timeline, deadlineRisk, minimumPrice, shotsPerSecond, totalCrewCost, crewFit, criticalDepartment };
+  const dealScore = computeDealScore(plan, derived);
+
+  // Priority-ordered warnings (spec section 24: financial loss, deadline,
+  // over-allocation, crew-over-budget, scope mismatch, low contingency,
+  // then optimization opportunities).
+  const warnings = [];
+  if (financial.state === "red") {
+    warnings.push({ level: "red", text: `Critical margin: ${financial.actualMargin.toFixed(1)}% — very little financial buffer.` });
+  }
+  if (deadlineRisk.state === "risk") {
+    warnings.push({
+      level: "red",
+      text: `Deadline risk — estimated production is ${timeline.estimatedDays} days but only ${availableDays} days are available.`,
+    });
+  }
+  if (allocation.state === "over") {
+    warnings.push({ level: "red", text: `Department budget overallocated by ${allocation.diffPercent.toFixed(1)}%.` });
+  }
+  const overspendDept = departmentSpend.find((d) => d.state === "over");
+  if (overspendDept) {
+    warnings.push({
+      level: "red",
+      text: `Crew costs exceed the ${overspendDept.label} allocation by ${plan.currency || "$"}${formatMoney(overspendDept.crewCost - overspendDept.allocatedAmount)}.`,
+    });
+  }
+  if (crewCostRatio.state === "critical") {
+    warnings.push({ level: "red", text: `Crew costs consume ${crewCostRatio.ratio.toFixed(0)}% of the production budget.` });
+  }
+  if (financial.state === "yellow") {
+    warnings.push({ level: "yellow", text: `Tight margin (${financial.actualMargin.toFixed(1)}%) — limited room for revisions or surprises.` });
+  }
+  if (deadlineRisk.state === "tight") {
+    warnings.push({ level: "yellow", text: `Tight schedule — only ${availableDays - timeline.estimatedDays} day(s) of buffer.` });
+  }
+  if (contingency.state === "none") {
+    warnings.push({ level: "yellow", text: "No contingency reserve set aside." });
+  } else if (contingency.state === "below") {
+    warnings.push({ level: "yellow", text: `Contingency (${contingency.value}%) is below the ${contingency.recommended}% recommended for this project's complexity.` });
+  }
+  if (crewCostRatio.state === "watch") {
+    warnings.push({ level: "yellow", text: `Crew costs are ${crewCostRatio.ratio.toFixed(0)}% of the production budget — worth watching.` });
+  }
+  if (!financial.meetsTarget && financial.state === "green") {
+    warnings.push({ level: "yellow", text: `Below your ${financial.targetProfitPercent}% target margin (currently ${financial.actualMargin.toFixed(1)}%).` });
+  }
+  overloadedCrew.forEach(({ person, fit }) => {
+    warnings.push({
+      level: "red",
+      text: `${person.name || "This crew member"} is assigned ${fit.capacity.overBy} unit(s) beyond their declared capacity.`,
+    });
+  });
+  if (criticalDepartment && crew.length > 0) {
+    warnings.push({
+      level: "yellow",
+      text: `${criticalDepartment.label} has budget allocated but no crew assigned yet — currently the largest schedule risk.`,
+    });
+  }
+
+  return { ...derived, dealScore, warnings };
+}
+
 const AVAILABILITY_OPTIONS = ["available", "busy", "unavailable"];
+const AVAILABILITY_LABELS = {
+  available: "Available",
+  busy: "Partially available",
+  unavailable: "Unavailable",
+};
 const AVAILABILITY_COLORS = {
   available: "#3DDC84",
   busy: "#F2A65A",
   unavailable: "#FF4D4D",
 };
 
+// Kept in sync with the department list the Planner's crew allocator
+// expects (see planner_crew_allocation.txt / planner_rm.txt Phase 4).
+const TEAM_DEPARTMENT_OPTIONS = [
+  "Pre-production",
+  "Storyboard / Animatic",
+  "Character Design",
+  "Background Art",
+  "Layout",
+  "Key Animation",
+  "In-between / Cleanup",
+  "Compositing",
+  "Editing",
+  "Sound",
+  "Other",
+];
+
+// Common production skills. Crew members aren't limited to this list -
+// the editor lets someone add a custom skill too.
+const TEAM_SKILL_OPTIONS = [
+  "Storyboard",
+  "Layout",
+  "Key Animation",
+  "Character Animation",
+  "Inbetween",
+  "Cleanup",
+  "Backgrounds",
+  "Compositing",
+  "Effects",
+  "Editing",
+  "Motion Graphics",
+  "Illustration",
+  "Sound",
+];
+
+const RATE_TYPE_OPTIONS = [
+  { value: "hour", label: "Per hour" },
+  { value: "day", label: "Per day" },
+  { value: "shot", label: "Per shot" },
+  { value: "second", label: "Per second" },
+  { value: "fixed", label: "Fixed project fee" },
+];
+
+const CAPACITY_UNIT_OPTIONS = [
+  "hours/week",
+  "days/week",
+  "shots/week",
+];
+
+const SKILL_LEVEL_LABELS = {
+  1: "Beginner",
+  2: "Junior",
+  3: "Intermediate",
+  4: "Senior",
+  5: "Expert",
+};
+
+function skillLevelLabel(level) {
+  return SKILL_LEVEL_LABELS[level] || "Intermediate";
+}
+
+// Tiers per planner_crew_allocation.txt section 6.
+function dependabilityTier(score) {
+  const n = Number(score);
+  if (n >= 90) return { label: "Highly dependable", color: "#3DDC84" };
+  if (n >= 75) return { label: "Reliable", color: "#7FE0D0" };
+  if (n >= 60) return { label: "Variable", color: "#F2A65A" };
+  return { label: "Risky", color: "#FF4D4D" };
+}
+
+function rateTypeLabel(rateType) {
+  return RATE_TYPE_OPTIONS.find((o) => o.value === rateType)?.label || "Per hour";
+}
+
+// Human-readable rate, e.g. "$150/shot" or "$2,400 fixed fee".
+// Falls back to the legacy free-text rate note when no structured
+// amount has been entered yet, so old data still displays sensibly.
+function formatMemberRate(member, currencySymbol) {
+  const cur = currencySymbol || "$";
+  const amount = Number(member.rateAmount) || 0;
+  if (amount > 0) {
+    const suffix = { hour: "/hr", day: "/day", shot: "/shot", second: "/sec", fixed: " fixed" }[
+      member.rateType || "hour"
+    ];
+    return `${cur}${formatMoney(amount)}${suffix}`;
+  }
+  return member.rate || "";
+}
+
 function emptyTeamMember() {
   return {
     name: "",
     role: "",
+    department: "",
     email: "",
     rate: "",
+    rateType: "hour",
+    rateAmount: 0,
     availability: "available",
+    availableStartDate: "",
+    availableEndDate: "",
+    capacityValue: 0,
+    capacityUnit: "hours/week",
+    skills: [],
+    skillLevel: 3,
+    dependabilityScore: 80,
+    defaultSpeedValue: 0,
+    defaultSpeedUnit: "",
     notes: "",
   };
 }
@@ -413,9 +1240,21 @@ function teamMemberFromRow(row) {
     id: row.id,
     name: row.name,
     role: row.role,
+    department: row.department || "",
     email: row.email,
     rate: row.rate,
+    rateType: row.rate_type || "hour",
+    rateAmount: row.rate_amount || 0,
     availability: row.availability || "available",
+    availableStartDate: row.available_start_date || "",
+    availableEndDate: row.available_end_date || "",
+    capacityValue: row.capacity_value || 0,
+    capacityUnit: row.capacity_unit || "hours/week",
+    skills: Array.isArray(row.skills) ? row.skills : [],
+    skillLevel: row.skill_level || 3,
+    dependabilityScore: row.dependability_score ?? 80,
+    defaultSpeedValue: row.default_speed_value || 0,
+    defaultSpeedUnit: row.default_speed_unit || "",
     notes: row.notes,
   };
 }
@@ -424,9 +1263,21 @@ function teamMemberToRow(member, userId) {
   return {
     name: member.name,
     role: member.role,
+    department: member.department || "",
     email: member.email,
     rate: member.rate,
+    rate_type: member.rateType || "hour",
+    rate_amount: Number(member.rateAmount) || 0,
     availability: member.availability || "available",
+    available_start_date: member.availableStartDate || null,
+    available_end_date: member.availableEndDate || null,
+    capacity_value: Number(member.capacityValue) || 0,
+    capacity_unit: member.capacityUnit || "hours/week",
+    skills: Array.isArray(member.skills) ? member.skills : [],
+    skill_level: Number(member.skillLevel) || 3,
+    dependability_score: Number(member.dependabilityScore) || 0,
+    default_speed_value: Number(member.defaultSpeedValue) || 0,
+    default_speed_unit: member.defaultSpeedUnit || "",
     notes: member.notes,
     user_id: userId,
   };
@@ -573,6 +1424,8 @@ const DEFAULT_SETTINGS = {
   hasSeenTutorial: false,
   plan: "free",
   isAdmin: false,
+  leadChannels: DEFAULT_LEAD_CHANNELS,
+  followupSchedule: DEFAULT_FOLLOWUP_SCHEDULE,
 };
 
 function settingsFromRow(row) {
@@ -591,6 +1444,14 @@ function settingsFromRow(row) {
     hasSeenTutorial: row.has_seen_tutorial || false,
     plan: row.plan || "free",
     isAdmin: row.is_admin || false,
+    leadChannels:
+      Array.isArray(row.lead_channels) && row.lead_channels.length > 0
+        ? row.lead_channels
+        : DEFAULT_LEAD_CHANNELS,
+    followupSchedule:
+      Array.isArray(row.followup_schedule) && row.followup_schedule.length === 5
+        ? row.followup_schedule
+        : DEFAULT_FOLLOWUP_SCHEDULE,
   };
 }
 
@@ -607,13 +1468,17 @@ function settingsToRow(settings, userId) {
     has_seen_tutorial: settings.hasSeenTutorial,
     plan: settings.plan,
     is_admin: settings.isAdmin,
+    lead_channels: settings.leadChannels || DEFAULT_LEAD_CHANNELS,
+    followup_schedule: settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE,
   };
 }
 
 function computeDashboardStats(projects, cards, leads, invoices, fxRates = {}) {
   const activeProjects = projects.filter((p) => !p.archived);
-  const activeLeads = leads.filter((l) => !["won", "lost", "closed"].includes(l.stage));
-  const dealsWon = leads.filter((l) => l.stage === "won" || l.stage === "closed").length;
+  const activeLeads = leads.filter(
+    (l) => !l.archivedAt && !LEAD_TERMINAL_STAGES.some((s) => s.id === l.stage)
+  );
+  const dealsWon = leads.filter((l) => l.stage === "won").length;
   const dealsLost = leads.filter((l) => l.stage === "lost").length;
 
   const now = new Date();
@@ -806,10 +1671,23 @@ function emptyEmails() {
     { label: "Follow-up 1", message: "", sent: false, dateSent: null },
     { label: "Follow-up 2", message: "", sent: false, dateSent: null },
     { label: "Follow-up 3", message: "", sent: false, dateSent: null },
+    { label: "Follow-up 4", message: "", sent: false, dateSent: null },
   ];
 }
 
-function emptyLead(stage = "pool") {
+// Older leads only have 4 slots (Initial + 3 follow-ups). Pad them with the
+// new Follow-up 4 slot so the schedule/automation code can always assume 5.
+function normalizeEmails(emails) {
+  const base = emails && emails.length ? emails : emptyEmails();
+  if (base.length >= 5) return base;
+  const padded = [...base];
+  while (padded.length < 5) {
+    padded.push({ label: `Follow-up ${padded.length}`, message: "", sent: false, dateSent: null });
+  }
+  return padded;
+}
+
+function emptyLead(stage = "pool", channel = "") {
   return {
     companyName: "",
     contactPerson: "",
@@ -818,6 +1696,13 @@ function emptyLead(stage = "pool") {
     country: "",
     notes: "",
     stage,
+    channel,
+    priority: "warm",
+    needsFollowup: false,
+    lastContactedAt: null,
+    activityLog: [],
+    archivedAt: null,
+    stageChangedAt: null,
     emails: emptyEmails(),
     proposedBudget: "",
     estimatedDeadline: "",
@@ -837,12 +1722,20 @@ function leadFromRow(row) {
     country: row.country,
     notes: row.notes,
     stage: row.stage,
-    emails: row.emails && row.emails.length ? row.emails : emptyEmails(),
+    channel: row.channel || "",
+    priority: row.priority || "warm",
+    needsFollowup: row.needs_followup || false,
+    lastContactedAt: row.last_contacted_at || null,
+    activityLog: Array.isArray(row.activity_log) ? row.activity_log : [],
+    archivedAt: row.archived_at || null,
+    stageChangedAt: row.stage_changed_at || row.created_at || null,
+    emails: normalizeEmails(row.emails),
     proposedBudget: row.proposed_budget,
     estimatedDeadline: row.estimated_deadline,
     projectNotes: row.project_notes,
     lostReason: row.lost_reason,
     linkedProjectId: row.linked_project_id,
+    createdAt: row.created_at || null,
   };
 }
 
@@ -855,6 +1748,13 @@ function leadToRow(lead, userId) {
     country: lead.country,
     notes: lead.notes,
     stage: lead.stage,
+    channel: lead.channel || "",
+    priority: lead.priority || "warm",
+    needs_followup: !!lead.needsFollowup,
+    last_contacted_at: lead.lastContactedAt || null,
+    activity_log: lead.activityLog || [],
+    archived_at: lead.archivedAt || null,
+    stage_changed_at: lead.stageChangedAt || null,
     emails: lead.emails,
     proposed_budget: lead.proposedBudget,
     estimated_deadline: lead.estimatedDeadline,
@@ -863,6 +1763,189 @@ function leadToRow(lead, userId) {
     linked_project_id: lead.linkedProjectId || null,
     user_id: userId,
   };
+}
+
+// ---- Lead lifecycle helpers (shared by the board, editor, and dashboard) ----
+
+const STAGE_ACTIVITY_LABEL = {
+  pool: "Moved back to New",
+  cold_email: "Cold email sent",
+  responded: "Lead responded",
+  qualified: "Qualified",
+  proposal: "Proposal sent",
+  negotiation: "Entered negotiation",
+  won: "Won",
+  lost: "Marked lost",
+  no_response: "No response after follow-ups",
+  disqualified: "Disqualified",
+  closed: "Closed",
+};
+
+// Diffs the previous saved lead against the form about to be saved and
+// returns new activity-log entries for anything meaningful that changed.
+// Centralizing this in one place (called right before every save) means
+// every stage/priority/follow-up/archive change gets logged automatically,
+// without having to remember to log it at each call site.
+function buildActivityEntries(oldLead, newLead) {
+  const entries = [];
+  const now = new Date().toISOString();
+  if (!oldLead) {
+    entries.push({ ts: now, type: "created", note: "Lead created" });
+  } else {
+    const oldEmails = normalizeEmails(oldLead.emails);
+    const newEmails = normalizeEmails(newLead.emails);
+    newEmails.forEach((em, i) => {
+      if (em.sent && !oldEmails[i]?.sent) {
+        const note = i === 0 ? "Initial cold email sent" : `${em.label} sent`;
+        entries.push({ ts: now, type: "email_sent", note });
+      }
+    });
+    if (oldLead.stage !== newLead.stage) {
+      entries.push({
+        ts: now,
+        type: "stage_change",
+        note: STAGE_ACTIVITY_LABEL[newLead.stage] || `Status changed to ${newLead.stage}`,
+      });
+    }
+    if (!oldLead.needsFollowup && newLead.needsFollowup) {
+      entries.push({ ts: now, type: "followup_flag", note: "Marked as needing follow-up" });
+    }
+    if (oldLead.priority !== newLead.priority) {
+      const p = LEAD_PRIORITIES.find((x) => x.id === newLead.priority);
+      entries.push({ ts: now, type: "priority_change", note: `Priority set to ${p ? p.label : newLead.priority}` });
+    }
+    if (!oldLead.archivedAt && newLead.archivedAt) {
+      entries.push({ ts: now, type: "archived", note: "Lead archived" });
+    }
+    if (oldLead.archivedAt && !newLead.archivedAt) {
+      entries.push({ ts: now, type: "restored", note: "Lead restored" });
+    }
+  }
+  return entries;
+}
+
+// Given a lead and the studio's follow-up cadence, figures out what's next:
+// which slot is due, when, and what the lead card/editor should say about
+// it. Returns null once outreach is over (terminal stage, or all 5 emails
+// already sent).
+function computeFollowupStatus(lead, schedule = DEFAULT_FOLLOWUP_SCHEDULE) {
+  const emails = normalizeEmails(lead.emails);
+  const isTerminal = LEAD_TERMINAL_STAGES.some((s) => s.id === lead.stage);
+  const anchorStr = emails[0]?.dateSent;
+  const lastSent = emails.filter((e) => e.sent && e.dateSent).map((e) => e.dateSent).sort().pop() || null;
+
+  if (!anchorStr) {
+    return {
+      nextActionLabel: "Send initial email",
+      dueLabel: null,
+      lastContactedLabel: null,
+      isDue: false,
+      daysUntilDue: null,
+    };
+  }
+
+  const nextIndex = emails.findIndex((e) => !e.sent);
+  if (isTerminal || nextIndex === -1) {
+    return {
+      nextActionLabel: nextIndex === -1 ? "No response after 4 follow-ups" : null,
+      dueLabel: null,
+      lastContactedLabel: lastSent ? formatShortDate(lastSent) : null,
+      isDue: false,
+      daysUntilDue: null,
+    };
+  }
+
+  const anchor = new Date(anchorStr);
+  const dayOffset = schedule[nextIndex]?.dayOffset ?? 0;
+  const due = new Date(anchor.getTime() + dayOffset * 86400000);
+  const today = new Date();
+  const daysUntilDue = Math.floor((due.setHours(0, 0, 0, 0) - today.setHours(0, 0, 0, 0)) / 86400000);
+
+  let dueLabel;
+  if (daysUntilDue < 0) dueLabel = `Follow-up overdue by ${Math.abs(daysUntilDue)}d`;
+  else if (daysUntilDue === 0) dueLabel = "Follow-up due today";
+  else dueLabel = `Follow-up in ${daysUntilDue}d`;
+
+  return {
+    nextActionLabel: emails[nextIndex]?.label || null,
+    dueLabel,
+    lastContactedLabel: lastSent ? formatShortDate(lastSent) : null,
+    isDue: daysUntilDue <= 0,
+    daysUntilDue,
+  };
+}
+
+function formatShortDate(dateStr) {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+// ---- Smart duplicate detection ----
+// Normalizes free-text so trivially different spellings of the same
+// company/website compare as equal ("Example Studios Ltd" vs "example
+// studios", "https://www.x.com/" vs "x.com").
+function normalizeCompanyName(name) {
+  return (name || "")
+    .toLowerCase()
+    .replace(/[.,]/g, "")
+    .replace(/\b(ltd|llc|inc|studio|studios|games|co|corp|company)\b/g, "")
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+}
+
+function normalizeWebsite(url) {
+  return (url || "")
+    .toLowerCase()
+    .trim()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/\/+$/, "");
+}
+
+function normalizeEmailStr(email) {
+  return (email || "").toLowerCase().trim();
+}
+
+// Returns possible duplicates of `form` among `leads` (excluding the lead
+// being edited), each tagged with a confidence level so the UI can decide
+// how loudly to warn. Very high/high confidence blocks a silent save; medium
+// is a soft, dismissible hint.
+function findPossibleDuplicates(form, leads, excludeId) {
+  const email = normalizeEmailStr(form.email);
+  const website = normalizeWebsite(form.website);
+  const company = normalizeCompanyName(form.companyName);
+  const contact = (form.contactPerson || "").toLowerCase().trim();
+  if (!email && !website && !company) return [];
+
+  const matches = [];
+  for (const lead of leads) {
+    if (!lead || lead.id === excludeId) continue;
+    const leadEmail = normalizeEmailStr(lead.email);
+    const leadWebsite = normalizeWebsite(lead.website);
+    const leadCompany = normalizeCompanyName(lead.companyName);
+    const leadContact = (lead.contactPerson || "").toLowerCase().trim();
+
+    let confidence = null;
+    if (email && leadEmail && email === leadEmail) confidence = "very_high";
+    else if (website && leadWebsite && website === leadWebsite) confidence = "very_high";
+    else if (company && leadCompany && company === leadCompany) {
+      confidence = contact && leadContact && contact === leadContact ? "high" : "high";
+    } else if (
+      company &&
+      leadCompany &&
+      company.length >= 4 &&
+      leadCompany.length >= 4 &&
+      (company.startsWith(leadCompany) || leadCompany.startsWith(company))
+    ) {
+      confidence = "medium";
+    }
+
+    if (confidence) matches.push({ lead, confidence });
+  }
+
+  const rank = { very_high: 0, high: 1, medium: 2 };
+  return matches.sort((a, b) => rank[a.confidence] - rank[b.confidence]);
 }
 
 function friendlyAuthError(err) {
@@ -925,6 +2008,19 @@ const RestoreIcon = () => (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
     <path d="M3 12a9 9 0 1 0 3-6.7" />
     <path d="M3 4v5h5" />
+  </svg>
+);
+
+const EditIcon = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 20h9" />
+    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+  </svg>
+);
+
+const SpinnerIcon = ({ size = 18 }) => (
+  <svg className="kf-spin" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+    <path d="M12 3a9 9 0 1 0 9 9" />
   </svg>
 );
 
@@ -1001,6 +2097,13 @@ const XCircleIcon = () => (
   </svg>
 );
 
+const ClockIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7v5l3.5 2" />
+  </svg>
+);
+
 const TrendIcon = ({ direction = "up" }) => (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
     {direction === "up" ? <path d="M4 17 10 11 14 15 20 7M14 7h6v6" /> : <path d="M4 7 10 13 14 9 20 17M14 17h6v-6" />}
@@ -1030,13 +2133,18 @@ export default function ShotTracker() {
     teamMembers: [],
     activity: [],
     budgetPlanners: [],
+    plannerTemplates: [],
   });
-  const { projects, cards, leads, invoices, expenses, teamMembers, activity, budgetPlanners } = data;
+  const { projects, cards, leads, invoices, expenses, teamMembers, activity, budgetPlanners, plannerTemplates } = data;
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [fxRates, setFxRates] = useState({});
   const [fxUpdatedAt, setFxUpdatedAt] = useState(null);
   const [driveEmail, setDriveEmail] = useState(null);
   const [driveNotice, setDriveNotice] = useState("");
+  // Shown when the project-card Drive shortcut is used before Drive is
+  // connected. Kept separate from driveNotice (which only ever holds plain
+  // post-OAuth-redirect text) since this one needs an action button.
+  const [driveConnectPrompt, setDriveConnectPrompt] = useState(false);
   const [patreonEmail, setPatreonEmail] = useState(null);
   const [patreonIsPro, setPatreonIsPro] = useState(false);
   const [patreonConnected, setPatreonConnected] = useState(false);
@@ -1060,6 +2168,12 @@ export default function ShotTracker() {
   const [tutorialHighlightTarget, setTutorialHighlightTarget] = useState(null);
   const [pendingLeadLinkId, setPendingLeadLinkId] = useState(null);
   const [dragOverStage, setDragOverStage] = useState(null);
+  const [leadChannelFilter, setLeadChannelFilter] = useState("all");
+  const [leadSearch, setLeadSearch] = useState("");
+  const [leadStatusFilter, setLeadStatusFilter] = useState("all");
+  const [leadPriorityFilter, setLeadPriorityFilter] = useState("all");
+  const [leadFollowupFilter, setLeadFollowupFilter] = useState("all");
+  const [showArchivedLeads, setShowArchivedLeads] = useState(false);
   const [dragVisual, setDragVisual] = useState(null);
   const [saveState, setSaveState] = useState("idle");
 
@@ -1340,6 +2454,27 @@ export default function ShotTracker() {
     setShowSettingsModal(false);
   };
 
+  // Adds a new channel to the shared, per-studio channel list (used by the
+  // lead editor's "+" button) without requiring a trip through the full
+  // Settings modal. The list lives on user_settings so it's shared between
+  // the CRM board's filter chips and the dashboard breakdown.
+  const handleAddLeadChannel = async (name) => {
+    const trimmed = (name || "").trim();
+    if (!trimmed) return;
+    const existing = settings.leadChannels || DEFAULT_LEAD_CHANNELS;
+    if (existing.some((c) => c.toLowerCase() === trimmed.toLowerCase())) return;
+    const nextSettings = { ...settings, leadChannels: [...existing, trimmed] };
+    setSettings(nextSettings);
+    try {
+      const { error } = await supabase
+        .from("user_settings")
+        .upsert(settingsToRow(nextSettings, userId), { onConflict: "user_id" });
+      if (error) throw error;
+    } catch (e) {
+      console.error("Adding lead channel failed:", e);
+    }
+  };
+
   const handleCompleteTutorial = async () => {
     setShowTutorial(false);
     setTutorialHighlightTarget(null);
@@ -1383,7 +2518,7 @@ export default function ShotTracker() {
     if (!userId) return;
     setLoading(true);
     try {
-      const [projectsRes, shotsRes, leadsRes, invoicesRes, expensesRes, teamRes, activityRes, plannersRes] = await Promise.all([
+      const [projectsRes, shotsRes, leadsRes, invoicesRes, expensesRes, teamRes, activityRes, plannersRes, plannerTemplatesRes] = await Promise.all([
         supabase.from("projects").select("*").order("created_at"),
         supabase.from("shots").select("*").order("created_at"),
         supabase.from("leads").select("*").order("created_at"),
@@ -1392,6 +2527,7 @@ export default function ShotTracker() {
         supabase.from("team_members").select("*").order("created_at"),
         supabase.from("activity_log").select("*").order("created_at", { ascending: false }),
         supabase.from("budget_planners").select("*").order("created_at", { ascending: false }),
+        supabase.from("planner_templates").select("*").order("created_at", { ascending: false }),
       ]);
       if (projectsRes.error) throw projectsRes.error;
       if (shotsRes.error) throw shotsRes.error;
@@ -1401,6 +2537,7 @@ export default function ShotTracker() {
       if (teamRes.error) throw teamRes.error;
       if (activityRes.error) throw activityRes.error;
       if (plannersRes.error) throw plannersRes.error;
+      if (plannerTemplatesRes.error) throw plannerTemplatesRes.error;
       const nextProjects = (projectsRes.data || []).map((p) => ({
         id: p.id,
         name: p.name,
@@ -1432,6 +2569,7 @@ export default function ShotTracker() {
         createdAt: a.created_at,
       }));
       const nextBudgetPlanners = (plannersRes.data || []).map(budgetPlannerFromRow);
+      const nextPlannerTemplates = (plannerTemplatesRes.data || []).map(plannerTemplateFromRow);
       setData({
         projects: nextProjects,
         cards: nextCards,
@@ -1441,6 +2579,7 @@ export default function ShotTracker() {
         teamMembers: nextTeamMembers,
         activity: nextActivity,
         budgetPlanners: nextBudgetPlanners,
+        plannerTemplates: nextPlannerTemplates,
       });
     } catch (e) {
       console.error("Shot Tracker load failed:", e);
@@ -1460,6 +2599,8 @@ export default function ShotTracker() {
         expenses: [],
         teamMembers: [],
         activity: [],
+        budgetPlanners: [],
+        plannerTemplates: [],
       });
   }, [userId, loadData]);
 
@@ -1753,8 +2894,21 @@ export default function ShotTracker() {
     }
   };
 
-  const handleSaveLead = async (lead) => {
+  const handleSaveLead = async (leadInput) => {
     setSaveState("saving");
+    // Diff against whatever we last persisted (not the possibly-stale form
+    // state) so the activity log reflects real transitions, and every
+    // stage/priority/follow-up/archive change gets recorded automatically
+    // without every caller having to remember to log it.
+    const oldLead = leadInput.id ? data.leads.find((l) => l.id === leadInput.id) : null;
+    const lead = {
+      ...leadInput,
+      activityLog: [...(oldLead?.activityLog || []), ...buildActivityEntries(oldLead, leadInput)],
+      stageChangedAt:
+        !oldLead || oldLead.stage !== leadInput.stage
+          ? new Date().toISOString()
+          : oldLead.stageChangedAt || null,
+    };
     try {
       if (lead.id) {
         const { error } = await supabase.from("leads").update(leadToRow(lead, userId)).eq("id", lead.id);
@@ -1780,6 +2934,9 @@ export default function ShotTracker() {
     setEditingLead(null);
   };
 
+  const handleArchiveLead = (lead) => handleSaveLead({ ...lead, archivedAt: new Date().toISOString() });
+  const handleRestoreLead = (lead) => handleSaveLead({ ...lead, archivedAt: null });
+
   const handleDeleteLead = async (id) => {
     setSaveState("saving");
     try {
@@ -1795,13 +2952,27 @@ export default function ShotTracker() {
   };
 
   const moveLeadStage = async (id, stage) => {
+    const oldLead = data.leads.find((l) => l.id === id);
+    const nowIso = new Date().toISOString();
+    const entries = oldLead ? buildActivityEntries(oldLead, { ...oldLead, stage }) : [];
     setData((prev) => ({
       ...prev,
-      leads: prev.leads.map((l) => (l.id === id ? { ...l, stage } : l)),
+      leads: prev.leads.map((l) =>
+        l.id === id
+          ? { ...l, stage, stageChangedAt: nowIso, activityLog: [...(l.activityLog || []), ...entries] }
+          : l
+      ),
     }));
     setSaveState("saving");
     try {
-      const { error } = await supabase.from("leads").update({ stage }).eq("id", id);
+      const { error } = await supabase
+        .from("leads")
+        .update({
+          stage,
+          stage_changed_at: nowIso,
+          activity_log: [...(oldLead?.activityLog || []), ...entries],
+        })
+        .eq("id", id);
       if (error) throw error;
       flashSave(true);
     } catch (e) {
@@ -2041,6 +3212,7 @@ export default function ShotTracker() {
           ...prev,
           budgetPlanners: prev.budgetPlanners.map((p) => (p.id === plan.id ? { ...plan } : p)),
         }));
+        setEditingBudgetPlanner({ ...plan });
       } else {
         const { data: inserted, error } = await supabase
           .from("budget_planners")
@@ -2048,17 +3220,18 @@ export default function ShotTracker() {
           .select()
           .single();
         if (error) throw error;
+        const savedPlan = budgetPlannerFromRow(inserted);
         setData((prev) => ({
           ...prev,
-          budgetPlanners: [budgetPlannerFromRow(inserted), ...prev.budgetPlanners],
+          budgetPlanners: [savedPlan, ...prev.budgetPlanners],
         }));
+        setEditingBudgetPlanner(savedPlan);
       }
       flashSave(true);
     } catch (e) {
       console.error("Budget planner save failed:", e);
       flashSave(false);
     }
-    setEditingBudgetPlanner(null);
   };
 
   const handleDeleteBudgetPlanner = async (id) => {
@@ -2073,6 +3246,158 @@ export default function ShotTracker() {
       flashSave(false);
     }
     setEditingBudgetPlanner(null);
+  };
+
+  // Phase 3 — duplicate an existing plan (also used as "new from template").
+  const handleDuplicateBudgetPlanner = async (plan) => {
+    if (atBudgetPlannerLimit) {
+      flashSave(false);
+      return;
+    }
+    const copy = {
+      ...plan,
+      id: undefined,
+      name: `${plan.name || "Untitled plan"} (copy)`,
+      status: "draft",
+      convertedProjectId: null,
+    };
+    setSaveState("saving");
+    try {
+      const { data: inserted, error } = await supabase
+        .from("budget_planners")
+        .insert(budgetPlannerToRow(copy, userId))
+        .select()
+        .single();
+      if (error) throw error;
+      const nextPlan = budgetPlannerFromRow(inserted);
+      setData((prev) => ({ ...prev, budgetPlanners: [nextPlan, ...prev.budgetPlanners] }));
+      setEditingBudgetPlanner(nextPlan);
+      flashSave(true);
+    } catch (e) {
+      console.error("Budget planner duplicate failed:", e);
+      flashSave(false);
+    }
+  };
+
+  // Phase 11 — save the structure of a plan (not client-specific info) as a
+  // reusable template.
+  const handleSaveAsTemplate = async (plan) => {
+    if (!hasProAccess) return;
+    const template = {
+      name: plan.name ? `${plan.name} template` : "Untitled template",
+      projectType: plan.projectType,
+      targetProfitPercent: plan.targetProfitPercent,
+      departmentAllocations: plan.departmentAllocations,
+      crew: (plan.crew || []).map((p) => ({ ...p, name: "" })), // rate/role defaults only, not the person's name
+      scope: plan.scope,
+    };
+    setSaveState("saving");
+    try {
+      const { data: inserted, error } = await supabase
+        .from("planner_templates")
+        .insert(plannerTemplateToRow(template, userId))
+        .select()
+        .single();
+      if (error) throw error;
+      setData((prev) => ({ ...prev, plannerTemplates: [plannerTemplateFromRow(inserted), ...prev.plannerTemplates] }));
+      flashSave(true);
+    } catch (e) {
+      console.error("Save as template failed:", e);
+      flashSave(false);
+    }
+  };
+
+  const handleDeleteTemplate = async (id) => {
+    setSaveState("saving");
+    try {
+      const { error } = await supabase.from("planner_templates").delete().eq("id", id);
+      if (error) throw error;
+      setData((prev) => ({ ...prev, plannerTemplates: prev.plannerTemplates.filter((t) => t.id !== id) }));
+      flashSave(true);
+    } catch (e) {
+      console.error("Template delete failed:", e);
+      flashSave(false);
+    }
+  };
+
+  // Phase 10 — Convert to Project. Copies the planner's core fields into a
+  // real project, attaches the planner's budget info as notes, marks the
+  // planner Converted, and never deletes the planner. Guards against
+  // accidental duplicate conversion.
+  const handleConvertPlannerToProject = async (plan) => {
+    if (plan.convertedProjectId) {
+      flashSave(false);
+      return { alreadyConverted: true };
+    }
+    if (atProjectLimit) {
+      flashSave(false);
+      return { limitReached: true };
+    }
+    setSaveState("saving");
+    try {
+      const calc = computeBudgetPlan(plan);
+      const plannerSummary = [
+        `Converted from Budget Planner: ${plan.name || "Untitled plan"}`,
+        `Target profit: ${plan.targetProfitPercent}% (${plan.currency || "$"}${formatMoney(calc.profit)})`,
+        `Production budget: ${plan.currency || "$"}${formatMoney(calc.productionBudget)}`,
+        plan.notes ? `Notes: ${plan.notes}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const { data: inserted, error } = await supabase
+        .from("projects")
+        .insert({
+          name: plan.name || "Untitled project",
+          client: plan.clientName || "",
+          notes: plannerSummary,
+          budget: parseMoney(plan.budget),
+          budget_mode: "manual",
+          currency: plan.currency || "$",
+          deadline: plan.deadline || null,
+          priority: "normal",
+          share_enabled: false,
+          share_token: null,
+          user_id: userId,
+        })
+        .select()
+        .single();
+      if (error) throw error;
+      const newProject = {
+        id: inserted.id,
+        name: inserted.name,
+        client: inserted.client,
+        notes: inserted.notes,
+        budget: inserted.budget,
+        budgetMode: inserted.budget_mode || "manual",
+        currency: inserted.currency || "$",
+        deadline: inserted.deadline,
+        priority: inserted.priority,
+        archived: inserted.archived,
+        shareEnabled: inserted.share_enabled || false,
+        shareToken: inserted.share_token || null,
+        driveFolderId: null,
+        driveFolderUrl: null,
+        driveDeliverablesFolderId: null,
+      };
+      const { error: updateError } = await supabase
+        .from("budget_planners")
+        .update({ status: "converted", converted_project_id: inserted.id })
+        .eq("id", plan.id);
+      if (updateError) throw updateError;
+      const updatedPlan = { ...plan, status: "converted", convertedProjectId: inserted.id };
+      setData((prev) => ({
+        ...prev,
+        projects: [...prev.projects, newProject],
+        budgetPlanners: prev.budgetPlanners.map((p) => (p.id === plan.id ? updatedPlan : p)),
+      }));
+      setEditingBudgetPlanner(updatedPlan);
+      flashSave(true);
+      return { project: newProject };
+    } catch (e) {
+      console.error("Convert to project failed:", e);
+      flashSave(false);
+      return { error: e };
+    }
   };
 
   const handleExport = () => {
@@ -2166,12 +3491,23 @@ export default function ShotTracker() {
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
-    setData({ projects: [], cards: [], leads: [], invoices: [], expenses: [], teamMembers: [], activity: [], budgetPlanners: [] });
+    setData({ projects: [], cards: [], leads: [], invoices: [], expenses: [], teamMembers: [], activity: [], budgetPlanners: [], plannerTemplates: [] });
     setView("projects");
     setSelectedProjectId(null);
   };
 
+  // Touch drags need a brief "hold" before we commit to picking a card up.
+  // Without this, any touch that starts on a card and moves vertically to
+  // scroll the board gets immediately hijacked into a drag (since the old
+  // 6px threshold fires on scroll gestures too), which is what caused cards
+  // to get dropped in the wrong column while someone was just trying to
+  // scroll. Mouse/pen drags are unaffected and still arm instantly.
+  const TOUCH_HOLD_MS = 160;
+  const TOUCH_CANCEL_DISTANCE = 10;
+
   const endDrag = useCallback(() => {
+    const ds = dragStateRef.current;
+    if (ds?.holdTimer) clearTimeout(ds.holdTimer);
     window.removeEventListener("pointermove", handlePointerMove);
     window.removeEventListener("pointerup", handlePointerUp);
     window.removeEventListener("pointercancel", handlePointerUp);
@@ -2185,7 +3521,20 @@ export default function ShotTracker() {
     if (!ds) return;
     const dx = e.clientX - ds.startX;
     const dy = e.clientY - ds.startY;
-    if (!ds.moved && Math.hypot(dx, dy) > 6) {
+    const dist = Math.hypot(dx, dy);
+
+    if (!ds.armed) {
+      // Still deciding whether this is a drag or a scroll. If the finger
+      // has already moved a meaningful distance before the hold timer
+      // fired, this was a scroll attempt - bail out without ever calling
+      // preventDefault so the browser can scroll normally.
+      if (dist > TOUCH_CANCEL_DISTANCE) {
+        endDrag();
+      }
+      return;
+    }
+
+    if (!ds.moved && dist > 6) {
       ds.moved = true;
     }
     if (ds.moved) {
@@ -2235,7 +3584,8 @@ export default function ShotTracker() {
   const handlePointerDown = (e, card, kind = "shot") => {
     if (e.button !== undefined && e.button !== 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    dragStateRef.current = {
+    const isTouch = e.pointerType === "touch";
+    const state = {
       kind,
       id: card.id,
       title: kind === "lead" ? card.companyName : card.title,
@@ -2246,7 +3596,20 @@ export default function ShotTracker() {
       offsetY: e.clientY - rect.top,
       width: rect.width,
       moved: false,
+      // Mouse/pen: arm the drag immediately, same as before.
+      // Touch: wait for a short hold so a scroll swipe never gets mistaken
+      // for a drag pickup.
+      armed: !isTouch,
+      holdTimer: null,
     };
+    dragStateRef.current = state;
+    if (isTouch) {
+      state.holdTimer = setTimeout(() => {
+        if (dragStateRef.current === state) {
+          state.armed = true;
+        }
+      }, TOUCH_HOLD_MS);
+    }
     window.addEventListener("pointermove", handlePointerMove, { passive: false });
     window.addEventListener("pointerup", handlePointerUp);
     window.addEventListener("pointercancel", handlePointerUp);
@@ -2273,6 +3636,19 @@ export default function ShotTracker() {
     setView("board");
     setBoardTab("shots");
   };
+
+  // Must be called unconditionally, before the early returns below - React
+  // requires the same hooks in the same order on every render, and several
+  // renders happen while authLoading/session/loading are still resolving.
+  // (selectedProject itself is computed again further down for the JSX that
+  // needs it; that's a plain expression, not a hook, so it's fine there.)
+  const boardDriveAction = useDriveFolderAction({
+    project: projects.find((p) => p.id === selectedProjectId),
+    driveEmail,
+    onCreateDriveFolders: handleCreateDriveFolders,
+    onRequestDriveConnect: () => setDriveConnectPrompt(true),
+    onDriveError: setDriveNotice,
+  });
 
   if (authLoading) {
     return (
@@ -2474,6 +3850,25 @@ export default function ShotTracker() {
         </div>
       )}
 
+      {driveConnectPrompt && (
+        <div style={{ ...styles.driveToast, flexWrap: "wrap", justifyContent: "center" }}>
+          <span>Connect Google Drive to create project folders.</span>
+          <button
+            type="button"
+            style={{ ...styles.addRevisionButton, alignSelf: "center", flexShrink: 0 }}
+            onClick={() => {
+              setDriveConnectPrompt(false);
+              handleConnectDrive();
+            }}
+          >
+            Connect Google Drive
+          </button>
+          <button style={styles.iconButton} onClick={() => setDriveConnectPrompt(false)}>
+            <CloseIcon />
+          </button>
+        </div>
+      )}
+
       <header style={styles.header}>
         <div style={styles.headerLeft}>
           {view === "board" ? (
@@ -2563,7 +3958,7 @@ export default function ShotTracker() {
               <PlusIcon />
               New member
             </button>
-          ) : workspace === "planner" ? (
+          ) : workspace === "planner" && !editingBudgetPlanner ? (
             <button
               style={styles.newButton}
               onClick={() => setEditingBudgetPlanner(emptyBudgetPlanner({ currency: settings.currencySymbol }))}
@@ -2576,6 +3971,11 @@ export default function ShotTracker() {
             >
               <PlusIcon />
               New plan
+            </button>
+          ) : workspace === "planner" && editingBudgetPlanner ? (
+            <button style={styles.cancelButton} onClick={() => setEditingBudgetPlanner(null)}>
+              <BackIcon />
+              All plans
             </button>
           ) : workspace === "dashboard" ? null : (
             <button
@@ -2657,6 +4057,25 @@ export default function ShotTracker() {
           >
             Activity
           </button>
+          {selectedProject && (
+            <button
+              type="button"
+              style={{
+                ...styles.addRevisionButton,
+                alignSelf: "center",
+                fontSize: 13,
+                padding: "8px 16px",
+                ...(boardDriveAction.connected ? {} : { opacity: 0.6 }),
+              }}
+              onClick={boardDriveAction.handleDriveAction}
+              disabled={boardDriveAction.creatingFolders}
+              title={boardDriveAction.tooltip}
+              aria-label={boardDriveAction.tooltip}
+            >
+              {boardDriveAction.creatingFolders ? <SpinnerIcon /> : <FolderIcon />}
+              {boardDriveAction.label}
+            </button>
+          )}
         </div>
       )}
 
@@ -2686,7 +4105,16 @@ export default function ShotTracker() {
           fxRates={fxRates}
           onOpenProject={openProject}
           onGoToProjects={() => setWorkspace("projects")}
-          onGoToLeads={() => setWorkspace("leads")}
+          onGoToLeads={(filters = {}) => {
+            setLeadStatusFilter(filters.status || "all");
+            setLeadPriorityFilter(filters.priority || "all");
+            setLeadFollowupFilter(filters.followup || "all");
+            setLeadChannelFilter("all");
+            setShowArchivedLeads(false);
+            setWorkspace("leads");
+          }}
+          user={session?.user}
+          userId={userId}
         />
       )}
 
@@ -2698,71 +4126,236 @@ export default function ShotTracker() {
           onEdit={setEditingProject}
           onNew={() => setEditingProject(emptyProject({ currency: settings.currencySymbol }))}
           onToggleArchive={handleToggleArchive}
+          driveEmail={driveEmail}
+          onCreateDriveFolders={handleCreateDriveFolders}
+          onRequestDriveConnect={() => setDriveConnectPrompt(true)}
+          onDriveError={setDriveNotice}
         />
       )}
 
       {view === "projects" && workspace === "leads" && (
-        <div style={{ ...styles.board, touchAction: dragVisual ? "none" : "auto" }}>
-          {LEAD_STAGES.map((stage) => {
-            const stageLeads = leads.filter((l) => l.stage === stage.id);
-            const isOver = dragOverStage === stage.id;
-            return (
-              <div
-                key={stage.id}
-                data-stage={stage.id}
-                style={{ ...styles.column, ...(isOver ? styles.columnOver : {}) }}
+        <>
+          <div style={styles.fieldRow}>
+            <input
+              style={styles.input}
+              value={leadSearch}
+              onChange={(e) => setLeadSearch(e.target.value)}
+              placeholder="Search company, contact, email, website, notes..."
+            />
+            <select
+              style={styles.input}
+              value={leadStatusFilter}
+              onChange={(e) => setLeadStatusFilter(e.target.value)}
+            >
+              <option value="all">All statuses</option>
+              {ALL_LEAD_STAGES.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+            <select
+              style={styles.input}
+              value={leadFollowupFilter}
+              onChange={(e) => setLeadFollowupFilter(e.target.value)}
+            >
+              <option value="all">Any follow-up</option>
+              <option value="due">Due</option>
+              <option value="upcoming">Upcoming</option>
+              <option value="completed">Completed</option>
+              <option value="none">None</option>
+            </select>
+          </div>
+          <div style={{ ...styles.lostReasonGrid, marginBottom: 12 }}>
+            <button
+              type="button"
+              style={{
+                ...styles.reviewStatusButton,
+                borderColor: leadChannelFilter === "all" ? teal : border,
+                color: leadChannelFilter === "all" ? tealLight : textMuted,
+                background: leadChannelFilter === "all" ? "rgba(47,191,166,0.1)" : "transparent",
+              }}
+              onClick={() => setLeadChannelFilter("all")}
+            >
+              All channels
+            </button>
+            {(settings.leadChannels || DEFAULT_LEAD_CHANNELS).map((channel) => (
+              <button
+                key={channel}
+                type="button"
+                style={{
+                  ...styles.reviewStatusButton,
+                  borderColor: leadChannelFilter === channel ? teal : border,
+                  color: leadChannelFilter === channel ? tealLight : textMuted,
+                  background: leadChannelFilter === channel ? "rgba(47,191,166,0.1)" : "transparent",
+                }}
+                onClick={() => setLeadChannelFilter(channel)}
               >
-                <div style={styles.columnHeader}>
-                  <span style={styles.columnLabel}>{stage.label}</span>
-                  <span style={styles.columnCount}>{stageLeads.length}</span>
-                </div>
-                <div style={styles.columnBody}>
-                  {stageLeads.length === 0 && (
-                    <button
-                      style={styles.emptyAdd}
-                      onClick={() => setEditingLead(emptyLead(stage.id))}
-                    >
-                      <PlusIcon />
-                      Add lead
-                    </button>
-                  )}
-                  {stageLeads.map((lead) => {
-                    const sentCount = lead.emails.filter((e) => e.sent).length;
-                    return (
-                      <div
-                        key={lead.id}
-                        onPointerDown={(e) => handlePointerDown(e, lead, "lead")}
-                        onClick={() => handleLeadClick(lead)}
-                        style={{
-                          ...styles.card,
-                          opacity: dragStateRef.current?.id === lead.id && dragVisual ? 0.4 : 1,
-                          touchAction: "none",
-                        }}
-                      >
-                        <div style={styles.cardTop}>
-                          <span style={styles.cardTitle}>
-                            {lead.companyName || "Untitled lead"}
-                          </span>
-                        </div>
-                        {lead.contactPerson && (
-                          <div style={styles.cardMeta}>{lead.contactPerson}</div>
-                        )}
-                        <div style={styles.cardFooter}>
-                          {sentCount > 0 && (
-                            <span style={styles.cardTag}>{sentCount}/4 emails sent</span>
-                          )}
-                          {lead.stage === "lost" && lead.lostReason && (
-                            <span style={styles.cardTag}>{lead.lostReason}</span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+                {channel}
+              </button>
+            ))}
+            <span style={{ width: 1, background: border, margin: "0 4px" }} />
+            <button
+              type="button"
+              style={{
+                ...styles.reviewStatusButton,
+                borderColor: leadPriorityFilter === "all" ? teal : border,
+                color: leadPriorityFilter === "all" ? tealLight : textMuted,
+                background: leadPriorityFilter === "all" ? "rgba(47,191,166,0.1)" : "transparent",
+              }}
+              onClick={() => setLeadPriorityFilter("all")}
+            >
+              All priorities
+            </button>
+            {LEAD_PRIORITIES.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                style={{
+                  ...styles.reviewStatusButton,
+                  borderColor: leadPriorityFilter === p.id ? teal : border,
+                  color: leadPriorityFilter === p.id ? tealLight : textMuted,
+                  background: leadPriorityFilter === p.id ? "rgba(47,191,166,0.1)" : "transparent",
+                }}
+                onClick={() => setLeadPriorityFilter(p.id)}
+              >
+                {p.icon} {p.label}
+              </button>
+            ))}
+            <span style={{ width: 1, background: border, margin: "0 4px" }} />
+            <button
+              type="button"
+              style={{
+                ...styles.reviewStatusButton,
+                borderColor: showArchivedLeads ? teal : border,
+                color: showArchivedLeads ? tealLight : textMuted,
+                background: showArchivedLeads ? "rgba(47,191,166,0.1)" : "transparent",
+              }}
+              onClick={() => setShowArchivedLeads((v) => !v)}
+            >
+              <ArchiveIcon /> {showArchivedLeads ? "Showing archived" : "Show archived"}
+            </button>
+          </div>
+
+          {showArchivedLeads ? (
+            <div style={styles.timeline}>
+              {leads.filter((l) => l.archivedAt).length === 0 && (
+                <p style={styles.fieldHint}>No archived leads yet.</p>
+              )}
+              {leads
+                .filter((l) => l.archivedAt)
+                .map((lead) => (
+                  <div key={lead.id} style={{ ...styles.card, cursor: "pointer" }} onClick={() => handleLeadClick(lead)}>
+                    <div style={styles.cardTop}>
+                      <span style={styles.cardTitle}>{lead.companyName || "Untitled lead"}</span>
+                    </div>
+                    <div style={styles.cardFooter}>
+                      <span style={styles.cardTag}>
+                        {ALL_LEAD_STAGES.find((s) => s.id === lead.stage)?.label || lead.stage}
+                      </span>
+                      <span style={styles.cardTag}>Archived {formatShortDate(lead.archivedAt)}</span>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          ) : (
+            <div style={{ ...styles.board, touchAction: dragVisual ? "none" : "auto" }}>
+              {ALL_LEAD_STAGES.map((stage) => {
+                const searchText = leadSearch.trim().toLowerCase();
+                const stageLeads = leads.filter((l) => {
+                  if (l.stage !== stage.id) return false;
+                  if (l.archivedAt) return false;
+                  if (leadChannelFilter !== "all" && l.channel !== leadChannelFilter) return false;
+                  if (leadPriorityFilter !== "all" && l.priority !== leadPriorityFilter) return false;
+                  if (leadStatusFilter !== "all" && l.stage !== leadStatusFilter) return false;
+                  if (searchText) {
+                    const haystack = [l.companyName, l.contactPerson, l.email, l.website, l.notes]
+                      .join(" ")
+                      .toLowerCase();
+                    if (!haystack.includes(searchText)) return false;
+                  }
+                  if (leadFollowupFilter !== "all") {
+                    const status = computeFollowupStatus(l, settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE);
+                    const notStarted = status.nextActionLabel === "Send initial email";
+                    if (leadFollowupFilter === "due" && !status.isDue) return false;
+                    if (leadFollowupFilter === "upcoming" && (status.isDue || status.daysUntilDue == null)) return false;
+                    if (leadFollowupFilter === "completed" && (notStarted || status.daysUntilDue !== null)) return false;
+                    if (leadFollowupFilter === "none" && !notStarted) return false;
+                  }
+                  return true;
+                });
+                const isOver = dragOverStage === stage.id;
+                return (
+                  <div
+                    key={stage.id}
+                    data-stage={stage.id}
+                    style={{ ...styles.column, ...(isOver ? styles.columnOver : {}) }}
+                  >
+                    <div style={styles.columnHeader}>
+                      <span style={styles.columnLabel}>{stage.label}</span>
+                      <span style={styles.columnCount}>{stageLeads.length}</span>
+                    </div>
+                    <div style={styles.columnBody}>
+                      {stageLeads.length === 0 && (
+                        <button
+                          style={styles.emptyAdd}
+                          onClick={() =>
+                            setEditingLead(
+                              emptyLead(stage.id, leadChannelFilter === "all" ? "" : leadChannelFilter)
+                            )
+                          }
+                        >
+                          <PlusIcon />
+                          Add lead
+                        </button>
+                      )}
+                      {stageLeads.map((lead) => {
+                        const sentCount = lead.emails.filter((e) => e.sent).length;
+                        const priorityMeta = LEAD_PRIORITIES.find((p) => p.id === lead.priority);
+                        return (
+                          <div
+                            key={lead.id}
+                            onPointerDown={(e) => handlePointerDown(e, lead, "lead")}
+                            onClick={() => handleLeadClick(lead)}
+                            style={{
+                              ...styles.card,
+                              opacity: dragStateRef.current?.id === lead.id && dragVisual ? 0.4 : 1,
+                              touchAction: dragStateRef.current?.id === lead.id && dragVisual ? "none" : "pan-y",
+                            }}
+                          >
+                            <div style={styles.cardTop}>
+                              <span style={styles.cardTitle}>
+                                {priorityMeta ? `${priorityMeta.icon} ` : ""}
+                                {lead.companyName || "Untitled lead"}
+                              </span>
+                            </div>
+                            {lead.contactPerson && (
+                              <div style={styles.cardMeta}>{lead.contactPerson}</div>
+                            )}
+                            <div style={styles.cardFooter}>
+                              {lead.channel && (
+                                <span style={styles.cardTag}>{lead.channel}</span>
+                              )}
+                              {sentCount > 0 && (
+                                <span style={styles.cardTag}>{sentCount}/5 emails sent</span>
+                              )}
+                              {lead.needsFollowup && (
+                                <span style={{ ...styles.cardTag, color: "#F2A65A" }}>Needs follow-up</span>
+                              )}
+                              {lead.stage === "lost" && lead.lostReason && (
+                                <span style={styles.cardTag}>{lead.lostReason}</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
 
       {view === "projects" && workspace === "finance" && (
@@ -2793,12 +4386,35 @@ export default function ShotTracker() {
         />
       )}
 
-      {view === "projects" && workspace === "planner" && (
-        <BudgetPlannerPanel
+      {view === "projects" && workspace === "planner" && !editingBudgetPlanner && (
+        <PlannerDashboard
           plans={budgetPlanners}
           settings={settings}
-          onEdit={setEditingBudgetPlanner}
+          onOpen={setEditingBudgetPlanner}
+          onNew={(overrides) => setEditingBudgetPlanner(emptyBudgetPlanner({ currency: settings.currencySymbol, ...overrides }))}
           atLimit={atBudgetPlannerLimit}
+          hasProAccess={hasProAccess}
+          templates={plannerTemplates}
+          onDeleteTemplate={handleDeleteTemplate}
+        />
+      )}
+
+      {view === "projects" && workspace === "planner" && editingBudgetPlanner && (
+        <PlannerWorkspace
+          key={editingBudgetPlanner.id || "new"}
+          plan={editingBudgetPlanner}
+          isNew={!editingBudgetPlanner.id}
+          settings={settings}
+          hasProAccess={hasProAccess}
+          templates={plannerTemplates}
+          projects={projects}
+          teamMembers={teamMembers}
+          onSave={handleSaveBudgetPlanner}
+          onDelete={handleDeleteBudgetPlanner}
+          onDuplicate={handleDuplicateBudgetPlanner}
+          onSaveAsTemplate={handleSaveAsTemplate}
+          onConvertToProject={handleConvertPlannerToProject}
+          onClose={() => setEditingBudgetPlanner(null)}
         />
       )}
 
@@ -2837,7 +4453,7 @@ export default function ShotTracker() {
                       style={{
                         ...styles.card,
                         opacity: dragStateRef.current?.id === card.id && dragVisual ? 0.4 : 1,
-                        touchAction: "none",
+                        touchAction: dragStateRef.current?.id === card.id && dragVisual ? "none" : "pan-y",
                       }}
                     >
                       <div style={styles.cardTop}>
@@ -2969,16 +4585,6 @@ export default function ShotTracker() {
         />
       )}
 
-      {editingBudgetPlanner && (
-        <BudgetPlannerEditor
-          plan={editingBudgetPlanner}
-          onCancel={() => setEditingBudgetPlanner(null)}
-          onSave={handleSaveBudgetPlanner}
-          onDelete={handleDeleteBudgetPlanner}
-          isNew={!editingBudgetPlanner.id}
-        />
-      )}
-
       {editingTeamMember && (
         <TeamMemberEditor
           member={editingTeamMember}
@@ -2986,6 +4592,7 @@ export default function ShotTracker() {
           onSave={handleSaveTeamMember}
           onDelete={handleDeleteTeamMember}
           isNew={!editingTeamMember.id}
+          currencySymbol={settings.currencySymbol}
         />
       )}
 
@@ -3033,7 +4640,13 @@ export default function ShotTracker() {
           onDelete={handleDeleteLead}
           onMarkWon={handleMarkWon}
           onMarkLost={handleMarkLost}
+          onArchive={handleArchiveLead}
+          onRestore={handleRestoreLead}
           isNew={!editingLead.id}
+          leadChannels={settings.leadChannels || DEFAULT_LEAD_CHANNELS}
+          onAddChannel={handleAddLeadChannel}
+          leads={leads}
+          followupSchedule={settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE}
         />
       )}
 
@@ -3052,7 +4665,79 @@ export default function ShotTracker() {
   );
 }
 
-function ProjectsGrid({ projects, cards, onOpen, onEdit, onNew, onToggleArchive }) {
+// Shared by the Projects-grid card shortcut and the in-project (board view)
+// shortcut so the open/create/connect logic exists exactly once. `project`
+// may be null/undefined transiently (e.g. selectedProject before it
+// resolves) - every read of it is optional-chained so the hook is always
+// safe to call unconditionally.
+function useDriveFolderAction({ project, driveEmail, onCreateDriveFolders, onRequestDriveConnect, onDriveError }) {
+  const [creatingFolders, setCreatingFolders] = useState(false);
+
+  const createFolder = async () => {
+    setCreatingFolders(true);
+    try {
+      const result = await onCreateDriveFolders(project.id, project.name || "Untitled project");
+      // Folder info is already saved to the project by onCreateDriveFolders
+      // (the same Edge Function call Project Settings uses); immediately
+      // open it so the shortcut completes in one click where the browser
+      // allows it. If a popup blocker steps in, the button has already
+      // flipped to its "Open Drive" state as a one-click fallback.
+      if (result?.driveFolderUrl) {
+        window.open(result.driveFolderUrl, "_blank", "noopener,noreferrer");
+      }
+    } catch (err) {
+      onDriveError(err.message || "Couldn't create the Drive folder, please try again.");
+    } finally {
+      setCreatingFolders(false);
+    }
+  };
+
+  const handleDriveAction = (e) => {
+    e?.stopPropagation?.();
+    if (!driveEmail) {
+      onRequestDriveConnect();
+      return;
+    }
+    if (project?.driveFolderUrl) {
+      window.open(project.driveFolderUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+    if (creatingFolders) return; // guard against duplicate folder creation on repeated clicks
+    createFolder();
+  };
+
+  const connected = Boolean(driveEmail);
+  const hasFolder = Boolean(project?.driveFolderUrl);
+  const label = !connected
+    ? "Connect Google Drive"
+    : creatingFolders
+    ? "Creating…"
+    : hasFolder
+    ? "Open Drive"
+    : "Create Drive Folder";
+  const tooltip = !connected
+    ? "Connect Google Drive to create a project folder"
+    : creatingFolders
+    ? "Creating Google Drive folder…"
+    : hasFolder
+    ? "Open Google Drive folder"
+    : "Create Google Drive folder";
+
+  return { creatingFolders, handleDriveAction, connected, hasFolder, label, tooltip };
+}
+
+function ProjectsGrid({
+  projects,
+  cards,
+  onOpen,
+  onEdit,
+  onNew,
+  onToggleArchive,
+  driveEmail,
+  onCreateDriveFolders,
+  onRequestDriveConnect,
+  onDriveError,
+}) {
   const [showArchived, setShowArchived] = useState(false);
   const activeProjects = projects.filter((p) => !p.archived);
   const archivedProjects = projects.filter((p) => p.archived);
@@ -3091,6 +4776,10 @@ function ProjectsGrid({ projects, cards, onOpen, onEdit, onNew, onToggleArchive 
               onOpen={onOpen}
               onEdit={onEdit}
               onToggleArchive={onToggleArchive}
+              driveEmail={driveEmail}
+              onCreateDriveFolders={onCreateDriveFolders}
+              onRequestDriveConnect={onRequestDriveConnect}
+              onDriveError={onDriveError}
             />
           ))}
         </div>
@@ -3115,6 +4804,10 @@ function ProjectsGrid({ projects, cards, onOpen, onEdit, onNew, onToggleArchive 
                   onOpen={onOpen}
                   onEdit={onEdit}
                   onToggleArchive={onToggleArchive}
+                  driveEmail={driveEmail}
+                  onCreateDriveFolders={onCreateDriveFolders}
+                  onRequestDriveConnect={onRequestDriveConnect}
+                  onDriveError={onDriveError}
                   archived
                 />
               ))}
@@ -3126,9 +4819,28 @@ function ProjectsGrid({ projects, cards, onOpen, onEdit, onNew, onToggleArchive 
   );
 }
 
-function ProjectCard({ project, cards, onOpen, onEdit, onToggleArchive, archived }) {
+function ProjectCard({
+  project,
+  cards,
+  onOpen,
+  onEdit,
+  onToggleArchive,
+  archived,
+  driveEmail,
+  onCreateDriveFolders,
+  onRequestDriveConnect,
+  onDriveError,
+}) {
   const projectCards = cards.filter((c) => c.projectId === project.id);
   const { delivered, percent } = projectProgress(projectCards);
+  const drive = useDriveFolderAction({
+    project,
+    driveEmail,
+    onCreateDriveFolders,
+    onRequestDriveConnect,
+    onDriveError,
+  });
+
   return (
     <div
       className="kf-card"
@@ -3138,6 +4850,19 @@ function ProjectCard({ project, cards, onOpen, onEdit, onToggleArchive, archived
       <div style={styles.projectCardTop}>
         <div style={styles.projectIconMark}><FolderIcon /></div>
         <div style={styles.projectCardActions}>
+          <button
+            style={{
+              ...styles.iconButton,
+              ...(drive.hasFolder ? { color: teal } : {}),
+              ...(!drive.connected ? { opacity: 0.5 } : {}),
+            }}
+            onClick={drive.handleDriveAction}
+            disabled={drive.creatingFolders}
+            title={drive.tooltip}
+            aria-label={drive.tooltip}
+          >
+            {drive.creatingFolders ? <SpinnerIcon /> : <FolderIcon />}
+          </button>
           <button
             style={styles.iconButton}
             onClick={(e) => {
@@ -3396,6 +5121,8 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew }) {
       <div style={styles.invoiceList}>
         {teamMembers.map((member) => {
           const { shots, pending, paid } = computeMemberShots(member, cards, projects);
+          const dependability = dependabilityTier(member.dependabilityScore ?? 80);
+          const formattedRate = formatMemberRate(member, cur);
           return (
             <div key={member.id} className="kf-card" style={styles.invoiceCard} onClick={() => onEdit(member)}>
               <div style={styles.invoiceCardTop}>
@@ -3405,19 +5132,47 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew }) {
                     ...styles.invoiceStatusTag,
                     color: AVAILABILITY_COLORS[member.availability] || "#8b9a98",
                     borderColor: AVAILABILITY_COLORS[member.availability] || "#8b9a98",
-                    textTransform: "capitalize",
                   }}
                 >
-                  {member.availability}
+                  {AVAILABILITY_LABELS[member.availability] || member.availability}
                 </span>
               </div>
-              {member.role && <div style={styles.cardMeta}>{member.role}</div>}
+              {(member.role || member.department) && (
+                <div style={styles.cardMeta}>
+                  {member.role}
+                  {member.role && member.department ? " · " : ""}
+                  {member.department}
+                </div>
+              )}
+              {member.skills?.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
+                  {member.skills.slice(0, 5).map((skill) => (
+                    <span key={skill} style={styles.skillChip}>
+                      {skill}
+                    </span>
+                  ))}
+                  {member.skills.length > 5 && (
+                    <span style={styles.skillChip}>+{member.skills.length - 5}</span>
+                  )}
+                </div>
+              )}
+              <div style={styles.invoiceAmountsRow}>
+                <span style={styles.fieldHint}>Skill: {skillLevelLabel(member.skillLevel)}</span>
+                <span style={{ ...styles.fieldHint, color: dependability.color }}>
+                  {dependability.label} ({member.dependabilityScore ?? 80})
+                </span>
+              </div>
               <div style={styles.invoiceAmountsRow}>
                 <span style={styles.fieldHint}>
                   {shots.length} shot{shots.length === 1 ? "" : "s"} assigned
                 </span>
-                {member.rate && <span style={styles.fieldHint}>Rate {member.rate}</span>}
+                {formattedRate && <span style={styles.fieldHint}>Rate {formattedRate}</span>}
               </div>
+              {member.capacityValue > 0 && (
+                <div style={styles.fieldHint}>
+                  Capacity {member.capacityValue} {member.capacityUnit}
+                </div>
+              )}
               <div style={styles.invoiceAmountsRow}>
                 <span style={{ ...styles.fieldHint, color: "#F2A65A" }}>
                   Pending {cur}
@@ -3449,78 +5204,447 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew }) {
   );
 }
 
-function BudgetPlannerPanel({ plans, settings, onEdit, atLimit }) {
-  if (plans.length === 0) {
-    return (
-      <div style={styles.invoicesWrap}>
-        <div style={styles.projectsEmpty}>
-          <div style={styles.projectsEmptyIcon}><InvoiceIcon /></div>
-          <p style={styles.projectsEmptyText}>No budget plans yet</p>
-          <p style={styles.fieldHint}>
-            Sketch out a project's numbers before you commit to it, budget, target profit, and what's actually
-            left to spend on production.
-          </p>
-        </div>
-      </div>
-    );
-  }
+// Full-page Planner dashboard (replaces the old pop-out list). Shows
+// portfolio-level summary cards (Phase 12 lite analytics), status
+// filtering/search, and the plan list. Clicking a plan opens the full-page
+// PlannerWorkspace, never a modal.
+function PlannerDashboard({ plans, settings, onOpen, onNew, atLimit, hasProAccess, templates, onDeleteTemplate }) {
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false);
+
+  const allTemplates = [...BUILT_IN_PLANNER_TEMPLATES, ...(templates || [])];
+
+  const analytics = computePlannerPortfolioAnalytics(plans);
+  const cur = settings.currencySymbol || "$";
+
+  const filtered = plans.filter((plan) => {
+    if (statusFilter !== "all" && (plan.status || "draft") !== statusFilter) return false;
+    if (!search.trim()) return true;
+    const q = search.trim().toLowerCase();
+    return (plan.name || "").toLowerCase().includes(q) || (plan.clientName || "").toLowerCase().includes(q);
+  });
+
+  const startFromTemplate = (template) => {
+    setShowTemplatePicker(false);
+    onNew({
+      projectType: template.projectType || "",
+      targetProfitPercent: template.targetProfitPercent ?? 25,
+      departmentAllocations: template.departmentAllocations || defaultDepartmentAllocations(),
+      crew: template.crew || [],
+      scope: { ...emptyBudgetPlanner().scope, ...(template.scope || {}) },
+      templateId: template.builtin ? null : template.id,
+    });
+  };
 
   return (
     <div style={styles.invoicesWrap}>
+      <div style={styles.plannerPageHeader}>
+        <div>
+          <h2 style={styles.plannerPageTitle}>Budget Planner</h2>
+          <p style={styles.fieldHint}>Plan, price and scope your productions.</p>
+        </div>
+      </div>
+
+      <div style={styles.dashboardGrid}>
+        <PlannerStatCard label="Total planned" value={`${cur}${formatMoney(analytics.totalPlannedValue)}`} />
+        <PlannerStatCard label="Avg. production cost" value={`${cur}${formatMoney(analytics.averageProductionCost)}`} />
+        <PlannerStatCard label="Avg. margin" value={`${analytics.averageMargin.toFixed(1)}%`} />
+        <PlannerStatCard label="Converted to project" value={`${analytics.convertedCount} / ${plans.length}`} />
+        <PlannerStatCard label="Proposal win rate" value={analytics.winRate === null ? "—" : `${analytics.winRate.toFixed(0)}%`} />
+      </div>
+
       {atLimit && (
         <p style={styles.fieldHint}>
           You're at the free plan's limit of {FREE_BUDGET_PLANNER_LIMIT} budget plans. Delete one or upgrade
           to Pro for unlimited plans.
         </p>
       )}
-      <div style={styles.invoiceList}>
-        {plans.map((plan) => {
-          const calc = computeBudgetPlan(plan);
-          const cur = plan.currency || settings.currencySymbol || "$";
-          const healthColor =
-            calc.health === "green" ? "#3DDC84" : calc.health === "yellow" ? "#F2A65A" : "#FF4D4D";
-          return (
-            <div key={plan.id} className="kf-card" style={styles.invoiceCard} onClick={() => onEdit(plan)}>
-              <div style={styles.invoiceCardTop}>
-                <span style={styles.invoiceNumber}>{plan.name || "Untitled plan"}</span>
-                <span style={{ ...styles.invoiceStatusTag, color: healthColor, borderColor: healthColor }}>
-                  {calc.profitPercent}% profit
-                </span>
-              </div>
-              {plan.clientName && <div style={styles.cardMeta}>{plan.clientName}</div>}
-              <div style={styles.invoiceAmountsRow}>
-                <span style={styles.fieldHint}>
-                  Budget {cur}
-                  {formatMoney(calc.budget)}
-                </span>
-                <span style={styles.fieldHint}>
-                  Production {cur}
-                  {formatMoney(calc.productionBudget)}
-                </span>
-                <span style={{ ...styles.fieldHint, color: healthColor }}>
-                  Profit {cur}
-                  {formatMoney(calc.profit)}
-                </span>
-              </div>
-            </div>
-          );
-        })}
+
+      <div style={styles.plannerToolbar}>
+        <input
+          style={{ ...styles.input, maxWidth: 260 }}
+          placeholder="Search plans or clients..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        <select style={{ ...styles.input, maxWidth: 200 }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="all">All statuses</option>
+          {PLANNER_STATUSES.map((s) => (
+            <option key={s.id} value={s.id}>{s.label}</option>
+          ))}
+        </select>
+        <div style={{ flex: 1 }} />
+        <button
+          type="button"
+          style={styles.tabButton}
+          disabled={atLimit}
+          onClick={() => setShowTemplatePicker((v) => !v)}
+        >
+          {showTemplatePicker ? "Close templates" : "New from template"}
+        </button>
       </div>
+
+      {showTemplatePicker && (
+        <div style={styles.plannerTemplateRow}>
+          {allTemplates.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className="kf-card"
+              style={styles.plannerTemplateCard}
+              onClick={() => startFromTemplate(t)}
+            >
+              <span style={styles.invoiceNumber}>{t.name}</span>
+              <span style={styles.fieldHint}>{t.builtin ? "Built-in" : "Your template"}</span>
+              {!t.builtin && hasProAccess && (
+                <span
+                  role="button"
+                  style={{ ...styles.fieldHint, color: "#FF4D4D" }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (window.confirm(`Delete template "${t.name}"?`)) onDeleteTemplate(t.id);
+                  }}
+                >
+                  Remove
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {plans.length === 0 ? (
+        <div style={styles.projectsEmpty}>
+          <div style={styles.projectsEmptyIcon}><InvoiceIcon /></div>
+          <p style={styles.projectsEmptyText}>No budget plans yet</p>
+          <p style={styles.fieldHint}>
+            Sketch out a project's numbers before you commit to it: budget, target profit, department spend,
+            crew cost, and what's actually left to deliver it.
+          </p>
+        </div>
+      ) : filtered.length === 0 ? (
+        <p style={styles.fieldHint}>No plans match your search/filter.</p>
+      ) : (
+        <div style={styles.invoiceList}>
+          {filtered.map((plan) => {
+            const intel = computePlannerIntelligence(plan);
+            const cur2 = plan.currency || settings.currencySymbol || "$";
+            const healthColor =
+              intel.financial.state === "green" ? "#3DDC84" : intel.financial.state === "yellow" ? "#F2A65A" : "#FF4D4D";
+            return (
+              <div key={plan.id} className="kf-card" style={styles.invoiceCard} onClick={() => onOpen(plan)}>
+                <div style={styles.invoiceCardTop}>
+                  <span style={styles.invoiceNumber}>{plan.name || "Untitled plan"}</span>
+                  <span style={{ ...styles.invoiceStatusTag, color: healthColor, borderColor: healthColor }}>
+                    {PLANNER_STATUS_LABELS[plan.status] || "Draft"}
+                  </span>
+                </div>
+                {plan.clientName && <div style={styles.cardMeta}>{plan.clientName}</div>}
+                <div style={styles.invoiceAmountsRow}>
+                  <span style={styles.fieldHint}>
+                    Budget {cur2}{formatMoney(intel.financial.budget)}
+                  </span>
+                  <span style={styles.fieldHint}>{plan.targetProfitPercent}% target profit</span>
+                  <span style={{ ...styles.fieldHint, color: healthColor }}>
+                    {intel.dealScore.label} · {intel.dealScore.score}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
-function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToLeads }) {
+function PlannerStatCard({ label, value }) {
+  return (
+    <div className="kf-card" style={styles.budgetStat}>
+      <span style={styles.label}>{label}</span>
+      <span style={styles.budgetStatValue}>{value}</span>
+    </div>
+  );
+}
+
+// --- Studio Time / greeting helpers -------------------------------------
+// The display name comes from the authenticated user's own Supabase auth
+// profile, never hardcoded: Google sign-in populates user_metadata's
+// full_name/name, so that first name is used when present. Email/password
+// accounts have no such metadata, so this falls back to a cleaned-up
+// version of the email's local part - still real account data, not a
+// placeholder.
+function getDisplayName(user) {
+  const meta = user?.user_metadata || {};
+  const metaName = meta.full_name || meta.name;
+  if (metaName) return String(metaName).trim().split(/\s+/)[0];
+  const localPart = (user?.email || "").split("@")[0];
+  if (!localPart) return "";
+  const firstSegment = localPart.split(/[._-]+/)[0];
+  return firstSegment ? firstSegment.charAt(0).toUpperCase() + firstSegment.slice(1) : "";
+}
+
+// date.getHours() already reads in the browser's local time, so this (and
+// localDayStartISO below) needs no stored timezone - there isn't one
+// anywhere in this app's user_settings/profile data today, and this way
+// nothing is hardcoded to one.
+function getGreeting(date) {
+  const hour = date.getHours();
+  if (hour >= 5 && hour < 12) return "Good morning";
+  if (hour >= 12 && hour < 17) return "Good afternoon";
+  return "Good evening";
+}
+
+function formatClockDuration(totalSeconds) {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const hh = String(Math.floor(s / 3600)).padStart(2, "0");
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+function formatDayDuration(totalSeconds) {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+// Local midnight, as the matching UTC instant, for querying "today" without
+// assuming UTC. new Date(y, m, d) is built from the browser's own local
+// calendar fields, so this lands on the right day in whatever timezone the
+// user's system is actually set to.
+function localDayStartISO(date = new Date()) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0).toISOString();
+}
+
+function DashboardGreeting({ user }) {
+  const [now, setNow] = useState(() => new Date());
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 60000);
+    return () => clearInterval(id);
+  }, []);
+
+  const name = getDisplayName(user);
+  const greeting = getGreeting(now);
+
+  return (
+    <div>
+      <h2 style={styles.greetingTitle}>
+        <span>
+          {greeting}
+          {name ? `, ${name}` : ""}
+        </span>
+        <span aria-hidden="true">👋</span>
+      </h2>
+      <p style={styles.fieldHint}>Ready to get some work done?</p>
+    </div>
+  );
+}
+
+// Studio Time: a persistent, Supabase-backed clock in/out tracker. All
+// state is re-derived from work_sessions on every mount rather than kept
+// only in memory, so it survives refreshes, closing and reopening the
+// Dashboard, and navigating to other Kairil pages and back - there's
+// nothing to "restore" client-side, it just re-asks the database what's
+// true every time.
+function StudioTimeCard({ userId }) {
+  const [activeSession, setActiveSession] = useState(null); // { id, clockIn } | null
+  const [todaySeconds, setTodaySeconds] = useState(0); // completed sessions today, in seconds
+  const [now, setNow] = useState(() => new Date());
+  const [initializing, setInitializing] = useState(true);
+  const [clockingIn, setClockingIn] = useState(false);
+  const [clockingOut, setClockingOut] = useState(false);
+  const [clockError, setClockError] = useState("");
+
+  const refetchSessions = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const dayStart = localDayStartISO();
+      // Active session (any date, in case it was started just before
+      // midnight) plus every session - active or completed - from today.
+      const { data: rows, error } = await supabase
+        .from("work_sessions")
+        .select("*")
+        .or(`clock_out.is.null,clock_in.gte.${dayStart}`)
+        .order("clock_in", { ascending: true });
+      if (error) throw error;
+      let active = null;
+      let completedSeconds = 0;
+      (rows || []).forEach((row) => {
+        if (row.clock_out === null) {
+          active = { id: row.id, clockIn: row.clock_in };
+        } else {
+          completedSeconds += row.duration || 0;
+        }
+      });
+      setActiveSession(active);
+      setTodaySeconds(completedSeconds);
+    } catch (err) {
+      console.error("Studio time load failed:", err);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setInitializing(true);
+    refetchSessions().finally(() => {
+      if (!cancelled) setInitializing(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [refetchSessions]);
+
+  useEffect(() => {
+    if (!activeSession) return;
+    setNow(new Date());
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, [activeSession]);
+
+  const handleClockIn = async () => {
+    if (clockingIn || activeSession || !userId) return; // guard against duplicate active sessions on repeated clicks
+    setClockError("");
+    setClockingIn(true);
+    try {
+      const { data: row, error } = await supabase
+        .from("work_sessions")
+        .insert({ user_id: userId }) // clock_in is the database's own now(), not the browser's clock
+        .select()
+        .single();
+      if (error) {
+        if (error.code === "23505") {
+          // The one-active-session-per-user index caught a race (another
+          // tab, or a click that slipped in before the button disabled) -
+          // not a real failure, just resync with what's actually there.
+          await refetchSessions();
+        } else {
+          throw error;
+        }
+      } else {
+        setActiveSession({ id: row.id, clockIn: row.clock_in });
+      }
+    } catch (err) {
+      setClockError(err.message || "Couldn't clock in, please try again.");
+      await refetchSessions();
+    } finally {
+      setClockingIn(false);
+    }
+  };
+
+  const handleClockOut = async () => {
+    if (clockingOut || !activeSession) return;
+    setClockError("");
+    setClockingOut(true);
+    try {
+      // clock_out_active_session() stamps clock_out and computes duration
+      // from the database's own clock in one atomic update, rather than
+      // trusting the browser's clock or risking a read-then-write gap.
+      const { data: row, error } = await supabase.rpc("clock_out_active_session");
+      if (error) throw error;
+      setActiveSession(null);
+      setTodaySeconds((prev) => prev + (row?.duration || 0));
+    } catch (err) {
+      setClockError(err.message || "Couldn't clock out, please try again.");
+      // The update may have actually gone through even though this failed
+      // (e.g. the response didn't make it back) - resync instead of
+      // leaving the UI stuck showing a session the database already closed.
+      await refetchSessions();
+    } finally {
+      setClockingOut(false);
+    }
+  };
+
+  const elapsedSeconds = activeSession
+    ? Math.max(0, Math.floor((now - new Date(activeSession.clockIn)) / 1000))
+    : 0;
+  const label = activeSession || todaySeconds === 0 ? "Studio Time" : "Today's studio time";
+  const busy = clockingIn || clockingOut;
+
+  return (
+    <div
+      className="kf-card"
+      style={{ ...styles.studioTimeCard, ...(activeSession ? styles.studioTimeCardActive : {}) }}
+    >
+      <div>
+        <span style={styles.label}>{label}</span>
+        {activeSession && (
+          <div style={styles.studioTimeStatus}>
+            <span style={styles.studioTimeStatusDot} />
+            Working
+          </div>
+        )}
+        {initializing ? (
+          <div style={styles.studioTimeValue}>--:--:--</div>
+        ) : activeSession ? (
+          <>
+            <div style={styles.studioTimeValue}>{formatClockDuration(elapsedSeconds)}</div>
+            <p style={styles.fieldHint}>Today so far: {formatDayDuration(todaySeconds + elapsedSeconds)}</p>
+          </>
+        ) : todaySeconds > 0 ? (
+          <div style={styles.studioTimeValue}>{formatDayDuration(todaySeconds)}</div>
+        ) : (
+          <div style={styles.studioTimeValue}>00:00:00</div>
+        )}
+        {clockError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{clockError}</p>}
+      </div>
+      <button
+        style={styles.newButton}
+        onClick={activeSession ? handleClockOut : handleClockIn}
+        disabled={initializing || busy}
+      >
+        {busy ? <SpinnerIcon size={16} /> : <ClockIcon />}
+        {activeSession ? "Clock Out" : "Clock In"}
+      </button>
+    </div>
+  );
+}
+
+// Phase 12 — lightweight portfolio analytics computed straight from the
+// user's own planner data. No dashboard, just the numbers the spec asks for.
+function computePlannerPortfolioAnalytics(plans) {
+  if (plans.length === 0) {
+    return { totalPlannedValue: 0, averageMargin: 0, averageProductionCost: 0, convertedCount: 0, winRate: null };
+  }
+  let totalPlannedValue = 0;
+  let totalMargin = 0;
+  let totalProductionCost = 0;
+  let convertedCount = 0;
+  let sentOrLater = 0;
+  let approvedOrConverted = 0;
+  plans.forEach((plan) => {
+    const calc = computeBudgetPlan(plan);
+    totalPlannedValue += calc.budget;
+    totalMargin += calc.profitPercent;
+    totalProductionCost += calc.productionBudget;
+    if (plan.status === "converted") convertedCount += 1;
+    if (["proposal_sent", "negotiating", "approved", "rejected", "converted"].includes(plan.status)) sentOrLater += 1;
+    if (["approved", "converted"].includes(plan.status)) approvedOrConverted += 1;
+  });
+  return {
+    totalPlannedValue,
+    averageMargin: totalMargin / plans.length,
+    averageProductionCost: totalProductionCost / plans.length,
+    convertedCount,
+    winRate: sentOrLater > 0 ? (approvedOrConverted / sentOrLater) * 100 : null,
+  };
+}
+
+function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToLeads, user, userId }) {
   const stats = computeDashboardStats(projects, cards, leads, invoices, fxRates);
   const cur = "$"; // Dashboard totals are always USD-converted for cross-project consistency
+  const schedule = settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE;
 
   const statItems = [
     { label: "Active projects", value: stats.activeProjectsCount, icon: <FolderIcon />, color: teal, onClick: onGoToProjects },
-    { label: "Active leads", value: stats.activeLeadsCount, icon: <TargetIcon />, color: "#4A90D9", onClick: onGoToLeads },
+    { label: "Active leads", value: stats.activeLeadsCount, icon: <TargetIcon />, color: "#4A90D9", onClick: () => onGoToLeads() },
     { label: "Total shots", value: stats.totalShots, icon: <ClapperIcon />, color: "#9B8AD8" },
     { label: "Projects completed", value: stats.projectsCompleted, icon: <CheckCircleIcon />, color: "#3DDC84" },
-    { label: "Deals won", value: stats.dealsWon, icon: <CheckCircleIcon />, color: "#3DDC84", onClick: onGoToLeads },
-    { label: "Deals lost", value: stats.dealsLost, icon: <XCircleIcon />, color: "#FF4D4D", onClick: onGoToLeads },
+    { label: "Deals won", value: stats.dealsWon, icon: <CheckCircleIcon />, color: "#3DDC84", onClick: () => onGoToLeads({ status: "won" }) },
+    { label: "Deals lost", value: stats.dealsLost, icon: <XCircleIcon />, color: "#FF4D4D", onClick: () => onGoToLeads({ status: "lost" }) },
     {
       label: "Revenue this month",
       value: `${cur}${formatMoney(stats.revenueThisMonth)}`,
@@ -3541,10 +5665,62 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     value: cards.filter((c) => c.stage === s.id).length,
   }));
 
-  const leadsByStage = LEAD_STAGES.map((s) => ({
-    label: s.label,
-    value: leads.filter((l) => l.stage === s.id).length,
+  // Active-outreach breakdown deliberately excludes the untouched pool and
+  // every terminal outcome, per the "active outreach" definition: leads
+  // that have actually been contacted and haven't resolved yet.
+  const activeOutreachLeads = leads.filter((l) => !l.archivedAt && ACTIVE_OUTREACH_STAGE_IDS.includes(l.stage));
+  const leadsByActiveStage = ACTIVE_OUTREACH_STAGE_IDS.map((id) => ({
+    label: LEAD_STAGES.find((s) => s.id === id)?.label || id,
+    value: activeOutreachLeads.filter((l) => l.stage === id).length,
   }));
+
+  const leadsByChannel = (settings.leadChannels || DEFAULT_LEAD_CHANNELS).map((channel) => ({
+    label: channel,
+    value: leads.filter((l) => l.channel === channel && !l.archivedAt).length,
+  }));
+
+  // Outreach totals are lifetime figures, including archived leads, so
+  // archiving a won/lost lead never distorts the historical success rate.
+  const coldEmailsSentTotal = leads.filter((l) => l.emails?.[0]?.sent).length;
+  const respondedTotal = leads.filter((l) => normalizeEmails(l.emails).some((e) => e.sent) && l.stage !== "pool" && l.stage !== "cold_email").length;
+  const qualifiedTotal = leads.filter((l) => ["qualified", "proposal", "negotiation", "won"].includes(l.stage)).length;
+  const wonTotal = leads.filter((l) => l.stage === "won").length;
+  const lostTotal = leads.filter((l) => l.stage === "lost").length;
+  const noResponseTotal = leads.filter((l) => l.stage === "no_response").length;
+  const successRate = coldEmailsSentTotal > 0 ? (wonTotal / coldEmailsSentTotal) * 100 : 0;
+
+  // Needs Attention: a handful of counts that point at something the user
+  // should actually act on today, each clickable straight into a filtered
+  // view of the Leads board.
+  const activeNonArchived = leads.filter((l) => !l.archivedAt);
+  const followupsDueToday = activeNonArchived.filter((l) => computeFollowupStatus(l, schedule).isDue).length;
+  const hotAwaitingResponse = activeNonArchived.filter(
+    (l) => l.priority === "hot" && l.stage === "cold_email"
+  ).length;
+  const proposalsAwaitingResponse = activeNonArchived.filter((l) => l.stage === "proposal").length;
+  const approachingDeadline = activeNonArchived.filter((l) => {
+    const s = computeFollowupStatus(l, schedule);
+    return !s.isDue && s.daysUntilDue != null && s.daysUntilDue <= 2;
+  }).length;
+
+  const needsAttentionItems = [
+    followupsDueToday > 0 && {
+      label: `${followupsDueToday} follow-up${followupsDueToday === 1 ? "" : "s"} due today`,
+      onClick: () => onGoToLeads({ followup: "due" }),
+    },
+    hotAwaitingResponse > 0 && {
+      label: `${hotAwaitingResponse} hot lead${hotAwaitingResponse === 1 ? "" : "s"} awaiting response`,
+      onClick: () => onGoToLeads({ priority: "hot", status: "cold_email" }),
+    },
+    proposalsAwaitingResponse > 0 && {
+      label: `${proposalsAwaitingResponse} proposal${proposalsAwaitingResponse === 1 ? "" : "s"} awaiting response`,
+      onClick: () => onGoToLeads({ status: "proposal" }),
+    },
+    approachingDeadline > 0 && {
+      label: `${approachingDeadline} lead${approachingDeadline === 1 ? "" : "s"} approaching follow-up deadline`,
+      onClick: () => onGoToLeads({ followup: "upcoming" }),
+    },
+  ].filter(Boolean);
 
   const months = lastSixMonthKeys();
   const revenueTrend = months.map(({ key, label }) => ({
@@ -3554,11 +5730,50 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       .reduce((sum, inv) => sum + convertToUSD(inv.amountPaid, inv.currency, fxRates), 0),
   }));
 
+  // Outreach-over-time uses each email's own sent date (not the lead's
+  // current stage) so a lead that later moved to Lost still counts toward
+  // the month it was actually emailed, responded to, etc.
+  const outreachTrend = months.map(({ key, label }) => {
+    const coldEmails = leads.filter((l) => l.emails?.[0]?.sent && monthKey(l.emails[0].dateSent) === key).length;
+    const responded = leads.filter((l) =>
+      (l.activityLog || []).some((a) => a.type === "stage_change" && a.note === "Lead responded" && monthKey(a.ts) === key)
+    ).length;
+    const won = leads.filter((l) =>
+      (l.activityLog || []).some((a) => a.type === "stage_change" && a.note === "Won" && monthKey(a.ts) === key)
+    ).length;
+    const lost = leads.filter((l) =>
+      (l.activityLog || []).some((a) => a.type === "stage_change" && a.note === "Marked lost" && monthKey(a.ts) === key)
+    ).length;
+    const noResponse = leads.filter((l) =>
+      (l.activityLog || []).some(
+        (a) => a.type === "stage_change" && a.note === "No response after follow-ups" && monthKey(a.ts) === key
+      )
+    ).length;
+    return { label, "Cold Emails": coldEmails, Responded: responded, Won: won, Lost: lost, "No Response": noResponse };
+  });
+
   return (
     <div style={styles.invoicesWrap}>
+      <DashboardGreeting user={user} />
+      <StudioTimeCard userId={userId} />
+
       <p style={styles.fieldHint}>
         Dollar figures below are converted live from each project's own currency to USD.
       </p>
+
+      {needsAttentionItems.length > 0 && (
+        <div style={styles.needsAttentionBox}>
+          <div style={styles.fieldDivider}>Needs Attention</div>
+          <div style={styles.needsAttentionList}>
+            {needsAttentionItems.map((item) => (
+              <button key={item.label} type="button" style={styles.needsAttentionItem} onClick={item.onClick}>
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={styles.dashboardGrid}>
         {statItems.map((item) => (
           <div
@@ -3589,6 +5804,46 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         ))}
       </div>
 
+      <div className="kf-card" style={styles.successRateCard} onClick={() => onGoToLeads()}>
+        <span style={styles.label}>Cold Email Success Rate</span>
+        <span style={styles.successRateValue}>{successRate.toFixed(1)}%</span>
+        <span style={styles.fieldHint}>
+          {wonTotal} win{wonTotal === 1 ? "" : "s"} from {coldEmailsSentTotal} cold email{coldEmailsSentTotal === 1 ? "" : "s"}
+        </span>
+      </div>
+
+      <div style={styles.dashboardChartsRow}>
+        <div style={{ flex: "1 1 200px" }}>
+          <span style={styles.label}>Cold emails sent</span>
+          <div style={styles.budgetStatValue}>{coldEmailsSentTotal}</div>
+        </div>
+        <div style={{ flex: "1 1 200px" }}>
+          <span style={styles.label}>Responded</span>
+          <div style={styles.budgetStatValue}>{respondedTotal}</div>
+        </div>
+        <div style={{ flex: "1 1 200px" }}>
+          <span style={styles.label}>Qualified</span>
+          <div style={styles.budgetStatValue}>{qualifiedTotal}</div>
+        </div>
+        <div style={{ flex: "1 1 200px" }}>
+          <span style={styles.label}>Won</span>
+          <div style={styles.budgetStatValue}>{wonTotal}</div>
+        </div>
+        <div style={{ flex: "1 1 200px" }}>
+          <span style={styles.label}>Lost</span>
+          <div style={styles.budgetStatValue}>{lostTotal}</div>
+        </div>
+        <div style={{ flex: "1 1 200px" }}>
+          <span style={styles.label}>No Response</span>
+          <div style={styles.budgetStatValue}>{noResponseTotal}</div>
+        </div>
+      </div>
+
+      <div>
+        <div style={styles.fieldDivider}>Outreach performance (6 months)</div>
+        <LeadOutreachTrendChart data={outreachTrend} />
+      </div>
+
       <div>
         <div style={styles.fieldDivider}>Revenue trend (6 months)</div>
         <RevenueTrendChart data={revenueTrend} currencySymbol={cur} />
@@ -3600,8 +5855,12 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
           <DonutBreakdown data={shotsByStage} emptyLabel="No shots yet." centerLabel="Shots" />
         </div>
         <div style={{ flex: "1 1 260px" }}>
-          <div style={styles.fieldDivider}>Leads by stage</div>
-          <DonutBreakdown data={leadsByStage} emptyLabel="No leads yet." centerLabel="Leads" />
+          <div style={styles.fieldDivider}>Active outreach by stage</div>
+          <DonutBreakdown data={leadsByActiveStage} emptyLabel="No active outreach yet." centerLabel="Leads" />
+        </div>
+        <div style={{ flex: "1 1 260px" }}>
+          <div style={styles.fieldDivider}>Leads by channel</div>
+          <DonutBreakdown data={leadsByChannel} emptyLabel="No leads tagged with a channel yet." centerLabel="Leads" />
         </div>
       </div>
 
@@ -3649,7 +5908,7 @@ const TUTORIAL_STEPS = [
   },
   {
     title: "Leads (CRM)",
-    body: "Track outreach through Email Pool, Cold Email, Responded, and beyond. Mark a deal Won and Kairil pre-fills a new project from that lead, no retyping client details.",
+    body: "Track outreach through New, Cold Email Sent, Responded, Qualified, Proposal, and Negotiation. Mark a deal Won and Kairil pre-fills a new project from that lead, no retyping client details.",
     targetTab: "leads",
   },
   {
@@ -3826,6 +6085,22 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
     const next = [...form.milestoneDefaults];
     next[i] = e.target.value;
     setForm({ ...form, milestoneDefaults: next });
+  };
+
+  const [newChannel, setNewChannel] = useState("");
+  const channels = form.leadChannels || DEFAULT_LEAD_CHANNELS;
+  const addChannel = () => {
+    const trimmed = newChannel.trim();
+    if (!trimmed) return;
+    if (channels.some((c) => c.toLowerCase() === trimmed.toLowerCase())) {
+      setNewChannel("");
+      return;
+    }
+    setForm({ ...form, leadChannels: [...channels, trimmed] });
+    setNewChannel("");
+  };
+  const removeChannel = (channel) => {
+    setForm({ ...form, leadChannels: channels.filter((c) => c !== channel) });
   };
 
   const [supportMessages, setSupportMessages] = useState(null);
@@ -4052,6 +6327,70 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
           </div>
           <p style={styles.fieldHint}>
             Upfront / Mid-project / Delivery. Used as the starting point on "Set up milestones."
+          </p>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Lead channels</label>
+          <div style={styles.lostReasonGrid}>
+            {channels.map((channel) => (
+              <span key={channel} style={{ ...styles.fileNameRow, ...styles.cardTag, gap: 6, padding: "5px 6px 5px 12px" }}>
+                {channel}
+                <button
+                  type="button"
+                  style={{ ...styles.iconButton, width: 18, height: 18 }}
+                  onClick={() => removeChannel(channel)}
+                >
+                  <CloseIcon />
+                </button>
+              </span>
+            ))}
+          </div>
+          <div style={{ ...styles.fieldRow, marginTop: 8 }}>
+            <input
+              style={styles.input}
+              value={newChannel}
+              onChange={(e) => setNewChannel(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") addChannel();
+              }}
+              placeholder="e.g. TikTok"
+            />
+            <button type="button" style={styles.addRevisionButton} onClick={addChannel}>
+              <PlusIcon />
+              Add channel
+            </button>
+          </div>
+          <p style={styles.fieldHint}>
+            Track where leads come from. These show up as filters on the Leads board and as a
+            breakdown on the Dashboard.
+          </p>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Follow-up cadence (days after initial email)</label>
+          <div style={styles.fieldRow}>
+            {(form.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE).map((step, i) => (
+              <input
+                key={step.label}
+                style={styles.input}
+                type="number"
+                min="0"
+                disabled={i === 0}
+                value={step.dayOffset}
+                title={step.label}
+                onChange={(e) => {
+                  const next = (form.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE).map((s, j) =>
+                    j === i ? { ...s, dayOffset: Number(e.target.value) } : s
+                  );
+                  setForm({ ...form, followupSchedule: next });
+                }}
+              />
+            ))}
+          </div>
+          <p style={styles.fieldHint}>
+            Initial / Follow-up 1 / 2 / 3 / 4. After the 4th follow-up goes unanswered, a lead
+            automatically moves to No Response.
           </p>
         </div>
 
@@ -4508,10 +6847,80 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
   );
 }
 
-function LeadEditor({ lead, onCancel, onSave, onDelete, onMarkWon, onMarkLost, isNew }) {
+function LeadEditor({
+  lead,
+  onCancel,
+  onSave,
+  onDelete,
+  onMarkWon,
+  onMarkLost,
+  onArchive,
+  onRestore,
+  isNew,
+  leadChannels = [],
+  onAddChannel,
+  leads = [],
+  followupSchedule = DEFAULT_FOLLOWUP_SCHEDULE,
+}) {
   const [form, setForm] = useState(lead);
+  const [isEditing, setIsEditing] = useState(isNew);
   const [showLostReasons, setShowLostReasons] = useState(false);
+  const [addingChannel, setAddingChannel] = useState(false);
+  const [newChannelName, setNewChannelName] = useState("");
+  const [copiedEmail, setCopiedEmail] = useState(false);
+  const [confirmingDuplicate, setConfirmingDuplicate] = useState(false);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+
+  const handleCopyEmail = () => {
+    if (!form.email) return;
+    navigator.clipboard?.writeText(form.email).then(() => {
+      setCopiedEmail(true);
+      setTimeout(() => setCopiedEmail(false), 1500);
+    });
+  };
+
+  const handleCancelEdit = () => {
+    if (isNew) {
+      onCancel();
+      return;
+    }
+    setForm(lead);
+    setIsEditing(false);
+    setShowLostReasons(false);
+    setConfirmingDuplicate(false);
+  };
+
+  const duplicates = useMemo(
+    () => findPossibleDuplicates(form, leads, form.id),
+    // Re-check whenever the fields that matter for matching change.
+    [form.companyName, form.email, form.website, form.contactPerson, leads, form.id]
+  );
+  const blockingDuplicates = duplicates.filter((d) => d.confidence !== "medium");
+  const softDuplicates = duplicates.filter((d) => d.confidence === "medium");
+
+  const attemptSave = () => {
+    if (!confirmingDuplicate && blockingDuplicates.length > 0) {
+      setConfirmingDuplicate(true);
+      return;
+    }
+    setConfirmingDuplicate(false);
+    onSave({ ...form, companyName: form.companyName || "Untitled lead" });
+  };
+
+  const followupStatus = computeFollowupStatus(form, followupSchedule);
+  const isTerminal = LEAD_TERMINAL_STAGES.some((s) => s.id === form.stage);
+
+  const handleAddChannelSubmit = () => {
+    const trimmed = newChannelName.trim();
+    if (!trimmed) {
+      setAddingChannel(false);
+      return;
+    }
+    onAddChannel && onAddChannel(trimmed);
+    setForm({ ...form, channel: trimmed });
+    setNewChannelName("");
+    setAddingChannel(false);
+  };
 
   const updateEmail = (index, patch) => {
     const nextEmails = form.emails.map((em, i) => {
@@ -4533,207 +6942,489 @@ function LeadEditor({ lead, onCancel, onSave, onDelete, onMarkWon, onMarkLost, i
     if (index === 0 && patch.sent === true && form.stage === "pool") {
       nextStage = "cold_email";
     }
-    if (index === 3 && patch.sent === true && (form.stage === "pool" || form.stage === "cold_email")) {
+    if (index === 4 && patch.sent === true && !LEAD_TERMINAL_STAGES.some((s) => s.id === form.stage)) {
       nextStage = "no_response";
     }
     setForm({ ...form, emails: nextEmails, stage: nextStage });
   };
 
   const showNegotiation = !["pool", "cold_email"].includes(form.stage);
+  const priorityMeta = LEAD_PRIORITIES.find((p) => p.id === form.priority) || LEAD_PRIORITIES[1];
+  const stageMeta = ALL_LEAD_STAGES.find((s) => s.id === form.stage);
 
   return (
     <div style={styles.overlay} onClick={onCancel}>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
-          <span style={styles.modalTitle}>{isNew ? "New lead" : "Edit lead"}</span>
-          <button style={styles.iconButton} onClick={onCancel}>
-            <CloseIcon />
-          </button>
-        </div>
-
-        <div style={styles.field}>
-          <label style={styles.label}>Company name</label>
-          <input
-            style={styles.input}
-            value={form.companyName}
-            onChange={set("companyName")}
-            placeholder="e.g. Nightfall Games"
-            autoFocus
-          />
-        </div>
-
-        <div style={styles.fieldRow}>
-          <div style={styles.field}>
-            <label style={styles.label}>Contact person</label>
-            <input
-              style={styles.input}
-              value={form.contactPerson}
-              onChange={set("contactPerson")}
-              placeholder="e.g. Jamie Fox"
-            />
-          </div>
-          <div style={styles.field}>
-            <label style={styles.label}>Email</label>
-            <input
-              style={styles.input}
-              value={form.email}
-              onChange={set("email")}
-              placeholder="jamie@studio.com"
-            />
+          <span style={styles.modalTitle}>
+            {isNew ? "New lead" : isEditing ? "Edit lead" : form.companyName || "Untitled lead"}
+          </span>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {!isNew && !isEditing && (
+              <button type="button" style={styles.copyButton} onClick={() => setIsEditing(true)}>
+                <EditIcon />
+                Edit
+              </button>
+            )}
+            <button style={styles.iconButton} onClick={onCancel}>
+              <CloseIcon />
+            </button>
           </div>
         </div>
 
-        <div style={styles.fieldRow}>
-          <div style={styles.field}>
-            <label style={styles.label}>Website</label>
-            <input
-              style={styles.input}
-              value={form.website}
-              onChange={set("website")}
-              placeholder="nightfallgames.com"
-            />
+        {form.archivedAt && (
+          <div style={styles.archivedBanner}>
+            Archived {formatShortDate(form.archivedAt)}.
+            <button type="button" style={styles.linkButton} onClick={() => onRestore(form)}>
+              Restore lead
+            </button>
           </div>
-          <div style={styles.field}>
-            <label style={styles.label}>Country</label>
-            <input
-              style={styles.input}
-              value={form.country}
-              onChange={set("country")}
-              placeholder="e.g. United States"
-            />
-          </div>
-        </div>
+        )}
 
-        <div style={styles.field}>
-          <label style={styles.label}>Client notes</label>
-          <textarea
-            style={styles.textarea}
-            value={form.notes}
-            onChange={set("notes")}
-            placeholder="What they do, style, references, budget signals, source of lead..."
-            rows={3}
-          />
-        </div>
-
-        <div style={styles.fieldDivider}>Outreach</div>
-
-        {form.emails.map((em, i) => (
-          <div key={i} style={styles.emailRow}>
-            <div style={styles.emailRowHeader}>
-              <label style={styles.checkboxLabel}>
-                <input
-                  type="checkbox"
-                  checked={em.sent}
-                  onChange={(e) => updateEmail(i, { sent: e.target.checked })}
-                />
-                {em.label}
-              </label>
-              {em.sent && em.dateSent && (
-                <span style={styles.fieldHint}>Sent {em.dateSent}</span>
-              )}
-            </div>
-            <textarea
-              style={styles.textarea}
-              value={em.message}
-              onChange={(e) => updateEmail(i, { message: e.target.value })}
-              placeholder={`${em.label} draft...`}
-              rows={2}
-            />
-          </div>
-        ))}
-
-        {showNegotiation && (
+        {!isEditing ? (
           <>
-            <div style={styles.fieldDivider}>Negotiation</div>
+            <div style={styles.badgeRow}>
+              <span style={styles.cardTag}>
+                {priorityMeta.icon} {priorityMeta.label}
+              </span>
+              <span style={styles.cardTag}>{stageMeta ? stageMeta.label : form.stage}</span>
+              {form.channel && <span style={styles.cardTag}>{form.channel}</span>}
+              {form.needsFollowup && <span style={{ ...styles.cardTag, color: "#F2A65A" }}>Needs follow-up</span>}
+            </div>
+
             <div style={styles.fieldRow}>
               <div style={styles.field}>
-                <label style={styles.label}>Proposed budget</label>
+                <label style={styles.label}>Contact</label>
+                <p style={styles.readOnlyValue}>{form.contactPerson || "\u2014"}</p>
+              </div>
+              <div style={styles.field}>
+                <label style={styles.label}>Email</label>
+                <p style={styles.readOnlyValue}>
+                  {form.email || "\u2014"}
+                  {form.email && (
+                    <button type="button" style={styles.copyIconButton} onClick={handleCopyEmail} title="Copy email">
+                      <CopyIcon />
+                    </button>
+                  )}
+                  {copiedEmail && <span style={styles.copiedTag}>Copied</span>}
+                </p>
+              </div>
+            </div>
+
+            <div style={styles.fieldRow}>
+              <div style={styles.field}>
+                <label style={styles.label}>Website</label>
+                <p style={styles.readOnlyValue}>{form.website || "\u2014"}</p>
+              </div>
+              <div style={styles.field}>
+                <label style={styles.label}>Country</label>
+                <p style={styles.readOnlyValue}>{form.country || "\u2014"}</p>
+              </div>
+            </div>
+
+            {form.notes && (
+              <div style={styles.field}>
+                <label style={styles.label}>Client notes</label>
+                <p style={styles.readOnlyValue}>{form.notes}</p>
+              </div>
+            )}
+
+            <div style={styles.fieldDivider}>Follow-up</div>
+            <p style={styles.readOnlyValue}>
+              {followupStatus.dueLabel || followupStatus.nextActionLabel || "Outreach complete"}
+              {followupStatus.lastContactedLabel && ` \u00b7 Last contacted: ${followupStatus.lastContactedLabel}`}
+            </p>
+            {!isTerminal && !form.needsFollowup && (
+              <button
+                type="button"
+                style={{ ...styles.copyButton, marginTop: 4 }}
+                onClick={() => onSave({ ...form, needsFollowup: true })}
+              >
+                Needs follow-up
+              </button>
+            )}
+
+            {form.stage === "lost" && form.lostReason && (
+              <p style={styles.fieldHint}>Marked lost: {form.lostReason}</p>
+            )}
+            {form.linkedProjectId && <p style={styles.fieldHint}>Linked to an active project.</p>}
+
+            {isTerminal && !form.archivedAt && (
+              <button type="button" style={{ ...styles.copyButton, marginTop: 8 }} onClick={() => onArchive(form)}>
+                Archive lead
+              </button>
+            )}
+
+            <div style={styles.fieldDivider}>Activity</div>
+            <div style={styles.timeline}>
+              {(form.activityLog || []).length === 0 && (
+                <p style={styles.fieldHint}>No activity recorded yet.</p>
+              )}
+              {[...(form.activityLog || [])]
+                .reverse()
+                .map((entry, i) => (
+                  <div key={i} style={styles.timelineItem}>
+                    <span style={styles.timelineDate}>{formatShortDate(entry.ts)}</span>
+                    <span>{entry.note}</span>
+                  </div>
+                ))}
+            </div>
+
+            <div style={styles.modalFooter}>
+              {!isNew && (
+                <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
+                  <TrashIcon />
+                  Delete
+                </button>
+              )}
+              <div style={{ flex: 1 }} />
+              <button style={styles.cancelButton} onClick={onCancel}>
+                Close
+              </button>
+              <button style={styles.saveButton} onClick={() => setIsEditing(true)}>
+                Edit
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            {softDuplicates.length > 0 && !confirmingDuplicate && (
+              <div style={styles.duplicateBanner}>
+                Possible existing lead: <strong>{softDuplicates[0].lead.companyName}</strong>
+                {softDuplicates[0].lead.email ? ` \u00b7 ${softDuplicates[0].lead.email}` : ""}
+                {" \u00b7 "}
+                {ALL_LEAD_STAGES.find((s) => s.id === softDuplicates[0].lead.stage)?.label || softDuplicates[0].lead.stage}
+              </div>
+            )}
+
+            <div style={styles.field}>
+              <label style={styles.label}>Company name</label>
+              <input
+                style={styles.input}
+                value={form.companyName}
+                onChange={set("companyName")}
+                placeholder="e.g. Nightfall Games"
+                autoFocus
+              />
+            </div>
+
+            <div style={styles.fieldRow}>
+              <div style={styles.field}>
+                <label style={styles.label}>Contact person</label>
                 <input
                   style={styles.input}
-                  value={form.proposedBudget}
-                  onChange={set("proposedBudget")}
-                  placeholder="e.g. $2,500"
+                  value={form.contactPerson}
+                  onChange={set("contactPerson")}
+                  placeholder="e.g. Jamie Fox"
                 />
               </div>
               <div style={styles.field}>
-                <label style={styles.label}>Estimated deadline</label>
+                <label style={styles.label}>Email</label>
+                <div style={{ ...styles.fileNameRow, gap: 6 }}>
+                  <input
+                    style={styles.input}
+                    value={form.email}
+                    onChange={set("email")}
+                    placeholder="jamie@studio.com"
+                  />
+                  {form.email && (
+                    <button type="button" style={styles.copyIconButton} onClick={handleCopyEmail} title="Copy email">
+                      <CopyIcon />
+                    </button>
+                  )}
+                  {copiedEmail && <span style={styles.copiedTag}>Copied</span>}
+                </div>
+              </div>
+            </div>
+
+            <div style={styles.fieldRow}>
+              <div style={styles.field}>
+                <label style={styles.label}>Website</label>
                 <input
                   style={styles.input}
-                  value={form.estimatedDeadline}
-                  onChange={set("estimatedDeadline")}
-                  placeholder="e.g. Sept 1"
+                  value={form.website}
+                  onChange={set("website")}
+                  placeholder="nightfallgames.com"
+                />
+              </div>
+              <div style={styles.field}>
+                <label style={styles.label}>Country</label>
+                <input
+                  style={styles.input}
+                  value={form.country}
+                  onChange={set("country")}
+                  placeholder="e.g. United States"
                 />
               </div>
             </div>
+
             <div style={styles.field}>
-              <label style={styles.label}>Project notes</label>
+              <label style={styles.label}>Client notes</label>
               <textarea
                 style={styles.textarea}
-                value={form.projectNotes}
-                onChange={set("projectNotes")}
-                placeholder="Scope discussed, expectations..."
-                rows={2}
+                value={form.notes}
+                onChange={set("notes")}
+                placeholder="What they do, style, references, budget signals, source of lead..."
+                rows={3}
               />
+            </div>
+
+            <div style={styles.fieldRow}>
+              <div style={styles.field}>
+                <label style={styles.label}>Priority</label>
+                <div style={styles.lostReasonGrid}>
+                  {LEAD_PRIORITIES.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      style={{
+                        ...styles.reviewStatusButton,
+                        borderColor: form.priority === p.id ? teal : border,
+                        color: form.priority === p.id ? tealLight : textMuted,
+                        background: form.priority === p.id ? "rgba(47,191,166,0.1)" : "transparent",
+                      }}
+                      onClick={() => setForm({ ...form, priority: p.id })}
+                    >
+                      {p.icon} {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div style={styles.field}>
+                <label style={styles.label}>Follow-up</label>
+                <button
+                  type="button"
+                  style={{
+                    ...styles.reviewStatusButton,
+                    borderColor: form.needsFollowup ? teal : border,
+                    color: form.needsFollowup ? tealLight : textMuted,
+                    background: form.needsFollowup ? "rgba(47,191,166,0.1)" : "transparent",
+                  }}
+                  onClick={() => setForm({ ...form, needsFollowup: !form.needsFollowup })}
+                >
+                  Needs follow-up
+                </button>
+              </div>
+            </div>
+
+            <div style={styles.field}>
+              <label style={styles.label}>Status</label>
+              <div style={styles.lostReasonGrid}>
+                {ALL_LEAD_STAGES.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    style={{
+                      ...styles.reviewStatusButton,
+                      borderColor: form.stage === s.id ? teal : border,
+                      color: form.stage === s.id ? tealLight : textMuted,
+                      background: form.stage === s.id ? "rgba(47,191,166,0.1)" : "transparent",
+                    }}
+                    onClick={() => setForm({ ...form, stage: s.id })}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+              <p style={styles.fieldHint}>
+                No Response and Lost are tracked separately: one means they went quiet, the other means they said no.
+              </p>
+            </div>
+
+            <div style={styles.field}>
+              <label style={styles.label}>Channel</label>
+              <div style={styles.lostReasonGrid}>
+                {leadChannels.map((channel) => (
+                  <button
+                    key={channel}
+                    type="button"
+                    style={{
+                      ...styles.reviewStatusButton,
+                      borderColor: form.channel === channel ? teal : border,
+                      color: form.channel === channel ? tealLight : textMuted,
+                      background: form.channel === channel ? "rgba(47,191,166,0.1)" : "transparent",
+                    }}
+                    onClick={() => setForm({ ...form, channel: form.channel === channel ? "" : channel })}
+                  >
+                    {channel}
+                  </button>
+                ))}
+                {addingChannel ? (
+                  <div style={{ ...styles.fileNameRow, gap: 6 }}>
+                    <input
+                      style={{ ...styles.input, maxWidth: 140, padding: "6px 10px" }}
+                      autoFocus
+                      value={newChannelName}
+                      onChange={(e) => setNewChannelName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleAddChannelSubmit();
+                        if (e.key === "Escape") {
+                          setAddingChannel(false);
+                          setNewChannelName("");
+                        }
+                      }}
+                      placeholder="e.g. TikTok"
+                    />
+                    <button type="button" style={styles.copyButton} onClick={handleAddChannelSubmit}>
+                      Add
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    style={{ ...styles.reviewStatusButton, borderColor: border, color: teal, borderStyle: "dashed" }}
+                    onClick={() => setAddingChannel(true)}
+                  >
+                    <PlusIcon />
+                    New channel
+                  </button>
+                )}
+              </div>
+              <p style={styles.fieldHint}>Where this lead came from. Add as many channels as you want to track.</p>
+            </div>
+
+            <div style={styles.fieldDivider}>Outreach</div>
+            <p style={styles.fieldHint}>
+              {followupStatus.dueLabel || followupStatus.nextActionLabel || "Outreach complete."}
+              {followupStatus.lastContactedLabel && ` \u00b7 Last contacted: ${followupStatus.lastContactedLabel}`}
+            </p>
+
+            {form.emails.map((em, i) => (
+              <div key={i} style={styles.emailRow}>
+                <div style={styles.emailRowHeader}>
+                  <label style={styles.checkboxLabel}>
+                    <input
+                      type="checkbox"
+                      checked={em.sent}
+                      onChange={(e) => updateEmail(i, { sent: e.target.checked })}
+                    />
+                    {em.label}
+                  </label>
+                  {em.sent && em.dateSent && (
+                    <span style={styles.fieldHint}>Sent {em.dateSent}</span>
+                  )}
+                  {!em.sent && i > 0 && (
+                    <span style={styles.fieldHint}>Day {followupSchedule[i]?.dayOffset ?? "-"}</span>
+                  )}
+                </div>
+                <textarea
+                  style={styles.textarea}
+                  value={em.message}
+                  onChange={(e) => updateEmail(i, { message: e.target.value })}
+                  placeholder={`${em.label} draft...`}
+                  rows={2}
+                />
+              </div>
+            ))}
+
+            {showNegotiation && (
+              <>
+                <div style={styles.fieldDivider}>Negotiation</div>
+                <div style={styles.fieldRow}>
+                  <div style={styles.field}>
+                    <label style={styles.label}>Proposed budget</label>
+                    <input
+                      style={styles.input}
+                      value={form.proposedBudget}
+                      onChange={set("proposedBudget")}
+                      placeholder="e.g. $2,500"
+                    />
+                  </div>
+                  <div style={styles.field}>
+                    <label style={styles.label}>Estimated deadline</label>
+                    <input
+                      style={styles.input}
+                      value={form.estimatedDeadline}
+                      onChange={set("estimatedDeadline")}
+                      placeholder="e.g. Sept 1"
+                    />
+                  </div>
+                </div>
+                <div style={styles.field}>
+                  <label style={styles.label}>Project notes</label>
+                  <textarea
+                    style={styles.textarea}
+                    value={form.projectNotes}
+                    onChange={set("projectNotes")}
+                    placeholder="Scope discussed, expectations..."
+                    rows={2}
+                  />
+                </div>
+              </>
+            )}
+
+            {form.linkedProjectId && (
+              <p style={styles.fieldHint}>Linked to an active project.</p>
+            )}
+
+            {showLostReasons && (
+              <div style={styles.field}>
+                <label style={styles.label}>Reason lost</label>
+                <div style={styles.lostReasonGrid}>
+                  {LOST_REASONS.map((reason) => (
+                    <button
+                      key={reason}
+                      style={styles.lostReasonButton}
+                      onClick={() => onMarkLost(form, reason)}
+                    >
+                      {reason}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {confirmingDuplicate && (
+              <div style={styles.duplicateBannerHard}>
+                <strong>\u26a0\ufe0f Possible duplicate lead</strong>
+                <p style={{ margin: "4px 0" }}>This lead appears to already exist:</p>
+                {blockingDuplicates.slice(0, 2).map((d) => (
+                  <p key={d.lead.id} style={{ margin: "2px 0" }}>
+                    {d.lead.companyName}
+                    {d.lead.email ? ` \u00b7 ${d.lead.email}` : ""}
+                    {" \u00b7 "}
+                    {ALL_LEAD_STAGES.find((s) => s.id === d.lead.stage)?.label || d.lead.stage}
+                  </p>
+                ))}
+                <p style={{ margin: "4px 0" }}>Are you sure you want to create another lead?</p>
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <button style={styles.cancelButton} onClick={() => setConfirmingDuplicate(false)}>
+                    Cancel
+                  </button>
+                  <button style={styles.saveButton} onClick={attemptSave}>
+                    Create anyway
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div style={styles.modalFooter}>
+              {!isNew && (
+                <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
+                  <TrashIcon />
+                  Delete
+                </button>
+              )}
+              <div style={{ flex: 1 }} />
+              <button style={styles.cancelButton} onClick={handleCancelEdit}>
+                Cancel
+              </button>
+              {!showLostReasons && form.stage !== "won" && form.stage !== "closed" && (
+                <button style={styles.cancelButton} onClick={() => setShowLostReasons(true)}>
+                  Mark lost
+                </button>
+              )}
+              {form.stage !== "won" && form.stage !== "closed" && (
+                <button style={styles.wonButton} onClick={() => onMarkWon(form)}>
+                  Mark won
+                </button>
+              )}
+              <button style={styles.saveButton} onClick={attemptSave}>
+                Save lead
+              </button>
             </div>
           </>
         )}
-
-        {form.stage === "lost" && form.lostReason && (
-          <p style={styles.fieldHint}>Marked lost: {form.lostReason}</p>
-        )}
-
-        {form.linkedProjectId && (
-          <p style={styles.fieldHint}>Linked to an active project.</p>
-        )}
-
-        {showLostReasons && (
-          <div style={styles.field}>
-            <label style={styles.label}>Reason lost</label>
-            <div style={styles.lostReasonGrid}>
-              {LOST_REASONS.map((reason) => (
-                <button
-                  key={reason}
-                  style={styles.lostReasonButton}
-                  onClick={() => onMarkLost(form, reason)}
-                >
-                  {reason}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div style={styles.modalFooter}>
-          {!isNew && (
-            <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
-              <TrashIcon />
-              Delete
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          <button style={styles.cancelButton} onClick={onCancel}>
-            Cancel
-          </button>
-          {!showLostReasons && form.stage !== "won" && form.stage !== "closed" && (
-            <button
-              style={styles.cancelButton}
-              onClick={() => setShowLostReasons(true)}
-            >
-              Mark lost
-            </button>
-          )}
-          {form.stage !== "won" && form.stage !== "closed" && (
-            <button style={styles.wonButton} onClick={() => onMarkWon(form)}>
-              Mark won
-            </button>
-          )}
-          <button
-            style={styles.saveButton}
-            onClick={() => onSave({ ...form, companyName: form.companyName || "Untitled lead" })}
-          >
-            Save lead
-          </button>
-        </div>
       </div>
     </div>
   );
@@ -5207,37 +7898,86 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
   );
 }
 
-function BudgetPlannerEditor({ plan, onCancel, onSave, onDelete, isNew }) {
+// Full-page Planner workspace (replaces the old pop-out editor). Organized
+// into visually distinct sections rather than one long form, per the
+// planner_ui.txt architecture spec. Financial summary stays visible near
+// the top while the rest of the sections are worked on below it.
+function PlannerWorkspace({
+  plan, isNew, settings, hasProAccess, templates, projects, teamMembers,
+  onSave, onDelete, onDuplicate, onSaveAsTemplate, onConvertToProject, onClose,
+}) {
   const [form, setForm] = useState(plan);
+  const [showWarnings, setShowWarnings] = useState(false);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const setPreset = (percent) => setForm({ ...form, targetProfitPercent: percent });
 
+  const setDept = (deptId) => (e) => {
+    setForm({
+      ...form,
+      departmentAllocations: { ...(form.departmentAllocations || {}), [deptId]: e.target.value },
+    });
+  };
+
+  const setScope = (key) => (e) => {
+    const value = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+    setForm({ ...form, scope: { ...(form.scope || {}), [key]: value } });
+  };
+
+  const addCrewMember = () => {
+    setForm({
+      ...form,
+      crew: [
+        ...(form.crew || []),
+        {
+          id: `c${Date.now()}`,
+          name: "",
+          role: "",
+          department: PLANNER_DEPARTMENTS[0].id,
+          rateType: "per_shot",
+          rate: "",
+          units: "",
+          skillLevel: 3,
+          dependability: 75,
+          availability: "available",
+          capacityUnits: "",
+        },
+      ],
+    });
+  };
+  const updateCrewMember = (idx, key, value) => {
+    const next = [...form.crew];
+    next[idx] = { ...next[idx], [key]: value };
+    setForm({ ...form, crew: next });
+  };
+  const removeCrewMember = (idx) => {
+    setForm({ ...form, crew: form.crew.filter((_, i) => i !== idx) });
+  };
+  const addCrewMemberFromRoster = (teamMemberId) => {
+    const tm = (teamMembers || []).find((m) => m.id === teamMemberId);
+    if (!tm) return;
+    setForm({ ...form, crew: [...(form.crew || []), crewRowFromTeamMember(tm)] });
+  };
+
   const calc = computeBudgetPlan(form);
   const cur = form.currency || "$";
-  const healthColor = calc.health === "green" ? "#3DDC84" : calc.health === "yellow" ? "#F2A65A" : "#FF4D4D";
-  const healthLabel = calc.health === "green" ? "Healthy" : calc.health === "yellow" ? "Warning" : "Low profit";
+  const intel = computePlannerIntelligence(form);
+  const healthColor = intel.financial.state === "green" ? "#3DDC84" : intel.financial.state === "yellow" ? "#F2A65A" : "#FF4D4D";
+  const healthLabel = intel.financial.state === "green" ? "Healthy" : intel.financial.state === "yellow" ? "Tight" : "Critical";
+  const allocation = intel.allocation;
+  const convertedProject = form.convertedProjectId ? projects.find((p) => p.id === form.convertedProjectId) : null;
+
+  const topWarnings = intel.warnings.slice(0, 3);
+  const restWarnings = intel.warnings.slice(3);
 
   return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-        <div style={styles.modalHeader}>
-          <span style={styles.modalTitle}>{isNew ? "New budget plan" : "Edit budget plan"}</span>
-          <button style={styles.iconButton} onClick={onCancel}>
-            <CloseIcon />
-          </button>
-        </div>
-
+    <div style={styles.invoicesWrap}>
+      {/* Project Information */}
+      <div style={styles.plannerSection}>
+        <div style={styles.plannerSectionTitle}>Project</div>
         <div style={styles.field}>
           <label style={styles.label}>Plan name</label>
-          <input
-            style={styles.input}
-            value={form.name}
-            onChange={set("name")}
-            placeholder="e.g. 15s Anime Trailer"
-            autoFocus
-          />
+          <input style={styles.input} value={form.name} onChange={set("name")} placeholder="e.g. 15s Anime Trailer" autoFocus />
         </div>
-
         <div style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Client name</label>
@@ -5245,15 +7985,70 @@ function BudgetPlannerEditor({ plan, onCancel, onSave, onDelete, isNew }) {
           </div>
           <div style={styles.field}>
             <label style={styles.label}>Project type</label>
-            <input
-              style={styles.input}
-              value={form.projectType}
-              onChange={set("projectType")}
-              placeholder="e.g. Trailer"
-            />
+            <input style={styles.input} value={form.projectType} onChange={set("projectType")} placeholder="e.g. Trailer" />
           </div>
         </div>
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Start date</label>
+            <input type="date" style={styles.input} value={form.startDate || ""} onChange={set("startDate")} />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Deadline</label>
+            <input type="date" style={styles.input} value={form.deadline || ""} onChange={set("deadline")} />
+          </div>
+        </div>
+        <div style={styles.field}>
+          <label style={styles.label}>Status</label>
+          <div style={styles.reviewStatusRow}>
+            {PLANNER_STATUSES.filter((s) => s.id !== "converted" || form.status === "converted").map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                style={{ ...styles.reviewStatusButton, ...(form.status === s.id ? { borderColor: teal, color: teal } : {}) }}
+                onClick={() => setForm({ ...form, status: s.id })}
+                disabled={s.id === "converted"}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
 
+      {/* Intelligence panel */}
+      <div style={{ ...styles.plannerSection, borderColor: `${healthColor}55` }}>
+        <div style={styles.plannerSectionTitle}>Planner Intelligence</div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
+          <span style={{ ...styles.budgetStatValue, color: healthColor }}>{intel.dealScore.score} — {intel.dealScore.label}</span>
+          <span style={{ ...styles.fieldHint, color: healthColor }}>{healthLabel} margin · {intel.financial.actualMargin.toFixed(1)}%</span>
+        </div>
+        {topWarnings.length === 0 ? (
+          <p style={styles.fieldHint}>No issues detected against your current inputs.</p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {topWarnings.map((w, i) => (
+              <p key={i} style={{ ...styles.fieldHint, color: w.level === "red" ? "#FF4D4D" : "#F2A65A" }}>
+                {w.level === "red" ? "\u{1F534}" : "\u{1F7E1}"} {w.text}
+              </p>
+            ))}
+          </div>
+        )}
+        {restWarnings.length > 0 && (
+          <button type="button" style={{ ...styles.fieldHint, background: "none", border: "none", cursor: "pointer", color: teal, padding: 0, marginTop: 4 }} onClick={() => setShowWarnings((v) => !v)}>
+            {showWarnings ? "Show less" : `+${restWarnings.length} more`}
+          </button>
+        )}
+        {showWarnings && restWarnings.map((w, i) => (
+          <p key={i} style={{ ...styles.fieldHint, color: w.level === "red" ? "#FF4D4D" : "#F2A65A" }}>
+            {w.level === "red" ? "\u{1F534}" : "\u{1F7E1}"} {w.text}
+          </p>
+        ))}
+      </div>
+
+      {/* Financial Summary + Profit Target */}
+      <div style={styles.plannerSection}>
+        <div style={styles.plannerSectionTitle}>Financial Summary</div>
         <div style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Budget</label>
@@ -5262,85 +8057,334 @@ function BudgetPlannerEditor({ plan, onCancel, onSave, onDelete, isNew }) {
           <div style={styles.field}>
             <label style={styles.label}>Currency</label>
             <select style={styles.input} value={form.currency || "$"} onChange={set("currency")}>
-              {CURRENCIES.map((c) => (
-                <option key={c.code} value={c.symbol}>
-                  {c.label}
-                </option>
-              ))}
+              {CURRENCIES.map((c) => (<option key={c.code} value={c.symbol}>{c.label}</option>))}
             </select>
           </div>
         </div>
-
         <div style={styles.field}>
           <label style={styles.label}>Target profit</label>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
             {PROFIT_PRESETS.map((p) => (
-              <button
-                key={p}
-                type="button"
-                style={{
-                  ...styles.tabButton,
-                  ...(Number(form.targetProfitPercent) === p ? styles.tabButtonActive : {}),
-                }}
-                onClick={() => setPreset(p)}
-              >
+              <button key={p} type="button" style={{ ...styles.tabButton, ...(Number(form.targetProfitPercent) === p ? styles.tabButtonActive : {}) }} onClick={() => setPreset(p)}>
                 {p}%{p === 25 ? " (recommended)" : ""}
               </button>
             ))}
           </div>
-          <input
-            style={styles.input}
-            value={form.targetProfitPercent}
-            onChange={set("targetProfitPercent")}
-            placeholder="Custom %"
-          />
+          <input style={styles.input} value={form.targetProfitPercent} onChange={set("targetProfitPercent")} placeholder="Custom %" />
         </div>
-
         <div style={styles.field}>
-          <label style={styles.label}>Notes</label>
-          <textarea
-            style={styles.textarea}
-            rows={3}
-            value={form.notes}
-            onChange={set("notes")}
-            placeholder="Anything worth remembering about this plan..."
-          />
+          <label style={styles.label}>Contingency reserve %</label>
+          <input style={styles.input} value={form.contingencyPercent} onChange={set("contingencyPercent")} placeholder={`Recommended ${intel.contingency.recommended}%`} />
+          <p style={{ ...styles.fieldHint, color: intel.contingency.state === "none" ? "#FF4D4D" : intel.contingency.state === "below" ? "#F2A65A" : undefined }}>
+            {intel.contingency.state === "none" && "No contingency reserve — any revision or issue reduces profit directly."}
+            {intel.contingency.state === "below" && `Below the ${intel.contingency.recommended}% recommended for this project's complexity.`}
+            {intel.contingency.state === "ok" && `At or above the ${intel.contingency.recommended}% recommended level.`}
+          </p>
         </div>
-
-        <div style={styles.fieldDivider}>Live summary</div>
         <div style={styles.budgetSummaryRow}>
           <div style={styles.budgetStat}>
             <span style={styles.label}>Production budget</span>
-            <span style={styles.budgetStatValue}>
-              {cur}
-              {formatMoney(calc.productionBudget)}
-            </span>
-            <span style={styles.fieldHint}>What's left to actually spend on production</span>
+            <span style={styles.budgetStatValue}>{cur}{formatMoney(calc.productionBudget)}</span>
           </div>
           <div style={styles.budgetStat}>
             <span style={styles.label}>Expected profit</span>
-            <span style={{ ...styles.budgetStatValue, color: healthColor }}>
-              {cur}
-              {formatMoney(calc.profit)}
-            </span>
-            <span style={{ ...styles.fieldHint, color: healthColor }}>
-              {healthLabel} {"\u00b7"} {calc.profitPercent}% margin
-            </span>
+            <span style={{ ...styles.budgetStatValue, color: healthColor }}>{cur}{formatMoney(calc.profit)}</span>
+          </div>
+          <div style={styles.budgetStat}>
+            <span style={styles.label}>Crew cost so far</span>
+            <span style={styles.budgetStatValue}>{cur}{formatMoney(intel.totalCrewCost)}</span>
+          </div>
+          <div style={styles.budgetStat}>
+            <span style={styles.label}>Actual margin</span>
+            <span style={{ ...styles.budgetStatValue, color: healthColor }}>{intel.financial.actualMargin.toFixed(1)}%</span>
           </div>
         </div>
+        {intel.minimumPrice !== null && (
+          <p style={styles.fieldHint}>
+            Estimated minimum project price at this margin: <strong>{cur}{formatMoney(intel.minimumPrice)}</strong> (estimate based on current assumptions).
+          </p>
+        )}
+      </div>
 
-        <div style={styles.modalFooter}>
+      {/* Department Budget */}
+      <div style={styles.plannerSection}>
+        <div style={styles.plannerSectionTitle}>Department Budget</div>
+        <p style={styles.fieldHint}>Percent of the {cur}{formatMoney(calc.productionBudget)} production budget. Override any row.</p>
+        {PLANNER_DEPARTMENTS.map((dept) => {
+          const pct = parseMoney((form.departmentAllocations || {})[dept.id]);
+          const amount = (pct / 100) * calc.productionBudget;
+          return (
+            <div key={dept.id} style={styles.plannerDeptRow}>
+              <span style={{ flex: 1 }}>{dept.label}</span>
+              <input
+                style={{ ...styles.input, width: 70 }}
+                value={(form.departmentAllocations || {})[dept.id] ?? ""}
+                onChange={setDept(dept.id)}
+              />
+              <span style={{ ...styles.fieldHint, width: 90, textAlign: "right" }}>{cur}{formatMoney(amount)}</span>
+            </div>
+          );
+        })}
+        <div style={{ ...styles.plannerDeptRow, fontWeight: 600 }}>
+          <span style={{ flex: 1 }}>Allocated</span>
+          <span style={{ width: 70, textAlign: "center" }}>{allocation.totalPercent}%</span>
+          <span
+            style={{
+              ...styles.fieldHint, width: 90, textAlign: "right",
+              color: allocation.state === "over" ? "#FF4D4D" : allocation.state === "under" ? "#F2A65A" : "#3DDC84",
+            }}
+          >
+            {allocation.state === "over" && `Over by ${allocation.diffPercent.toFixed(1)}%`}
+            {allocation.state === "under" && `${allocation.diffPercent.toFixed(1)}% unallocated`}
+            {allocation.state === "exact" && "Fully allocated"}
+          </span>
+        </div>
+      </div>
+
+      {/* Crew */}
+      {!hasProAccess ? (
+        <div style={styles.plannerSection}>
+          <div style={styles.plannerSectionTitle}>Crew / Person Costs</div>
+          <ProUpgradePrompt feature="Crew cost planning" inline />
+        </div>
+      ) : (
+        <div style={styles.plannerSection}>
+          <div style={styles.plannerSectionTitle}>Crew / Person Costs</div>
+          {(form.crew || []).map((person, idx) => {
+            const cost = computeCrewMemberCost(person);
+            const fitEntry = intel.crewFit.find((c) => c.person === person) || { fit: computeCrewMemberFit(person, intel.deadlineRisk.state) };
+            const fit = fitEntry.fit;
+            const capacityBad = fit.capacity.state === "over";
+            return (
+              <div key={person.id || idx} style={{ borderBottom: "1px solid rgba(127,224,208,0.08)", padding: "8px 0" }}>
+                <div style={styles.plannerCrewRow}>
+                  <input style={{ ...styles.input, flex: 1 }} placeholder="Name" value={person.name} onChange={(e) => updateCrewMember(idx, "name", e.target.value)} />
+                  <input style={{ ...styles.input, flex: 1 }} placeholder="Role" value={person.role} onChange={(e) => updateCrewMember(idx, "role", e.target.value)} />
+                  <select style={{ ...styles.input, width: 150 }} value={person.department} onChange={(e) => updateCrewMember(idx, "department", e.target.value)}>
+                    {PLANNER_DEPARTMENTS.map((d) => (<option key={d.id} value={d.id}>{d.label}</option>))}
+                  </select>
+                  <select style={{ ...styles.input, width: 120 }} value={person.rateType} onChange={(e) => updateCrewMember(idx, "rateType", e.target.value)}>
+                    {CREW_RATE_TYPES.map((r) => (<option key={r.id} value={r.id}>{r.label}</option>))}
+                  </select>
+                  <input style={{ ...styles.input, width: 80 }} placeholder="Rate" value={person.rate} onChange={(e) => updateCrewMember(idx, "rate", e.target.value)} />
+                  {person.rateType !== "fixed" && (
+                    <input style={{ ...styles.input, width: 70 }} placeholder="Units" value={person.units} onChange={(e) => updateCrewMember(idx, "units", e.target.value)} />
+                  )}
+                  <span style={{ ...styles.fieldHint, width: 90, textAlign: "right" }}>{cur}{formatMoney(cost)}</span>
+                  <button type="button" style={styles.iconButton} onClick={() => removeCrewMember(idx)}><TrashIcon /></button>
+                </div>
+                <div style={styles.plannerCrewRow}>
+                  <select style={{ ...styles.input, width: 130 }} value={person.skillLevel ?? 3} onChange={(e) => updateCrewMember(idx, "skillLevel", e.target.value)}>
+                    {SKILL_LEVELS.map((s) => (<option key={s.value} value={s.value}>{s.label}</option>))}
+                  </select>
+                  <div style={styles.field}>
+                    <input
+                      style={{ ...styles.input, width: 90 }}
+                      placeholder="Dependability"
+                      value={person.dependability ?? ""}
+                      onChange={(e) => updateCrewMember(idx, "dependability", e.target.value)}
+                      title="Dependability score, 0-100"
+                    />
+                  </div>
+                  <select style={{ ...styles.input, width: 160 }} value={person.availability || "available"} onChange={(e) => updateCrewMember(idx, "availability", e.target.value)}>
+                    {CREW_AVAILABILITY_OPTIONS.map((a) => (<option key={a.id} value={a.id}>{a.label}</option>))}
+                  </select>
+                  <input
+                    style={{ ...styles.input, width: 100 }}
+                    placeholder="Max capacity"
+                    value={person.capacityUnits ?? ""}
+                    onChange={(e) => updateCrewMember(idx, "capacityUnits", e.target.value)}
+                    title="Maximum units this person can take on for this plan"
+                  />
+                  <span style={{ ...styles.fieldHint, color: capacityBad ? "#FF4D4D" : undefined }}>
+                    Fit score {fit.score} {"\u00b7"} {fit.dependabilityInfo.label}
+                    {capacityBad && ` \u00b7 \u{1F534} over capacity by ${fit.capacity.overBy}`}
+                    {person.teamMemberId && ` \u00b7 linked to roster`}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+          <button type="button" style={styles.tabButton} onClick={addCrewMember}>
+            <PlusIcon /> Add crew member
+          </button>
+          {(teamMembers || []).length > 0 && (
+            <select
+              style={{ ...styles.input, width: 220, marginLeft: 8 }}
+              value=""
+              onChange={(e) => {
+                if (e.target.value) addCrewMemberFromRoster(e.target.value);
+                e.target.value = "";
+              }}
+            >
+              <option value="">+ Add from Team roster…</option>
+              {teamMembers.map((tm) => (
+                <option key={tm.id} value={tm.id}>{tm.name}{tm.role ? ` · ${tm.role}` : ""}</option>
+              ))}
+            </select>
+          )}
+          <div style={styles.budgetSummaryRow}>
+            <div style={styles.budgetStat}>
+              <span style={styles.label}>Total crew cost</span>
+              <span style={styles.budgetStatValue}>{cur}{formatMoney(intel.totalCrewCost)}</span>
+            </div>
+            <div style={styles.budgetStat}>
+              <span style={styles.label}>Crew cost ratio</span>
+              <span style={{ ...styles.budgetStatValue, color: intel.crewCostRatio.state === "critical" ? "#FF4D4D" : intel.crewCostRatio.state === "watch" ? "#F2A65A" : "#3DDC84" }}>
+                {intel.crewCostRatio.ratio.toFixed(0)}% of production budget
+              </span>
+            </div>
+          </div>
+          {intel.departmentSpend.filter((d) => d.crewCost > 0 && d.state !== "ok").map((d) => (
+            <p key={d.id} style={{ ...styles.fieldHint, color: d.state === "over" ? "#FF4D4D" : "#F2A65A" }}>
+              {d.state === "over"
+                ? `Crew costs exceed the ${d.label} allocation by ${cur}${formatMoney(d.crewCost - d.allocatedAmount)}.`
+                : `${d.label} has very little budget remaining for other expenses.`}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {/* Production Scope + Timeline */}
+      {!hasProAccess ? (
+        <div style={styles.plannerSection}>
+          <div style={styles.plannerSectionTitle}>Production Scope & Timeline</div>
+          <ProUpgradePrompt feature="Timeline estimation" inline />
+        </div>
+      ) : (
+        <div style={styles.plannerSection}>
+          <div style={styles.plannerSectionTitle}>Production Scope</div>
+          <div style={styles.fieldRow}>
+            <div style={styles.field}>
+              <label style={styles.label}>Duration (seconds)</label>
+              <input style={styles.input} value={form.scope?.durationSeconds || ""} onChange={setScope("durationSeconds")} />
+            </div>
+            <div style={styles.field}>
+              <label style={styles.label}>Estimated shots</label>
+              <input style={styles.input} value={form.scope?.estimatedShots || ""} onChange={setScope("estimatedShots")} />
+            </div>
+          </div>
+          <div style={styles.fieldRow}>
+            <div style={styles.field}>
+              <label style={styles.label}>Characters</label>
+              <input style={styles.input} value={form.scope?.characters || ""} onChange={setScope("characters")} />
+            </div>
+            <div style={styles.field}>
+              <label style={styles.label}>Backgrounds</label>
+              <input style={styles.input} value={form.scope?.backgrounds || ""} onChange={setScope("backgrounds")} />
+            </div>
+            <div style={styles.field}>
+              <label style={styles.label}>Target FPS</label>
+              <input style={styles.input} value={form.scope?.targetFps || ""} onChange={setScope("targetFps")} />
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 10 }}>
+            {[
+              ["complexMovement", "Complex character movement"],
+              ["heavyEffects", "Heavy effects"],
+              ["cameraMovement", "Significant camera movement"],
+              ["dialogueHeavy", "Dialogue-heavy"],
+            ].map(([key, label]) => (
+              <label key={key} style={{ ...styles.fieldHint, display: "flex", alignItems: "center", gap: 6 }}>
+                <input type="checkbox" checked={!!form.scope?.[key]} onChange={setScope(key)} />
+                {label}
+              </label>
+            ))}
+          </div>
+          <p style={styles.fieldHint}>
+            Complexity: <strong>{intel.complexity.label}</strong> ({intel.complexity.score.toFixed(1)}){intel.complexity.factors.length > 0 && ` — ${intel.complexity.factors.join(", ")}`}
+          </p>
+          {intel.shotsPerSecond !== null && (
+            <p style={styles.fieldHint}>Shot density: {intel.shotsPerSecond.toFixed(2)} shots/sec.</p>
+          )}
+
+          <div style={styles.fieldDivider}>Timeline (estimated starting point)</div>
+          <p style={styles.fieldHint}>Estimated production: {intel.timeline.estimatedDays} days.</p>
+          {intel.timeline.phases.map((phase) => (
+            <div key={phase.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <span style={{ ...styles.fieldHint, width: 150 }}>{phase.label}</span>
+              <div style={styles.plannerTimelineTrack}>
+                <div style={{ ...styles.plannerTimelineFill, width: `${Math.min(100, (phase.days / intel.timeline.estimatedDays) * 100)}%` }} />
+              </div>
+              <span style={{ ...styles.fieldHint, width: 46, textAlign: "right" }}>{phase.days}d</span>
+            </div>
+          ))}
+          {intel.deadlineRisk.state !== "unknown" && (
+            <p style={{ ...styles.fieldHint, marginTop: 8, color: intel.deadlineRisk.state === "risk" ? "#FF4D4D" : intel.deadlineRisk.state === "tight" ? "#F2A65A" : "#3DDC84" }}>
+              {intel.deadlineRisk.state === "healthy" && `\u{1F7E2} Healthy schedule — ${intel.deadlineRisk.availableDays - intel.timeline.estimatedDays} day buffer.`}
+              {intel.deadlineRisk.state === "tight" && `\u{1F7E1} Tight schedule — ${intel.deadlineRisk.availableDays - intel.timeline.estimatedDays} day(s) of buffer.`}
+              {intel.deadlineRisk.state === "risk" && `\u{1F534} Deadline risk — estimated ${intel.timeline.estimatedDays} production days vs ${intel.deadlineRisk.availableDays} available.`}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Notes */}
+      <div style={styles.plannerSection}>
+        <div style={styles.plannerSectionTitle}>Notes</div>
+        <textarea style={styles.textarea} rows={3} value={form.notes} onChange={set("notes")} placeholder="Anything worth remembering about this plan..." />
+      </div>
+
+      {/* Actions */}
+      <div style={styles.plannerSection}>
+        <div style={styles.plannerSectionTitle}>Actions</div>
+        {convertedProject && (
+          <p style={styles.fieldHint}>
+            This plan has already been converted to project "{convertedProject.name}".
+          </p>
+        )}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button style={styles.saveButton} onClick={() => onSave({ ...form, name: form.name || "Untitled plan" })}>
+            Save
+          </button>
+          {!isNew && (
+            <button style={styles.tabButton} onClick={() => onDuplicate(form)}>
+              Duplicate
+            </button>
+          )}
+          {!isNew && (
+            hasProAccess ? (
+              <button style={styles.tabButton} onClick={() => onSaveAsTemplate(form)}>
+                Save as Template
+              </button>
+            ) : (
+              <button style={styles.tabButton} disabled title="Pro feature">
+                Save as Template <span style={styles.proBadge}>PRO</span>
+              </button>
+            )
+          )}
+          {!isNew && (
+            hasProAccess ? (
+              <button
+                style={styles.tabButton}
+                disabled={!!form.convertedProjectId}
+                onClick={async () => {
+                  if (form.convertedProjectId) {
+                    window.alert("This plan has already been converted to a project.");
+                    return;
+                  }
+                  const result = await onConvertToProject(form);
+                  if (result?.project) setForm({ ...form, status: "converted", convertedProjectId: result.project.id });
+                  else if (result?.limitReached) window.alert(`Free plan is limited to ${FREE_PROJECT_LIMIT} active projects. Archive one or upgrade to Pro.`);
+                  else if (result?.alreadyConverted) window.alert("This plan has already been converted to a project.");
+                }}
+              >
+                {form.convertedProjectId ? "Already converted" : "Convert to Project"}
+              </button>
+            ) : (
+              <button style={styles.tabButton} disabled title="Pro feature">
+                Convert to Project <span style={styles.proBadge}>PRO</span>
+              </button>
+            )
+          )}
+          <div style={{ flex: 1 }} />
           {!isNew && (
             <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
               Delete
             </button>
           )}
-          <div style={{ flex: 1 }} />
-          <button style={styles.cancelButton} onClick={onCancel}>
-            Cancel
-          </button>
-          <button style={styles.saveButton} onClick={() => onSave({ ...form, name: form.name || "Untitled plan" })}>
-            Save plan
+          <button style={styles.cancelButton} onClick={onClose}>
+            Close
           </button>
         </div>
       </div>
@@ -5348,9 +8392,32 @@ function BudgetPlannerEditor({ plan, onCancel, onSave, onDelete, isNew }) {
   );
 }
 
-function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew }) {
-  const [form, setForm] = useState(member);
+function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew, currencySymbol }) {
+  const [form, setForm] = useState({ ...emptyTeamMember(), ...member });
+  const [customSkill, setCustomSkill] = useState("");
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+  const cur = currencySymbol || "$";
+
+  const toggleSkill = (skill) => {
+    const has = (form.skills || []).includes(skill);
+    setForm({
+      ...form,
+      skills: has ? form.skills.filter((s) => s !== skill) : [...(form.skills || []), skill],
+    });
+  };
+
+  const addCustomSkill = () => {
+    const trimmed = customSkill.trim();
+    if (!trimmed || (form.skills || []).includes(trimmed)) {
+      setCustomSkill("");
+      return;
+    }
+    setForm({ ...form, skills: [...(form.skills || []), trimmed] });
+    setCustomSkill("");
+  };
+
+  const extraSkills = (form.skills || []).filter((s) => !TEAM_SKILL_OPTIONS.includes(s));
+  const dependability = dependabilityTier(form.dependabilityScore ?? 80);
 
   return (
     <div style={styles.overlay} onClick={onCancel}>
@@ -5387,13 +8454,15 @@ function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew }) {
             />
           </div>
           <div style={styles.field}>
-            <label style={styles.label}>Rate</label>
-            <input
-              style={styles.input}
-              value={form.rate}
-              onChange={set("rate")}
-              placeholder="e.g. $15/cut"
-            />
+            <label style={styles.label}>Department</label>
+            <select style={styles.input} value={form.department || ""} onChange={set("department")}>
+              <option value="">Unassigned</option>
+              {TEAM_DEPARTMENT_OPTIONS.map((dept) => (
+                <option key={dept} value={dept}>
+                  {dept}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
 
@@ -5406,6 +8475,124 @@ function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew }) {
             placeholder="kevin@example.com"
           />
         </div>
+
+        <div style={styles.fieldDivider}>Skills &amp; level</div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Skills</label>
+          <div style={styles.reviewStatusRow}>
+            {TEAM_SKILL_OPTIONS.map((skill) => {
+              const active = (form.skills || []).includes(skill);
+              return (
+                <button
+                  key={skill}
+                  type="button"
+                  style={active ? { ...styles.skillChip, ...styles.skillChipActive } : styles.skillChip}
+                  onClick={() => toggleSkill(skill)}
+                >
+                  {skill}
+                </button>
+              );
+            })}
+            {extraSkills.map((skill) => (
+              <button
+                key={skill}
+                type="button"
+                style={{ ...styles.skillChip, ...styles.skillChipActive }}
+                onClick={() => toggleSkill(skill)}
+              >
+                {skill}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+            <input
+              style={styles.input}
+              value={customSkill}
+              onChange={(e) => setCustomSkill(e.target.value)}
+              placeholder="Add a custom skill..."
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addCustomSkill();
+                }
+              }}
+            />
+            <button type="button" style={styles.cancelButton} onClick={addCustomSkill}>
+              Add
+            </button>
+          </div>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Skill level</label>
+          <div style={styles.reviewStatusRow}>
+            {[1, 2, 3, 4, 5].map((level) => {
+              const active = Number(form.skillLevel) === level;
+              return (
+                <button
+                  key={level}
+                  type="button"
+                  style={{
+                    ...styles.reviewStatusButton,
+                    borderColor: active ? teal : border,
+                    color: active ? tealLight : textMuted,
+                    background: active ? "rgba(47,191,166,0.14)" : "transparent",
+                  }}
+                  onClick={() => setForm({ ...form, skillLevel: level })}
+                >
+                  {level} &middot; {skillLevelLabel(level)}
+                </button>
+              );
+            })}
+          </div>
+          <p style={styles.fieldHint}>
+            A senior/expert isn't automatically the right pick for simple, repetitive work &mdash; this just
+            tells the Planner what this person is capable of.
+          </p>
+        </div>
+
+        <div style={styles.fieldDivider}>Rate</div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Rate type</label>
+            <select style={styles.input} value={form.rateType || "hour"} onChange={set("rateType")}>
+              {RATE_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Rate amount ({cur})</label>
+            <input
+              style={styles.input}
+              type="number"
+              min="0"
+              step="0.01"
+              value={form.rateAmount || ""}
+              onChange={set("rateAmount")}
+              placeholder="e.g. 150"
+            />
+          </div>
+        </div>
+        <div style={styles.field}>
+          <label style={styles.label}>Rate note (optional)</label>
+          <input
+            style={styles.input}
+            value={form.rate}
+            onChange={set("rate")}
+            placeholder="e.g. negotiable, rush jobs only, $15/cut for simple inbetweens"
+          />
+          <p style={styles.fieldHint}>
+            Used as a fallback label if no rate amount is set above, and useful for caveats the Planner
+            can't calculate on its own.
+          </p>
+        </div>
+
+        <div style={styles.fieldDivider}>Availability &amp; capacity</div>
 
         <div style={styles.field}>
           <label style={styles.label}>Availability</label>
@@ -5421,16 +8608,107 @@ function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew }) {
                     borderColor: active ? AVAILABILITY_COLORS[status] : border,
                     color: active ? AVAILABILITY_COLORS[status] : textMuted,
                     background: active ? `${AVAILABILITY_COLORS[status]}1a` : "transparent",
-                    textTransform: "capitalize",
                   }}
                   onClick={() => setForm({ ...form, availability: status })}
                 >
-                  {status}
+                  {AVAILABILITY_LABELS[status]}
                 </button>
               );
             })}
           </div>
         </div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Available from</label>
+            <input
+              style={styles.input}
+              type="date"
+              value={form.availableStartDate || ""}
+              onChange={set("availableStartDate")}
+            />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Available until</label>
+            <input
+              style={styles.input}
+              type="date"
+              value={form.availableEndDate || ""}
+              onChange={set("availableEndDate")}
+            />
+          </div>
+        </div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Max workload</label>
+            <input
+              style={styles.input}
+              type="number"
+              min="0"
+              value={form.capacityValue || ""}
+              onChange={set("capacityValue")}
+              placeholder="e.g. 30"
+            />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Capacity unit</label>
+            <select style={styles.input} value={form.capacityUnit || "hours/week"} onChange={set("capacityUnit")}>
+              {CAPACITY_UNIT_OPTIONS.map((unit) => (
+                <option key={unit} value={unit}>
+                  {unit}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div style={styles.fieldDivider}>Dependability &amp; speed</div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Dependability score (0-100)</label>
+          <input
+            style={styles.input}
+            type="number"
+            min="0"
+            max="100"
+            value={form.dependabilityScore ?? ""}
+            onChange={set("dependabilityScore")}
+            placeholder="e.g. 85"
+          />
+          <p style={{ ...styles.fieldHint, color: dependability.color }}>
+            {dependability.label} &middot; 90-100 highly dependable, 75-89 reliable, 60-74 variable, below 60
+            risky.
+          </p>
+        </div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Default speed</label>
+            <input
+              style={styles.input}
+              type="number"
+              min="0"
+              step="0.1"
+              value={form.defaultSpeedValue || ""}
+              onChange={set("defaultSpeedValue")}
+              placeholder="e.g. 3"
+            />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Unit</label>
+            <input
+              style={styles.input}
+              value={form.defaultSpeedUnit || ""}
+              onChange={set("defaultSpeedUnit")}
+              placeholder="e.g. shots/day, seconds/day"
+            />
+          </div>
+        </div>
+        <p style={styles.fieldHint}>
+          A starting estimate to use until there's enough completed-project history to calculate a real
+          average &mdash; the Planner won't invent a track record that doesn't exist yet.
+        </p>
 
         <div style={styles.field}>
           <label style={styles.label}>Notes</label>
@@ -5763,6 +9041,14 @@ a:hover {
   box-shadow: 0 16px 40px rgba(0,0,0,0.45), 0 4px 12px rgba(0,0,0,0.3);
 }
 
+@keyframes kf-spin {
+  to { transform: rotate(360deg); }
+}
+.kf-spin {
+  animation: kf-spin 0.8s linear infinite;
+  transform-origin: center;
+}
+
 @keyframes kf-tutorial-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(47,191,166,0.55); }
   50% { box-shadow: 0 0 0 8px rgba(47,191,166,0); }
@@ -6070,6 +9356,8 @@ const styles = {
   projectCardActions: {
     display: "flex",
     gap: 4,
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
   },
   archiveSection: {
     padding: "8px 0 32px",
@@ -6098,6 +9386,60 @@ const styles = {
     flexDirection: "column",
     gap: 20,
   },
+  greetingTitle: {
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontSize: 24,
+    fontWeight: 700,
+    margin: 0,
+    letterSpacing: "-0.015em",
+    color: paper,
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  },
+  studioTimeCard: {
+    background: inkSoft,
+    border: `1px solid ${border}`,
+    borderRadius: 14,
+    padding: "16px 20px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 16,
+    boxShadow: shadowSoft,
+    flexWrap: "wrap",
+    maxWidth: 440,
+  },
+  studioTimeCardActive: {
+    borderColor: teal,
+    background: "rgba(47,191,166,0.08)",
+  },
+  studioTimeValue: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 30,
+    fontWeight: 600,
+    color: paper,
+    letterSpacing: "0.02em",
+    marginTop: 2,
+  },
+  studioTimeStatus: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    fontSize: 12,
+    color: "#3DDC84",
+    fontWeight: 600,
+    fontFamily: "'Inter', sans-serif",
+    margin: "3px 0 0",
+  },
+  studioTimeStatusDot: {
+    width: 7,
+    height: 7,
+    borderRadius: "50%",
+    background: "#3DDC84",
+    boxShadow: "0 0 6px rgba(61,220,132,0.6)",
+    flexShrink: 0,
+  },
   budgetSummaryRow: {
     display: "flex",
     gap: 14,
@@ -6107,6 +9449,87 @@ const styles = {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
     gap: 14,
+  },
+  plannerPageHeader: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  plannerPageTitle: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 20,
+    fontWeight: 600,
+    color: "#EAF6F4",
+    margin: "0 0 4px",
+  },
+  plannerToolbar: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+  plannerTemplateRow: {
+    display: "flex",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+  plannerTemplateCard: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    padding: "12px 14px",
+    minWidth: 150,
+    textAlign: "left",
+    cursor: "pointer",
+    background: "none",
+    border: "1px solid rgba(127,224,208,0.18)",
+    borderRadius: 10,
+  },
+  plannerSection: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+    padding: "18px 20px",
+    borderRadius: 14,
+    border: "1px solid rgba(127,224,208,0.14)",
+    background: "rgba(20,32,34,0.4)",
+  },
+  plannerSectionTitle: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 13,
+    fontWeight: 600,
+    letterSpacing: 0.4,
+    textTransform: "uppercase",
+    color: tealLight,
+  },
+  plannerDeptRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "4px 0",
+    borderBottom: "1px solid rgba(127,224,208,0.08)",
+  },
+  plannerCrewRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    padding: "6px 0",
+    borderBottom: "1px solid rgba(127,224,208,0.08)",
+  },
+  plannerTimelineTrack: {
+    flex: 1,
+    height: 8,
+    borderRadius: 4,
+    background: "rgba(127,224,208,0.1)",
+    overflow: "hidden",
+  },
+  plannerTimelineFill: {
+    height: "100%",
+    background: teal,
+    borderRadius: 4,
   },
   proLockWrap: {
     display: "flex",
@@ -6254,8 +9677,8 @@ const styles = {
   },
   board: {
     display: "flex",
-    gap: 16,
-    padding: "0 28px 32px",
+    gap: 10,
+    padding: "0 20px 32px",
     overflowX: "auto",
     flex: 1,
     userSelect: "none",
@@ -6264,8 +9687,9 @@ const styles = {
   column: {
     background: inkSoft,
     borderRadius: 16,
-    minWidth: 250,
-    maxWidth: 250,
+    flex: "1 1 0",
+    minWidth: 168,
+    maxWidth: 280,
     display: "flex",
     flexDirection: "column",
     border: `1px solid ${border}`,
@@ -6278,11 +9702,11 @@ const styles = {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: "14px 16px",
+    padding: "12px 12px",
     borderBottom: `1px solid ${border}`,
   },
   columnLabel: {
-    fontSize: 12.5,
+    fontSize: 12,
     fontWeight: 600,
     fontFamily: "'Space Grotesk', sans-serif",
     letterSpacing: "0.01em",
@@ -6296,10 +9720,10 @@ const styles = {
     padding: "2px 8px",
   },
   columnBody: {
-    padding: 10,
+    padding: 8,
     display: "flex",
     flexDirection: "column",
-    gap: 8,
+    gap: 6,
     flex: 1,
     minHeight: 80,
   },
@@ -6321,7 +9745,7 @@ const styles = {
     background: "#20282c",
     border: `1px solid ${border}`,
     borderRadius: 12,
-    padding: "12px 14px",
+    padding: "10px 12px",
     cursor: "grab",
     display: "flex",
     flexDirection: "column",
@@ -6387,6 +9811,127 @@ const styles = {
     background: "rgba(47,191,166,0.1)",
     borderRadius: 999,
     padding: "3px 8px",
+  },
+  needsAttentionBox: {
+    border: "1px solid rgba(242,166,90,0.35)",
+    background: "rgba(242,166,90,0.06)",
+    borderRadius: 12,
+    padding: "4px 16px 16px",
+  },
+  needsAttentionList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+  needsAttentionItem: {
+    textAlign: "left",
+    background: "transparent",
+    border: "none",
+    color: "#F2A65A",
+    fontSize: 13.5,
+    cursor: "pointer",
+    padding: "4px 0",
+  },
+  successRateCard: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    border: `1px solid ${border}`,
+    borderRadius: 12,
+    padding: 16,
+    cursor: "pointer",
+  },
+  successRateValue: {
+    fontSize: 32,
+    fontFamily: "'IBM Plex Mono', monospace",
+    color: teal,
+  },
+  readOnlyValue: {
+    fontSize: 14,
+    color: paper,
+    margin: 0,
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    wordBreak: "break-word",
+  },
+  copyIconButton: {
+    background: "transparent",
+    border: "none",
+    color: textMuted,
+    cursor: "pointer",
+    display: "inline-flex",
+    padding: 2,
+  },
+  copiedTag: {
+    fontSize: 10.5,
+    color: teal,
+    fontFamily: "'IBM Plex Mono', monospace",
+  },
+  badgeRow: {
+    display: "flex",
+    gap: 6,
+    flexWrap: "wrap",
+    marginBottom: 4,
+  },
+  archivedBanner: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    fontSize: 12.5,
+    color: textMuted,
+    background: "rgba(255,255,255,0.04)",
+    border: `1px solid ${border}`,
+    borderRadius: 8,
+    padding: "8px 12px",
+    marginBottom: 4,
+  },
+  linkButton: {
+    background: "transparent",
+    border: "none",
+    color: teal,
+    cursor: "pointer",
+    fontSize: 12.5,
+    textDecoration: "underline",
+    padding: 0,
+  },
+  timeline: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    maxHeight: 220,
+    overflowY: "auto",
+    paddingRight: 4,
+  },
+  timelineItem: {
+    display: "flex",
+    gap: 10,
+    fontSize: 13,
+    color: paper,
+  },
+  timelineDate: {
+    color: textMuted,
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 11.5,
+    minWidth: 52,
+  },
+  duplicateBanner: {
+    fontSize: 12.5,
+    color: "#F2A65A",
+    background: "rgba(242,166,90,0.1)",
+    border: "1px solid rgba(242,166,90,0.3)",
+    borderRadius: 8,
+    padding: "8px 12px",
+    marginBottom: 4,
+  },
+  duplicateBannerHard: {
+    fontSize: 13,
+    color: paper,
+    background: "rgba(255,77,77,0.08)",
+    border: "1px solid rgba(255,77,77,0.35)",
+    borderRadius: 10,
+    padding: "10px 14px",
+    marginTop: 8,
   },
   cardProgressTrack: {
     height: 4,
@@ -6571,6 +10116,21 @@ const styles = {
     gap: 8,
     fontSize: 13,
     color: paper,
+  },
+  skillChip: {
+    display: "inline-flex",
+    alignItems: "center",
+    border: `1px solid ${border}`,
+    borderRadius: 999,
+    color: textMuted,
+    fontSize: 11,
+    padding: "3px 9px",
+    fontFamily: "'IBM Plex Mono', monospace",
+  },
+  skillChipActive: {
+    border: `1px solid ${teal}`,
+    background: "rgba(47,191,166,0.14)",
+    color: tealLight,
   },
   lostReasonGrid: {
     display: "flex",

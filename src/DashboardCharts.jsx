@@ -281,3 +281,33 @@ export function RevenueTrendChart({ data, currencySymbol = "$" }) {
     </div>
   );
 }
+
+// Lead outreach performance over time: cold emails sent vs. how they
+// resolved (responded / won / lost / no response), so a studio can see
+// whether their outreach is actually improving month over month.
+export function LeadOutreachTrendChart({ data }) {
+  const hasData = data.some((d) => d["Cold Emails"] > 0);
+  return (
+    <div style={{ width: "100%", height: 240 }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <ComposedChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+          <CartesianGrid stroke={border} strokeDasharray="3 3" vertical={false} />
+          <XAxis dataKey="label" stroke={textMuted} fontSize={11} tickLine={false} axisLine={{ stroke: border }} />
+          <YAxis stroke={textMuted} fontSize={11} tickLine={false} axisLine={false} width={32} allowDecimals={false} />
+          <Tooltip content={<ChartTooltip />} />
+          <Legend content={<LegendSwatches />} />
+          <Bar dataKey="Cold Emails" fill="#4A90D9" radius={[4, 4, 0, 0]} maxBarSize={18} />
+          <Line type="monotone" dataKey="Responded" stroke="#F2A65A" strokeWidth={2} dot={{ r: 2 }} />
+          <Line type="monotone" dataKey="Won" stroke="#3DDC84" strokeWidth={2} dot={{ r: 2 }} />
+          <Line type="monotone" dataKey="Lost" stroke="#FF4D4D" strokeWidth={2} dot={{ r: 2 }} />
+          <Line type="monotone" dataKey="No Response" stroke="#8b9a98" strokeWidth={2} dot={{ r: 2 }} />
+        </ComposedChart>
+      </ResponsiveContainer>
+      {!hasData && (
+        <p style={{ color: textMuted, fontSize: 12, marginTop: -8, textAlign: "center" }}>
+          No cold emails logged yet, this fills in as outreach happens.
+        </p>
+      )}
+    </div>
+  );
+}

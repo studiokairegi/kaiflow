@@ -28,6 +28,19 @@ Deno.serve(async (req) => {
       });
     }
 
+    // This endpoint is reachable with no login, guarded only by the
+    // unguessable share token - so unlike the rest of the app, a size cap
+    // here isn't optional. 200MB covers real production deliverables
+    // (frames, PSDs, short clips) without leaving the studio's Drive open
+    // to unbounded uploads from anyone holding a single shot's link.
+    const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
+    if (file.size > MAX_UPLOAD_BYTES) {
+      return new Response(
+        JSON.stringify({ error: `File is too large. The limit is ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB.` }),
+        { status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
