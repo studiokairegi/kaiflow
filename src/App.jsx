@@ -5682,7 +5682,7 @@ function DashboardGreeting({ user, compact = false }) {
 // Dashboard, and navigating to other Kairil pages and back - there's
 // nothing to "restore" client-side, it just re-asks the database what's
 // true every time.
-function StudioTimeCard({ userId, compact = false }) {
+
 function PomodoroSetupForm({ config, onChange, onStart }) {
   const setField = (field, max) => (e) => {
     const value = Math.max(1, Math.min(max, Number(e.target.value) || 1));
@@ -5894,6 +5894,8 @@ function StudioTimeSummaryModal({ userId, onClose }) {
     </div>
   );
 }
+function StudioTimeCard({ userId, compact = false }) {
+  const [activeSession, setActiveSession] = useState(null); // { id, clockIn, sessionType } | null
   const [todaySeconds, setTodaySeconds] = useState(0); // completed sessions today, in seconds
   const [now, setNow] = useState(() => new Date());
   const [initializing, setInitializing] = useState(true);
@@ -6364,6 +6366,7 @@ function StudioTimeSummaryModal({ userId, onClose }) {
       {showSummary && <StudioTimeSummaryModal userId={userId} onClose={() => setShowSummary(false)} />}
     </>
   );
+
 }
 
 // Phase 12 — lightweight portfolio analytics computed straight from the
