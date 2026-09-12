@@ -2506,6 +2506,37 @@ export default function ShotTracker() {
     else setSettings(DEFAULT_SETTINGS);
   }, [userId, loadSettings]);
 
+  // Batched "Needs Attention" desktop notification - checks on load and
+  // every 5 minutes after, using the exact same counts DashboardPanel
+  // shows, so a notification and the dashboard card it corresponds to
+  // never disagree. Only fires when the combination of counts actually
+  // changes (see shouldNotifyNeedsAttention) - re-checking with nothing
+  // new stays silent rather than re-pinging the same due follow-ups every
+  // five minutes.
+  useEffect(() => {
+    if (!userId || !notificationsSupported() || Notification.permission !== "granted") return;
+    const checkNeedsAttention = () => {
+      const schedule = settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE;
+      const counts = computeNeedsAttentionCounts(leads, schedule);
+      const total = counts.followupsDueToday + counts.hotAwaitingResponse + counts.proposalsAwaitingResponse + counts.approachingDeadline;
+      if (total === 0) return;
+      const todayStr = new Date().toDateString();
+      const signature = `${todayStr}:${counts.followupsDueToday}:${counts.hotAwaitingResponse}:${counts.proposalsAwaitingResponse}:${counts.approachingDeadline}`;
+      if (!shouldNotifyNeedsAttention(signature)) return;
+      const parts = [
+        counts.followupsDueToday > 0 && `${counts.followupsDueToday} follow-up${counts.followupsDueToday === 1 ? "" : "s"} due today`,
+        counts.hotAwaitingResponse > 0 && `${counts.hotAwaitingResponse} hot lead${counts.hotAwaitingResponse === 1 ? "" : "s"} awaiting response`,
+        counts.proposalsAwaitingResponse > 0 && `${counts.proposalsAwaitingResponse} proposal${counts.proposalsAwaitingResponse === 1 ? "" : "s"} awaiting response`,
+        counts.approachingDeadline > 0 && `${counts.approachingDeadline} lead${counts.approachingDeadline === 1 ? "" : "s"} approaching follow-up deadline`,
+      ].filter(Boolean);
+      notifyBrowser("CRM needs your attention", parts.join(" \u00b7 "), "kairil-needs-attention");
+      markNeedsAttentionNotified(signature);
+    };
+    checkNeedsAttention();
+    const interval = setInterval(checkNeedsAttention, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [userId, leads, settings.followupSchedule]);
+
   const handleSaveSettings = async (nextSettings) => {
     setSaveState("saving");
     try {
@@ -5556,6 +5587,58 @@ function savePomodoroConfig(config) {
   }
 }
 
+// Browser desktop notifications. Permission (like Pomodoro's config) is a
+// per-device browser setting, not account data, so there's nothing to sync
+// to Supabase here - Notification.permission itself is the source of
+// truth, checked fresh every time rather than mirrored into app state that
+// could drift from it (e.g. if the user changes it from the browser's own
+// site-settings UI instead of Kairil's).
+function notificationsSupported() {
+  return typeof window !== "undefined" && "Notification" in window;
+}
+
+function notifyBrowser(title, body, tag) {
+  if (!notificationsSupported() || Notification.permission !== "granted") return;
+  try {
+    const n = new Notification(title, { body, tag, icon: "/icon-512.png" });
+    // Auto-close after a while so these don't pile up in the OS
+    // notification center if the studio steps away for hours.
+    setTimeout(() => n.close(), 20000);
+    n.onclick = () => {
+      window.focus();
+      n.close();
+    };
+  } catch {
+    // Some browsers throw if called outside a user-gesture-adjacent
+    // context on certain platforms - a missed notification isn't worth
+    // surfacing an error for.
+  }
+}
+
+// Needs-Attention notifications are deliberately a single batched digest
+// per change, not one notification per lead - four individual "lead
+// responded" pings every few minutes would train anyone to ignore them.
+// The signature is stored per-day so a fresh day (or a genuinely new
+// number of items) can notify again, but re-checking every few minutes
+// with no change stays silent.
+const NEEDS_ATTENTION_NOTIFIED_KEY = "kairil_needs_attention_notified";
+function shouldNotifyNeedsAttention(signature) {
+  if (typeof window === "undefined" || !window.localStorage) return true;
+  try {
+    return window.localStorage.getItem(NEEDS_ATTENTION_NOTIFIED_KEY) !== signature;
+  } catch {
+    return true;
+  }
+}
+function markNeedsAttentionNotified(signature) {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(NEEDS_ATTENTION_NOTIFIED_KEY, signature);
+  } catch {
+    // best-effort only
+  }
+}
+
 function DashboardGreeting({ user, compact = false }) {
   const [now, setNow] = useState(() => new Date());
 
@@ -5989,9 +6072,16 @@ function StudioTimeSummaryModal({ userId, onClose }) {
         const minutes = completingLongBreak ? pomodoroConfig.longBreakMinutes : pomodoroConfig.breakMinutes;
         setPomodoroPhase(nextPhase);
         setPhaseEndsAt(Date.now() + minutes * 60000);
+        notifyBrowser(
+          completingLongBreak ? "Long break time" : "Break time",
+          `Focus session done - ${minutes} minute${minutes === 1 ? "" : "s"} to recharge.`,
+          "kairil-pomodoro"
+        );
       } else {
+        const finishedLabel = pomodoroPhase === "longBreak" ? "Long break" : "Break";
         setPomodoroCycle(pomodoroPhase === "longBreak" ? 1 : (c) => c + 1);
         await beginPomodoroWork();
+        notifyBrowser("Back to focus", `${finishedLabel} over - starting the next focus session.`, "kairil-pomodoro");
       }
     } finally {
       transitioningRef.current = false;
@@ -6269,6 +6359,23 @@ function computePlannerPortfolioAnalytics(plans) {
   };
 }
 
+// Shared by DashboardPanel's "Needs Attention" card and the top-level
+// browser-notification digest, so the two can never quietly drift into
+// different definitions of what counts as needing attention.
+function computeNeedsAttentionCounts(leads, schedule) {
+  const activeNonArchived = leads.filter((l) => !l.archivedAt);
+  const followupsDueToday = activeNonArchived.filter((l) => computeFollowupStatus(l, schedule).isDue).length;
+  const hotAwaitingResponse = activeNonArchived.filter(
+    (l) => l.priority === "hot" && l.stage === "cold_email"
+  ).length;
+  const proposalsAwaitingResponse = activeNonArchived.filter((l) => l.stage === "proposal").length;
+  const approachingDeadline = activeNonArchived.filter((l) => {
+    const s = computeFollowupStatus(l, schedule);
+    return !s.isDue && s.daysUntilDue != null && s.daysUntilDue <= 2;
+  }).length;
+  return { followupsDueToday, hotAwaitingResponse, proposalsAwaitingResponse, approachingDeadline };
+}
+
 function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToLeads, user, userId }) {
   const stats = computeDashboardStats(projects, cards, leads, invoices, fxRates);
   const cur = "$"; // Dashboard totals are always USD-converted for cross-project consistency
@@ -6334,16 +6441,8 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   // Needs Attention: a handful of counts that point at something the user
   // should actually act on today, each clickable straight into a filtered
   // view of the Leads board.
-  const activeNonArchived = leads.filter((l) => !l.archivedAt);
-  const followupsDueToday = activeNonArchived.filter((l) => computeFollowupStatus(l, schedule).isDue).length;
-  const hotAwaitingResponse = activeNonArchived.filter(
-    (l) => l.priority === "hot" && l.stage === "cold_email"
-  ).length;
-  const proposalsAwaitingResponse = activeNonArchived.filter((l) => l.stage === "proposal").length;
-  const approachingDeadline = activeNonArchived.filter((l) => {
-    const s = computeFollowupStatus(l, schedule);
-    return !s.isDue && s.daysUntilDue != null && s.daysUntilDue <= 2;
-  }).length;
+  const { followupsDueToday, hotAwaitingResponse, proposalsAwaitingResponse, approachingDeadline } =
+    computeNeedsAttentionCounts(leads, schedule);
 
   const needsAttentionItems = [
     followupsDueToday > 0 && {
@@ -6722,6 +6821,17 @@ function TutorialModal({ onComplete, onStepChange }) {
 function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEmail, patreonIsPro, patreonConnected, onConnectPatreon, onReplayTutorial, onOpenSupport, onCancel, onSave }) {
   const [form, setForm] = useState(settings);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+  const [notificationPermission, setNotificationPermission] = useState(
+    notificationsSupported() ? Notification.permission : "unsupported"
+  );
+  const handleEnableNotifications = async () => {
+    if (!notificationsSupported()) return;
+    const result = await Notification.requestPermission();
+    setNotificationPermission(result);
+    if (result === "granted") {
+      notifyBrowser("Notifications enabled", "Kairil will let you know about Pomodoro breaks and CRM follow-ups.", "kairil-test");
+    }
+  };
   const setMilestone = (i) => (e) => {
     const next = [...form.milestoneDefaults];
     next[i] = e.target.value;
@@ -6886,6 +6996,31 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
               </p>
               <button type="button" style={styles.addRevisionButton} onClick={onConnectDrive}>
                 Connect Google Drive
+              </button>
+            </>
+          )}
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Desktop notifications</label>
+          {notificationPermission === "unsupported" ? (
+            <p style={styles.fieldHint}>Your browser doesn't support desktop notifications.</p>
+          ) : notificationPermission === "granted" ? (
+            <p style={{ ...styles.fieldHint, color: "#3DDC86" }}>
+              Enabled - you'll get a notification for Pomodoro breaks and when leads need attention.
+            </p>
+          ) : notificationPermission === "denied" ? (
+            <p style={styles.fieldHint}>
+              Blocked in your browser's site settings. Allow notifications for this site to turn these back on.
+            </p>
+          ) : (
+            <>
+              <p style={styles.fieldHint}>
+                Get notified when a focus session's break starts, and when leads need follow-up -
+                even if Kairil isn't the tab you're looking at.
+              </p>
+              <button type="button" style={styles.addRevisionButton} onClick={handleEnableNotifications}>
+                Enable notifications
               </button>
             </>
           )}
