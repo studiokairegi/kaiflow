@@ -6158,52 +6158,6 @@ function StudioTimeSummaryModal({ userId, onClose }) {
     ? Math.max(0, Math.floor((now - new Date(activeSession.clockIn)) / 1000))
     : 0;
 
-  if (compact) {
-    const phaseRemaining = pomodoroPhase ? Math.max(0, Math.round((phaseEndsAt - now.getTime()) / 1000)) : 0;
-    const displayValue = initializing
-      ? "--:--:--"
-      : pomodoroPhase
-      ? formatClockDuration(phaseRemaining)
-      : activeSession
-      ? formatClockDuration(elapsedSeconds)
-      : todaySeconds > 0
-      ? formatDayDuration(todaySeconds)
-      : "00:00:00";
-    const compactLabel = pomodoroPhase
-      ? pomodoroPhase === "work"
-        ? "Focus"
-        : pomodoroPhase === "longBreak"
-        ? "Long break"
-        : "Break"
-      : activeSession || todaySeconds === 0
-      ? "Studio Time"
-      : "Today's studio time";
-    const compactBusy = clockingIn || clockingOut;
-    return (
-      <div style={{ ...styles.studioTimeCompact, ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
-        {(activeSession || pomodoroPhase) && <span style={styles.studioTimeStatusDot} />}
-        <span style={styles.dashboardGreetingCompactDate}>{compactLabel}</span>
-        <span style={styles.studioTimeCompactValue}>{displayValue}</span>
-        {pomodoroPhase ? (
-          <button type="button" style={styles.dashboardCompactButton} onClick={skipPomodoroPhase}>
-            Skip
-          </button>
-        ) : (
-          <button
-            type="button"
-            style={styles.dashboardCompactButton}
-            onClick={activeSession ? () => handleClockOut().catch(() => {}) : () => handleClockIn("manual").catch(() => {})}
-            disabled={initializing || compactBusy}
-          >
-            {compactBusy ? <SpinnerIcon size={13} /> : <ClockIcon />}
-            {activeSession ? "Clock Out" : "Clock In"}
-          </button>
-        )}
-        {clockError && <span style={{ ...styles.fieldHint, color: "#FF4D4D", fontSize: 11 }}>{clockError}</span>}
-      </div>
-    );
-  }
-
   let trackingContent;
   if (pomodoroPhase) {
     const phaseLabel = pomodoroPhase === "work" ? "Focus" : pomodoroPhase === "longBreak" ? "Long break" : "Break";
@@ -6285,6 +6239,89 @@ function StudioTimeSummaryModal({ userId, onClose }) {
       </div>
     );
   }
+  if (compact) {
+    const phaseRemaining = pomodoroPhase ? Math.max(0, Math.round((phaseEndsAt - now.getTime()) / 1000)) : 0;
+    const displayValue = initializing
+      ? "--:--:--"
+      : pomodoroPhase
+      ? formatClockDuration(phaseRemaining)
+      : activeSession
+      ? formatClockDuration(elapsedSeconds)
+      : todaySeconds > 0
+      ? formatDayDuration(todaySeconds)
+      : "00:00:00";
+    const compactLabel = pomodoroPhase
+      ? pomodoroPhase === "work"
+        ? "Focus"
+        : pomodoroPhase === "longBreak"
+        ? "Long break"
+        : "Break"
+      : activeSession || todaySeconds === 0
+      ? "Studio Time"
+      : "Today's studio time";
+    const compactBusy = clockingIn || clockingOut;
+    const idle = !activeSession && !pomodoroPhase;
+    return (
+      <>
+        <div style={styles.studioTimeCompactWrap}>
+        <div style={{ ...styles.studioTimeCompact, ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
+          {(activeSession || pomodoroPhase) && <span style={styles.studioTimeStatusDot} />}
+          <span style={styles.dashboardGreetingCompactDate}>{compactLabel}</span>
+          <span style={styles.studioTimeCompactValue}>{displayValue}</span>
+          {pomodoroPhase ? (
+            <button type="button" style={styles.dashboardCompactButton} onClick={skipPomodoroPhase}>
+              Skip
+            </button>
+          ) : (
+            <button
+              type="button"
+              style={styles.dashboardCompactButton}
+              onClick={activeSession ? () => handleClockOut().catch(() => {}) : () => handleClockIn("manual").catch(() => {})}
+              disabled={initializing || compactBusy}
+            >
+              {compactBusy ? <SpinnerIcon size={13} /> : <ClockIcon />}
+              {activeSession ? "Clock Out" : "Clock In"}
+            </button>
+          )}
+          <button
+            type="button"
+            style={{ ...styles.iconButton, padding: 4 }}
+            onClick={() => setShowSummary(true)}
+            title="Weekly & monthly summary"
+          >
+            <ChartIcon />
+          </button>
+          {pipSupported && (
+            <button
+              type="button"
+              style={{ ...styles.iconButton, padding: 4 }}
+              onClick={pipWindow ? closePip : openPip}
+              title={pipWindow ? "Bring back to page" : "Pop out as a floating window"}
+            >
+              <PopOutIcon />
+            </button>
+          )}
+          {idle && (
+            <button
+              type="button"
+              style={{ ...styles.pomodoroLinkButton, fontSize: 11, padding: 0, whiteSpace: "nowrap" }}
+              onClick={() => setShowPomodoroSetup((v) => !v)}
+            >
+              {showPomodoroSetup ? "Hide focus session setup" : "Start a focus session"}
+            </button>
+          )}
+        </div>
+        {clockError && <span style={{ ...styles.fieldHint, color: "#FF4D4D", fontSize: 11 }}>{clockError}</span>}
+        {idle && showPomodoroSetup && (
+          <PomodoroSetupForm config={pomodoroConfig} onChange={setPomodoroConfig} onStart={startPomodoro} />
+        )}
+        </div>
+        {pipWindow && createPortal(<div style={styles.pipContent}>{trackingContent}</div>, pipWindow.document.body)}
+        {showSummary && <StudioTimeSummaryModal userId={userId} onClose={() => setShowSummary(false)} />}
+      </>
+    );
+  }
+
 
   return (
     <>
@@ -10372,6 +10409,12 @@ const styles = {
   dashboardGreetingCompactDate: {
     fontSize: 12,
     color: textMuted,
+  },
+  studioTimeCompactWrap: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 6,
   },
   studioTimeCompact: {
     display: "flex",
