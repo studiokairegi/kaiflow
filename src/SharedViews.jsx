@@ -47,10 +47,14 @@ function stagePosition(stageId) {
 }
 
 export function genShareToken() {
-  return (
-    Math.random().toString(36).slice(2, 10) +
-    Math.random().toString(36).slice(2, 10)
-  );
+  // These are public portal credentials (a client or freelancer with the
+  // link can act as whoever holds it), so they need to be unguessable,
+  // not just unique - Math.random() is neither cryptographically random
+  // nor uniformly distributed enough for that job. crypto.getRandomValues
+  // is available in every browser this app already targets.
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 const wrapStyle = {
@@ -215,19 +219,12 @@ export function FreelancerView({ token }) {
       const result = await res.json().catch(() => ({}));
 
       if (result?.error === "not_connected") {
-        // This project hasn't been set up with Drive folders yet, fall back
-        // to storing the file directly so the upload still works.
-        const path = `freelancer/${token}/${Date.now()}-${file.name}`;
-        const { error: uploadErr } = await supabase.storage.from("attachments").upload(path, file);
-        if (uploadErr) throw uploadErr;
-        const { data: publicUrlData } = supabase.storage.from("attachments").getPublicUrl(path);
-        const { data: ok, error: rpcErr } = await supabase.rpc("add_shot_deliverable", {
-          p_token: token,
-          p_name: file.name,
-          p_path: path,
-          p_url: publicUrlData.publicUrl,
-        });
-        if (rpcErr || !ok) throw rpcErr || new Error("Couldn't record the upload");
+        // Previously fell back to uploading straight into the public
+        // Supabase Storage bucket when a project wasn't Drive-connected
+        // yet. All uploads - studio and freelancer - now go to Drive
+        // only, so there's nothing to fall back to: surface this clearly
+        // instead of silently switching storage backends.
+        throw new Error(result?.message || "This project isn't set up to receive Drive uploads yet - let the studio know.");
       } else if (!res.ok || !result?.success) {
         throw new Error(result?.error || result?.message || "Upload failed");
       }

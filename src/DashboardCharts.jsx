@@ -61,12 +61,38 @@ function ChartTooltip({ active, payload, label, currencySymbol }) {
   );
 }
 
-export function DonutBreakdown({ data, emptyLabel = "Nothing here yet", centerLabel = "Total" }) {
+export function DonutBreakdown({ data, emptyLabel = "Nothing here yet", centerLabel = "Total", size = 160, compact = false }) {
   const filtered = data.filter((d) => d.value > 0);
   if (filtered.length === 0) {
-    return <p style={{ color: textMuted, fontSize: 13, margin: 0 }}>{emptyLabel}</p>;
+    return <p style={{ color: textMuted, fontSize: compact ? 11.5 : 13, margin: 0 }}>{emptyLabel}</p>;
   }
   const total = filtered.reduce((sum, d) => sum + d.value, 0);
+  const innerRadius = compact ? size * 0.29 : 45;
+  const outerRadius = compact ? size * 0.46 : 72;
+
+  if (compact) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, width: "100%" }}>
+        <div style={{ width: size, height: size, flexShrink: 0, position: "relative" }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie data={filtered} dataKey="value" nameKey="label" innerRadius={innerRadius} outerRadius={outerRadius} paddingAngle={2} stroke="none">
+                {filtered.map((entry, i) => (
+                  <Cell key={entry.label} fill={PALETTE[i % PALETTE.length]} />
+                ))}
+              </Pie>
+              <Tooltip content={<ChartTooltip />} />
+            </PieChart>
+          </ResponsiveContainer>
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+            <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 700, color: paper }}>{total}</span>
+          </div>
+        </div>
+        <span style={{ fontSize: 10.5, color: textMuted, textTransform: "uppercase", letterSpacing: "0.04em", textAlign: "center" }}>{centerLabel}</span>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
       <div style={{ width: 160, height: 160, flexShrink: 0, position: "relative" }}>
@@ -247,12 +273,12 @@ export function ProjectComparisonChart({ data, currencySymbol = "$" }) {
   );
 }
 
-export function RevenueTrendChart({ data, currencySymbol = "$" }) {
+export function RevenueTrendChart({ data, currencySymbol = "$", height = 200, compact = false }) {
   const hasData = data.some((d) => d.value > 0);
   return (
-    <div style={{ width: "100%", height: 200 }}>
+    <div style={{ width: "100%", height }}>
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+        <AreaChart data={data} margin={{ top: 6, right: 6, left: compact ? -26 : -20, bottom: 0 }}>
           <defs>
             <linearGradient id="revenueFill" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#2FBFA6" stopOpacity={0.45} />
@@ -260,8 +286,8 @@ export function RevenueTrendChart({ data, currencySymbol = "$" }) {
             </linearGradient>
           </defs>
           <CartesianGrid stroke={border} strokeDasharray="3 3" vertical={false} />
-          <XAxis dataKey="label" stroke={textMuted} fontSize={11} tickLine={false} axisLine={{ stroke: border }} />
-          <YAxis stroke={textMuted} fontSize={11} tickLine={false} axisLine={false} width={40} />
+          <XAxis dataKey="label" stroke={textMuted} fontSize={compact ? 9.5 : 11} tickLine={false} axisLine={{ stroke: border }} />
+          <YAxis stroke={textMuted} fontSize={compact ? 9.5 : 11} tickLine={false} axisLine={false} width={compact ? 32 : 40} />
           <Tooltip content={<ChartTooltip currencySymbol={currencySymbol} />} />
           <Area
             type="monotone"
@@ -274,7 +300,7 @@ export function RevenueTrendChart({ data, currencySymbol = "$" }) {
         </AreaChart>
       </ResponsiveContainer>
       {!hasData && (
-        <p style={{ color: textMuted, fontSize: 12, marginTop: -8 }}>
+        <p style={{ color: textMuted, fontSize: compact ? 10.5 : 12, marginTop: compact ? -20 : -8 }}>
           No paid invoices yet, this fills in as revenue comes through.
         </p>
       )}
@@ -285,26 +311,26 @@ export function RevenueTrendChart({ data, currencySymbol = "$" }) {
 // Lead outreach performance over time: cold emails sent vs. how they
 // resolved (responded / won / lost / no response), so a studio can see
 // whether their outreach is actually improving month over month.
-export function LeadOutreachTrendChart({ data }) {
+export function LeadOutreachTrendChart({ data, height = 240, compact = false }) {
   const hasData = data.some((d) => d["Cold Emails"] > 0);
   return (
-    <div style={{ width: "100%", height: 240 }}>
+    <div style={{ width: "100%", height }}>
       <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+        <ComposedChart data={data} margin={{ top: 6, right: 6, left: compact ? -26 : -20, bottom: 0 }}>
           <CartesianGrid stroke={border} strokeDasharray="3 3" vertical={false} />
-          <XAxis dataKey="label" stroke={textMuted} fontSize={11} tickLine={false} axisLine={{ stroke: border }} />
-          <YAxis stroke={textMuted} fontSize={11} tickLine={false} axisLine={false} width={32} allowDecimals={false} />
+          <XAxis dataKey="label" stroke={textMuted} fontSize={compact ? 9.5 : 11} tickLine={false} axisLine={{ stroke: border }} />
+          <YAxis stroke={textMuted} fontSize={compact ? 9.5 : 11} tickLine={false} axisLine={false} width={compact ? 26 : 32} allowDecimals={false} />
           <Tooltip content={<ChartTooltip />} />
-          <Legend content={<LegendSwatches />} />
-          <Bar dataKey="Cold Emails" fill="#4A90D9" radius={[4, 4, 0, 0]} maxBarSize={18} />
-          <Line type="monotone" dataKey="Responded" stroke="#F2A65A" strokeWidth={2} dot={{ r: 2 }} />
-          <Line type="monotone" dataKey="Won" stroke="#3DDC84" strokeWidth={2} dot={{ r: 2 }} />
-          <Line type="monotone" dataKey="Lost" stroke="#FF4D4D" strokeWidth={2} dot={{ r: 2 }} />
-          <Line type="monotone" dataKey="No Response" stroke="#8b9a98" strokeWidth={2} dot={{ r: 2 }} />
+          {!compact && <Legend content={<LegendSwatches />} />}
+          <Bar dataKey="Cold Emails" fill="#4A90D9" radius={[4, 4, 0, 0]} maxBarSize={compact ? 12 : 18} />
+          <Line type="monotone" dataKey="Responded" stroke="#F2A65A" strokeWidth={2} dot={{ r: compact ? 1.5 : 2 }} />
+          <Line type="monotone" dataKey="Won" stroke="#3DDC84" strokeWidth={2} dot={{ r: compact ? 1.5 : 2 }} />
+          <Line type="monotone" dataKey="Lost" stroke="#FF4D4D" strokeWidth={2} dot={{ r: compact ? 1.5 : 2 }} />
+          <Line type="monotone" dataKey="No Response" stroke="#8b9a98" strokeWidth={2} dot={{ r: compact ? 1.5 : 2 }} />
         </ComposedChart>
       </ResponsiveContainer>
       {!hasData && (
-        <p style={{ color: textMuted, fontSize: 12, marginTop: -8, textAlign: "center" }}>
+        <p style={{ color: textMuted, fontSize: compact ? 10.5 : 12, marginTop: compact ? -20 : -8, textAlign: "center" }}>
           No cold emails logged yet, this fills in as outreach happens.
         </p>
       )}

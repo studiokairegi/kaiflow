@@ -1,24 +1,13 @@
-// GET /patreon-callback?code=...&state=...
-// Exchanges the code for tokens, verifies the signed state to recover which
-// user is connecting, checks whether they're currently entitled to the Pro
-// tier on our campaign, sets their plan accordingly, encrypts and stores
-// the refresh token, then redirects back into the app. Mirrors
-// google-drive-callback's structure.
+// GET /patreon-callback?code=...&state=<intent id>
+// Same intent-based state handling as google-drive-callback - see
+// migration_oauth_intents.sql and _shared/oauth_intent.ts. Exchanges the
+// code for tokens, checks whether the connecting user is currently
+// entitled to the Pro tier on our campaign, sets their plan accordingly,
+// encrypts and stores the refresh token, then redirects back into the app.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { encryptText } from "../_shared/crypto.ts";
-
-async function sign(value: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
-  return btoa(String.fromCharCode(...new Uint8Array(sig)));
-}
+import { consumeIntentForCallback } from "../_shared/oauth_intent.ts";
 
 Deno.serve(async (req) => {
   const appUrl = Deno.env.get("APP_URL") || "/";
@@ -26,16 +15,17 @@ Deno.serve(async (req) => {
     const url = new URL(req.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state") || "";
-    const [userId, signature] = state.split(".");
 
-    if (!code || !userId || !signature) {
+    if (!code || !state) {
       return new Response("Missing code or state", { status: 400 });
     }
 
-    const secret = Deno.env.get("DRIVE_STATE_SECRET")!;
-    const expected = await sign(userId, secret);
-    if (expected !== signature) {
-      return new Response("Invalid state", { status: 401 });
+    const userId = await consumeIntentForCallback(state, "patreon");
+    if (!userId) {
+      return new Response(
+        "This connection attempt has expired or was already completed. Go back to Settings and try again.",
+        { status: 401 }
+      );
     }
 
     const clientId = Deno.env.get("PATREON_CLIENT_ID")!;
@@ -95,10 +85,19 @@ Deno.serve(async (req) => {
     if (campaignsRes.ok) {
       const campaignsJson = await campaignsRes.json();
       const discoveredId = campaignsJson?.data?.[0]?.id;
-      if (discoveredId) {
-        if (!campaignId) campaignId = discoveredId;
-        // Keep this current regardless, cheap to refresh and self-healing
-        // if it's ever wrong.
+      // Only ever write patreon_campaign_config once, on true first-time
+      // bootstrap (nothing stored yet, and no PATREON_CAMPAIGN_ID env var
+      // set either). Previously this ran on every connection and
+      // overwrote whatever was stored with campaigns[0] of whoever just
+      // connected - harmless for an ordinary patron (who owns no
+      // campaign, so this returns empty for them), but any patron who
+      // happens to own an unrelated Patreon campaign of their own would
+      // silently replace Studio Kairegi's campaign id, breaking Pro
+      // verification for everyone. Once a campaign id is established -
+      // by config or by that first real connection - it's authoritative
+      // and only changed by hand.
+      if (discoveredId && !campaignId) {
+        campaignId = discoveredId;
         const { error: campaignSaveError } = await supabase
           .from("patreon_campaign_config")
           .upsert({ id: true, campaign_id: discoveredId, discovered_at: new Date().toISOString() });
@@ -168,6 +167,16 @@ Deno.serve(async (req) => {
       is_pro: isPro,
     });
     if (connectionError) {
+      if (connectionError.code === "23505") {
+        // patreon_user_id has a unique constraint (see migration_audit_fixes_2.sql)
+        // - this specific Patreon account is already linked to a different
+        // Kairil account. Without that constraint this would silently
+        // create two rows sharing one patreon_user_id, and the webhook's
+        // lookup-by-patreon_user_id would break for both accounts the
+        // next time Patreon notified us about this patron.
+        console.error("Patreon account already linked to a different Kairil user:", userId);
+        return Response.redirect(`${appUrl}?patreon=already_linked`, 302);
+      }
       console.error("Failed to save Patreon connection:", connectionError.message);
       return Response.redirect(`${appUrl}?patreon=error`, 302);
     }

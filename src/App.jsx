@@ -2110,6 +2110,20 @@ const TrendIcon = ({ direction = "up" }) => (
   </svg>
 );
 
+const BellIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 8a6 6 0 0 1 12 0c0 4 1.5 5.5 2 6H4c.5-.5 2-2 2-6Z" />
+    <path d="M10 20a2 2 0 0 0 4 0" />
+  </svg>
+);
+
+const CalendarIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3.5" y="5" width="17" height="16" rx="2.5" />
+    <path d="M8 3v4M16 3v4M3.5 10h17" />
+  </svg>
+);
+
 export default function ShotTracker() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -2284,7 +2298,28 @@ export default function ShotTracker() {
       data: { session: currentSession },
     } = await supabase.auth.getSession();
     if (!currentSession) return;
-    window.location.href = `${functionUrl("google-drive-connect")}?token=${currentSession.access_token}`;
+    // The old flow put the raw access token in this URL as ?token=...,
+    // which a full-page redirect can't avoid unless the token itself is
+    // never in the URL to begin with - so this authenticated fetch (a
+    // proper Authorization header, not a query param) trades it for a
+    // short-lived, single-use intent id first. See
+    // migration_oauth_intents.sql.
+    try {
+      const res = await fetch(functionUrl("oauth-start-intent"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${currentSession.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ provider: "google_drive" }),
+      });
+      const result = await res.json();
+      if (!res.ok || !result?.intentId) throw new Error(result?.error || "Couldn't start connecting Drive");
+      window.location.href = `${functionUrl("google-drive-connect")}?intent=${result.intentId}`;
+    } catch (err) {
+      console.error("Starting Drive connect failed:", err);
+      setDriveNotice("Couldn't connect to Google Drive, please try again.");
+    }
   };
 
   const loadPatreonStatus = useCallback(async () => {
@@ -2350,6 +2385,8 @@ export default function ShotTracker() {
         .then(({ data: row }) => {
           if (row) setSettings(settingsFromRow(row));
         });
+    } else if (patreonResult === "already_linked") {
+      setPatreonNotice("That Patreon account is already connected to a different Kairil account.");
     } else if (patreonResult === "error") {
       setPatreonNotice("Couldn't connect Patreon, please try again from Settings.");
     }
@@ -2364,7 +2401,22 @@ export default function ShotTracker() {
       data: { session: currentSession },
     } = await supabase.auth.getSession();
     if (!currentSession) return;
-    window.location.href = `${functionUrl("patreon-connect")}?token=${currentSession.access_token}`;
+    try {
+      const res = await fetch(functionUrl("oauth-start-intent"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${currentSession.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ provider: "patreon" }),
+      });
+      const result = await res.json();
+      if (!res.ok || !result?.intentId) throw new Error(result?.error || "Couldn't start connecting Patreon");
+      window.location.href = `${functionUrl("patreon-connect")}?intent=${result.intentId}`;
+    } catch (err) {
+      console.error("Starting Patreon connect failed:", err);
+      setPatreonNotice("Couldn't connect to Patreon, please try again.");
+    }
   };
 
   const handleCreateDriveFolders = async (projectId, projectName) => {
@@ -2388,6 +2440,7 @@ export default function ShotTracker() {
       driveFolderId: result.folderId,
       driveFolderUrl: result.folderUrl,
       driveDeliverablesFolderId: result.deliverablesFolderId,
+      driveReferencesFolderId: result.referencesFolderId,
     };
     setData((prev) => ({
       ...prev,
@@ -3335,56 +3388,28 @@ export default function ShotTracker() {
     }
     setSaveState("saving");
     try {
-      const calc = computeBudgetPlan(plan);
-      const plannerSummary = [
-        `Converted from Budget Planner: ${plan.name || "Untitled plan"}`,
-        `Target profit: ${plan.targetProfitPercent}% (${plan.currency || "$"}${formatMoney(calc.profit)})`,
-        `Production budget: ${plan.currency || "$"}${formatMoney(calc.productionBudget)}`,
-        plan.notes ? `Notes: ${plan.notes}` : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
-      const { data: inserted, error } = await supabase
-        .from("projects")
-        .insert({
-          name: plan.name || "Untitled project",
-          client: plan.clientName || "",
-          notes: plannerSummary,
-          budget: parseMoney(plan.budget),
-          budget_mode: "manual",
-          currency: plan.currency || "$",
-          deadline: plan.deadline || null,
-          priority: "normal",
-          share_enabled: false,
-          share_token: null,
-          user_id: userId,
-        })
-        .select()
-        .single();
+      const { data: newProjectRow, error } = await supabase.rpc("convert_planner_to_project", {
+        p_plan_id: plan.id,
+      });
       if (error) throw error;
       const newProject = {
-        id: inserted.id,
-        name: inserted.name,
-        client: inserted.client,
-        notes: inserted.notes,
-        budget: inserted.budget,
-        budgetMode: inserted.budget_mode || "manual",
-        currency: inserted.currency || "$",
-        deadline: inserted.deadline,
-        priority: inserted.priority,
-        archived: inserted.archived,
-        shareEnabled: inserted.share_enabled || false,
-        shareToken: inserted.share_token || null,
+        id: newProjectRow.id,
+        name: newProjectRow.name,
+        client: newProjectRow.client,
+        notes: newProjectRow.notes,
+        budget: newProjectRow.budget,
+        budgetMode: newProjectRow.budget_mode || "manual",
+        currency: newProjectRow.currency || "$",
+        deadline: newProjectRow.deadline,
+        priority: newProjectRow.priority,
+        archived: newProjectRow.archived,
+        shareEnabled: newProjectRow.share_enabled || false,
+        shareToken: newProjectRow.share_token || null,
         driveFolderId: null,
         driveFolderUrl: null,
         driveDeliverablesFolderId: null,
       };
-      const { error: updateError } = await supabase
-        .from("budget_planners")
-        .update({ status: "converted", converted_project_id: inserted.id })
-        .eq("id", plan.id);
-      if (updateError) throw updateError;
-      const updatedPlan = { ...plan, status: "converted", convertedProjectId: inserted.id };
+      const updatedPlan = { ...plan, status: "converted", convertedProjectId: newProjectRow.id };
       setData((prev) => ({
         ...prev,
         projects: [...prev.projects, newProject],
@@ -3959,19 +3984,59 @@ export default function ShotTracker() {
               New member
             </button>
           ) : workspace === "planner" && !editingBudgetPlanner ? (
-            <button
-              style={styles.newButton}
-              onClick={() => setEditingBudgetPlanner(emptyBudgetPlanner({ currency: settings.currencySymbol }))}
-              disabled={atBudgetPlannerLimit}
-              title={
-                atBudgetPlannerLimit
-                  ? `Free plan is limited to ${FREE_BUDGET_PLANNER_LIMIT} budget plans. Delete one or upgrade to Pro.`
-                  : undefined
-              }
-            >
-              <PlusIcon />
-              New plan
-            </button>
+            <>
+              <button
+                style={styles.newButton}
+                onClick={() => setEditingBudgetPlanner(emptyBudgetPlanner({ currency: settings.currencySymbol }))}
+                disabled={atBudgetPlannerLimit}
+                title={
+                  atBudgetPlannerLimit
+                    ? `Free plan is limited to ${FREE_BUDGET_PLANNER_LIMIT} budget plans. Delete one or upgrade to Pro.`
+                    : undefined
+                }
+              >
+                <PlusIcon />
+                New plan
+              </button>
+              <select
+                style={{ ...styles.input, width: 200, marginLeft: 8 }}
+                value=""
+                disabled={atBudgetPlannerLimit}
+                title="Start a new plan pre-filled from a template"
+                onChange={(e) => {
+                  const templateId = e.target.value;
+                  e.target.value = "";
+                  if (!templateId) return;
+                  const template = [...BUILT_IN_PLANNER_TEMPLATES, ...plannerTemplates].find((t) => t.id === templateId);
+                  if (!template) return;
+                  setEditingBudgetPlanner(
+                    emptyBudgetPlanner({
+                      currency: settings.currencySymbol,
+                      projectType: template.projectType || "",
+                      targetProfitPercent: template.targetProfitPercent ?? 25,
+                      departmentAllocations: template.departmentAllocations || defaultDepartmentAllocations(),
+                      crew: template.crew || [],
+                      scope: { ...emptyBudgetPlanner().scope, ...(template.scope || {}) },
+                      templateId: template.builtin ? null : template.id,
+                    })
+                  );
+                }}
+              >
+                <option value="">New from template…</option>
+                <optgroup label="Built-in">
+                  {BUILT_IN_PLANNER_TEMPLATES.map((t) => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </optgroup>
+                {plannerTemplates.length > 0 && (
+                  <optgroup label="Your templates">
+                    {plannerTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+            </>
           ) : workspace === "planner" && editingBudgetPlanner ? (
             <button style={styles.cancelButton} onClick={() => setEditingBudgetPlanner(null)}>
               <BackIcon />
@@ -5419,7 +5484,7 @@ function localDayStartISO(date = new Date()) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0).toISOString();
 }
 
-function DashboardGreeting({ user }) {
+function DashboardGreeting({ user, compact = false }) {
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
@@ -5429,6 +5494,18 @@ function DashboardGreeting({ user }) {
 
   const name = getDisplayName(user);
   const greeting = getGreeting(now);
+  const dateLabel = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+
+  if (compact) {
+    return (
+      <div style={styles.dashboardGreetingCompact}>
+        <span style={styles.dashboardGreetingCompactTitle}>
+          {greeting}{name ? `, ${name}` : ""} <span aria-hidden="true">👋</span>
+        </span>
+        <span style={styles.dashboardGreetingCompactDate}>{dateLabel}</span>
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -5450,7 +5527,7 @@ function DashboardGreeting({ user }) {
 // Dashboard, and navigating to other Kairil pages and back - there's
 // nothing to "restore" client-side, it just re-asks the database what's
 // true every time.
-function StudioTimeCard({ userId }) {
+function StudioTimeCard({ userId, compact = false }) {
   const [activeSession, setActiveSession] = useState(null); // { id, clockIn } | null
   const [todaySeconds, setTodaySeconds] = useState(0); // completed sessions today, in seconds
   const [now, setNow] = useState(() => new Date());
@@ -5564,6 +5641,32 @@ function StudioTimeCard({ userId }) {
   const label = activeSession || todaySeconds === 0 ? "Studio Time" : "Today's studio time";
   const busy = clockingIn || clockingOut;
 
+  if (compact) {
+    const displayValue = initializing
+      ? "--:--:--"
+      : activeSession
+      ? formatClockDuration(elapsedSeconds)
+      : todaySeconds > 0
+      ? formatDayDuration(todaySeconds)
+      : "00:00:00";
+    return (
+      <div style={{ ...styles.studioTimeCompact, ...(activeSession ? styles.studioTimeCompactActive : {}) }}>
+        {activeSession && <span style={styles.studioTimeStatusDot} />}
+        <span style={styles.dashboardGreetingCompactDate}>{label}</span>
+        <span style={styles.studioTimeCompactValue}>{displayValue}</span>
+        <button
+          style={styles.dashboardCompactButton}
+          onClick={activeSession ? handleClockOut : handleClockIn}
+          disabled={initializing || busy}
+        >
+          {busy ? <SpinnerIcon size={13} /> : <ClockIcon />}
+          {activeSession ? "Clock Out" : "Clock In"}
+        </button>
+        {clockError && <span style={{ ...styles.fieldHint, color: "#FF4D4D", fontSize: 11 }}>{clockError}</span>}
+      </div>
+    );
+  }
+
   return (
     <div
       className="kf-card"
@@ -5639,10 +5742,9 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   const schedule = settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE;
 
   const statItems = [
-    { label: "Active projects", value: stats.activeProjectsCount, icon: <FolderIcon />, color: teal, onClick: onGoToProjects },
+    { label: "Active projects", value: stats.activeProjectsCount, sub: `${stats.projectsCompleted} completed`, icon: <FolderIcon />, color: teal, onClick: onGoToProjects },
     { label: "Active leads", value: stats.activeLeadsCount, icon: <TargetIcon />, color: "#4A90D9", onClick: () => onGoToLeads() },
     { label: "Total shots", value: stats.totalShots, icon: <ClapperIcon />, color: "#9B8AD8" },
-    { label: "Projects completed", value: stats.projectsCompleted, icon: <CheckCircleIcon />, color: "#3DDC84" },
     { label: "Deals won", value: stats.dealsWon, icon: <CheckCircleIcon />, color: "#3DDC84", onClick: () => onGoToLeads({ status: "won" }) },
     { label: "Deals lost", value: stats.dealsLost, icon: <XCircleIcon />, color: "#FF4D4D", onClick: () => onGoToLeads({ status: "lost" }) },
     {
@@ -5682,7 +5784,14 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   // Outreach totals are lifetime figures, including archived leads, so
   // archiving a won/lost lead never distorts the historical success rate.
   const coldEmailsSentTotal = leads.filter((l) => l.emails?.[0]?.sent).length;
-  const respondedTotal = leads.filter((l) => normalizeEmails(l.emails).some((e) => e.sent) && l.stage !== "pool" && l.stage !== "cold_email").length;
+  // Matches the performance chart's definition below: an actual "Lead
+  // responded" stage-change event, not just "the stage moved past Cold
+  // Email" - a lead nudged straight to Qualified by the studio owner
+  // (no real reply) shouldn't inflate this the way the old stage-based
+  // check did.
+  const respondedTotal = leads.filter((l) =>
+    (l.activityLog || []).some((a) => a.type === "stage_change" && a.note === "Lead responded")
+  ).length;
   const qualifiedTotal = leads.filter((l) => ["qualified", "proposal", "negotiation", "won"].includes(l.stage)).length;
   const wonTotal = leads.filter((l) => l.stage === "won").length;
   const lostTotal = leads.filter((l) => l.stage === "lost").length;
@@ -5753,138 +5862,137 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   });
 
   return (
-    <div style={styles.invoicesWrap}>
-      <DashboardGreeting user={user} />
-      <StudioTimeCard userId={userId} />
+    <div style={styles.dashboardShell}>
+      <div style={styles.dashboardTopStrip}>
+        <DashboardGreeting user={user} compact />
+        <StudioTimeCard userId={userId} compact />
+      </div>
 
-      <p style={styles.fieldHint}>
-        Dollar figures below are converted live from each project's own currency to USD.
-      </p>
-
-      {needsAttentionItems.length > 0 && (
-        <div style={styles.needsAttentionBox}>
-          <div style={styles.fieldDivider}>Needs Attention</div>
-          <div style={styles.needsAttentionList}>
-            {needsAttentionItems.map((item) => (
-              <button key={item.label} type="button" style={styles.needsAttentionItem} onClick={item.onClick}>
-                {item.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div style={styles.dashboardGrid}>
+      <div style={styles.dashboardKpiStrip}>
         {statItems.map((item) => (
           <div
             key={item.label}
             className="kf-card"
-            style={{ ...styles.budgetStat, cursor: item.onClick ? "pointer" : "default" }}
+            style={{ ...styles.dashboardKpiTile, cursor: item.onClick ? "pointer" : "default" }}
             onClick={item.onClick}
           >
-            <div style={styles.dashboardStatTop}>
-              <div style={{ ...styles.dashboardStatIcon, color: item.color, background: `${item.color}1f` }}>
+            <div style={styles.dashboardKpiTop}>
+              <div style={{ ...styles.dashboardKpiIcon, color: item.color, background: `${item.color}1f` }}>
                 {item.icon}
               </div>
               {item.delta !== undefined && item.delta !== null && (
-                <span
-                  style={{
-                    ...styles.dashboardDelta,
-                    color: item.delta >= 0 ? "#3DDC84" : "#FF4D4D",
-                  }}
-                >
+                <span style={{ ...styles.dashboardDelta, color: item.delta >= 0 ? "#3DDC84" : "#FF4D4D" }}>
                   <TrendIcon direction={item.delta >= 0 ? "up" : "down"} />
                   {Math.abs(item.delta)}%
                 </span>
               )}
             </div>
-            <span style={styles.label}>{item.label}</span>
-            <span style={styles.budgetStatValue}>{item.value}</span>
+            <span style={styles.dashboardKpiValue}>{item.value}</span>
+            <span style={styles.dashboardKpiLabel}>
+              {item.label}
+              {item.sub && <span style={styles.dashboardKpiSub}> · {item.sub}</span>}
+            </span>
           </div>
         ))}
       </div>
 
-      <div className="kf-card" style={styles.successRateCard} onClick={() => onGoToLeads()}>
-        <span style={styles.label}>Cold Email Success Rate</span>
-        <span style={styles.successRateValue}>{successRate.toFixed(1)}%</span>
-        <span style={styles.fieldHint}>
-          {wonTotal} win{wonTotal === 1 ? "" : "s"} from {coldEmailsSentTotal} cold email{coldEmailsSentTotal === 1 ? "" : "s"}
-        </span>
-      </div>
-
-      <div style={styles.dashboardChartsRow}>
-        <div style={{ flex: "1 1 200px" }}>
-          <span style={styles.label}>Cold emails sent</span>
-          <div style={styles.budgetStatValue}>{coldEmailsSentTotal}</div>
-        </div>
-        <div style={{ flex: "1 1 200px" }}>
-          <span style={styles.label}>Responded</span>
-          <div style={styles.budgetStatValue}>{respondedTotal}</div>
-        </div>
-        <div style={{ flex: "1 1 200px" }}>
-          <span style={styles.label}>Qualified</span>
-          <div style={styles.budgetStatValue}>{qualifiedTotal}</div>
-        </div>
-        <div style={{ flex: "1 1 200px" }}>
-          <span style={styles.label}>Won</span>
-          <div style={styles.budgetStatValue}>{wonTotal}</div>
-        </div>
-        <div style={{ flex: "1 1 200px" }}>
-          <span style={styles.label}>Lost</span>
-          <div style={styles.budgetStatValue}>{lostTotal}</div>
-        </div>
-        <div style={{ flex: "1 1 200px" }}>
-          <span style={styles.label}>No Response</span>
-          <div style={styles.budgetStatValue}>{noResponseTotal}</div>
-        </div>
-      </div>
-
-      <div>
-        <div style={styles.fieldDivider}>Outreach performance (6 months)</div>
-        <LeadOutreachTrendChart data={outreachTrend} />
-      </div>
-
-      <div>
-        <div style={styles.fieldDivider}>Revenue trend (6 months)</div>
-        <RevenueTrendChart data={revenueTrend} currencySymbol={cur} />
-      </div>
-
-      <div style={styles.dashboardChartsRow}>
-        <div style={{ flex: "1 1 260px" }}>
-          <div style={styles.fieldDivider}>Shots by stage</div>
-          <DonutBreakdown data={shotsByStage} emptyLabel="No shots yet." centerLabel="Shots" />
-        </div>
-        <div style={{ flex: "1 1 260px" }}>
-          <div style={styles.fieldDivider}>Active outreach by stage</div>
-          <DonutBreakdown data={leadsByActiveStage} emptyLabel="No active outreach yet." centerLabel="Leads" />
-        </div>
-        <div style={{ flex: "1 1 260px" }}>
-          <div style={styles.fieldDivider}>Leads by channel</div>
-          <DonutBreakdown data={leadsByChannel} emptyLabel="No leads tagged with a channel yet." centerLabel="Leads" />
-        </div>
-      </div>
-
-      <div>
-        <div style={styles.fieldDivider}>Projects near deadline</div>
-        {stats.nearDeadline.length === 0 ? (
-          <p style={styles.fieldHint}>Nothing coming up in the next 7 days.</p>
-        ) : (
-          <div style={styles.invoiceList}>
-            {stats.nearDeadline.map((p) => (
-              <div key={p.id} className="kf-card" style={styles.invoiceCard} onClick={() => onOpenProject(p.id)}>
-                <div style={styles.invoiceCardTop}>
-                  <span style={styles.invoiceNumber}>{p.name}</span>
-                  <span style={styles.fieldHint}>{p.deadline}</span>
-                </div>
-                {p.client && <div style={styles.cardMeta}>{p.client}</div>}
-              </div>
-            ))}
+      <div style={styles.dashboardMainGrid}>
+        {/* Column A — trends */}
+        <div style={styles.dashboardCol}>
+          <div className="kf-card" style={styles.dashboardCard}>
+            <div style={styles.dashboardCardHeaderRow}>
+              <span style={styles.dashboardCardHeader}>Revenue trend</span>
+              <span style={styles.dashboardCardHeaderHint}>6 months · USD</span>
+            </div>
+            <div style={styles.dashboardChartFill}>
+              <RevenueTrendChart data={revenueTrend} currencySymbol={cur} height="100%" compact />
+            </div>
           </div>
-        )}
+          <div className="kf-card" style={styles.dashboardCard}>
+            <div style={styles.dashboardCardHeaderRow}>
+              <span style={styles.dashboardCardHeader}>Outreach performance</span>
+              <span style={styles.dashboardCardHeaderHint}>6 months</span>
+            </div>
+            <div style={styles.dashboardChartFill}>
+              <LeadOutreachTrendChart data={outreachTrend} height="100%" compact />
+            </div>
+          </div>
+        </div>
+
+        {/* Column B — pipeline snapshot */}
+        <div style={styles.dashboardCol}>
+          <div className="kf-card" style={styles.dashboardCard} onClick={() => onGoToLeads()}>
+            <div style={styles.dashboardCardHeaderRow}>
+              <span style={styles.dashboardCardHeader}>Cold email success rate</span>
+            </div>
+            <span style={styles.dashboardSuccessBig}>{successRate.toFixed(1)}%</span>
+            <p style={styles.dashboardCardHeaderHint}>
+              {wonTotal} win{wonTotal === 1 ? "" : "s"} from {coldEmailsSentTotal} cold email{coldEmailsSentTotal === 1 ? "" : "s"}
+            </p>
+            <div style={styles.dashboardMiniFunnelGrid}>
+              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Sent</span><strong>{coldEmailsSentTotal}</strong></div>
+              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Responded</span><strong>{respondedTotal}</strong></div>
+              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Qualified</span><strong>{qualifiedTotal}</strong></div>
+              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Won</span><strong style={{ color: "#3DDC84" }}>{wonTotal}</strong></div>
+              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Lost</span><strong style={{ color: "#FF4D4D" }}>{lostTotal}</strong></div>
+              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>No response</span><strong>{noResponseTotal}</strong></div>
+            </div>
+          </div>
+          <div className="kf-card" style={styles.dashboardCard}>
+            <div style={styles.dashboardCardHeaderRow}>
+              <span style={styles.dashboardCardHeader}>Pipeline breakdown</span>
+            </div>
+            <div style={styles.dashboardDonutRow}>
+              <DonutBreakdown data={shotsByStage} emptyLabel="No shots yet." centerLabel="Shots" size={88} compact />
+              <DonutBreakdown data={leadsByActiveStage} emptyLabel="No active outreach." centerLabel="Leads" size={88} compact />
+              <DonutBreakdown data={leadsByChannel} emptyLabel="No channels tagged." centerLabel="Leads" size={88} compact />
+            </div>
+          </div>
+        </div>
+
+        {/* Column C — attention & deadlines */}
+        <div style={styles.dashboardCol}>
+          <div className="kf-card" style={styles.dashboardCard}>
+            <div style={styles.dashboardCardHeaderRow}>
+              <span style={styles.dashboardCardHeader}><BellIcon /> Needs attention</span>
+              {needsAttentionItems.length > 0 && <span style={styles.dashboardCardHeaderHint}>{needsAttentionItems.length}</span>}
+            </div>
+            <div style={styles.dashboardScrollList}>
+              {needsAttentionItems.length === 0 ? (
+                <p style={styles.dashboardEmptyState}>You're all caught up.</p>
+              ) : (
+                needsAttentionItems.map((item) => (
+                  <button key={item.label} type="button" style={styles.dashboardNotifRow} onClick={item.onClick}>
+                    {item.label}
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+          <div className="kf-card" style={styles.dashboardCard}>
+            <div style={styles.dashboardCardHeaderRow}>
+              <span style={styles.dashboardCardHeader}><CalendarIcon /> Near deadline</span>
+              {stats.nearDeadline.length > 0 && <span style={styles.dashboardCardHeaderHint}>{stats.nearDeadline.length}</span>}
+            </div>
+            <div style={styles.dashboardScrollList}>
+              {stats.nearDeadline.length === 0 ? (
+                <p style={styles.dashboardEmptyState}>Nothing due in the next 7 days.</p>
+              ) : (
+                stats.nearDeadline.map((p) => (
+                  <div key={p.id} style={styles.dashboardDeadlineRow} onClick={() => onOpenProject(p.id)}>
+                    <span style={styles.dashboardDeadlineName}>{p.name}</span>
+                    {p.client && <span style={styles.dashboardKpiSub}>{p.client}</span>}
+                    <span style={styles.dashboardDeadlineDate}>{p.deadline}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
       </div>
 
-      <p style={styles.fieldHint}>
-        For accounts receivable, per-project profitability, and client value, check the Finance tab.
+      <p style={styles.dashboardFooterHint}>
+        Dollar figures are converted live to USD. For accounts receivable, per-project profitability, and client value, see Finance.
       </p>
     </div>
   );
@@ -7510,16 +7618,37 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
     setUploadError("");
     setUploading(true);
     try {
+      if (!form.projectId) throw new Error("Save the shot before adding attachments.");
       const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      const path = `${user.id}/${form.id || "new"}-${Date.now()}-${file.name}`;
-      const { error: uploadErr } = await supabase.storage.from("attachments").upload(path, file);
-      if (uploadErr) throw uploadErr;
-      const { data: publicUrlData } = supabase.storage.from("attachments").getPublicUrl(path);
-      const newAttachment = { name: file.name, path, url: publicUrlData.publicUrl };
+        data: { session: currentSession },
+      } = await supabase.auth.getSession();
+      if (!currentSession) throw new Error("Not signed in");
+
+      const body = new FormData();
+      body.append("projectId", form.projectId);
+      if (form.id) body.append("shotId", form.id);
+      body.append("file", file);
+
+      const res = await fetch(functionUrl("studio-drive-upload"), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${currentSession.access_token}` },
+        body,
+      });
+      const result = await res.json();
+      if (!res.ok || !result?.success) {
+        if (result?.error === "not_connected") {
+          throw new Error(result?.message || "Connect Google Drive and create this project's folders first (from the project card), then try again.");
+        }
+        throw new Error(result?.error || "Upload failed");
+      }
+
+      const newAttachment = { name: result.name, url: result.url, driveFileId: result.driveFileId };
       const nextAttachments = [...(form.attachments || []), newAttachment];
       setForm({ ...form, attachments: nextAttachments });
+      // studio-drive-upload already persisted the attachment on the shot
+      // row via append_shot_file when shotId was sent; onPersistShareToken
+      // still needs to run so the share-link/token side of the form stays
+      // in sync with whatever else this editor has pending.
       if (onPersistShareToken && form.id) {
         await onPersistShareToken(form.id, form.shareToken, nextAttachments);
       }
@@ -8095,7 +8224,7 @@ function PlannerWorkspace({
             <span style={styles.budgetStatValue}>{cur}{formatMoney(intel.totalCrewCost)}</span>
           </div>
           <div style={styles.budgetStat}>
-            <span style={styles.label}>Actual margin</span>
+            <span style={styles.label}>Margin after crew costs</span>
             <span style={{ ...styles.budgetStatValue, color: healthColor }}>{intel.financial.actualMargin.toFixed(1)}%</span>
           </div>
         </div>
@@ -8104,6 +8233,12 @@ function PlannerWorkspace({
             Estimated minimum project price at this margin: <strong>{cur}{formatMoney(intel.minimumPrice)}</strong> (estimate based on current assumptions).
           </p>
         )}
+        <p style={styles.fieldHint}>
+          "Margin after crew costs" only subtracts planned crew spend from
+          the budget - it doesn't yet account for backgrounds, software,
+          outsourcing, or other production expenses, so treat it as a
+          floor on your real margin, not the final number.
+        </p>
       </div>
 
       {/* Department Budget */}
@@ -8367,6 +8502,7 @@ function PlannerWorkspace({
                   if (result?.project) setForm({ ...form, status: "converted", convertedProjectId: result.project.id });
                   else if (result?.limitReached) window.alert(`Free plan is limited to ${FREE_PROJECT_LIMIT} active projects. Archive one or upgrade to Pro.`);
                   else if (result?.alreadyConverted) window.alert("This plan has already been converted to a project.");
+                  else if (result?.error) window.alert(result.error.message || "Couldn't convert this plan to a project, please try again.");
                 }}
               >
                 {form.convertedProjectId ? "Already converted" : "Convert to Project"}
@@ -9449,6 +9585,259 @@ const styles = {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
     gap: 14,
+  },
+
+  // ---------------------------------------------------------------------
+  // Compact "at a glance" dashboard — designed to fit within the viewport
+  // on desktop with no page scroll. Long lists (Needs Attention, Near
+  // Deadline) scroll within their own card instead of the whole page
+  // growing. See dashboardCardHeaderRow -> dashboardCardHeader for labels.
+  // ---------------------------------------------------------------------
+  dashboardShell: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+    padding: "14px 24px 16px",
+    height: "calc(100vh - 130px)",
+    minHeight: 520,
+    overflow: "hidden",
+  },
+  dashboardTopStrip: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: 10,
+    flexShrink: 0,
+  },
+  dashboardGreetingCompact: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+  dashboardGreetingCompactTitle: {
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontSize: 18,
+    fontWeight: 600,
+    color: paper,
+  },
+  dashboardGreetingCompactDate: {
+    fontSize: 12,
+    color: textMuted,
+  },
+  studioTimeCompact: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "6px 12px",
+    borderRadius: 999,
+    border: `1px solid ${border}`,
+    background: inkSoft,
+  },
+  studioTimeCompactActive: {
+    borderColor: "rgba(47,191,166,0.5)",
+    boxShadow: "0 0 0 3px rgba(47,191,166,0.1)",
+  },
+  studioTimeCompactValue: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 13,
+    fontWeight: 600,
+    color: paper,
+    minWidth: 62,
+  },
+  dashboardCompactButton: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    fontSize: 11.5,
+    fontWeight: 600,
+    padding: "5px 10px",
+    borderRadius: 999,
+    border: "none",
+    background: teal,
+    color: "#08211c",
+    cursor: "pointer",
+  },
+  dashboardKpiStrip: {
+    display: "grid",
+    gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+    gap: 10,
+    flexShrink: 0,
+  },
+  dashboardKpiTile: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    padding: "10px 12px",
+    borderRadius: 12,
+  },
+  dashboardKpiTop: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 2,
+  },
+  dashboardKpiIcon: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  dashboardKpiValue: {
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontSize: 19,
+    fontWeight: 700,
+    color: paper,
+    lineHeight: 1.1,
+  },
+  dashboardKpiLabel: {
+    fontSize: 11,
+    color: textMuted,
+  },
+  dashboardKpiSub: {
+    fontSize: 10.5,
+    color: textMuted,
+  },
+  dashboardMainGrid: {
+    display: "grid",
+    gridTemplateColumns: "1.15fr 1fr 0.9fr",
+    gap: 12,
+    flex: 1,
+    minHeight: 0,
+  },
+  dashboardCol: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+    minHeight: 0,
+  },
+  dashboardCard: {
+    display: "flex",
+    flexDirection: "column",
+    flex: 1,
+    minHeight: 0,
+    padding: "12px 14px",
+    borderRadius: 14,
+    border: `1px solid ${border}`,
+    background: inkSoft,
+  },
+  dashboardCardHeaderRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    flexShrink: 0,
+    marginBottom: 6,
+  },
+  dashboardCardHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 11.5,
+    fontWeight: 600,
+    letterSpacing: 0.3,
+    textTransform: "uppercase",
+    color: tealLight,
+  },
+  dashboardCardHeaderHint: {
+    fontSize: 11,
+    color: textMuted,
+    margin: 0,
+  },
+  dashboardChartFill: {
+    flex: 1,
+    minHeight: 0,
+  },
+  dashboardSuccessBig: {
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontSize: 30,
+    fontWeight: 700,
+    color: teal,
+    lineHeight: 1.1,
+  },
+  dashboardMiniFunnelGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, 1fr)",
+    gap: 8,
+    marginTop: 10,
+  },
+  dashboardMiniFunnelItem: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    padding: "6px 8px",
+    borderRadius: 8,
+    background: "rgba(255,255,255,0.03)",
+    fontSize: 14,
+    fontWeight: 600,
+    color: paper,
+  },
+  dashboardDonutRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 6,
+    flex: 1,
+    minHeight: 0,
+    alignItems: "center",
+  },
+  dashboardScrollList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+    flex: 1,
+    minHeight: 0,
+    overflowY: "auto",
+    paddingRight: 2,
+  },
+  dashboardEmptyState: {
+    fontSize: 12,
+    color: textMuted,
+    margin: 0,
+  },
+  dashboardNotifRow: {
+    textAlign: "left",
+    fontSize: 12.5,
+    color: paper,
+    background: "rgba(242,166,90,0.08)",
+    border: "1px solid rgba(242,166,90,0.25)",
+    borderRadius: 8,
+    padding: "8px 10px",
+    cursor: "pointer",
+    flexShrink: 0,
+  },
+  dashboardDeadlineRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    fontSize: 12.5,
+    color: paper,
+    background: "rgba(255,255,255,0.03)",
+    borderRadius: 8,
+    padding: "7px 10px",
+    cursor: "pointer",
+    flexShrink: 0,
+  },
+  dashboardDeadlineName: {
+    fontWeight: 600,
+    flex: 1,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  dashboardDeadlineDate: {
+    fontSize: 11,
+    color: "#F2A65A",
+    flexShrink: 0,
+  },
+  dashboardFooterHint: {
+    fontSize: 10.5,
+    color: textMuted,
+    margin: 0,
+    flexShrink: 0,
   },
   plannerPageHeader: {
     display: "flex",

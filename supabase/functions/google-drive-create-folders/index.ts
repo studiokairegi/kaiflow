@@ -100,6 +100,7 @@ Deno.serve(async (req) => {
         drive_folder_id: projectFolder.id,
         drive_folder_url: projectFolder.url,
         drive_deliverables_folder_id: deliverablesFolder.id,
+        drive_references_folder_id: referencesFolder.id,
       })
       .eq("id", projectId)
       .eq("user_id", user.id);

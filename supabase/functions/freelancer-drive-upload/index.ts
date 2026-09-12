@@ -101,20 +101,18 @@ Deno.serve(async (req) => {
       file.type
     );
 
-    const nextDeliverables = [
-      ...(Array.isArray(shot.deliverables) ? shot.deliverables : []),
-      {
-        name: file.name,
-        url: uploaded.url,
-        driveFileId: uploaded.id,
-        uploadedAt: new Date().toISOString(),
-      },
-    ];
+    const nextDeliverable = {
+      name: file.name,
+      url: uploaded.url,
+      driveFileId: uploaded.id,
+      uploadedAt: new Date().toISOString(),
+    };
 
-    const { error: updateError } = await supabase
-      .from("shots")
-      .update({ deliverables: nextDeliverables })
-      .eq("id", shot.id);
+    const { error: updateError } = await supabase.rpc("append_shot_file", {
+      p_shot_id: shot.id,
+      p_column: "deliverables",
+      p_entry: JSON.stringify([nextDeliverable]),
+    });
 
     if (updateError) {
       // The file made it to Drive but we couldn't record it against the

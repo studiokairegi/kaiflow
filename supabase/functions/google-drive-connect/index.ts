@@ -1,45 +1,26 @@
-// GET /google-drive-connect?token=<supabase access token>
-// Verifies the studio user's identity, then redirects them to Google's
-// consent screen. The user's id is embedded in a signed `state` value so
-// the callback function can trust it without needing a session.
+// GET /google-drive-connect?intent=<id from oauth-start-intent>
+// Consumes the intent (proving it's a real, recent, not-yet-used connect
+// attempt for this provider) and redirects to Google's consent screen,
+// using that same intent id as the OAuth `state` - see
+// migration_oauth_intents.sql and _shared/oauth_intent.ts for why.
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-
-async function sign(value: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
-  return btoa(String.fromCharCode(...new Uint8Array(sig)));
-}
+import { consumeIntentForRedirect } from "../_shared/oauth_intent.ts";
 
 Deno.serve(async (req) => {
   try {
     const url = new URL(req.url);
-    const token = url.searchParams.get("token");
-    if (!token) {
-      return new Response("Missing token", { status: 400 });
+    const intentId = url.searchParams.get("intent");
+    if (!intentId) {
+      return new Response("Missing intent", { status: 400 });
     }
 
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!
-    );
-    const {
-      data: { user },
-      error,
-    } = await supabase.auth.getUser(token);
-    if (error || !user) {
-      return new Response("Invalid session", { status: 401 });
+    const userId = await consumeIntentForRedirect(intentId, "google_drive");
+    if (!userId) {
+      return new Response(
+        "This connect link has expired or was already used. Go back to Settings and try again.",
+        { status: 401 }
+      );
     }
-
-    const secret = Deno.env.get("DRIVE_STATE_SECRET")!;
-    const signature = await sign(user.id, secret);
-    const state = `${user.id}.${signature}`;
 
     const clientId = Deno.env.get("GOOGLE_CLIENT_ID")!;
     const redirectUri = Deno.env.get("GOOGLE_REDIRECT_URI")!;
@@ -51,7 +32,7 @@ Deno.serve(async (req) => {
     googleUrl.searchParams.set("access_type", "offline");
     googleUrl.searchParams.set("prompt", "consent");
     googleUrl.searchParams.set("scope", "openid email https://www.googleapis.com/auth/drive.file");
-    googleUrl.searchParams.set("state", state);
+    googleUrl.searchParams.set("state", intentId);
 
     return Response.redirect(googleUrl.toString(), 302);
   } catch (err) {

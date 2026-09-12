@@ -1,22 +1,13 @@
-// GET /google-drive-callback?code=...&state=...
-// Exchanges the authorization code for tokens, verifies the signed state
-// to recover which studio user is connecting, encrypts the refresh token,
-// and stores it. Then redirects back into the app.
+// GET /google-drive-callback?code=...&state=<intent id>
+// Exchanges the authorization code for tokens, consumes the intent to
+// recover which studio user is connecting (see migration_oauth_intents.sql
+// and _shared/oauth_intent.ts - this is what makes state genuinely
+// one-time instead of a signature that stays valid forever), encrypts the
+// refresh token, and stores it. Then redirects back into the app.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { encryptText } from "../_shared/crypto.ts";
-
-async function sign(value: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
-  return btoa(String.fromCharCode(...new Uint8Array(sig)));
-}
+import { consumeIntentForCallback } from "../_shared/oauth_intent.ts";
 
 Deno.serve(async (req) => {
   const appUrl = Deno.env.get("APP_URL") || "/";
@@ -24,16 +15,17 @@ Deno.serve(async (req) => {
     const url = new URL(req.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state") || "";
-    const [userId, signature] = state.split(".");
 
-    if (!code || !userId || !signature) {
+    if (!code || !state) {
       return new Response("Missing code or state", { status: 400 });
     }
 
-    const secret = Deno.env.get("DRIVE_STATE_SECRET")!;
-    const expected = await sign(userId, secret);
-    if (expected !== signature) {
-      return new Response("Invalid state", { status: 401 });
+    const userId = await consumeIntentForCallback(state, "google_drive");
+    if (!userId) {
+      return new Response(
+        "This connection attempt has expired or was already completed. Go back to Settings and try again.",
+        { status: 401 }
+      );
     }
 
     const clientId = Deno.env.get("GOOGLE_CLIENT_ID")!;
