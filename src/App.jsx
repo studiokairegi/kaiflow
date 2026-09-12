@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { supabase, functionUrl } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import { genShareToken } from "./SharedViews.jsx";
@@ -9,6 +10,7 @@ import {
   RevenueByClientBarChart,
   ProjectComparisonChart,
   LeadOutreachTrendChart,
+  HoursTrendChart,
 } from "./DashboardCharts.jsx";
 
 const STAGES = [
@@ -2101,6 +2103,19 @@ const ClockIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
     <circle cx="12" cy="12" r="9" />
     <path d="M12 7v5l3.5 2" />
+  </svg>
+);
+
+const PopOutIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="18" height="14" rx="2" />
+    <rect x="12.5" y="10.5" width="7" height="5" rx="1.2" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const ChartIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 20V11M12 20V4M20 20v-6" />
   </svg>
 );
 
@@ -5484,6 +5499,63 @@ function localDayStartISO(date = new Date()) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0).toISOString();
 }
 
+function startOfLocalDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+// Monday-start week containing `date`.
+function startOfWeek(date) {
+  const d = startOfLocalDay(date);
+  const day = d.getDay(); // 0 = Sunday
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return d;
+}
+
+function startOfMonth(date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function addDays(date, n) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + n);
+  return d;
+}
+
+function isSameLocalDay(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function dayKey(d) {
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+const POMODORO_DEFAULTS = { workMinutes: 25, breakMinutes: 5, longBreakMinutes: 15, cyclesBeforeLongBreak: 4 };
+const POMODORO_STORAGE_KEY = "kairil_pomodoro_config";
+
+// Pomodoro setup is a lightweight personal preference, not account data, so
+// it's kept in localStorage rather than added to work_sessions - it's read
+// once on mount and re-saved whenever the user changes it in the setup form.
+function loadPomodoroConfig() {
+  if (typeof window === "undefined" || !window.localStorage) return POMODORO_DEFAULTS;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(POMODORO_STORAGE_KEY));
+    if (saved && typeof saved === "object") return { ...POMODORO_DEFAULTS, ...saved };
+  } catch {
+    // malformed or missing - fall through to defaults
+  }
+  return POMODORO_DEFAULTS;
+}
+
+function savePomodoroConfig(config) {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(POMODORO_STORAGE_KEY, JSON.stringify(config));
+  } catch {
+    // storage unavailable/full - the in-memory config still works for this session
+  }
+}
+
 function DashboardGreeting({ user, compact = false }) {
   const [now, setNow] = useState(() => new Date());
 
@@ -5528,13 +5600,249 @@ function DashboardGreeting({ user, compact = false }) {
 // nothing to "restore" client-side, it just re-asks the database what's
 // true every time.
 function StudioTimeCard({ userId, compact = false }) {
-  const [activeSession, setActiveSession] = useState(null); // { id, clockIn } | null
+function PomodoroSetupForm({ config, onChange, onStart }) {
+  const setField = (field, max) => (e) => {
+    const value = Math.max(1, Math.min(max, Number(e.target.value) || 1));
+    onChange({ ...config, [field]: value });
+  };
+
+  return (
+    <div style={styles.pomodoroSetup}>
+      <div style={styles.pomodoroSetupGrid}>
+        <label style={styles.pomodoroField}>
+          <span style={styles.label}>Focus (min)</span>
+          <input type="number" min={1} max={180} style={styles.input} value={config.workMinutes} onChange={setField("workMinutes", 180)} />
+        </label>
+        <label style={styles.pomodoroField}>
+          <span style={styles.label}>Break (min)</span>
+          <input type="number" min={1} max={180} style={styles.input} value={config.breakMinutes} onChange={setField("breakMinutes", 180)} />
+        </label>
+        <label style={styles.pomodoroField}>
+          <span style={styles.label}>Long break (min)</span>
+          <input type="number" min={1} max={180} style={styles.input} value={config.longBreakMinutes} onChange={setField("longBreakMinutes", 180)} />
+        </label>
+        <label style={styles.pomodoroField}>
+          <span style={styles.label}>Cycles</span>
+          <input type="number" min={1} max={12} style={styles.input} value={config.cyclesBeforeLongBreak} onChange={setField("cyclesBeforeLongBreak", 12)} />
+        </label>
+      </div>
+      <button type="button" style={styles.newButton} onClick={onStart}>
+        <ClockIcon />
+        Start Focus Session
+      </button>
+    </div>
+  );
+}
+
+// Totals + a day-by-day trend for one period (week or month), from a set of
+// already-fetched completed sessions plus the live active session if any.
+// The active session (if present) always counts toward both periods: it's
+// happening right now, so by definition it falls within both "this week"
+// and "this month" regardless of when it started.
+function computePeriodStats(completedSessions, activeSession, rangeStart, rangeEndExclusive, now) {
+  const inRange = completedSessions.filter((r) => {
+    const d = new Date(r.clock_in);
+    return d >= rangeStart && d < rangeEndExclusive;
+  });
+
+  const lastDay = now < rangeEndExclusive ? startOfLocalDay(now) : addDays(rangeEndExclusive, -1);
+  const days = [];
+  for (let cursor = new Date(rangeStart); cursor <= lastDay; cursor = addDays(cursor, 1)) {
+    days.push({ date: new Date(cursor), seconds: 0 });
+  }
+  const addToDay = (dateObj, seconds) => {
+    const match = days.find((d) => isSameLocalDay(d.date, dateObj));
+    if (match) match.seconds += seconds;
+  };
+
+  let totalSeconds = 0;
+  let pomodoroSeconds = 0;
+  const activeDayKeys = new Set();
+
+  inRange.forEach((r) => {
+    const seconds = r.duration || 0;
+    totalSeconds += seconds;
+    if (r.session_type === "pomodoro") pomodoroSeconds += seconds;
+    activeDayKeys.add(dayKey(new Date(r.clock_in)));
+    addToDay(new Date(r.clock_in), seconds);
+  });
+
+  if (activeSession) {
+    const elapsed = Math.max(0, Math.floor((now - new Date(activeSession.clockIn)) / 1000));
+    totalSeconds += elapsed;
+    if (activeSession.sessionType === "pomodoro") pomodoroSeconds += elapsed;
+    activeDayKeys.add(dayKey(new Date(activeSession.clockIn)));
+    addToDay(new Date(activeSession.clockIn), elapsed);
+  }
+
+  return {
+    totalSeconds,
+    pomodoroSeconds,
+    manualSeconds: totalSeconds - pomodoroSeconds,
+    activeDays: activeDayKeys.size,
+    dailyTrend: days,
+  };
+}
+
+function StudioTimeSummaryModal({ userId, onClose }) {
+  const [period, setPeriod] = useState("week"); // "week" | "month"
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [completedRows, setCompletedRows] = useState([]);
+  const [activeSession, setActiveSession] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError("");
+      try {
+        const today = new Date();
+        const weekStart = startOfWeek(today);
+        const monthStart = startOfMonth(today);
+        const rangeStart = weekStart < monthStart ? weekStart : monthStart;
+        const { data, error: fetchError } = await supabase
+          .from("work_sessions")
+          .select("*")
+          .or(`clock_out.is.null,clock_in.gte.${rangeStart.toISOString()}`)
+          .order("clock_in", { ascending: true });
+        if (fetchError) throw fetchError;
+        if (cancelled) return;
+        setCompletedRows((data || []).filter((r) => r.clock_out !== null));
+        const active = (data || []).find((r) => r.clock_out === null) || null;
+        setActiveSession(active ? { clockIn: active.clock_in, sessionType: active.session_type } : null);
+      } catch (err) {
+        if (!cancelled) setError(err.message || "Couldn't load the studio time summary.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  const now = new Date();
+  const rangeStart = period === "week" ? startOfWeek(now) : startOfMonth(now);
+  const rangeEndExclusive =
+    period === "week" ? addDays(rangeStart, 7) : new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const stats = computePeriodStats(completedRows, activeSession, rangeStart, rangeEndExclusive, now);
+  const daysSoFar =
+    Math.floor((Math.min(now.getTime(), rangeEndExclusive.getTime() - 1) - rangeStart.getTime()) / 86400000) + 1;
+  const focusRatio = stats.totalSeconds > 0 ? Math.round((stats.pomodoroSeconds / stats.totalSeconds) * 100) : 0;
+
+  const trendData = stats.dailyTrend.map((d) => ({
+    label: period === "week" ? d.date.toLocaleDateString(undefined, { weekday: "short" }) : String(d.date.getDate()),
+    value: Math.round((d.seconds / 3600) * 100) / 100,
+  }));
+
+  return (
+    <div style={styles.overlay} onClick={onClose}>
+      <div style={{ ...styles.modal, maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <h3 style={styles.modalTitle}>Studio Time Summary</h3>
+          <button style={styles.iconButton} onClick={onClose}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        <div style={styles.tabRow}>
+          <button
+            style={{ ...styles.tabButton, ...(period === "week" ? styles.tabButtonActive : {}) }}
+            onClick={() => setPeriod("week")}
+          >
+            This week
+          </button>
+          <button
+            style={{ ...styles.tabButton, ...(period === "month" ? styles.tabButtonActive : {}) }}
+            onClick={() => setPeriod("month")}
+          >
+            This month
+          </button>
+        </div>
+
+        {loading ? (
+          <p style={styles.fieldHint}>Loading{"\u2026"}</p>
+        ) : error ? (
+          <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{error}</p>
+        ) : (
+          <>
+            <div style={styles.summaryStatsRow}>
+              <div style={styles.summaryStat}>
+                <span style={styles.label}>Total</span>
+                <span style={styles.summaryStatValue}>{formatDayDuration(stats.totalSeconds)}</span>
+              </div>
+              <div style={styles.summaryStat}>
+                <span style={styles.label}>Active days</span>
+                <span style={styles.summaryStatValue}>
+                  {stats.activeDays} of {daysSoFar}
+                </span>
+              </div>
+              <div style={styles.summaryStat}>
+                <span style={styles.label}>Avg / active day</span>
+                <span style={styles.summaryStatValue}>
+                  {stats.activeDays > 0 ? formatDayDuration(Math.round(stats.totalSeconds / stats.activeDays)) : "\u2014"}
+                </span>
+              </div>
+              <div style={styles.summaryStat}>
+                <span style={styles.label}>In focus sessions</span>
+                <span style={styles.summaryStatValue}>{focusRatio}%</span>
+              </div>
+            </div>
+
+            <HoursTrendChart data={trendData} />
+
+            <div>
+              <span style={styles.label}>Focus vs. manual time</span>
+              <div style={{ marginTop: 8 }}>
+                <DonutBreakdown
+                  data={[
+                    { label: "Focus sessions", value: Math.round((stats.pomodoroSeconds / 3600) * 10) / 10 },
+                    { label: "Manual", value: Math.round((stats.manualSeconds / 3600) * 10) / 10 },
+                  ]}
+                  emptyLabel="No studio time clocked in this period yet."
+                  centerLabel="Hours"
+                />
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
   const [todaySeconds, setTodaySeconds] = useState(0); // completed sessions today, in seconds
   const [now, setNow] = useState(() => new Date());
   const [initializing, setInitializing] = useState(true);
   const [clockingIn, setClockingIn] = useState(false);
   const [clockingOut, setClockingOut] = useState(false);
   const [clockError, setClockError] = useState("");
+
+  // Pomodoro focus sessions - reuse the exact same clock-in/out calls above
+  // (tagged session_type: "pomodoro"), so a focus session is just a
+  // structured, auto-repeating way of doing the same clock in/out cycle,
+  // not a separate tracking system.
+  const [pomodoroConfig, setPomodoroConfig] = useState(loadPomodoroConfig);
+  const [showPomodoroSetup, setShowPomodoroSetup] = useState(false);
+  const [pomodoroPhase, setPomodoroPhase] = useState(null); // null | "work" | "break" | "longBreak"
+  const [pomodoroCycle, setPomodoroCycle] = useState(1);
+  const [phaseEndsAt, setPhaseEndsAt] = useState(null); // ms epoch
+  const transitioningRef = useRef(false);
+
+  // Always-on-top popup (Document Picture-in-Picture). Chrome/Edge and
+  // recent Firefox only, as of when this was built - not Safari.
+  const [pipSupported, setPipSupported] = useState(false);
+  const [pipWindow, setPipWindow] = useState(null);
+
+  const [showSummary, setShowSummary] = useState(false);
+
+  useEffect(() => {
+    setPipSupported(typeof window !== "undefined" && "documentPictureInPicture" in window);
+  }, []);
+
+  useEffect(() => {
+    savePomodoroConfig(pomodoroConfig);
+  }, [pomodoroConfig]);
 
   const refetchSessions = useCallback(async () => {
     if (!userId) return;
@@ -5552,7 +5860,7 @@ function StudioTimeCard({ userId, compact = false }) {
       let completedSeconds = 0;
       (rows || []).forEach((row) => {
         if (row.clock_out === null) {
-          active = { id: row.id, clockIn: row.clock_in };
+          active = { id: row.id, clockIn: row.clock_in, sessionType: row.session_type || "manual" };
         } else {
           completedSeconds += row.duration || 0;
         }
@@ -5575,21 +5883,27 @@ function StudioTimeCard({ userId, compact = false }) {
     };
   }, [refetchSessions]);
 
+  // Ticks while a session is active, or mid-pomodoro - breaks have no
+  // active session but still need their own countdown to keep moving.
   useEffect(() => {
-    if (!activeSession) return;
+    if (!activeSession && !pomodoroPhase) return;
     setNow(new Date());
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
-  }, [activeSession]);
+  }, [activeSession, pomodoroPhase]);
 
-  const handleClockIn = async () => {
-    if (clockingIn || activeSession || !userId) return; // guard against duplicate active sessions on repeated clicks
+  // Resolves to the created session on success, resolves to undefined if
+  // blocked by a guard (already clocked in, no userId), and throws on a
+  // real failure (after already recording it in clockError) - callers that
+  // don't care about the outcome can just fire-and-forget with .catch(() => {}).
+  const handleClockIn = async (sessionType = "manual") => {
+    if (clockingIn || activeSession || !userId) return undefined;
     setClockError("");
     setClockingIn(true);
     try {
       const { data: row, error } = await supabase
         .from("work_sessions")
-        .insert({ user_id: userId }) // clock_in is the database's own now(), not the browser's clock
+        .insert({ user_id: userId, session_type: sessionType }) // clock_in is the database's own now()
         .select()
         .single();
       if (error) {
@@ -5598,22 +5912,24 @@ function StudioTimeCard({ userId, compact = false }) {
           // tab, or a click that slipped in before the button disabled) -
           // not a real failure, just resync with what's actually there.
           await refetchSessions();
-        } else {
-          throw error;
+          return undefined;
         }
-      } else {
-        setActiveSession({ id: row.id, clockIn: row.clock_in });
+        throw error;
       }
+      const session = { id: row.id, clockIn: row.clock_in, sessionType: row.session_type || sessionType };
+      setActiveSession(session);
+      return session;
     } catch (err) {
       setClockError(err.message || "Couldn't clock in, please try again.");
       await refetchSessions();
+      throw err;
     } finally {
       setClockingIn(false);
     }
   };
 
   const handleClockOut = async () => {
-    if (clockingOut || !activeSession) return;
+    if (clockingOut || !activeSession) return undefined;
     setClockError("");
     setClockingOut(true);
     try {
@@ -5624,85 +5940,302 @@ function StudioTimeCard({ userId, compact = false }) {
       if (error) throw error;
       setActiveSession(null);
       setTodaySeconds((prev) => prev + (row?.duration || 0));
+      return row;
     } catch (err) {
       setClockError(err.message || "Couldn't clock out, please try again.");
       // The update may have actually gone through even though this failed
       // (e.g. the response didn't make it back) - resync instead of
       // leaving the UI stuck showing a session the database already closed.
       await refetchSessions();
+      throw err;
     } finally {
       setClockingOut(false);
     }
   };
 
+  const beginPomodoroWork = async () => {
+    let session;
+    try {
+      session = await handleClockIn("pomodoro");
+    } catch {
+      setPomodoroPhase(null);
+      setPhaseEndsAt(null);
+      return;
+    }
+    if (!session) {
+      // Blocked (already clocked in some other way) - don't claim a work
+      // phase started when nothing was actually clocked in.
+      setPomodoroPhase(null);
+      setPhaseEndsAt(null);
+      return;
+    }
+    setPomodoroPhase("work");
+    setPhaseEndsAt(Date.now() + pomodoroConfig.workMinutes * 60000);
+  };
+
+  const advancePomodoroPhase = async () => {
+    if (transitioningRef.current) return;
+    transitioningRef.current = true;
+    try {
+      if (pomodoroPhase === "work") {
+        try {
+          await handleClockOut();
+        } catch {
+          // Already surfaced via clockError; still move on to the break so
+          // one failed request doesn't get the whole rhythm stuck.
+        }
+        const completingLongBreak = pomodoroCycle >= pomodoroConfig.cyclesBeforeLongBreak;
+        const nextPhase = completingLongBreak ? "longBreak" : "break";
+        const minutes = completingLongBreak ? pomodoroConfig.longBreakMinutes : pomodoroConfig.breakMinutes;
+        setPomodoroPhase(nextPhase);
+        setPhaseEndsAt(Date.now() + minutes * 60000);
+      } else {
+        setPomodoroCycle(pomodoroPhase === "longBreak" ? 1 : (c) => c + 1);
+        await beginPomodoroWork();
+      }
+    } finally {
+      transitioningRef.current = false;
+    }
+  };
+
+  // Auto-advances the pomodoro phase once its countdown reaches zero.
+  // advancePomodoroPhase is intentionally re-created each render (not
+  // useCallback) so it always closes over the latest state; transitioningRef
+  // stops it from firing more than once per phase.
+  useEffect(() => {
+    if (!pomodoroPhase || !phaseEndsAt) return;
+    if (now.getTime() < phaseEndsAt) return;
+    advancePomodoroPhase();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [now, pomodoroPhase, phaseEndsAt]);
+
+  const startPomodoro = () => {
+    if (activeSession || pomodoroPhase) return;
+    setPomodoroCycle(1);
+    setShowPomodoroSetup(false);
+    beginPomodoroWork();
+  };
+
+  const skipPomodoroPhase = () => {
+    advancePomodoroPhase();
+  };
+
+  const stopPomodoro = async () => {
+    if (pomodoroPhase === "work" && activeSession) {
+      try {
+        await handleClockOut();
+      } catch {
+        // already surfaced via clockError
+      }
+    }
+    setPomodoroPhase(null);
+    setPhaseEndsAt(null);
+    setPomodoroCycle(1);
+  };
+
+  const openPip = async () => {
+    if (!pipSupported || pipWindow) return;
+    try {
+      const pw = await window.documentPictureInPicture.requestWindow({ width: 320, height: 260 });
+      // This app's global styles (fonts, keyframes, hover/disabled rules)
+      // live in one <style> tag; everything else is inline styles, which
+      // render correctly in any document without copying anything else.
+      const styleTag = pw.document.createElement("style");
+      styleTag.textContent = fontImport;
+      pw.document.head.appendChild(styleTag);
+      pw.document.title = "Studio Time \u2014 Kairil";
+      Object.assign(pw.document.body.style, {
+        margin: "0",
+        minHeight: "100vh",
+        background: ink,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      });
+      pw.addEventListener("pagehide", () => setPipWindow(null), { once: true });
+      setPipWindow(pw);
+    } catch (err) {
+      console.error("Couldn't open the popup window:", err);
+    }
+  };
+
+  const closePip = () => {
+    if (pipWindow) pipWindow.close();
+    setPipWindow(null);
+  };
+
   const elapsedSeconds = activeSession
     ? Math.max(0, Math.floor((now - new Date(activeSession.clockIn)) / 1000))
     : 0;
-  const label = activeSession || todaySeconds === 0 ? "Studio Time" : "Today's studio time";
-  const busy = clockingIn || clockingOut;
 
   if (compact) {
+    const phaseRemaining = pomodoroPhase ? Math.max(0, Math.round((phaseEndsAt - now.getTime()) / 1000)) : 0;
     const displayValue = initializing
       ? "--:--:--"
+      : pomodoroPhase
+      ? formatClockDuration(phaseRemaining)
       : activeSession
       ? formatClockDuration(elapsedSeconds)
       : todaySeconds > 0
       ? formatDayDuration(todaySeconds)
       : "00:00:00";
+    const compactLabel = pomodoroPhase
+      ? pomodoroPhase === "work"
+        ? "Focus"
+        : pomodoroPhase === "longBreak"
+        ? "Long break"
+        : "Break"
+      : activeSession || todaySeconds === 0
+      ? "Studio Time"
+      : "Today's studio time";
+    const compactBusy = clockingIn || clockingOut;
     return (
-      <div style={{ ...styles.studioTimeCompact, ...(activeSession ? styles.studioTimeCompactActive : {}) }}>
-        {activeSession && <span style={styles.studioTimeStatusDot} />}
-        <span style={styles.dashboardGreetingCompactDate}>{label}</span>
+      <div style={{ ...styles.studioTimeCompact, ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
+        {(activeSession || pomodoroPhase) && <span style={styles.studioTimeStatusDot} />}
+        <span style={styles.dashboardGreetingCompactDate}>{compactLabel}</span>
         <span style={styles.studioTimeCompactValue}>{displayValue}</span>
-        <button
-          style={styles.dashboardCompactButton}
-          onClick={activeSession ? handleClockOut : handleClockIn}
-          disabled={initializing || busy}
-        >
-          {busy ? <SpinnerIcon size={13} /> : <ClockIcon />}
-          {activeSession ? "Clock Out" : "Clock In"}
-        </button>
+        {pomodoroPhase ? (
+          <button type="button" style={styles.dashboardCompactButton} onClick={skipPomodoroPhase}>
+            Skip
+          </button>
+        ) : (
+          <button
+            type="button"
+            style={styles.dashboardCompactButton}
+            onClick={activeSession ? () => handleClockOut().catch(() => {}) : () => handleClockIn("manual").catch(() => {})}
+            disabled={initializing || compactBusy}
+          >
+            {compactBusy ? <SpinnerIcon size={13} /> : <ClockIcon />}
+            {activeSession ? "Clock Out" : "Clock In"}
+          </button>
+        )}
         {clockError && <span style={{ ...styles.fieldHint, color: "#FF4D4D", fontSize: 11 }}>{clockError}</span>}
       </div>
     );
   }
 
-  return (
-    <div
-      className="kf-card"
-      style={{ ...styles.studioTimeCard, ...(activeSession ? styles.studioTimeCardActive : {}) }}
-    >
+  let trackingContent;
+  if (pomodoroPhase) {
+    const phaseLabel = pomodoroPhase === "work" ? "Focus" : pomodoroPhase === "longBreak" ? "Long break" : "Break";
+    const phaseRemaining = Math.max(0, Math.round((phaseEndsAt - now.getTime()) / 1000));
+    const dotColor = pomodoroPhase === "work" ? "#3DDC84" : "#F2A65A";
+    trackingContent = (
       <div>
-        <span style={styles.label}>{label}</span>
-        {activeSession && (
-          <div style={styles.studioTimeStatus}>
-            <span style={styles.studioTimeStatusDot} />
-            Working
-          </div>
-        )}
+        <div style={{ ...styles.studioTimeStatus, color: dotColor }}>
+          <span style={{ ...styles.studioTimeStatusDot, background: dotColor, boxShadow: `0 0 6px ${dotColor}` }} />
+          {phaseLabel} {"\u00b7"} Cycle {pomodoroCycle} of {pomodoroConfig.cyclesBeforeLongBreak}
+        </div>
+        <div style={styles.studioTimeValue}>{formatClockDuration(phaseRemaining)}</div>
+        {clockError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{clockError}</p>}
+        <div style={styles.pomodoroControls}>
+          <button type="button" style={styles.pomodoroSecondaryButton} onClick={skipPomodoroPhase}>
+            Skip
+          </button>
+          <button type="button" style={styles.pomodoroSecondaryButton} onClick={() => stopPomodoro()}>
+            Stop
+          </button>
+        </div>
+      </div>
+    );
+  } else if (activeSession) {
+    trackingContent = (
+      <div>
+        <div style={styles.studioTimeStatus}>
+          <span style={styles.studioTimeStatusDot} />
+          Working
+        </div>
         {initializing ? (
           <div style={styles.studioTimeValue}>--:--:--</div>
-        ) : activeSession ? (
+        ) : (
           <>
             <div style={styles.studioTimeValue}>{formatClockDuration(elapsedSeconds)}</div>
             <p style={styles.fieldHint}>Today so far: {formatDayDuration(todaySeconds + elapsedSeconds)}</p>
           </>
+        )}
+        {clockError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{clockError}</p>}
+        <button
+          type="button"
+          style={{ ...styles.newButton, marginTop: 8 }}
+          onClick={() => handleClockOut().catch(() => {})}
+          disabled={clockingOut}
+        >
+          {clockingOut ? <SpinnerIcon size={16} /> : <ClockIcon />}
+          Clock Out
+        </button>
+      </div>
+    );
+  } else {
+    trackingContent = (
+      <div>
+        {initializing ? (
+          <div style={styles.studioTimeValue}>--:--:--</div>
         ) : todaySeconds > 0 ? (
           <div style={styles.studioTimeValue}>{formatDayDuration(todaySeconds)}</div>
         ) : (
           <div style={styles.studioTimeValue}>00:00:00</div>
         )}
         {clockError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{clockError}</p>}
+        <div style={styles.studioTimeActionsRow}>
+          <button
+            type="button"
+            style={styles.newButton}
+            onClick={() => handleClockIn("manual").catch(() => {})}
+            disabled={initializing || clockingIn}
+          >
+            {clockingIn ? <SpinnerIcon size={16} /> : <ClockIcon />}
+            Clock In
+          </button>
+          <button type="button" style={styles.pomodoroLinkButton} onClick={() => setShowPomodoroSetup((v) => !v)}>
+            {showPomodoroSetup ? "Hide focus session setup" : "Start a focus session"}
+          </button>
+        </div>
+        {showPomodoroSetup && (
+          <PomodoroSetupForm config={pomodoroConfig} onChange={setPomodoroConfig} onStart={startPomodoro} />
+        )}
       </div>
-      <button
-        style={styles.newButton}
-        onClick={activeSession ? handleClockOut : handleClockIn}
-        disabled={initializing || busy}
+    );
+  }
+
+  return (
+    <>
+      <div
+        className="kf-card"
+        style={{ ...styles.studioTimeCard, ...(activeSession ? styles.studioTimeCardActive : {}) }}
       >
-        {busy ? <SpinnerIcon size={16} /> : <ClockIcon />}
-        {activeSession ? "Clock Out" : "Clock In"}
-      </button>
-    </div>
+        <div style={styles.studioTimeHeaderRow}>
+          <span style={styles.label}>
+            {pomodoroPhase ? "Focus Session" : activeSession || todaySeconds === 0 ? "Studio Time" : "Today's studio time"}
+          </span>
+          <div style={styles.studioTimeHeaderActions}>
+            <button type="button" style={styles.iconButton} onClick={() => setShowSummary(true)} title="Weekly & monthly summary">
+              <ChartIcon />
+            </button>
+            {pipSupported && (
+              <button
+                type="button"
+                style={styles.iconButton}
+                onClick={pipWindow ? closePip : openPip}
+                title={pipWindow ? "Bring back to page" : "Pop out as a floating window"}
+              >
+                <PopOutIcon />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {pipWindow ? (
+          <p style={styles.fieldHint}>
+            Popped out in a floating window {"\u2014"} keep tracking while you work in other apps.
+          </p>
+        ) : (
+          trackingContent
+        )}
+      </div>
+
+      {pipWindow && createPortal(<div style={styles.pipContent}>{trackingContent}</div>, pipWindow.document.body)}
+
+      {showSummary && <StudioTimeSummaryModal userId={userId} onClose={() => setShowSummary(false)} />}
+    </>
   );
 }
 
@@ -9539,16 +10072,31 @@ const styles = {
     borderRadius: 14,
     padding: "16px 20px",
     display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 16,
+    flexDirection: "column",
     boxShadow: shadowSoft,
-    flexWrap: "wrap",
-    maxWidth: 440,
+    maxWidth: 480,
   },
   studioTimeCardActive: {
     borderColor: teal,
     background: "rgba(47,191,166,0.08)",
+  },
+  studioTimeHeaderRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 4,
+  },
+  studioTimeHeaderActions: {
+    display: "flex",
+    alignItems: "center",
+    gap: 2,
+  },
+  studioTimeActionsRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    marginTop: 8,
+    flexWrap: "wrap",
   },
   studioTimeValue: {
     fontFamily: "'IBM Plex Mono', monospace",
@@ -9575,6 +10123,70 @@ const styles = {
     background: "#3DDC84",
     boxShadow: "0 0 6px rgba(61,220,132,0.6)",
     flexShrink: 0,
+  },
+  pomodoroLinkButton: {
+    background: "transparent",
+    border: "none",
+    color: teal,
+    fontSize: 12.5,
+    fontFamily: "'Inter', sans-serif",
+    cursor: "pointer",
+    padding: "10px 0",
+  },
+  pomodoroSetup: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTop: `1px solid ${border}`,
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+  pomodoroSetupGrid: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 10,
+  },
+  pomodoroField: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+  },
+  pomodoroControls: {
+    display: "flex",
+    gap: 8,
+    marginTop: 10,
+  },
+  pomodoroSecondaryButton: {
+    background: "transparent",
+    border: `1px solid ${border}`,
+    borderRadius: 999,
+    color: textMuted,
+    padding: "7px 14px",
+    fontSize: 12.5,
+    fontFamily: "'Inter', sans-serif",
+    cursor: "pointer",
+  },
+  pipContent: {
+    padding: 16,
+    width: "100%",
+    color: paper,
+    fontFamily: "'Inter', sans-serif",
+  },
+  summaryStatsRow: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))",
+    gap: 12,
+  },
+  summaryStat: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+  },
+  summaryStatValue: {
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontSize: 18,
+    fontWeight: 600,
+    color: paper,
   },
   budgetSummaryRow: {
     display: "flex",

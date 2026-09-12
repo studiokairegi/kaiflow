@@ -337,3 +337,74 @@ export function LeadOutreachTrendChart({ data, height = 240, compact = false }) 
     </div>
   );
 }
+
+function HoursTooltip({ active, payload, label }) {
+  if (!active || !payload || !payload.length) return null;
+  return (
+    <div
+      style={{
+        background: inkSoft,
+        border: `1px solid ${border}`,
+        borderRadius: 10,
+        padding: "8px 12px",
+        fontSize: 12,
+        color: paper,
+        fontFamily: "'Inter', sans-serif",
+      }}
+    >
+      {label && <div style={{ color: textMuted, marginBottom: 4 }}>{label}</div>}
+      {payload.map((p, i) => {
+        const totalMinutes = Math.round((p.value || 0) * 60);
+        const h = Math.floor(totalMinutes / 60);
+        const m = totalMinutes % 60;
+        return (
+          <div key={i} style={{ color: p.color || p.fill }}>
+            {p.name}: {h}h {m}m
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function HoursTrendChart({ data }) {
+  const hasData = data.some((d) => d.value > 0);
+  return (
+    <div style={{ width: "100%", height: 200 }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+          <defs>
+            <linearGradient id="hoursFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#2FBFA6" stopOpacity={0.45} />
+              <stop offset="100%" stopColor="#2FBFA6" stopOpacity={0.02} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid stroke={border} strokeDasharray="3 3" vertical={false} />
+          <XAxis dataKey="label" stroke={textMuted} fontSize={11} tickLine={false} axisLine={{ stroke: border }} />
+          <YAxis
+            stroke={textMuted}
+            fontSize={11}
+            tickLine={false}
+            axisLine={false}
+            width={30}
+            tickFormatter={(v) => `${v}h`}
+          />
+          <Tooltip content={<HoursTooltip />} />
+          <Area
+            type="monotone"
+            dataKey="value"
+            name="Hours"
+            stroke="#2FBFA6"
+            strokeWidth={2}
+            fill="url(#hoursFill)"
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+      {!hasData && (
+        <p style={{ color: textMuted, fontSize: 12, marginTop: -8 }}>
+          No studio time clocked in this period yet.
+        </p>
+      )}
+    </div>
+  );
+}
