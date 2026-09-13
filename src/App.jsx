@@ -411,14 +411,13 @@ const PLANNER_DEPARTMENTS = [
   { id: "preproduction", label: "Pre-production", defaultPercent: 5 },
   { id: "storyboard", label: "Storyboard / Animatic", defaultPercent: 8 },
   { id: "character_design", label: "Character Design", defaultPercent: 8 },
-  { id: "backgrounds", label: "Background Art", defaultPercent: 12 },
+  { id: "backgrounds", label: "Background Art", defaultPercent: 11 },
   { id: "layout", label: "Layout", defaultPercent: 10 },
-  { id: "key_animation", label: "Key Animation", defaultPercent: 30 },
-  { id: "cleanup", label: "In-between / Cleanup", defaultPercent: 15 },
+  { id: "key_animation", label: "Key Animation", defaultPercent: 27 },
+  { id: "cleanup", label: "In-between / Cleanup", defaultPercent: 13 },
   { id: "compositing", label: "Compositing", defaultPercent: 10 },
   { id: "editing", label: "Editing", defaultPercent: 5 },
   { id: "sound", label: "Sound", defaultPercent: 3 },
-  { id: "contingency", label: "Contingency", defaultPercent: 7 },
 ];
 
 const CREW_RATE_TYPES = [
@@ -525,7 +524,7 @@ const BUILT_IN_PLANNER_TEMPLATES = [
     targetProfitPercent: 30,
     departmentAllocations: {
       preproduction: 8, storyboard: 10, character_design: 4, backgrounds: 10,
-      layout: 8, key_animation: 20, cleanup: 12, compositing: 15, editing: 8, sound: 5, contingency: 7,
+      layout: 8, key_animation: 20, cleanup: 12, compositing: 15, editing: 8, sound: 5,
     },
     scope: { complexity: "low", targetFps: 24 },
   },
@@ -537,7 +536,7 @@ const BUILT_IN_PLANNER_TEMPLATES = [
     targetProfitPercent: 25,
     departmentAllocations: {
       preproduction: 5, storyboard: 8, character_design: 6, backgrounds: 14,
-      layout: 8, key_animation: 22, cleanup: 12, compositing: 14, editing: 6, sound: 5, contingency: 7,
+      layout: 8, key_animation: 22, cleanup: 12, compositing: 14, editing: 6, sound: 5,
     },
     scope: { complexity: "medium", targetFps: 24 },
   },
@@ -549,7 +548,7 @@ const BUILT_IN_PLANNER_TEMPLATES = [
     targetProfitPercent: 30,
     departmentAllocations: {
       preproduction: 5, storyboard: 7, character_design: 8, backgrounds: 8,
-      layout: 7, key_animation: 25, cleanup: 12, compositing: 16, editing: 6, sound: 6, contingency: 7,
+      layout: 7, key_animation: 25, cleanup: 12, compositing: 16, editing: 6, sound: 6,
     },
     scope: { complexity: "high", targetFps: 24 },
   },

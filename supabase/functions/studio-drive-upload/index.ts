@@ -117,10 +117,29 @@ Deno.serve(async (req) => {
     // append as the freelancer path rather than a client-side
     // read-modify-write, for the same reason.
     if (shotId && typeof shotId === "string") {
+      // append_shot_file is security definer and only validates the
+      // column name, not ownership - projectId was already confirmed to
+      // belong to this user above, but shotId itself was never checked,
+      // so without this a signed-in user could pass a different shot's
+      // UUID (not hard to obtain if one ever leaks in a URL or log) and
+      // have their upload's metadata attached to someone else's shot.
+      const { data: shotRow, error: shotLookupError } = await supabase
+        .from("shots")
+        .select("id")
+        .eq("id", shotId)
+        .eq("project_id", projectId)
+        .eq("user_id", user.id)
+        .maybeSingle();
+      if (shotLookupError || !shotRow) {
+        return new Response(
+          JSON.stringify({ error: "The file uploaded to Drive, but that shot doesn't belong to this project." }),
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
       const { error: appendError } = await supabase.rpc("append_shot_file", {
         p_shot_id: shotId,
         p_column: "attachments",
-        p_entry: JSON.stringify([{ name: file.name, url: uploaded.url, driveFileId: uploaded.id }]),
+        p_entry: [{ name: file.name, url: uploaded.url, driveFileId: uploaded.id }],
       });
       if (appendError) {
         return new Response(

@@ -111,7 +111,7 @@ Deno.serve(async (req) => {
     const { error: updateError } = await supabase.rpc("append_shot_file", {
       p_shot_id: shot.id,
       p_column: "deliverables",
-      p_entry: JSON.stringify([nextDeliverable]),
+      p_entry: [nextDeliverable],
     });
 
     if (updateError) {
