@@ -67,9 +67,21 @@ Deno.serve(async (req) => {
     // Resolve the campaign id: prefer whatever's already stored (discovered
     // on a previous connection), fall back to a manually-set secret if
     // someone prefers to hardcode it, and if neither exists yet, try
-    // discovering it right now, this only actually returns data if the
-    // person connecting happens to be the campaign's own creator. Regular
-    // patrons connecting get an empty result here and that's fine, expected.
+    // Campaign id is only ever established two ways: a pre-configured
+    // patreon_campaign_config row, or the PATREON_CAMPAIGN_ID env var -
+    // never by auto-discovering it from whoever happens to be connecting.
+    // The previous version let the *first* successful connection's own
+    // Patreon /campaigns lookup silently become the permanent global
+    // campaign if nothing was set yet. That "only real patrons get empty
+    // results here" reasoning holds for ordinary patrons, but any patron
+    // who happens to run their own unrelated Patreon campaign - a
+    // genuinely common thing - would have had *their* campaign silently
+    // adopted as Studio Kairegi's, breaking Pro verification for everyone
+    // else. There's no way to reliably tell "the studio owner, bootstrapping
+    // for the first time" apart from "an unrelated patron who owns a
+    // campaign" from inside this callback, so the only safe answer is to
+    // never auto-bootstrap here at all - the studio owner sets
+    // PATREON_CAMPAIGN_ID (or inserts the row directly) once, by hand.
     let campaignId: string | null = null;
     const { data: campaignConfig } = await supabase
       .from("patreon_campaign_config")
@@ -79,37 +91,9 @@ Deno.serve(async (req) => {
     if (campaignConfig?.campaign_id) campaignId = campaignConfig.campaign_id;
     if (!campaignId) campaignId = Deno.env.get("PATREON_CAMPAIGN_ID") || null;
 
-    const campaignsRes = await fetch("https://www.patreon.com/api/oauth2/v2/campaigns", {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (campaignsRes.ok) {
-      const campaignsJson = await campaignsRes.json();
-      const discoveredId = campaignsJson?.data?.[0]?.id;
-      // Only ever write patreon_campaign_config once, on true first-time
-      // bootstrap (nothing stored yet, and no PATREON_CAMPAIGN_ID env var
-      // set either). Previously this ran on every connection and
-      // overwrote whatever was stored with campaigns[0] of whoever just
-      // connected - harmless for an ordinary patron (who owns no
-      // campaign, so this returns empty for them), but any patron who
-      // happens to own an unrelated Patreon campaign of their own would
-      // silently replace Studio Kairegi's campaign id, breaking Pro
-      // verification for everyone. Once a campaign id is established -
-      // by config or by that first real connection - it's authoritative
-      // and only changed by hand.
-      if (discoveredId && !campaignId) {
-        campaignId = discoveredId;
-        const { error: campaignSaveError } = await supabase
-          .from("patreon_campaign_config")
-          .upsert({ id: true, campaign_id: discoveredId, discovered_at: new Date().toISOString() });
-        if (campaignSaveError) {
-          console.error("Failed to store discovered campaign id:", campaignSaveError.message);
-        }
-      }
-    }
-
     if (!campaignId) {
       console.error(
-        "No campaign id available yet, connect Patreon once as the campaign creator to auto-discover it, or set PATREON_CAMPAIGN_ID manually."
+        "No campaign id configured. Set PATREON_CAMPAIGN_ID (or insert a row into patreon_campaign_config) as the studio owner before Patreon Pro verification can work."
       );
     }
 

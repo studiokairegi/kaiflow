@@ -54,6 +54,25 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
+    // Verify the project actually belongs to this user BEFORE creating
+    // anything in Drive. The previous version only checked ownership via
+    // the final .update(...).eq("user_id", user.id) - which just quietly
+    // updates zero rows on a bad projectId rather than erroring - so a
+    // bad request still burned Drive API calls and left orphaned,
+    // never-linked folders sitting in the user's Drive.
+    const { data: existingProject, error: existingProjectError } = await supabase
+      .from("projects")
+      .select("id")
+      .eq("id", projectId)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (existingProjectError || !existingProject) {
+      return new Response(JSON.stringify({ error: "Project not found" }), {
+        status: 404,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const { data: connection, error: connError } = await supabase
       .from("google_drive_connections")
       .select("*")

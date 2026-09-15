@@ -109,20 +109,12 @@ Deno.serve(async (req) => {
     const refreshToken = await decryptText(connection.refresh_token_encrypted, encryptionKey);
     const accessToken = await getAccessToken(refreshToken);
 
-    const fileBytes = new Uint8Array(await file.arrayBuffer());
-    const uploaded = await uploadFileToDrive(accessToken, targetFolderId, file.name, fileBytes, file.type);
-
-    // Record the attachment against the shot if one was given (attachments
-    // are edited from within a shot's editor). Uses the same atomic
-    // append as the freelancer path rather than a client-side
-    // read-modify-write, for the same reason.
+    // Validate the shot BEFORE touching Drive, not after - the previous
+    // version uploaded first and only checked shotId ownership afterward,
+    // so a bad shotId still produced a real orphaned Drive file with no
+    // way to record it. Checking here means a rejected shotId never
+    // costs a Drive API call or leaves anything behind.
     if (shotId && typeof shotId === "string") {
-      // append_shot_file is security definer and only validates the
-      // column name, not ownership - projectId was already confirmed to
-      // belong to this user above, but shotId itself was never checked,
-      // so without this a signed-in user could pass a different shot's
-      // UUID (not hard to obtain if one ever leaks in a URL or log) and
-      // have their upload's metadata attached to someone else's shot.
       const { data: shotRow, error: shotLookupError } = await supabase
         .from("shots")
         .select("id")
@@ -132,10 +124,20 @@ Deno.serve(async (req) => {
         .maybeSingle();
       if (shotLookupError || !shotRow) {
         return new Response(
-          JSON.stringify({ error: "The file uploaded to Drive, but that shot doesn't belong to this project." }),
+          JSON.stringify({ error: "That shot doesn't belong to this project." }),
           { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
+    }
+
+    const fileBytes = new Uint8Array(await file.arrayBuffer());
+    const uploaded = await uploadFileToDrive(accessToken, targetFolderId, file.name, fileBytes, file.type);
+
+    // Record the attachment against the shot if one was given (attachments
+    // are edited from within a shot's editor). Uses the same atomic
+    // append as the freelancer path rather than a client-side
+    // read-modify-write, for the same reason.
+    if (shotId && typeof shotId === "string") {
       const { error: appendError } = await supabase.rpc("append_shot_file", {
         p_shot_id: shotId,
         p_column: "attachments",

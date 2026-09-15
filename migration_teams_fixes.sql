@@ -14,24 +14,6 @@ alter table user_settings add column if not exists default_landing_tab text not 
 alter table user_settings add column if not exists default_shot_priority text not null default 'normal';
 alter table user_settings add column if not exists logo_url text default '';
 
--- Per-project and per-invoice currency selection
-alter table projects add column if not exists currency text not null default '$';
-alter table invoices add column if not exists currency text not null default '$';
-
--- More personalized settings: default landing tab, default shot priority, studio logo
-alter table user_settings add column if not exists default_landing_tab text not null default 'dashboard';
-alter table user_settings add column if not exists default_shot_priority text not null default 'normal';
-alter table user_settings add column if not exists logo_url text default '';
-
--- Per-project and per-invoice currency selection
-alter table projects add column if not exists currency text not null default '$';
-alter table invoices add column if not exists currency text not null default '$';
-
--- Additional personalization settings
-alter table user_settings add column if not exists default_landing_tab text not null default 'dashboard';
-alter table user_settings add column if not exists default_shot_priority text not null default 'normal';
-alter table user_settings add column if not exists logo_url text default '';
-
 -- Simple Teams roster, a manual list of freelancers/collaborators.
 -- Not tied to real logins, just a lightweight directory the studio maintains.
 create table if not exists team_members (
@@ -63,35 +45,14 @@ end $$;
 
 create index if not exists team_members_user_id_idx on team_members(user_id);
 
--- The Freelancer share-link RPC needs to also return payment info now
-create or replace function get_shared_shot(p_token text)
-returns table (
-  shot_title text,
-  project_name text,
-  studio_name text,
-  stage text,
-  review_status text,
-  notes text,
-  assigned_to text,
-  attachments jsonb
-)
-language sql
-security definer
-set search_path = public
-as $$
-  select
-    s.title as shot_title,
-    p.name as project_name,
-    coalesce(us.studio_name, 'Studio Kairegi') as studio_name,
-    s.stage,
-    s.review_status,
-    s.notes,
-    s.assigned_to,
-    s.attachments
-  from shots s
-  join projects p on p.id = s.project_id
-  left join user_settings us on us.user_id = s.user_id
-  where s.share_token = p_token;
-$$;
-
-grant execute on function get_shared_shot(text) to anon, authenticated;
+-- NOTE: this file used to also redefine get_shared_shot() here (with a
+-- comment claiming it needed to return payment info, which it never
+-- actually did - the RETURNS TABLE never included assigned_pay/
+-- assigned_paid). That redefinition has been removed entirely: with no
+-- enforced migration order across this project's 29-odd migration files,
+-- four different files redefining the same function meant plain
+-- alphabetical run order could silently pick this file's copy - the
+-- oldest, most incomplete one - over the actually-correct, later fixes.
+-- get_shared_shot() now has exactly one definition, in
+-- migration_audit_fixes_5.sql, and nothing else in this project should
+-- ever `create or replace` it again.

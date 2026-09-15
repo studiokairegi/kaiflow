@@ -80,36 +80,13 @@ $$;
 
 grant execute on function get_shared_project(text) to anon, authenticated;
 
--- RPC: fetch a single shot's brief and attachments by share token, for the
--- public Freelancer link.
-create or replace function get_shared_shot(p_token text)
-returns table (
-  shot_title text,
-  project_name text,
-  studio_name text,
-  stage text,
-  review_status text,
-  notes text,
-  assigned_to text,
-  attachments jsonb
-)
-language sql
-security definer
-set search_path = public
-as $$
-  select
-    s.title as shot_title,
-    p.name as project_name,
-    coalesce(us.studio_name, 'Studio Kairegi') as studio_name,
-    s.stage,
-    s.review_status,
-    s.notes,
-    s.assigned_to,
-    s.attachments
-  from shots s
-  join projects p on p.id = s.project_id
-  left join user_settings us on us.user_id = s.user_id
-  where s.share_token = p_token;
-$$;
-
-grant execute on function get_shared_shot(text) to anon, authenticated;
+-- NOTE: get_shared_shot() used to be defined here too, but with 29-odd
+-- migration files and no enforced run order, having the same function
+-- redefined across multiple files meant plain alphabetical ordering could
+-- pick an outdated copy over a later, correct fix (this file's version
+-- didn't include `deliverables` at all, and alphabetically this file
+-- would have run *after* every migration_audit_fixes_*.sql file that
+-- tried to fix it - silently reintroducing the bug on a fresh deploy).
+-- get_shared_shot() now has exactly one definition, in
+-- migration_audit_fixes_5.sql, and nothing else in this project should
+-- ever `create or replace` it again.

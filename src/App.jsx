@@ -86,9 +86,20 @@ const LEAD_TERMINAL_STAGES = [
 
 const ALL_LEAD_STAGES = [...LEAD_STAGES, ...LEAD_TERMINAL_STAGES];
 
+// Won behaves as terminal for every business-logic purpose (follow-ups,
+// "active leads" counts, manual archive eligibility) even though it lives
+// in LEAD_STAGES rather than LEAD_TERMINAL_STAGES - that placement is only
+// so the Kanban board renders its column right after Negotiation instead
+// of after Lost/Disqualified/Closed. Use this helper for terminal checks
+// instead of testing LEAD_TERMINAL_STAGES directly.
+function isLeadStageTerminal(stageId) {
+  return stageId === "won" || LEAD_TERMINAL_STAGES.some((s) => s.id === stageId);
+}
+
 // "Active outreach" for dashboard purposes: everyone already contacted,
-// not counting the untouched pool or any terminal outcome.
-const ACTIVE_OUTREACH_STAGE_IDS = ["cold_email", "responded", "qualified", "proposal", "negotiation", "won"];
+// not counting the untouched pool or any terminal outcome. Won is
+// excluded - a won deal has converted, it isn't outreach in progress.
+const ACTIVE_OUTREACH_STAGE_IDS = ["cold_email", "responded", "qualified", "proposal", "negotiation"];
 
 const LEAD_PRIORITIES = [
   { id: "hot", label: "Hot", icon: "\u{1F525}" },
@@ -185,6 +196,7 @@ function emptyProject(overrides = {}) {
     driveFolderId: null,
     driveFolderUrl: null,
     driveDeliverablesFolderId: null,
+    driveReferencesFolderId: null,
     ...overrides,
   };
 }
@@ -1276,7 +1288,7 @@ function teamMemberToRow(member, userId) {
     capacity_unit: member.capacityUnit || "hours/week",
     skills: Array.isArray(member.skills) ? member.skills : [],
     skill_level: Number(member.skillLevel) || 3,
-    dependability_score: Number(member.dependabilityScore) || 0,
+    dependability_score: Number(member.dependabilityScore) || 80,
     default_speed_value: Number(member.defaultSpeedValue) || 0,
     default_speed_unit: member.defaultSpeedUnit || "",
     notes: member.notes,
@@ -1360,7 +1372,7 @@ function computeFinanceData(projects, invoices, expenses, fxRates = {}) {
         daysOverdue,
       };
     })
-    .sort((a, b) => (b.daysOverdue || -999) - (a.daysOverdue || -999));
+    .sort((a, b) => (b.daysOverdue ?? -999) - (a.daysOverdue ?? -999));
 
   // Per-project profitability, converted to USD so projects in different
   // currencies can be compared side by side.
@@ -1476,9 +1488,7 @@ function settingsToRow(settings, userId) {
 
 function computeDashboardStats(projects, cards, leads, invoices, fxRates = {}) {
   const activeProjects = projects.filter((p) => !p.archived);
-  const activeLeads = leads.filter(
-    (l) => !l.archivedAt && !LEAD_TERMINAL_STAGES.some((s) => s.id === l.stage)
-  );
+  const activeLeads = leads.filter((l) => !l.archivedAt && !isLeadStageTerminal(l.stage));
   const dealsWon = leads.filter((l) => l.stage === "won").length;
   const dealsLost = leads.filter((l) => l.stage === "lost").length;
 
@@ -1488,7 +1498,7 @@ function computeDashboardStats(projects, cards, leads, invoices, fxRates = {}) {
     const d = new Date(p.deadline);
     if (isNaN(d.getTime())) return false;
     const diffDays = (d - now) / 86400000;
-    return diffDays <= 7;
+    return diffDays >= 0 && diffDays <= 7;
   });
 
   const projectsCompleted = activeProjects.filter((p) => {
@@ -1825,13 +1835,23 @@ function buildActivityEntries(oldLead, newLead) {
   return entries;
 }
 
+// "YYYY-MM-DD" parsed via `new Date(str)` is interpreted as UTC midnight,
+// which reads as the previous calendar day for anyone west of UTC (all of
+// North/South America). Parse the parts directly instead, so the date
+// lands on local midnight of the intended calendar day.
+function parseLocalDateStr(dateStr) {
+  const [y, m, d] = (dateStr || "").split("-").map(Number);
+  if (!y || !m || !d) return new Date(NaN);
+  return new Date(y, m - 1, d);
+}
+
 // Given a lead and the studio's follow-up cadence, figures out what's next:
 // which slot is due, when, and what the lead card/editor should say about
 // it. Returns null once outreach is over (terminal stage, or all 5 emails
 // already sent).
 function computeFollowupStatus(lead, schedule = DEFAULT_FOLLOWUP_SCHEDULE) {
   const emails = normalizeEmails(lead.emails);
-  const isTerminal = LEAD_TERMINAL_STAGES.some((s) => s.id === lead.stage);
+  const isTerminal = isLeadStageTerminal(lead.stage);
   const anchorStr = emails[0]?.dateSent;
   const lastSent = emails.filter((e) => e.sent && e.dateSent).map((e) => e.dateSent).sort().pop() || null;
 
@@ -1856,11 +1876,12 @@ function computeFollowupStatus(lead, schedule = DEFAULT_FOLLOWUP_SCHEDULE) {
     };
   }
 
-  const anchor = new Date(anchorStr);
+  const anchor = parseLocalDateStr(anchorStr);
   const dayOffset = schedule[nextIndex]?.dayOffset ?? 0;
-  const due = new Date(anchor.getTime() + dayOffset * 86400000);
+  const due = new Date(anchor);
+  due.setDate(due.getDate() + dayOffset);
   const today = new Date();
-  const daysUntilDue = Math.floor((due.setHours(0, 0, 0, 0) - today.setHours(0, 0, 0, 0)) / 86400000);
+  const daysUntilDue = Math.round((due.setHours(0, 0, 0, 0) - today.setHours(0, 0, 0, 0)) / 86400000);
 
   let dueLabel;
   if (daysUntilDue < 0) dueLabel = `Follow-up overdue by ${Math.abs(daysUntilDue)}d`;
@@ -1877,7 +1898,7 @@ function computeFollowupStatus(lead, schedule = DEFAULT_FOLLOWUP_SCHEDULE) {
 }
 
 function formatShortDate(dateStr) {
-  const d = new Date(dateStr);
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(dateStr || "") ? parseLocalDateStr(dateStr) : new Date(dateStr);
   if (isNaN(d.getTime())) return dateStr;
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
@@ -1931,7 +1952,7 @@ function findPossibleDuplicates(form, leads, excludeId) {
     if (email && leadEmail && email === leadEmail) confidence = "very_high";
     else if (website && leadWebsite && website === leadWebsite) confidence = "very_high";
     else if (company && leadCompany && company === leadCompany) {
-      confidence = contact && leadContact && contact === leadContact ? "high" : "high";
+      confidence = contact && leadContact && contact === leadContact ? "very_high" : "high";
     } else if (
       company &&
       leadCompany &&
@@ -2202,6 +2223,31 @@ export default function ShotTracker() {
   const [leadPriorityFilter, setLeadPriorityFilter] = useState("all");
   const [leadFollowupFilter, setLeadFollowupFilter] = useState("all");
   const [showArchivedLeads, setShowArchivedLeads] = useState(false);
+
+  // Shared by the Kanban board columns and the archived-leads list, so
+  // toggling "Show archived" doesn't leave the search/channel/priority/
+  // status/follow-up filters looking live while actually doing nothing.
+  const leadMatchesActiveFilters = (l) => {
+    if (leadChannelFilter !== "all" && l.channel !== leadChannelFilter) return false;
+    if (leadPriorityFilter !== "all" && l.priority !== leadPriorityFilter) return false;
+    if (leadStatusFilter !== "all" && l.stage !== leadStatusFilter) return false;
+    const searchText = leadSearch.trim().toLowerCase();
+    if (searchText) {
+      const haystack = [l.companyName, l.contactPerson, l.email, l.website, l.notes]
+        .join(" ")
+        .toLowerCase();
+      if (!haystack.includes(searchText)) return false;
+    }
+    if (leadFollowupFilter !== "all") {
+      const status = computeFollowupStatus(l, settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE);
+      const notStarted = status.nextActionLabel === "Send initial email";
+      if (leadFollowupFilter === "due" && !status.isDue) return false;
+      if (leadFollowupFilter === "upcoming" && (status.isDue || status.daysUntilDue == null)) return false;
+      if (leadFollowupFilter === "completed" && (notStarted || status.daysUntilDue !== null)) return false;
+      if (leadFollowupFilter === "none" && !notStarted) return false;
+    }
+    return true;
+  };
   const [dragVisual, setDragVisual] = useState(null);
   const [saveState, setSaveState] = useState("idle");
 
@@ -2652,6 +2698,7 @@ export default function ShotTracker() {
         driveFolderId: p.drive_folder_id || null,
         driveFolderUrl: p.drive_folder_url || null,
         driveDeliverablesFolderId: p.drive_deliverables_folder_id || null,
+        driveReferencesFolderId: p.drive_references_folder_id || null,
       }));
       const nextCards = (shotsRes.data || []).map(cardFromRow);
       const nextLeads = (leadsRes.data || []).map(leadFromRow);
@@ -2789,6 +2836,7 @@ export default function ShotTracker() {
               driveFolderId: inserted.drive_folder_id || null,
               driveFolderUrl: inserted.drive_folder_url || null,
               driveDeliverablesFolderId: inserted.drive_deliverables_folder_id || null,
+              driveReferencesFolderId: inserted.drive_references_folder_id || null,
             },
           ],
           cards: [...prev.cards, ...newCards],
@@ -2818,6 +2866,10 @@ export default function ShotTracker() {
     } catch (e) {
       console.error("Project save failed:", e);
       flashSave(false);
+      // Same reasoning as the cancel handler: don't let a pending
+      // lead->project link survive to attach itself to a later,
+      // unrelated project.
+      if (!project.id && pendingLeadLinkId) setPendingLeadLinkId(null);
     }
     setEditingProject(null);
   };
@@ -2941,6 +2993,8 @@ export default function ShotTracker() {
   };
 
   const moveCardStage = async (id, stage) => {
+    const existing = data.cards.find((c) => c.id === id);
+    if (existing && existing.stage === stage) return; // no-op guard, same reasoning as the drag dispatch check
     const resetFields = { reviewStatus: "in_progress", revisions: [], revisionVersion: 1 };
     setData((prev) => ({
       ...prev,
@@ -3008,6 +3062,7 @@ export default function ShotTracker() {
           : oldLead.stageChangedAt || null,
     };
     try {
+      let savedLead = lead;
       if (lead.id) {
         const { error } = await supabase.from("leads").update(leadToRow(lead, userId)).eq("id", lead.id);
         if (error) throw error;
@@ -3022,14 +3077,17 @@ export default function ShotTracker() {
           .select()
           .single();
         if (error) throw error;
-        setData((prev) => ({ ...prev, leads: [...prev.leads, leadFromRow(inserted)] }));
+        savedLead = leadFromRow(inserted);
+        setData((prev) => ({ ...prev, leads: [...prev.leads, savedLead] }));
       }
       flashSave(true);
+      setEditingLead(null);
+      return savedLead;
     } catch (e) {
       console.error("Lead save failed:", e);
       flashSave(false);
+      return null;
     }
-    setEditingLead(null);
   };
 
   const handleArchiveLead = (lead) => handleSaveLead({ ...lead, archivedAt: new Date().toISOString() });
@@ -3051,6 +3109,7 @@ export default function ShotTracker() {
 
   const moveLeadStage = async (id, stage) => {
     const oldLead = data.leads.find((l) => l.id === id);
+    if (oldLead && oldLead.stage === stage) return; // no-op guard, same reasoning as the drag dispatch check
     const nowIso = new Date().toISOString();
     const entries = oldLead ? buildActivityEntries(oldLead, { ...oldLead, stage }) : [];
     setData((prev) => ({
@@ -3076,6 +3135,14 @@ export default function ShotTracker() {
     } catch (e) {
       console.error("Lead stage move failed:", e);
       flashSave(false);
+      // Roll back the optimistic move - otherwise the board shows a stage
+      // the database never actually accepted until the next full reload.
+      if (oldLead) {
+        setData((prev) => ({
+          ...prev,
+          leads: prev.leads.map((l) => (l.id === id ? oldLead : l)),
+        }));
+      }
     }
   };
 
@@ -3088,8 +3155,15 @@ export default function ShotTracker() {
   // prefilled New Project form so no data has to be typed twice.
   const handleMarkWon = async (lead) => {
     const wonLead = { ...lead, stage: "won" };
-    await handleSaveLead(wonLead);
-    setPendingLeadLinkId(lead.id || null);
+    const saved = await handleSaveLead(wonLead);
+    // Don't open project creation off a lead that didn't actually get
+    // marked Won - that produced a real project with no corresponding
+    // Won lead behind it if the save failed for any reason.
+    if (!saved) return;
+    // Use the saved lead's id, not lead.id - for a brand-new lead, lead.id
+    // is undefined until the insert returns one, so falling back to
+    // lead.id here silently dropped the link.
+    setPendingLeadLinkId(saved.id || null);
     setWorkspace("projects");
     setView("projects");
     setEditingProject(
@@ -3208,21 +3282,34 @@ export default function ShotTracker() {
         setData((prev) => ({ ...prev, expenses: [...prev.expenses, expenseFromRow(inserted)] }));
       }
       flashSave(true);
+      setEditingExpense(null);
+      return true;
     } catch (e) {
       console.error("Expense save failed:", e);
       flashSave(false);
+      return false;
     }
-    setEditingExpense(null);
   };
 
   const handleLogShotExpense = async (card) => {
-    await handleSaveExpense({
+    // Only mark the shot paid if the expense actually saved - otherwise a
+    // failed insert (network blip, RLS issue, whatever) would still leave
+    // the shot showing as paid with no expense record behind it.
+    // Tag the expense with the project's own currency, not the expense-form
+    // default - without this, every crew payment silently got recorded as
+    // USD regardless of the project's real currency (e.g. a ¥5,000 payment
+    // on a JPY project logged as a $5,000 expense), corrupting profit/
+    // expense totals for that project from then on.
+    const project = data.projects.find((p) => p.id === card.projectId);
+    const expenseSaved = await handleSaveExpense({
       projectId: card.projectId,
       category: "Animator Payments",
       description: `${card.title || "Shot"}${card.assignedTo ? " \u2014 " + card.assignedTo : ""}`,
       amount: card.assignedPay,
+      currency: project?.currency || "$",
       date: new Date().toISOString().slice(0, 10),
     });
+    if (!expenseSaved) return;
     try {
       const { error } = await supabase.from("shots").update({ assigned_paid: true }).eq("id", card.id);
       if (error) throw error;
@@ -3630,7 +3717,13 @@ export default function ShotTracker() {
         const el = document.elementFromPoint(e.clientX, e.clientY);
         const columnEl = el && el.closest("[data-stage]");
         const stage = columnEl ? columnEl.getAttribute("data-stage") : null;
-        if (stage) {
+        // Dropping back into the same column is an easy, ordinary thing to
+        // do (pick up, hesitate, put down) - without this check it still
+        // dispatched a full "move", which for shots wipes review status
+        // and the entire revision history, and for leads resets
+        // stage_changed_at (restarting the archive countdown) even though
+        // nothing actually changed.
+        if (stage && stage !== ds.originStage) {
           if (ds.kind === "lead") {
             moveLeadStageRef.current(ds.id, stage);
           } else {
@@ -3658,6 +3751,7 @@ export default function ShotTracker() {
     const state = {
       kind,
       id: card.id,
+      originStage: card.stage,
       title: kind === "lead" ? card.companyName : card.title,
       client: kind === "lead" ? card.contactPerson : card.client,
       startX: e.clientX,
@@ -4349,11 +4443,11 @@ export default function ShotTracker() {
 
           {showArchivedLeads ? (
             <div style={styles.timeline}>
-              {leads.filter((l) => l.archivedAt).length === 0 && (
-                <p style={styles.fieldHint}>No archived leads yet.</p>
+              {leads.filter((l) => l.archivedAt && leadMatchesActiveFilters(l)).length === 0 && (
+                <p style={styles.fieldHint}>No archived leads match your filters.</p>
               )}
               {leads
-                .filter((l) => l.archivedAt)
+                .filter((l) => l.archivedAt && leadMatchesActiveFilters(l))
                 .map((lead) => (
                   <div key={lead.id} style={{ ...styles.card, cursor: "pointer" }} onClick={() => handleLeadClick(lead)}>
                     <div style={styles.cardTop}>
@@ -4371,28 +4465,10 @@ export default function ShotTracker() {
           ) : (
             <div style={{ ...styles.board, touchAction: dragVisual ? "none" : "auto" }}>
               {ALL_LEAD_STAGES.map((stage) => {
-                const searchText = leadSearch.trim().toLowerCase();
                 const stageLeads = leads.filter((l) => {
                   if (l.stage !== stage.id) return false;
                   if (l.archivedAt) return false;
-                  if (leadChannelFilter !== "all" && l.channel !== leadChannelFilter) return false;
-                  if (leadPriorityFilter !== "all" && l.priority !== leadPriorityFilter) return false;
-                  if (leadStatusFilter !== "all" && l.stage !== leadStatusFilter) return false;
-                  if (searchText) {
-                    const haystack = [l.companyName, l.contactPerson, l.email, l.website, l.notes]
-                      .join(" ")
-                      .toLowerCase();
-                    if (!haystack.includes(searchText)) return false;
-                  }
-                  if (leadFollowupFilter !== "all") {
-                    const status = computeFollowupStatus(l, settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE);
-                    const notStarted = status.nextActionLabel === "Send initial email";
-                    if (leadFollowupFilter === "due" && !status.isDue) return false;
-                    if (leadFollowupFilter === "upcoming" && (status.isDue || status.daysUntilDue == null)) return false;
-                    if (leadFollowupFilter === "completed" && (notStarted || status.daysUntilDue !== null)) return false;
-                    if (leadFollowupFilter === "none" && !notStarted) return false;
-                  }
-                  return true;
+                  return leadMatchesActiveFilters(l);
                 });
                 const isOver = dragOverStage === stage.id;
                 return (
@@ -4731,7 +4807,14 @@ export default function ShotTracker() {
       {editingProject && (
         <ProjectEditor
           project={editingProject}
-          onCancel={() => setEditingProject(null)}
+          onCancel={() => {
+            // A Mark-Won flow may have left pendingLeadLinkId set expecting
+            // this project to be saved - if the user cancels instead, that
+            // link must not silently attach to whatever project they save
+            // next.
+            setPendingLeadLinkId(null);
+            setEditingProject(null);
+          }}
           onSave={handleSaveProject}
           onDelete={handleDeleteProject}
           isNew={!editingProject.id}
@@ -5556,6 +5639,18 @@ function isSameLocalDay(a, b) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
+// Inclusive day count between two dates using calendar-field arithmetic
+// (via startOfLocalDay/addDays), matching every other date helper in this
+// file - unlike a raw millisecond division by 86400000, this stays correct
+// across the day a clock change happens.
+function calendarDaysBetween(a, b) {
+  const start = startOfLocalDay(a);
+  const end = startOfLocalDay(b);
+  let count = 0;
+  for (let cursor = new Date(start); cursor <= end; cursor = addDays(cursor, 1)) count++;
+  return count;
+}
+
 function dayKey(d) {
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
@@ -5583,6 +5678,44 @@ function savePomodoroConfig(config) {
     window.localStorage.setItem(POMODORO_STORAGE_KEY, JSON.stringify(config));
   } catch {
     // storage unavailable/full - the in-memory config still works for this session
+  }
+}
+
+// Unlike pomodoroConfig (a standing preference), this is the live in-progress
+// phase/countdown/cycle - saved so a remount (navigating away from the
+// Dashboard and back, or a page refresh) can resume a focus session instead
+// of silently dropping it. Cleared whenever there's no active phase.
+const POMODORO_STATE_KEY = "kairil_pomodoro_state";
+
+function loadPomodoroState() {
+  if (typeof window === "undefined" || !window.localStorage) return null;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(POMODORO_STATE_KEY));
+    if (
+      saved &&
+      typeof saved === "object" &&
+      ["work", "break", "longBreak"].includes(saved.phase) &&
+      Number.isFinite(saved.phaseEndsAt)
+    ) {
+      return {
+        phase: saved.phase,
+        phaseEndsAt: saved.phaseEndsAt,
+        cycle: Number.isFinite(saved.cycle) && saved.cycle >= 1 ? saved.cycle : 1,
+      };
+    }
+  } catch {
+    // malformed or missing - nothing to resume
+  }
+  return null;
+}
+
+function savePomodoroState(state) {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    if (state) window.localStorage.setItem(POMODORO_STATE_KEY, JSON.stringify(state));
+    else window.localStorage.removeItem(POMODORO_STATE_KEY);
+  } catch {
+    // best-effort only
   }
 }
 
@@ -5682,7 +5815,7 @@ function DashboardGreeting({ user, compact = false }) {
 // nothing to "restore" client-side, it just re-asks the database what's
 // true every time.
 
-function PomodoroSetupForm({ config, onChange, onStart }) {
+function PomodoroSetupForm({ config, onChange, onStart, busy }) {
   const setField = (field, max) => (e) => {
     const value = Math.max(1, Math.min(max, Number(e.target.value) || 1));
     onChange({ ...config, [field]: value });
@@ -5708,8 +5841,8 @@ function PomodoroSetupForm({ config, onChange, onStart }) {
           <input type="number" min={1} max={12} style={styles.input} value={config.cyclesBeforeLongBreak} onChange={setField("cyclesBeforeLongBreak", 12)} />
         </label>
       </div>
-      <button type="button" style={styles.newButton} onClick={onStart}>
-        <ClockIcon />
+      <button type="button" style={styles.newButton} onClick={onStart} disabled={busy}>
+        {busy ? <SpinnerIcon size={16} /> : <ClockIcon />}
         Start Focus Session
       </button>
     </div>
@@ -5718,9 +5851,11 @@ function PomodoroSetupForm({ config, onChange, onStart }) {
 
 // Totals + a day-by-day trend for one period (week or month), from a set of
 // already-fetched completed sessions plus the live active session if any.
-// The active session (if present) always counts toward both periods: it's
-// happening right now, so by definition it falls within both "this week"
-// and "this month" regardless of when it started.
+// The active session (if present) only counts toward a period whose range
+// actually contains its clock_in - a session left open from a prior period
+// (forgotten clock-out, a stalled auto-cycle, a sleeping laptop) should not
+// have its full elapsed time folded into whatever period happens to be open
+// right now.
 function computePeriodStats(completedSessions, activeSession, rangeStart, rangeEndExclusive, now) {
   const inRange = completedSessions.filter((r) => {
     const d = new Date(r.clock_in);
@@ -5741,20 +5876,53 @@ function computePeriodStats(completedSessions, activeSession, rangeStart, rangeE
   let pomodoroSeconds = 0;
   const activeDayKeys = new Set();
 
+  // A session that crosses midnight gets its duration split across each
+  // calendar day it actually touches, rather than attributing all of it to
+  // the start day - both for the daily trend chart and for "active days".
+  const attributeSession = (start, end, seconds, sessionType) => {
+    totalSeconds += seconds;
+    if (sessionType === "pomodoro") pomodoroSeconds += seconds;
+    if (seconds <= 0 || isSameLocalDay(start, end)) {
+      activeDayKeys.add(dayKey(start));
+      addToDay(start, seconds);
+      return;
+    }
+    let cursor = start;
+    let remaining = seconds;
+    while (cursor < end && remaining > 0) {
+      const dayEnd = addDays(startOfLocalDay(cursor), 1);
+      const segmentEnd = dayEnd < end ? dayEnd : end;
+      const isLastSegment = segmentEnd >= end;
+      // Every day but the last is capped at its own real elapsed time so it
+      // never claims more than actually happened on it. The last day just
+      // absorbs whatever's left of the budget - `seconds` (the DB's
+      // whole-second duration) and the real end-start difference can be
+      // off by a fraction of a second, and letting the final segment
+      // soak that up guarantees the per-day total always adds back up to
+      // `seconds` exactly, instead of leaving a stray second unattributed.
+      const segmentSeconds = isLastSegment
+        ? remaining
+        : Math.min(remaining, Math.max(0, Math.round((segmentEnd - cursor) / 1000)));
+      activeDayKeys.add(dayKey(cursor));
+      addToDay(cursor, segmentSeconds);
+      remaining -= segmentSeconds;
+      cursor = segmentEnd;
+    }
+  };
+
   inRange.forEach((r) => {
     const seconds = r.duration || 0;
-    totalSeconds += seconds;
-    if (r.session_type === "pomodoro") pomodoroSeconds += seconds;
-    activeDayKeys.add(dayKey(new Date(r.clock_in)));
-    addToDay(new Date(r.clock_in), seconds);
+    const start = new Date(r.clock_in);
+    const end = r.clock_out ? new Date(r.clock_out) : new Date(start.getTime() + seconds * 1000);
+    attributeSession(start, end, seconds, r.session_type);
   });
 
   if (activeSession) {
-    const elapsed = Math.max(0, Math.floor((now - new Date(activeSession.clockIn)) / 1000));
-    totalSeconds += elapsed;
-    if (activeSession.sessionType === "pomodoro") pomodoroSeconds += elapsed;
-    activeDayKeys.add(dayKey(new Date(activeSession.clockIn)));
-    addToDay(new Date(activeSession.clockIn), elapsed);
+    const start = new Date(activeSession.clockIn);
+    if (start >= rangeStart && start < rangeEndExclusive) {
+      const elapsed = Math.max(0, Math.floor((now - start) / 1000));
+      attributeSession(start, now, elapsed, activeSession.sessionType);
+    }
   }
 
   return {
@@ -5809,8 +5977,7 @@ function StudioTimeSummaryModal({ userId, onClose }) {
   const rangeEndExclusive =
     period === "week" ? addDays(rangeStart, 7) : new Date(now.getFullYear(), now.getMonth() + 1, 1);
   const stats = computePeriodStats(completedRows, activeSession, rangeStart, rangeEndExclusive, now);
-  const daysSoFar =
-    Math.floor((Math.min(now.getTime(), rangeEndExclusive.getTime() - 1) - rangeStart.getTime()) / 86400000) + 1;
+  const daysSoFar = calendarDaysBetween(rangeStart, new Date(Math.min(now.getTime(), rangeEndExclusive.getTime() - 1)));
   const focusRatio = stats.totalSeconds > 0 ? Math.round((stats.pomodoroSeconds / stats.totalSeconds) * 100) : 0;
 
   const trendData = stats.dailyTrend.map((d) => ({
@@ -5893,7 +6060,7 @@ function StudioTimeSummaryModal({ userId, onClose }) {
     </div>
   );
 }
-function StudioTimeCard({ userId, compact = false }) {
+function StudioTimeCard({ userId }) {
   const [activeSession, setActiveSession] = useState(null); // { id, clockIn, sessionType } | null
   const [todaySeconds, setTodaySeconds] = useState(0); // completed sessions today, in seconds
   const [now, setNow] = useState(() => new Date());
@@ -5908,9 +6075,13 @@ function StudioTimeCard({ userId, compact = false }) {
   // not a separate tracking system.
   const [pomodoroConfig, setPomodoroConfig] = useState(loadPomodoroConfig);
   const [showPomodoroSetup, setShowPomodoroSetup] = useState(false);
-  const [pomodoroPhase, setPomodoroPhase] = useState(null); // null | "work" | "break" | "longBreak"
-  const [pomodoroCycle, setPomodoroCycle] = useState(1);
-  const [phaseEndsAt, setPhaseEndsAt] = useState(null); // ms epoch
+  // Initialized from localStorage (not just null) so a remount - navigating
+  // away from the Dashboard and back, or a page refresh - can resume an
+  // in-progress focus session instead of silently dropping the countdown.
+  // Reconciled against the actual DB session just below, once it loads.
+  const [pomodoroPhase, setPomodoroPhase] = useState(() => loadPomodoroState()?.phase ?? null); // null | "work" | "break" | "longBreak"
+  const [pomodoroCycle, setPomodoroCycle] = useState(() => loadPomodoroState()?.cycle ?? 1);
+  const [phaseEndsAt, setPhaseEndsAt] = useState(() => loadPomodoroState()?.phaseEndsAt ?? null); // ms epoch
   const transitioningRef = useRef(false);
 
   // Always-on-top popup (Document Picture-in-Picture). Chrome/Edge and
@@ -5920,24 +6091,70 @@ function StudioTimeCard({ userId, compact = false }) {
 
   const [showSummary, setShowSummary] = useState(false);
 
+  // Computed early (rather than just before render) so openPip and the
+  // auto-close effect below can both use it: the pop-out window is only
+  // ever meant to show an active session/phase, never the idle setup view.
+  const idle = !activeSession && !pomodoroPhase;
+
   useEffect(() => {
     setPipSupported(typeof window !== "undefined" && "documentPictureInPicture" in window);
   }, []);
+
+  // Close the floating window whenever it changes and on unmount (e.g.
+  // navigating off the Dashboard while it's open) - otherwise React tears
+  // down the portaled content but leaves the native window itself behind,
+  // with nothing in the app still holding a reference to close it.
+  useEffect(() => {
+    return () => {
+      if (pipWindow) pipWindow.close();
+    };
+  }, [pipWindow]);
+
+  // Closes the pop-out any time it's open while idle: the tracked
+  // session/phase ending while it's still open, or the brief window during
+  // a fresh clock-in before activeSession/pomodoroPhase have updated (see
+  // the comment on openPip below for why openPip itself can't guard on
+  // idle - the manual pop-out button guards with its own
+  // disabled={idle && !pipWindow} instead). Either way, this is what
+  // actually stops the fixed 240x240 window from settling on the wider
+  // "Start a focus session" setup grid.
+  useEffect(() => {
+    if (idle && pipWindow) {
+      pipWindow.close();
+      setPipWindow(null);
+    }
+  }, [idle, pipWindow]);
 
   useEffect(() => {
     savePomodoroConfig(pomodoroConfig);
   }, [pomodoroConfig]);
 
+  // Mirror the live phase/countdown/cycle to localStorage so it survives a
+  // remount; cleared automatically whenever there's no active phase (a
+  // natural phase end, stopPomodoro, or the reconciliation check below all
+  // flow through setPomodoroPhase(null), which lands here).
+  useEffect(() => {
+    if (pomodoroPhase && phaseEndsAt) {
+      savePomodoroState({ phase: pomodoroPhase, phaseEndsAt, cycle: pomodoroCycle });
+    } else {
+      savePomodoroState(null);
+    }
+  }, [pomodoroPhase, phaseEndsAt, pomodoroCycle]);
+
   const refetchSessions = useCallback(async () => {
     if (!userId) return;
     try {
       const dayStart = localDayStartISO();
+      const todayStartDate = startOfLocalDay(new Date());
       // Active session (any date, in case it was started just before
-      // midnight) plus every session - active or completed - from today.
+      // midnight) plus every session - active or completed - that touches
+      // today, which includes ones that started yesterday and were only
+      // clocked out after midnight (clock_out.gte.dayStart catches those;
+      // clock_in.gte.dayStart alone would miss them entirely).
       const { data: rows, error } = await supabase
         .from("work_sessions")
         .select("*")
-        .or(`clock_out.is.null,clock_in.gte.${dayStart}`)
+        .or(`clock_out.is.null,clock_in.gte.${dayStart},clock_out.gte.${dayStart}`)
         .order("clock_in", { ascending: true });
       if (error) throw error;
       let active = null;
@@ -5945,8 +6162,22 @@ function StudioTimeCard({ userId, compact = false }) {
       (rows || []).forEach((row) => {
         if (row.clock_out === null) {
           active = { id: row.id, clockIn: row.clock_in, sessionType: row.session_type || "manual" };
+          return;
+        }
+        const duration = row.duration || 0;
+        const start = new Date(row.clock_in);
+        if (start >= todayStartDate) {
+          // Started today - the whole thing counts.
+          completedSeconds += duration;
         } else {
-          completedSeconds += row.duration || 0;
+          // Started before today's local midnight (and, per the query
+          // above, was clocked out today or later) - only the portion from
+          // midnight onward belongs to "today". Clamped to `duration` so a
+          // rounding mismatch between the DB's floored duration and the
+          // real clock_out timestamp can't overcount.
+          const end = new Date(row.clock_out);
+          const sinceMidnight = Math.max(0, Math.round((end - todayStartDate) / 1000));
+          completedSeconds += Math.min(duration, sinceMidnight);
         }
       });
       setActiveSession(active);
@@ -5967,6 +6198,21 @@ function StudioTimeCard({ userId, compact = false }) {
     };
   }, [refetchSessions]);
 
+  // A restored "work" phase claims there's an active pomodoro session, but
+  // the only source of truth for that is the database - if it disagrees
+  // (stopped from another tab, cleaned up server-side, or the localStorage
+  // entry is simply stale), drop the restored phase rather than showing a
+  // countdown for a session that no longer exists. A restored break/long
+  // break has no corresponding DB row by design, so it's trusted as-is.
+  useEffect(() => {
+    if (initializing) return;
+    if (pomodoroPhase === "work" && (!activeSession || activeSession.sessionType !== "pomodoro")) {
+      setPomodoroPhase(null);
+      setPhaseEndsAt(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initializing]);
+
   // Ticks while a session is active, or mid-pomodoro - breaks have no
   // active session but still need their own countdown to keep moving.
   useEffect(() => {
@@ -5982,6 +6228,13 @@ function StudioTimeCard({ userId, compact = false }) {
   // don't care about the outcome can just fire-and-forget with .catch(() => {}).
   const handleClockIn = async (sessionType = "manual") => {
     if (clockingIn || activeSession || !userId) return undefined;
+    // Fired synchronously, before any await below - Chrome's
+    // requestWindow() only succeeds inside an active user-gesture call
+    // stack, which this still is right now but won't be once we've awaited
+    // the Supabase insert. openPip() no-ops on its own if unsupported or
+    // already open, so this is safe to call unconditionally on every
+    // clock-in (manual or the pomodoro one that opens a focus session).
+    openPip();
     setClockError("");
     setClockingIn(true);
     try {
@@ -6037,6 +6290,9 @@ function StudioTimeCard({ userId, compact = false }) {
     }
   };
 
+  // Resolves to true if a work phase was actually started, false if it was
+  // blocked or failed (and the phase was reset to idle) - callers use this
+  // to avoid announcing a focus session that never began.
   const beginPomodoroWork = async () => {
     let session;
     try {
@@ -6044,17 +6300,18 @@ function StudioTimeCard({ userId, compact = false }) {
     } catch {
       setPomodoroPhase(null);
       setPhaseEndsAt(null);
-      return;
+      return false;
     }
     if (!session) {
       // Blocked (already clocked in some other way) - don't claim a work
       // phase started when nothing was actually clocked in.
       setPomodoroPhase(null);
       setPhaseEndsAt(null);
-      return;
+      return false;
     }
     setPomodoroPhase("work");
     setPhaseEndsAt(Date.now() + pomodoroConfig.workMinutes * 60000);
+    return true;
   };
 
   const advancePomodoroPhase = async () => {
@@ -6081,8 +6338,10 @@ function StudioTimeCard({ userId, compact = false }) {
       } else {
         const finishedLabel = pomodoroPhase === "longBreak" ? "Long break" : "Break";
         setPomodoroCycle(pomodoroPhase === "longBreak" ? 1 : (c) => c + 1);
-        await beginPomodoroWork();
-        notifyBrowser("Back to focus", `${finishedLabel} over - starting the next focus session.`, "kairil-pomodoro");
+        const started = await beginPomodoroWork();
+        if (started) {
+          notifyBrowser("Back to focus", `${finishedLabel} over - starting the next focus session.`, "kairil-pomodoro");
+        }
       }
     } finally {
       transitioningRef.current = false;
@@ -6093,15 +6352,27 @@ function StudioTimeCard({ userId, compact = false }) {
   // advancePomodoroPhase is intentionally re-created each render (not
   // useCallback) so it always closes over the latest state; transitioningRef
   // stops it from firing more than once per phase.
+  //
+  // Guarded on `initializing`: a restored "work" phase (see the
+  // loadPomodoroState() initializers above) can already be past its
+  // phaseEndsAt on first render, before refetchSessions has populated
+  // activeSession from the database. Advancing at that point would call
+  // handleClockOut() while activeSession is still locally null - the
+  // clock-out no-ops (its own guard is `if (... || !activeSession) return`),
+  // so the phase would move on to a break while the actual work_sessions
+  // row stays open in the database, orphaned. Waiting for initializing to
+  // clear (and for the reconciliation effect above to run first) ensures
+  // activeSession is trustworthy before any auto-advance can fire.
   useEffect(() => {
+    if (initializing) return;
     if (!pomodoroPhase || !phaseEndsAt) return;
     if (now.getTime() < phaseEndsAt) return;
     advancePomodoroPhase();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [now, pomodoroPhase, phaseEndsAt]);
+  }, [now, pomodoroPhase, phaseEndsAt, initializing]);
 
   const startPomodoro = () => {
-    if (activeSession || pomodoroPhase) return;
+    if (activeSession || pomodoroPhase || clockingIn) return;
     setPomodoroCycle(1);
     setShowPomodoroSetup(false);
     beginPomodoroWork();
@@ -6124,10 +6395,19 @@ function StudioTimeCard({ userId, compact = false }) {
     setPomodoroCycle(1);
   };
 
+  // Deliberately does NOT check `idle` here: this is called from
+  // handleClockIn synchronously, before activeSession/pomodoroPhase have
+  // been updated, so an idle-check at this point would be true on every
+  // single clock-in and silently block the pop-out from ever auto-opening.
+  // Staying idle-unaware here is safe because the two callers guard it
+  // differently: the manual pop-out button disables itself while idle
+  // (disabled={idle && !pipWindow}), and the effect above closes the
+  // window automatically if a clock-in ultimately fails/is blocked and
+  // the app is left idle with it still open.
   const openPip = async () => {
     if (!pipSupported || pipWindow) return;
     try {
-      const pw = await window.documentPictureInPicture.requestWindow({ width: 320, height: 260 });
+      const pw = await window.documentPictureInPicture.requestWindow({ width: 240, height: 240 });
       // This app's global styles (fonts, keyframes, hover/disabled rules)
       // live in one <style> tag; everything else is inline styles, which
       // render correctly in any document without copying anything else.
@@ -6157,6 +6437,15 @@ function StudioTimeCard({ userId, compact = false }) {
 
   const elapsedSeconds = activeSession
     ? Math.max(0, Math.floor((now - new Date(activeSession.clockIn)) / 1000))
+    : 0;
+  // Same "only count what actually happened today" clipping as
+  // refetchSessions applies to completed sessions - a still-open session
+  // that started before local midnight would otherwise have its full
+  // (pre-midnight-inclusive) elapsed time folded into "Today so far".
+  // elapsedSeconds itself stays uncapped since the big clock above it is a
+  // stopwatch for the whole continuous session, not a "today" figure.
+  const elapsedSecondsToday = activeSession
+    ? Math.max(0, Math.floor((now - Math.max(new Date(activeSession.clockIn).getTime(), startOfLocalDay(now).getTime())) / 1000))
     : 0;
 
   let trackingContent;
@@ -6194,7 +6483,7 @@ function StudioTimeCard({ userId, compact = false }) {
         ) : (
           <>
             <div style={styles.studioTimeValue}>{formatClockDuration(elapsedSeconds)}</div>
-            <p style={styles.fieldHint}>Today so far: {formatDayDuration(todaySeconds + elapsedSeconds)}</p>
+            <p style={styles.fieldHint}>Today so far: {formatDayDuration(todaySeconds + elapsedSecondsToday)}</p>
           </>
         )}
         {clockError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{clockError}</p>}
@@ -6235,137 +6524,102 @@ function StudioTimeCard({ userId, compact = false }) {
           </button>
         </div>
         {showPomodoroSetup && (
-          <PomodoroSetupForm config={pomodoroConfig} onChange={setPomodoroConfig} onStart={startPomodoro} />
+          <PomodoroSetupForm config={pomodoroConfig} onChange={setPomodoroConfig} onStart={startPomodoro} busy={initializing || clockingIn} />
         )}
       </div>
     );
   }
-  if (compact) {
-    const phaseRemaining = pomodoroPhase ? Math.max(0, Math.round((phaseEndsAt - now.getTime()) / 1000)) : 0;
-    const displayValue = initializing
-      ? "--:--:--"
-      : pomodoroPhase
-      ? formatClockDuration(phaseRemaining)
-      : activeSession
-      ? formatClockDuration(elapsedSeconds)
-      : todaySeconds > 0
-      ? formatDayDuration(todaySeconds)
-      : "00:00:00";
-    const compactLabel = pomodoroPhase
-      ? pomodoroPhase === "work"
-        ? "Focus"
-        : pomodoroPhase === "longBreak"
-        ? "Long break"
-        : "Break"
-      : activeSession || todaySeconds === 0
-      ? "Studio Time"
-      : "Today's studio time";
-    const compactBusy = clockingIn || clockingOut;
-    const idle = !activeSession && !pomodoroPhase;
-    return (
-      <>
-        <div style={styles.studioTimeCompactWrap}>
-        <div style={{ ...styles.studioTimeCompact, ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
-          {(activeSession || pomodoroPhase) && <span style={styles.studioTimeStatusDot} />}
-          <span style={styles.dashboardGreetingCompactDate}>{compactLabel}</span>
-          <span style={styles.studioTimeCompactValue}>{displayValue}</span>
-          {pomodoroPhase ? (
+  const phaseRemaining = pomodoroPhase ? Math.max(0, Math.round((phaseEndsAt - now.getTime()) / 1000)) : 0;
+  const displayValue = initializing
+    ? "--:--:--"
+    : pomodoroPhase
+    ? formatClockDuration(phaseRemaining)
+    : activeSession
+    ? formatClockDuration(elapsedSeconds)
+    : todaySeconds > 0
+    ? formatDayDuration(todaySeconds)
+    : "00:00:00";
+  const compactLabel = pomodoroPhase
+    ? pomodoroPhase === "work"
+      ? "Focus"
+      : pomodoroPhase === "longBreak"
+      ? "Long break"
+      : "Break"
+    : activeSession || todaySeconds === 0
+    ? "Studio Time"
+    : "Today's studio time";
+  const compactBusy = clockingIn || clockingOut;
+  return (
+    <>
+      <div style={styles.studioTimeCompactWrap}>
+      <div style={{ ...styles.studioTimeCompact, ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
+        {(activeSession || pomodoroPhase) && <span style={styles.studioTimeStatusDot} />}
+        <span style={styles.dashboardGreetingCompactDate}>{compactLabel}</span>
+        <span style={styles.studioTimeCompactValue}>{displayValue}</span>
+        {pomodoroPhase ? (
+          <>
             <button type="button" style={styles.dashboardCompactButton} onClick={skipPomodoroPhase}>
               Skip
             </button>
-          ) : (
             <button
               type="button"
-              style={styles.dashboardCompactButton}
-              onClick={activeSession ? () => handleClockOut().catch(() => {}) : () => handleClockIn("manual").catch(() => {})}
-              disabled={initializing || compactBusy}
+              style={{ ...styles.dashboardCompactButton, background: "transparent", border: `1px solid ${border}`, color: textMuted }}
+              onClick={() => stopPomodoro()}
             >
-              {compactBusy ? <SpinnerIcon size={13} /> : <ClockIcon />}
-              {activeSession ? "Clock Out" : "Clock In"}
+              Stop
             </button>
-          )}
+          </>
+        ) : (
           <button
             type="button"
-            style={{ ...styles.iconButton, padding: 4 }}
-            onClick={() => setShowSummary(true)}
-            title="Weekly & monthly summary"
+            style={styles.dashboardCompactButton}
+            onClick={activeSession ? () => handleClockOut().catch(() => {}) : () => handleClockIn("manual").catch(() => {})}
+            disabled={initializing || compactBusy}
           >
-            <ChartIcon />
+            {compactBusy ? <SpinnerIcon size={13} /> : <ClockIcon />}
+            {activeSession ? "Clock Out" : "Clock In"}
           </button>
-          {pipSupported && (
-            <button
-              type="button"
-              style={{ ...styles.iconButton, padding: 4 }}
-              onClick={pipWindow ? closePip : openPip}
-              title={pipWindow ? "Bring back to page" : "Pop out as a floating window"}
-            >
-              <PopOutIcon />
-            </button>
-          )}
-          {idle && (
-            <button
-              type="button"
-              style={{ ...styles.pomodoroLinkButton, fontSize: 11, padding: 0, whiteSpace: "nowrap" }}
-              onClick={() => setShowPomodoroSetup((v) => !v)}
-            >
-              {showPomodoroSetup ? "Hide focus session setup" : "Start a focus session"}
-            </button>
-          )}
-        </div>
-        {clockError && <span style={{ ...styles.fieldHint, color: "#FF4D4D", fontSize: 11 }}>{clockError}</span>}
-        {idle && showPomodoroSetup && (
-          <PomodoroSetupForm config={pomodoroConfig} onChange={setPomodoroConfig} onStart={startPomodoro} />
         )}
-        </div>
-        {pipWindow && createPortal(<div style={styles.pipContent}>{trackingContent}</div>, pipWindow.document.body)}
-        {showSummary && <StudioTimeSummaryModal userId={userId} onClose={() => setShowSummary(false)} />}
-      </>
-    );
-  }
-
-
-  return (
-    <>
-      <div
-        className="kf-card"
-        style={{ ...styles.studioTimeCard, ...(activeSession ? styles.studioTimeCardActive : {}) }}
-      >
-        <div style={styles.studioTimeHeaderRow}>
-          <span style={styles.label}>
-            {pomodoroPhase ? "Focus Session" : activeSession || todaySeconds === 0 ? "Studio Time" : "Today's studio time"}
-          </span>
-          <div style={styles.studioTimeHeaderActions}>
-            <button type="button" style={styles.iconButton} onClick={() => setShowSummary(true)} title="Weekly & monthly summary">
-              <ChartIcon />
-            </button>
-            {pipSupported && (
-              <button
-                type="button"
-                style={styles.iconButton}
-                onClick={pipWindow ? closePip : openPip}
-                title={pipWindow ? "Bring back to page" : "Pop out as a floating window"}
-              >
-                <PopOutIcon />
-              </button>
-            )}
-          </div>
-        </div>
-
-        {pipWindow ? (
-          <p style={styles.fieldHint}>
-            Popped out in a floating window {"\u2014"} keep tracking while you work in other apps.
-          </p>
-        ) : (
-          trackingContent
+        <button
+          type="button"
+          style={{ ...styles.iconButton, padding: 4 }}
+          onClick={() => setShowSummary(true)}
+          title="Weekly & monthly summary"
+          aria-label="Weekly & monthly summary"
+        >
+          <ChartIcon />
+        </button>
+        {pipSupported && (
+          <button
+            type="button"
+            style={{ ...styles.iconButton, padding: 4, opacity: idle && !pipWindow ? 0.4 : 1 }}
+            onClick={pipWindow ? closePip : openPip}
+            disabled={idle && !pipWindow}
+            title={pipWindow ? "Bring back to page" : idle ? "Clock in or start a focus session to pop out" : "Pop out as a floating window"}
+            aria-label={pipWindow ? "Bring back to page" : idle ? "Clock in or start a focus session to pop out" : "Pop out as a floating window"}
+          >
+            <PopOutIcon />
+          </button>
+        )}
+        {idle && (
+          <button
+            type="button"
+            style={{ ...styles.pomodoroLinkButton, fontSize: 11, padding: 0, whiteSpace: "nowrap" }}
+            onClick={() => setShowPomodoroSetup((v) => !v)}
+          >
+            {showPomodoroSetup ? "Hide focus session setup" : "Start a focus session"}
+          </button>
         )}
       </div>
-
+      {clockError && <span style={{ ...styles.fieldHint, color: "#FF4D4D", fontSize: 11 }}>{clockError}</span>}
+      {idle && showPomodoroSetup && (
+        <PomodoroSetupForm config={pomodoroConfig} onChange={setPomodoroConfig} onStart={startPomodoro} busy={initializing || clockingIn} />
+      )}
+      </div>
       {pipWindow && createPortal(<div style={styles.pipContent}>{trackingContent}</div>, pipWindow.document.body)}
-
       {showSummary && <StudioTimeSummaryModal userId={userId} onClose={() => setShowSummary(false)} />}
     </>
   );
-
 }
 
 // Phase 12 — lightweight portfolio analytics computed straight from the
@@ -6536,7 +6790,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     <div style={styles.dashboardShell}>
       <div style={styles.dashboardTopStrip}>
         <DashboardGreeting user={user} compact />
-        <StudioTimeCard userId={userId} compact />
+        <StudioTimeCard userId={userId} />
       </div>
 
       <div style={styles.dashboardKpiStrip}>
@@ -7723,7 +7977,7 @@ function LeadEditor({
   };
 
   const followupStatus = computeFollowupStatus(form, followupSchedule);
-  const isTerminal = LEAD_TERMINAL_STAGES.some((s) => s.id === form.stage);
+  const isTerminal = isLeadStageTerminal(form.stage);
 
   const handleAddChannelSubmit = () => {
     const trimmed = newChannelName.trim();
@@ -7738,11 +7992,13 @@ function LeadEditor({
   };
 
   const updateEmail = (index, patch) => {
+    let justSent = false;
     const nextEmails = form.emails.map((em, i) => {
       if (i !== index) return em;
       const updated = { ...em, ...patch };
       if (patch.sent === true && !em.sent) {
         updated.dateSent = new Date().toISOString().slice(0, 10);
+        justSent = true;
       }
       if (patch.sent === false) {
         updated.dateSent = null;
@@ -7757,10 +8013,15 @@ function LeadEditor({
     if (index === 0 && patch.sent === true && form.stage === "pool") {
       nextStage = "cold_email";
     }
-    if (index === 4 && patch.sent === true && !LEAD_TERMINAL_STAGES.some((s) => s.id === form.stage)) {
+    if (index === 4 && patch.sent === true && form.stage === "cold_email") {
       nextStage = "no_response";
     }
-    setForm({ ...form, emails: nextEmails, stage: nextStage });
+    setForm({
+      ...form,
+      emails: nextEmails,
+      stage: nextStage,
+      lastContactedAt: justSent ? new Date().toISOString() : form.lastContactedAt,
+    });
   };
 
   const showNegotiation = !["pool", "cold_email"].includes(form.stage);
@@ -8352,13 +8613,13 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
       const newAttachment = { name: result.name, url: result.url, driveFileId: result.driveFileId };
       const nextAttachments = [...(form.attachments || []), newAttachment];
       setForm({ ...form, attachments: nextAttachments });
-      // studio-drive-upload already persisted the attachment on the shot
-      // row via append_shot_file when shotId was sent; onPersistShareToken
-      // still needs to run so the share-link/token side of the form stays
-      // in sync with whatever else this editor has pending.
-      if (onPersistShareToken && form.id) {
-        await onPersistShareToken(form.id, form.shareToken, nextAttachments);
-      }
+      // studio-drive-upload already persisted the attachment atomically via
+      // append_shot_file - a follow-up whole-array write from this local
+      // snapshot is exactly the read-modify-write race append_shot_file
+      // was built to avoid (e.g. a second upload, or the same shot open in
+      // another tab, landing between this upload's request and response).
+      // The local setForm above is enough for this session's own UI; nothing
+      // else here needs to re-persist attachments.
     } catch (err) {
       console.error("Upload failed:", err);
       setUploadError(err.message || "Upload failed");
@@ -8367,10 +8628,24 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
   };
 
   const removeAttachment = async (index) => {
+    const target = form.attachments[index];
     const nextAttachments = form.attachments.filter((_, i) => i !== index);
     setForm({ ...form, attachments: nextAttachments });
-    if (onPersistShareToken && form.id) {
-      await onPersistShareToken(form.id, form.shareToken, nextAttachments);
+    // Same race as the upload path: writing the whole (locally-snapshotted)
+    // array back would silently drop anything appended by a concurrent
+    // upload since this editor loaded. remove_shot_file matches and
+    // removes by url in a single atomic UPDATE instead.
+    if (form.id && target?.url) {
+      try {
+        const { error } = await supabase.rpc("remove_shot_file", {
+          p_shot_id: form.id,
+          p_column: "attachments",
+          p_url: target.url,
+        });
+        if (error) throw error;
+      } catch (err) {
+        console.error("Removing attachment failed:", err);
+      }
     }
   };
 
@@ -8802,7 +9077,11 @@ function PlannerWorkspace({
   const allocation = intel.allocation;
   const convertedProject = form.convertedProjectId ? projects.find((p) => p.id === form.convertedProjectId) : null;
 
-  const topWarnings = intel.warnings.slice(0, 3);
+  // Sort red before yellow so a genuinely critical warning can't get
+  // pushed past the top-3 cutoff just because it happens to be pushed
+  // later in computePlannerIntelligence's fixed sequence than several
+  // yellow ones - push-order isn't the same as priority-order.
+  const topWarnings = [...intel.warnings].sort((a, b) => (a.level === "red" ? 0 : 1) - (b.level === "red" ? 0 : 1)).slice(0, 3);
   const restWarnings = intel.warnings.slice(3);
 
   return (
@@ -10239,31 +10518,6 @@ const styles = {
     display: "flex",
     alignItems: "center",
     gap: 8,
-  },
-  studioTimeCard: {
-    background: inkSoft,
-    border: `1px solid ${border}`,
-    borderRadius: 14,
-    padding: "16px 20px",
-    display: "flex",
-    flexDirection: "column",
-    boxShadow: shadowSoft,
-    maxWidth: 480,
-  },
-  studioTimeCardActive: {
-    borderColor: teal,
-    background: "rgba(47,191,166,0.08)",
-  },
-  studioTimeHeaderRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 4,
-  },
-  studioTimeHeaderActions: {
-    display: "flex",
-    alignItems: "center",
-    gap: 2,
   },
   studioTimeActionsRow: {
     display: "flex",

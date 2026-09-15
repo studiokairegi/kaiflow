@@ -1,53 +1,20 @@
 -- Fixes from the second external review of the merged build. Run this
 -- after every other migration (including migration_security_hardening.sql
--- and migration_crm_v2.sql) - it's the final word on get_shared_shot() and
--- schedules the lead-archiving cron job that migration_crm_v2.sql left
--- commented out.
+-- and migration_crm_v2.sql) - it schedules the lead-archiving cron job
+-- that migration_crm_v2.sql left commented out.
 
 -- =========================================================================
--- 1. Regression fix: get_shared_shot() must return `deliverables`
+-- NOTE: this section used to redefine get_shared_shot() here too, and that
+-- version was actually broken (it referenced s.status/s.reference_url,
+-- neither of which exist on shots - the real columns are s.stage and
+-- s.review_status - so it would have errored on every call, breaking every
+-- freelancer share link outright). migration_audit_fixes_5.sql has the
+-- real fix and its own comment explains this mistake in more detail.
+-- get_shared_shot() now has exactly one definition, in
+-- migration_audit_fixes_5.sql, and nothing else in this project should
+-- ever `create or replace` it again.
 -- =========================================================================
--- migration_activity_uploads.sql correctly added `deliverables` to this
--- function's return shape. migration_teams_fixes.sql later did an
--- unrelated fix but was cut from an older copy of the function and
--- silently dropped `deliverables` again when it ran `create or replace`
--- after it. Since these are plain `create or replace`, whichever migration
--- was run last wins - so depending on the order they were applied, the
--- freelancer/client shared-shot view may currently be missing previously
--- uploaded deliverables. This redefinition is the final, authoritative one
--- and includes everything all three prior versions ever added.
-create or replace function get_shared_shot(p_token text)
-returns table (
-  id uuid,
-  title text,
-  stage text,
-  status text,
-  notes text,
-  reference_url text,
-  attachments jsonb,
-  deliverables jsonb,
-  project_name text,
-  project_client text
-)
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  return query
-    select
-      s.id, s.title, s.stage, s.status, s.notes, s.reference_url,
-      s.attachments, s.deliverables,
-      p.name as project_name, p.client as project_client
-    from shots s
-    join projects p on p.id = s.project_id
-    where s.share_token = p_token and s.share_enabled = true;
-end;
-$$;
 
-grant execute on function get_shared_shot(text) to anon, authenticated;
-
--- =========================================================================
 -- 2. Stop user_has_pro_access() from leaking other users' plan/admin status
 -- =========================================================================
 -- This was introduced in migration_security_hardening.sql, granted to

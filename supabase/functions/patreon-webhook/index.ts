@@ -10,7 +10,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 // Web Crypto (crypto.subtle) doesn't support MD5, Patreon's webhook
 // signature scheme requires it, so this one piece uses Deno's Node
 // compatibility layer instead of the shared Web Crypto helpers.
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
 
 Deno.serve(async (req) => {
@@ -29,7 +30,18 @@ Deno.serve(async (req) => {
     const webhookSecret = Deno.env.get("PATREON_WEBHOOK_SECRET")!;
 
     const expected = createHmac("md5", webhookSecret).update(rawBody).digest("hex");
-    if (expected !== signature) {
+    // MD5 is Patreon's own webhook spec, not a choice made here - but the
+    // comparison itself doesn't need to leak timing information. A plain
+    // !== short-circuits on the first differing character, which is a
+    // well-known (if impractical over a real network) side channel for
+    // guessing the signature byte-by-byte. timingSafeEqual only works on
+    // equal-length buffers, so the length check has to come first - a
+    // length mismatch alone is already conclusive.
+    const expectedBuf = Buffer.from(expected, "hex");
+    const signatureBuf = Buffer.from(signature, "hex");
+    const signatureValid =
+      expectedBuf.length === signatureBuf.length && timingSafeEqual(expectedBuf, signatureBuf);
+    if (!signatureValid) {
       return new Response("Invalid signature", { status: 401 });
     }
 
