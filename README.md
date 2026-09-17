@@ -49,6 +49,7 @@ Safe order:
    - `migration_audit_fixes_7.sql`
    - `migration_audit_fixes_8.sql`
    - `migration_audit_fixes_9.sql`
+   - `migration_audit_fixes_10.sql`
 
 (There is no `migration_audit_fixes_1.sql` or `_4.sql` - those numbers were
 skipped, nothing is missing.)

@@ -171,14 +171,76 @@ const DEFAULT_ARCHIVE_DAYS = {
   closed: 30,
 };
 
-const LOST_REASONS = [
-  "Budget",
-  "Timing",
-  "Chose another studio",
-  "No longer producing",
-  "No response",
+// ---- Outcome reasons (NOT pipeline stages) ----
+//
+// Deliberately kept separate from LEAD_STAGES/LEAD_TERMINAL_STAGES. A
+// stage answers "where is this lead in the pipeline"; a reason answers
+// "why did it end up there". Things like "No budget", "Not a fit" or
+// "Wrong timing" are reasons, not stages: they describe a qualification
+// outcome, not a position in the funnel.
+//
+// Mixing the two was the mistake this model exists to prevent. If
+// "No budget" were a stage, every stage-driven calculation on the
+// dashboard (active leads, the outreach funnel, the pipeline donuts,
+// the auto-archive policy) would silently start treating a
+// disqualification reason as a pipeline position. Reasons live on their
+// own field and are invisible to all of that.
+//
+// The vocabulary below comes straight from the Lead Generation &
+// Outreach Playbook - section 5 (Disqualify / Heavily Deprioritize) and
+// section 12 (Reply Handling) - so the CRM records the same outcomes the
+// playbook already tells you to look for.
+
+// Why a lead was disqualified during qualification, i.e. it was never
+// worth pitching in the first place. Playbook section 5.
+const DISQUALIFY_REASONS = [
+  "No anime aesthetic",
+  "Marketing window passed",
+  "Release too far out",
+  "No marketing-budget signal",
+  "No direct developer contact",
+  "Hobby project, no commercial intent",
+  "No cinematic trailer angle",
+  "Large studio, no external need",
+  "Major publisher blocker",
+  "Protected client - do not pitch",
   "Other",
 ];
+
+// Why a lead that WAS worth pitching didn't convert. Playbook section 12
+// plus the follow-up policy in section 11.
+const LOST_REASONS = [
+  "No budget",
+  "Wrong timing",
+  "Already has a trailer",
+  "Not a fit",
+  "Chose another studio",
+  "No longer producing",
+  "Not interested",
+  "Bad contact / bounced",
+  "Do not contact",
+  "Other",
+];
+
+// Every reason, deduped, for the board's reason filter and for validating
+// a reason loaded off an older row.
+const ALL_OUTCOME_REASONS = Array.from(new Set([...LOST_REASONS, ...DISQUALIFY_REASONS]));
+
+// Stages an outcome reason is meaningful on. A lead still in active
+// outreach hasn't had an outcome yet, so the field stays hidden there
+// rather than inviting someone to record a reason for something that
+// hasn't happened.
+const OUTCOME_REASON_STAGES = ["lost", "disqualified", "closed", "no_response"];
+
+function stageTakesOutcomeReason(stageId) {
+  return OUTCOME_REASON_STAGES.includes(stageId);
+}
+
+// Disqualified leads get the qualification vocabulary; everything else
+// terminal gets the didn't-convert vocabulary.
+function outcomeReasonsForStage(stageId) {
+  return stageId === "disqualified" ? DISQUALIFY_REASONS : LOST_REASONS;
+}
 
 // Starting set of lead channels, editable and extendable per-studio via
 // Settings (or inline from the lead editor's "+" button). Stored on
@@ -1491,6 +1553,13 @@ const DEFAULT_SETTINGS = {
   // selectable on leads, and still show up everywhere else (CRM board
   // filter chips, lead editor).
   dashboardHiddenChannels: [],
+  // App-level kill switch for desktop notifications, independent of the
+  // browser permission. Notification.permission only ever goes from
+  // "default" to "granted"/"denied" and back to "default" via the
+  // browser's own site settings - there was no in-app way to just turn
+  // notifications off without digging into browser chrome. This is that
+  // toggle; notifyBrowser() checks it before ever calling Notification().
+  notificationsEnabled: true,
 };
 
 function settingsFromRow(row) {
@@ -1518,6 +1587,7 @@ function settingsFromRow(row) {
         ? row.followup_schedule
         : DEFAULT_FOLLOWUP_SCHEDULE,
     dashboardHiddenChannels: Array.isArray(row.dashboard_hidden_channels) ? row.dashboard_hidden_channels : [],
+    notificationsEnabled: row.notifications_enabled !== false,
   };
 }
 
@@ -1537,6 +1607,7 @@ function settingsToRow(settings, userId) {
     lead_channels: settings.leadChannels || DEFAULT_LEAD_CHANNELS,
     followup_schedule: settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE,
     dashboard_hidden_channels: settings.dashboardHiddenChannels || [],
+    notifications_enabled: settings.notificationsEnabled !== false,
   };
 }
 
@@ -1791,7 +1862,9 @@ function emptyLead(stage = "pool", channel = "") {
     proposedBudget: "",
     estimatedDeadline: "",
     projectNotes: "",
-    lostReason: "",
+    // Why this lead ended where it did. Not a stage - see the
+    // DISQUALIFY_REASONS/LOST_REASONS block above.
+    outcomeReason: "",
     linkedProjectId: null,
   };
 }
@@ -1817,7 +1890,11 @@ function leadFromRow(row) {
     proposedBudget: row.proposed_budget,
     estimatedDeadline: row.estimated_deadline,
     projectNotes: row.project_notes,
-    lostReason: row.lost_reason,
+    // outcome_reason is the field going forward; lost_reason is the old
+    // lost-only column, kept as a read fallback so leads saved before
+    // migration_audit_fixes_10.sql still show their reason. Both are
+    // written on every save (see leadToRow), so they can't drift.
+    outcomeReason: row.outcome_reason || row.lost_reason || "",
     linkedProjectId: row.linked_project_id,
     createdAt: row.created_at || null,
   };
@@ -1843,7 +1920,11 @@ function leadToRow(lead, userId) {
     proposed_budget: lead.proposedBudget,
     estimated_deadline: lead.estimatedDeadline,
     project_notes: lead.projectNotes,
-    lost_reason: lead.lostReason,
+    outcome_reason: lead.outcomeReason || "",
+    // Written in lockstep with outcome_reason so the legacy column never
+    // holds a stale value that the read fallback above could resurrect
+    // after someone clears the reason.
+    lost_reason: lead.outcomeReason || "",
     linked_project_id: lead.linkedProjectId || null,
     user_id: userId,
   };
@@ -1900,6 +1981,16 @@ function buildActivityEntries(oldLead, newLead) {
         ts: now,
         type: "stage_change",
         note: STAGE_ACTIVITY_LABEL[newLead.stage] || `Status changed to ${newLead.stage}`,
+      });
+    }
+    // Logged as its own entry type, never as a stage_change - hadStageEvent
+    // matches on stage_change notes, so folding a reason in here would
+    // corrupt the dashboard funnel counts.
+    if ((oldLead.outcomeReason || "") !== (newLead.outcomeReason || "")) {
+      entries.push({
+        ts: now,
+        type: "outcome_reason",
+        note: newLead.outcomeReason ? `Outcome reason: ${newLead.outcomeReason}` : "Outcome reason cleared",
       });
     }
     if (!oldLead.needsFollowup && newLead.needsFollowup) {
@@ -2270,6 +2361,13 @@ export default function ShotTracker() {
   });
   const { projects, cards, leads, invoices, expenses, teamMembers, activity, budgetPlanners, plannerTemplates } = data;
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  // Keeps the module-level flag notifyBrowser() checks in sync with the
+  // account setting. Runs on every settings load/change, including the
+  // initial DEFAULT_SETTINGS render, so nothing can notify before this has
+  // had a chance to turn it off.
+  useEffect(() => {
+    setNotificationsEnabledFlag(settings.notificationsEnabled);
+  }, [settings.notificationsEnabled]);
   const [fxRates, setFxRates] = useState({});
   const [fxUpdatedAt, setFxUpdatedAt] = useState(null);
   const [driveEmail, setDriveEmail] = useState(null);
@@ -3263,7 +3361,7 @@ export default function ShotTracker() {
   };
 
   const handleMarkLost = async (lead, reason) => {
-    await handleSaveLead({ ...lead, stage: "lost", lostReason: reason });
+    await handleSaveLead({ ...lead, stage: "lost", outcomeReason: reason });
   };
 
   const handleSaveInvoice = async (invoice) => {
@@ -4621,8 +4719,8 @@ export default function ShotTracker() {
                               {lead.needsFollowup && (
                                 <span style={{ ...styles.cardTag, color: "#F2A65A" }}>Needs follow-up</span>
                               )}
-                              {lead.stage === "lost" && lead.lostReason && (
-                                <span style={styles.cardTag}>{lead.lostReason}</span>
+                              {stageTakesOutcomeReason(lead.stage) && lead.outcomeReason && (
+                                <span style={styles.cardTag}>{lead.outcomeReason}</span>
                               )}
                             </div>
                           </div>
@@ -5822,7 +5920,19 @@ function notificationsSupported() {
   return typeof window !== "undefined" && "Notification" in window;
 }
 
+// Mirrors settings.notificationsEnabled. A plain module-level flag rather
+// than a prop, because notifyBrowser() is called from places (the CRM
+// needs-attention digest, StudioTimeCard's Pomodoro phase transitions)
+// that don't all have the settings object threaded through them. Synced
+// once, on the main app component, whenever settings load or change - see
+// setNotificationsEnabledFlag below.
+let notificationsEnabledFlag = true;
+function setNotificationsEnabledFlag(enabled) {
+  notificationsEnabledFlag = enabled !== false;
+}
+
 function notifyBrowser(title, body, tag) {
+  if (!notificationsEnabledFlag) return;
   if (!notificationsSupported() || Notification.permission !== "granted") return;
   try {
     const n = new Notification(title, { body, tag, icon: "/icon-512.png" });
@@ -6113,11 +6223,18 @@ function StudioTimeSummaryModal({ userId, onClose }) {
               <div style={styles.summaryStat}>
                 <span style={styles.label}>Total</span>
                 <span style={styles.summaryStatValue}>{formatDayDuration(stats.totalSeconds)}</span>
+                <span style={styles.summaryStatHint}>
+                  All clocked time {period === "week" ? "this week" : "this month"} so far.
+                </span>
               </div>
               <div style={styles.summaryStat}>
                 <span style={styles.label}>Active days</span>
                 <span style={styles.summaryStatValue}>
                   {stats.activeDays} of {daysSoFar}
+                </span>
+                <span style={styles.summaryStatHint}>
+                  Days with any clocked time, out of the {daysSoFar} day{daysSoFar === 1 ? "" : "s"} elapsed so far
+                  {period === "week" ? " this week" : " this month"} - not out of a full {period === "week" ? "7-day week" : "month"} yet, since {period === "week" ? "the week" : "the month"} isn't over.
                 </span>
               </div>
               <div style={styles.summaryStat}>
@@ -6125,10 +6242,12 @@ function StudioTimeSummaryModal({ userId, onClose }) {
                 <span style={styles.summaryStatValue}>
                   {stats.activeDays > 0 ? formatDayDuration(Math.round(stats.totalSeconds / stats.activeDays)) : "\u2014"}
                 </span>
+                <span style={styles.summaryStatHint}>Total time \u00f7 active days (not \u00f7 all days).</span>
               </div>
               <div style={styles.summaryStat}>
                 <span style={styles.label}>In focus sessions</span>
                 <span style={styles.summaryStatValue}>{focusRatio}%</span>
+                <span style={styles.summaryStatHint}>Share of total time spent in Pomodoro focus sessions.</span>
               </div>
             </div>
 
@@ -6655,6 +6774,49 @@ function StudioTimeCard({ userId, visible = true }) {
     );
   }
   const phaseRemaining = pomodoroPhase ? Math.max(0, Math.round((phaseEndsAt - now.getTime()) / 1000)) : 0;
+
+  // The pop-out window gets its own minimal content - just the number and
+  // one action - rather than reusing `trackingContent` above. Portaling the
+  // full card (status line, "Today so far", the idle setup grid) into a
+  // small square window is what made the PiP feel oversized: the container
+  // was sized to the timer but the content inside kept demanding card-sized
+  // room. This is sized to actually fit a small square window with minimal
+  // empty space around it.
+  let pipTrackingContent;
+  if (pomodoroPhase) {
+    pipTrackingContent = (
+      <div style={styles.pipInner}>
+        <span style={styles.pipValue}>{formatClockDuration(phaseRemaining)}</span>
+        <button type="button" style={styles.pipButton} onClick={() => stopPomodoro()}>
+          Stop
+        </button>
+      </div>
+    );
+  } else if (activeSession) {
+    pipTrackingContent = (
+      <div style={styles.pipInner}>
+        <span style={styles.pipValue}>{initializing ? "--:--:--" : formatClockDuration(elapsedSeconds)}</span>
+        <button
+          type="button"
+          style={styles.pipButton}
+          onClick={() => handleClockOut().catch(() => {})}
+          disabled={clockingOut}
+        >
+          {clockingOut ? <SpinnerIcon size={13} /> : "Stop"}
+        </button>
+      </div>
+    );
+  } else {
+    // Never actually renders - the effect above closes the pop-out the
+    // moment there's nothing being tracked - but keeps this exhaustive
+    // rather than leaving a gap the window could flash empty during.
+    pipTrackingContent = (
+      <div style={styles.pipInner}>
+        <span style={styles.pipValue}>{formatDayDuration(todaySeconds)}</span>
+      </div>
+    );
+  }
+
   const displayValue = initializing
     ? "--:--:--"
     : pomodoroPhase
@@ -6744,7 +6906,7 @@ function StudioTimeCard({ userId, visible = true }) {
       )}
       </div>
       )}
-      {pipWindow && createPortal(<div style={styles.pipContent}>{trackingContent}</div>, pipWindow.document.body)}
+      {pipWindow && createPortal(<div style={styles.pipContent}>{pipTrackingContent}</div>, pipWindow.document.body)}
       {showSummary && <StudioTimeSummaryModal userId={userId} onClose={() => setShowSummary(false)} />}
     </>
   );
@@ -7508,12 +7670,48 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
         </div>
 
         <div style={styles.field}>
-          <label style={styles.label}>Desktop notifications</label>
+          <label style={styles.label}>Notifications</label>
+          <div style={styles.lostReasonGrid}>
+            <button
+              type="button"
+              style={{
+                ...styles.reviewStatusButton,
+                borderColor: form.notificationsEnabled !== false ? teal : border,
+                color: form.notificationsEnabled !== false ? tealLight : textMuted,
+                background: form.notificationsEnabled !== false ? "rgba(47,191,166,0.1)" : "transparent",
+              }}
+              onClick={() => setForm({ ...form, notificationsEnabled: true })}
+            >
+              On
+            </button>
+            <button
+              type="button"
+              style={{
+                ...styles.reviewStatusButton,
+                borderColor: form.notificationsEnabled === false ? teal : border,
+                color: form.notificationsEnabled === false ? tealLight : textMuted,
+                background: form.notificationsEnabled === false ? "rgba(47,191,166,0.1)" : "transparent",
+              }}
+              onClick={() => setForm({ ...form, notificationsEnabled: false })}
+            >
+              Off
+            </button>
+          </div>
+          <p style={styles.fieldHint}>
+            {form.notificationsEnabled === false
+              ? "Off - Kairil won't send desktop notifications, even if your browser allows them."
+              : "On - controls Pomodoro-break and CRM follow-up alerts. Your browser's own permission below still has to be granted too."}
+          </p>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Desktop notification permission</label>
           {notificationPermission === "unsupported" ? (
             <p style={styles.fieldHint}>Your browser doesn't support desktop notifications.</p>
           ) : notificationPermission === "granted" ? (
             <p style={{ ...styles.fieldHint, color: "#3DDC86" }}>
-              Enabled - you'll get a notification for Pomodoro breaks and when leads need attention.
+              Granted - you'll get a notification for Pomodoro breaks and when leads need attention
+              {form.notificationsEnabled === false ? " once you turn notifications back on above." : "."}
             </p>
           ) : notificationPermission === "denied" ? (
             <p style={styles.fieldHint}>
@@ -8165,6 +8363,10 @@ function LeadEditor({
 }) {
   const [form, setForm] = useState(lead);
   const [isEditing, setIsEditing] = useState(isNew);
+  // Quick-pick reason list shown by the "Mark lost" button specifically.
+  // Separate from the inline "Outcome reason" picker below (which handles
+  // every terminal stage, including ones reached via the Status grid
+  // rather than this button).
   const [showLostReasons, setShowLostReasons] = useState(false);
   const [addingChannel, setAddingChannel] = useState(false);
   const [newChannelName, setNewChannelName] = useState("");
@@ -8352,8 +8554,8 @@ function LeadEditor({
               </button>
             )}
 
-            {form.stage === "lost" && form.lostReason && (
-              <p style={styles.fieldHint}>Marked lost: {form.lostReason}</p>
+            {stageTakesOutcomeReason(form.stage) && form.outcomeReason && (
+              <p style={styles.fieldHint}>Reason: {form.outcomeReason}</p>
             )}
             {form.linkedProjectId && <p style={styles.fieldHint}>Linked to an active project.</p>}
 
@@ -8538,6 +8740,35 @@ function LeadEditor({
                 No Response and Lost are tracked separately: one means they went quiet, the other means they said no.
               </p>
             </div>
+
+            {stageTakesOutcomeReason(form.stage) && (
+              <div style={styles.field}>
+                <label style={styles.label}>Reason</label>
+                <div style={styles.lostReasonGrid}>
+                  {outcomeReasonsForStage(form.stage).map((reason) => (
+                    <button
+                      key={reason}
+                      type="button"
+                      style={{
+                        ...styles.reviewStatusButton,
+                        borderColor: form.outcomeReason === reason ? teal : border,
+                        color: form.outcomeReason === reason ? tealLight : textMuted,
+                        background: form.outcomeReason === reason ? "rgba(47,191,166,0.1)" : "transparent",
+                      }}
+                      onClick={() =>
+                        setForm({ ...form, outcomeReason: form.outcomeReason === reason ? "" : reason })
+                      }
+                    >
+                      {reason}
+                    </button>
+                  ))}
+                </div>
+                <p style={styles.fieldHint}>
+                  Why the lead ended up here - separate from the status itself, so "No budget" or "Not now" never
+                  gets counted as a pipeline stage.
+                </p>
+              </div>
+            )}
 
             <div style={styles.field}>
               <label style={styles.label}>Channel</label>
@@ -10827,10 +11058,42 @@ const styles = {
     cursor: "pointer",
   },
   pipContent: {
-    padding: 10,
+    padding: 0,
     width: "100%",
+    height: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
     color: paper,
     fontFamily: "'Inter', sans-serif",
+  },
+  // Sized for the 180x180 pop-out window itself: no card chrome, no status
+  // line, just the number and one action, centered with minimal margin
+  // around the content instead of card padding meant for a much bigger
+  // surface.
+  pipInner: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+  },
+  pipValue: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 26,
+    fontWeight: 600,
+    color: paper,
+    letterSpacing: 0.5,
+  },
+  pipButton: {
+    background: "transparent",
+    border: `1px solid ${border}`,
+    borderRadius: 999,
+    color: textMuted,
+    padding: "5px 16px",
+    fontSize: 12,
+    fontFamily: "'Inter', sans-serif",
+    cursor: "pointer",
   },
   summaryStatsRow: {
     display: "grid",
@@ -10847,6 +11110,11 @@ const styles = {
     fontSize: 18,
     fontWeight: 600,
     color: paper,
+  },
+  summaryStatHint: {
+    fontSize: 10.5,
+    color: textMuted,
+    lineHeight: 1.35,
   },
   budgetSummaryRow: {
     display: "flex",
@@ -10898,11 +11166,20 @@ const styles = {
     fontSize: 12,
     color: textMuted,
   },
+  // Right-aligned to match the original layout: this renders as its own
+  // full-width row between the header and the tabs (see the mount comment
+  // at its call site), so without an explicit right alignment here it just
+  // falls to the block's natural left edge - which is what was squeezing
+  // it left. flex-end on both axes keeps the pill and any error/notice
+  // text under it flush to the right edge instead.
   studioTimeCompactWrap: {
     display: "flex",
     flexDirection: "column",
-    alignItems: "flex-start",
+    alignItems: "flex-end",
     gap: 6,
+    width: "100%",
+    padding: "0 28px",
+    marginTop: 10,
   },
   studioTimeCompact: {
     display: "flex",
@@ -11010,16 +11287,20 @@ const styles = {
     flexShrink: 0,
     marginBottom: 6,
   },
+  // Plain heading treatment, matching columnLabel (the Kanban column
+  // headers) elsewhere in the app - normal weight, paper color, no
+  // uppercase/letter-spacing/monospace/bright-teal combination. That
+  // combination is what read as a decorative "glowing" header; this is
+  // the same plain style the rest of the dashboard already uses for
+  // section titles.
   dashboardCardHeader: {
     display: "flex",
     alignItems: "center",
     gap: 6,
-    fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 11.5,
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontSize: 13,
     fontWeight: 600,
-    letterSpacing: 0.3,
-    textTransform: "uppercase",
-    color: tealLight,
+    color: paper,
   },
   dashboardCardHeaderHint: {
     fontSize: 11,
