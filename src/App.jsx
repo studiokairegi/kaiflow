@@ -5846,6 +5846,34 @@ function dayKey(d) {
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
+// The studio's normal schedule: Monday-Friday, 09:00-17:00, i.e. an 8h
+// target per weekday. Anything clocked beyond a day's target is overtime;
+// weekends carry a 0h target, so time worked on them is overtime in full.
+const WORKDAY_TARGET_SECONDS = 8 * 3600;
+const SCHEDULE_LABEL = "Mon\u2013Fri, 9:00\u20135:00 (8h/day)";
+
+function isScheduledWorkday(date) {
+  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
+  return day >= 1 && day <= 5;
+}
+
+function scheduledSecondsForDay(date) {
+  return isScheduledWorkday(date) ? WORKDAY_TARGET_SECONDS : 0;
+}
+
+// "9h 30m", "6h", "45m", "0h" - drops a trailing "0m" so the daily
+// breakdown reads the way a person would say it out loud, unlike
+// formatDayDuration which always prints both parts.
+function formatWorkDuration(totalSeconds) {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h === 0 && m === 0) return "0h";
+  if (h === 0) return `${m}m`;
+  if (m === 0) return `${h}h`;
+  return `${h}h ${m}m`;
+}
+
 const POMODORO_DEFAULTS = { workMinutes: 25, breakMinutes: 5, longBreakMinutes: 15, cyclesBeforeLongBreak: 4 };
 const POMODORO_STORAGE_KEY = "kairil_pomodoro_config";
 
@@ -6065,10 +6093,24 @@ function computePeriodStats(completedSessions, activeSession, rangeStart, rangeE
     return d >= rangeStart && d < rangeEndExclusive;
   });
 
-  const lastDay = now < rangeEndExclusive ? startOfLocalDay(now) : addDays(rangeEndExclusive, -1);
+  // Every calendar day in the period is built up front - including days
+  // still in the future - so the breakdown can show an elapsed 0h day as a
+  // real (missed) day while a day that simply hasn't happened yet stays
+  // visibly blank instead of masquerading as zero work.
+  const today = startOfLocalDay(now);
+  const lastDay = addDays(rangeEndExclusive, -1);
   const days = [];
   for (let cursor = new Date(rangeStart); cursor <= lastDay; cursor = addDays(cursor, 1)) {
-    days.push({ date: new Date(cursor), seconds: 0 });
+    const date = new Date(cursor);
+    const dayStart = startOfLocalDay(date);
+    days.push({
+      date,
+      seconds: 0,
+      scheduledSeconds: scheduledSecondsForDay(date),
+      isScheduled: isScheduledWorkday(date),
+      isToday: dayStart.getTime() === today.getTime(),
+      isFuture: dayStart > today,
+    });
   }
   const addToDay = (dateObj, seconds) => {
     const match = days.find((d) => isSameLocalDay(d.date, dateObj));
@@ -6077,16 +6119,15 @@ function computePeriodStats(completedSessions, activeSession, rangeStart, rangeE
 
   let totalSeconds = 0;
   let pomodoroSeconds = 0;
-  const activeDayKeys = new Set();
 
   // A session that crosses midnight gets its duration split across each
   // calendar day it actually touches, rather than attributing all of it to
-  // the start day - both for the daily trend chart and for "active days".
+  // the start day - so a day's overtime is judged against the hours really
+  // worked on that day.
   const attributeSession = (start, end, seconds, sessionType) => {
     totalSeconds += seconds;
     if (sessionType === "pomodoro") pomodoroSeconds += seconds;
     if (seconds <= 0 || isSameLocalDay(start, end)) {
-      activeDayKeys.add(dayKey(start));
       addToDay(start, seconds);
       return;
     }
@@ -6106,7 +6147,6 @@ function computePeriodStats(completedSessions, activeSession, rangeStart, rangeE
       const segmentSeconds = isLastSegment
         ? remaining
         : Math.min(remaining, Math.max(0, Math.round((segmentEnd - cursor) / 1000)));
-      activeDayKeys.add(dayKey(cursor));
       addToDay(cursor, segmentSeconds);
       remaining -= segmentSeconds;
       cursor = segmentEnd;
@@ -6128,11 +6168,53 @@ function computePeriodStats(completedSessions, activeSession, rangeStart, rangeE
     }
   }
 
+  // Overtime is worked out per day, never from the period total: eight
+  // hours on Monday and none on Tuesday is a day of overtime debt, not a
+  // balanced 16h. Target and average both count every *elapsed* scheduled
+  // weekday, today included, so a day worked at 0h drags the average down
+  // instead of quietly vanishing from the denominator.
+  //
+  // Weekend time is never folded into "overtime" - the schedule has no
+  // weekend target to measure it against, so calling 4h on a Saturday
+  // "+4h overtime" would misrepresent it as excess against an 8h day that
+  // was never scheduled. It's tracked separately as unscheduled work: it
+  // still counts fully toward Worked, just not toward Target or Overtime.
+  let targetSeconds = 0;
+  let overtimeSeconds = 0;
+  let unscheduledSeconds = 0;
+  let elapsedScheduledDays = 0;
+
+  days.forEach((d) => {
+    if (d.isFuture) {
+      d.overtimeSeconds = 0;
+      d.shortfallSeconds = 0;
+      return;
+    }
+    if (d.isScheduled) {
+      d.overtimeSeconds = Math.max(0, d.seconds - d.scheduledSeconds);
+      d.shortfallSeconds = Math.max(0, d.scheduledSeconds - d.seconds);
+      targetSeconds += d.scheduledSeconds;
+      overtimeSeconds += d.overtimeSeconds;
+      elapsedScheduledDays += 1;
+    } else {
+      // Unscheduled (weekend) day: no target, so no overtime/shortfall -
+      // just logged hours, kept out of Target/Overtime/Average entirely.
+      d.overtimeSeconds = 0;
+      d.shortfallSeconds = 0;
+      unscheduledSeconds += d.seconds;
+    }
+  });
+
   return {
     totalSeconds,
     pomodoroSeconds,
     manualSeconds: totalSeconds - pomodoroSeconds,
-    activeDays: activeDayKeys.size,
+    targetSeconds,
+    overtimeSeconds,
+    unscheduledSeconds,
+    elapsedScheduledDays,
+    averageSeconds: elapsedScheduledDays > 0 ? Math.round(totalSeconds / elapsedScheduledDays) : 0,
+    efficiencyPct: targetSeconds > 0 ? Math.round((totalSeconds / targetSeconds) * 100) : 0,
     dailyTrend: days,
   };
 }
@@ -6180,12 +6262,39 @@ function StudioTimeSummaryModal({ userId, onClose }) {
   const rangeEndExclusive =
     period === "week" ? addDays(rangeStart, 7) : new Date(now.getFullYear(), now.getMonth() + 1, 1);
   const stats = computePeriodStats(completedRows, activeSession, rangeStart, rangeEndExclusive, now);
-  const daysSoFar = calendarDaysBetween(rangeStart, new Date(Math.min(now.getTime(), rangeEndExclusive.getTime() - 1)));
+  // "In focus sessions" is deliberately a ratio of *time*, not of session
+  // count - twenty two-minute sessions shouldn't outweigh one three-hour
+  // block of focused work.
   const focusRatio = stats.totalSeconds > 0 ? Math.round((stats.pomodoroSeconds / stats.totalSeconds) * 100) : 0;
 
-  const trendData = stats.dailyTrend.map((d) => ({
-    label: period === "week" ? d.date.toLocaleDateString(undefined, { weekday: "short" }) : String(d.date.getDate()),
-    value: Math.round((d.seconds / 3600) * 100) / 100,
+  // Scheduled weekdays always get a row, so a 0h Tuesday is visible rather
+  // than skipped. A weekend only shows up when something was actually
+  // clocked on it - in which case all of it counts as overtime, since the
+  // schedule targets 0h there.
+  const breakdownDays = stats.dailyTrend
+    .filter((d) => d.isScheduled || d.seconds > 0)
+    .map((d) => ({
+      ...d,
+      key: dayKey(d.date),
+      label:
+        period === "week"
+          ? d.date.toLocaleDateString(undefined, { weekday: "long" })
+          : d.date.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+      shortLabel:
+        period === "week"
+          ? d.date.toLocaleDateString(undefined, { weekday: "short" })
+          : String(d.date.getDate()),
+    }));
+
+  // The chart is fed from the very same per-day rows as the list below it,
+  // so Monday's plotted value and Monday's printed total can never drift
+  // apart. Future days carry a null value rather than a 0, which leaves a
+  // gap in the area instead of drawing a plunge to the floor.
+  const trendData = breakdownDays.map((d) => ({
+    label: d.shortLabel,
+    value: d.isFuture ? null : Math.round((d.seconds / 3600) * 100) / 100,
+    overtime: Math.round((d.overtimeSeconds / 3600) * 100) / 100,
+    unscheduled: !d.isScheduled,
   }));
 
   return (
@@ -6219,39 +6328,106 @@ function StudioTimeSummaryModal({ userId, onClose }) {
           <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{error}</p>
         ) : (
           <>
+            <HoursTrendChart data={trendData} targetHours={WORKDAY_TARGET_SECONDS / 3600} />
+
+            <div>
+              <span style={styles.label}>Daily breakdown</span>
+              <div style={styles.dayBreakdownList}>
+                {breakdownDays.map((d, i) => (
+                  <div
+                    key={d.key}
+                    style={{
+                      ...styles.dayBreakdownRow,
+                      ...(i === breakdownDays.length - 1 ? { borderBottom: "none" } : {}),
+                    }}
+                  >
+                    <span style={{ ...styles.dayBreakdownDay, ...(d.isToday ? styles.dayBreakdownDayToday : {}) }}>
+                      {d.label}
+                    </span>
+                    {d.isFuture ? (
+                      <span style={styles.dayBreakdownFuture} title="Not reached yet">
+                        {"\u2014"}
+                      </span>
+                    ) : (
+                      <span style={styles.dayBreakdownValues}>
+                        <span style={d.seconds > 0 ? styles.dayBreakdownHours : styles.dayBreakdownHoursZero}>
+                          {formatWorkDuration(d.seconds)}
+                        </span>
+                        {!d.isScheduled ? (
+                          <span style={styles.dayBreakdownNote}>(unscheduled)</span>
+                        ) : d.overtimeSeconds > 0 ? (
+                          <span style={styles.dayBreakdownOvertime}>
+                            +{formatWorkDuration(d.overtimeSeconds)} overtime
+                          </span>
+                        ) : d.shortfallSeconds > 0 ? (
+                          <span style={styles.dayBreakdownShortfall}>
+                            {formatWorkDuration(d.shortfallSeconds)} short
+                          </span>
+                        ) : null}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
             <div style={styles.summaryStatsRow}>
               <div style={styles.summaryStat}>
-                <span style={styles.label}>Total</span>
-                <span style={styles.summaryStatValue}>{formatDayDuration(stats.totalSeconds)}</span>
+                <span style={styles.label}>Worked</span>
+                <span style={styles.summaryStatValue}>{formatWorkDuration(stats.totalSeconds)}</span>
                 <span style={styles.summaryStatHint}>
                   All clocked time {period === "week" ? "this week" : "this month"} so far.
                 </span>
               </div>
               <div style={styles.summaryStat}>
-                <span style={styles.label}>Active days</span>
-                <span style={styles.summaryStatValue}>
-                  {stats.activeDays} of {daysSoFar}
-                </span>
+                <span style={styles.label}>Target</span>
+                <span style={styles.summaryStatValue}>{formatWorkDuration(stats.targetSeconds)}</span>
                 <span style={styles.summaryStatHint}>
-                  Days with any clocked time, out of the {daysSoFar} day{daysSoFar === 1 ? "" : "s"} elapsed so far
-                  {period === "week" ? " this week" : " this month"} - not out of a full {period === "week" ? "7-day week" : "month"} yet, since {period === "week" ? "the week" : "the month"} isn't over.
+                  {stats.elapsedScheduledDays} scheduled weekday{stats.elapsedScheduledDays === 1 ? "" : "s"} elapsed
+                  {" \u00d7 8h"}.
                 </span>
               </div>
               <div style={styles.summaryStat}>
-                <span style={styles.label}>Avg / active day</span>
-                <span style={styles.summaryStatValue}>
-                  {stats.activeDays > 0 ? formatDayDuration(Math.round(stats.totalSeconds / stats.activeDays)) : "\u2014"}
+                <span style={styles.label}>Overtime</span>
+                <span
+                  style={{
+                    ...styles.summaryStatValue,
+                    ...(stats.overtimeSeconds > 0 ? { color: OVERTIME_COLOR } : {}),
+                  }}
+                >
+                  {stats.overtimeSeconds > 0 ? formatWorkDuration(stats.overtimeSeconds) : "\u2014"}
                 </span>
-                <span style={styles.summaryStatHint}>Total time \u00f7 active days (not \u00f7 all days).</span>
+                <span style={styles.summaryStatHint}>
+                  Time beyond the 8h target on scheduled weekdays.
+                  {stats.unscheduledSeconds > 0
+                    ? ` Weekend time (${formatWorkDuration(stats.unscheduledSeconds)}) is counted in Worked, not here.`
+                    : ""}
+                </span>
+              </div>
+              <div style={styles.summaryStat}>
+                <span style={styles.label}>Efficiency</span>
+                <span style={styles.summaryStatValue}>
+                  {stats.targetSeconds > 0 ? `${stats.efficiencyPct}%` : "\u2014"}
+                </span>
+                <span style={styles.summaryStatHint}>Worked {"\u00f7"} target.</span>
+              </div>
+              <div style={styles.summaryStat}>
+                <span style={styles.label}>Average</span>
+                <span style={styles.summaryStatValue}>
+                  {stats.elapsedScheduledDays > 0 ? `${formatWorkDuration(stats.averageSeconds)}/day` : "\u2014"}
+                </span>
+                <span style={styles.summaryStatHint}>
+                  Worked {"\u00f7"} elapsed scheduled weekdays - 0h days included.
+                </span>
               </div>
               <div style={styles.summaryStat}>
                 <span style={styles.label}>In focus sessions</span>
                 <span style={styles.summaryStatValue}>{focusRatio}%</span>
-                <span style={styles.summaryStatHint}>Share of total time spent in Pomodoro focus sessions.</span>
+                <span style={styles.summaryStatHint}>Share of clocked time spent in Pomodoro focus sessions.</span>
               </div>
             </div>
 
-            <HoursTrendChart data={trendData} />
+            <p style={styles.summaryStatHint}>Schedule: {SCHEDULE_LABEL}.</p>
 
             <div>
               <span style={styles.label}>Focus vs. manual time</span>
@@ -10655,6 +10831,8 @@ const teal = "#2FBFA6";
 const tealLight = "#7FE0D0";
 const border = "#2a3338";
 const textMuted = "#8b9a98";
+// Amber, not red: overtime is worth spotting at a glance, but it isn't an error.
+const OVERTIME_COLOR = "#F2A65A";
 const shadowSoft = "0 1px 3px rgba(0,0,0,0.24), 0 1px 2px rgba(0,0,0,0.16)";
 const shadowLifted = "0 12px 32px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.24)";
 const shadowGlow = "0 4px 14px rgba(47,191,166,0.28)";
@@ -11094,6 +11272,68 @@ const styles = {
     fontSize: 12,
     fontFamily: "'Inter', sans-serif",
     cursor: "pointer",
+  },
+  dayBreakdownList: {
+    marginTop: 8,
+    display: "flex",
+    flexDirection: "column",
+    border: `1px solid ${border}`,
+    borderRadius: 12,
+    overflowY: "auto",
+    maxHeight: 260,
+  },
+  dayBreakdownRow: {
+    display: "flex",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    gap: 10,
+    padding: "7px 12px",
+    borderBottom: `1px solid ${border}`,
+    fontSize: 13,
+  },
+  dayBreakdownDay: {
+    color: textMuted,
+    display: "flex",
+    alignItems: "baseline",
+    gap: 6,
+  },
+  dayBreakdownDayToday: {
+    color: tealLight,
+    fontWeight: 600,
+  },
+  dayBreakdownValues: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: 8,
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+  },
+  dayBreakdownHours: {
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontWeight: 600,
+    color: paper,
+  },
+  dayBreakdownHoursZero: {
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontWeight: 600,
+    color: textMuted,
+  },
+  dayBreakdownOvertime: {
+    fontSize: 11.5,
+    fontWeight: 600,
+    color: OVERTIME_COLOR,
+  },
+  dayBreakdownShortfall: {
+    fontSize: 11.5,
+    color: textMuted,
+  },
+  dayBreakdownNote: {
+    fontSize: 11,
+    color: textMuted,
+  },
+  dayBreakdownFuture: {
+    color: textMuted,
+    opacity: 0.6,
   },
   summaryStatsRow: {
     display: "grid",
