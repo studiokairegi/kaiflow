@@ -1,64 +1,155 @@
-# Shot Tracker
+# Kairil
 
-A commission pipeline board for Studio Kairegi. Multi-user, with email/password and Google sign-in via Supabase, deployable as a static site on Cloudflare Pages.
+A studio operating system for Studio Kairegi: CRM and lead pipeline, project and
+shot tracking, budget planning, invoicing and finance, team/crew management,
+client and freelancer portals, Google Drive integration, Patreon-backed Pro
+plans, and time tracking.
 
-## 1. Set up Supabase
+Built with React + Vite on Supabase (Postgres, Auth, Edge Functions), deployed
+as a static site on Cloudflare Pages.
 
-1. Go to supabase.com and create a free account, then create a new project.
-2. Pick a database password and save it somewhere safe. You won't need it day to day.
-3. Once the project finishes provisioning, go to **SQL Editor > New query**, paste the contents of `schema.sql` from this folder, and run it. This creates the `projects` and `shots` tables with row-level security, so each user only ever sees their own data.
-4. Go to **Project Settings > API**. You'll need two values from this page:
-   - **Project URL**
-   - **anon public** key
+> Each account is its own isolated studio workspace: every record is tagged with
+> the signed-in user's ID and filtered by row-level security. This is *not* a
+> shared multi-user workspace where several people collaborate inside one
+> studio's data - that would be a `workspace_id` schema change.
 
-## 2. Turn on Google sign-in (optional)
+## Modules
 
-1. In Supabase, go to **Authentication > Providers > Google** and toggle it on.
-2. You'll need a Google OAuth Client ID and Secret. Create one at console.cloud.google.com under **APIs & Services > Credentials > Create Credentials > OAuth client ID**, application type "Web application".
-3. Add this as an **Authorized redirect URI** in the Google console (Supabase shows you the exact URL to copy on the same provider settings page, it looks like `https://<your-project>.supabase.co/auth/v1/callback`).
-4. Paste the Client ID and Secret back into Supabase's Google provider settings and save.
-5. Also go to **Authentication > URL Configuration** in Supabase and set your Cloudflare Pages URL (from step 4 below) as a **Redirect URL**, so Google sends people back to the right place after signing in.
+| Module | What it does |
+| --- | --- |
+| Dashboard | KPIs, needs-attention queue, charts, greeting, Studio Time clock |
+| Projects / Shots | Kanban board across the anime production pipeline, per-shot review + revisions |
+| Leads (CRM) | Full lifecycle, 5-step follow-up cadence, duplicate detection, activity log, auto-archiving |
+| Budget Planner | Department budget splits, crew cost + fit scoring, scope/timeline, templates, convert-to-project |
+| Finance | Multi-currency expenses, invoices, milestones, profitability analytics |
+| Teams | Crew roster with skills, rates, capacity, availability, dependability |
+| Client Portal | Public read-only project view via share link (Pro) |
+| Freelancer Portal | Public per-shot brief + Drive upload via share token (Pro) |
+| Studio Time | Clock in/out, Pomodoro focus sessions, weekly/monthly summaries, pop-out timer |
 
-Email/password sign-in works immediately with no extra setup, Supabase handles verification emails automatically.
+## 1. Set up the database
 
-## 3. Local development
+**Migration order matters.** Run `schema.sql` first, then every
+`migration_*.sql` file. Most are idempotent (`if not exists` / `or replace`), so
+re-running them is safe - but the `migration_audit_fixes_*.sql` files correct
+earlier ones and must run **after** the migrations they fix.
+
+Safe order:
+
+1. `schema.sql`
+2. All other `migration_*.sql` files (alphabetical is fine)
+3. Then, strictly in this order, last:
+   - `migration_security_hardening.sql`
+   - `migration_audit_fixes_2.sql`
+   - `migration_audit_fixes_3.sql`
+   - `migration_drive_uploads.sql`
+   - `migration_oauth_intents.sql`
+   - `migration_audit_fixes_5.sql`
+   - `migration_audit_fixes_6.sql`
+   - `migration_audit_fixes_7.sql`
+   - `migration_audit_fixes_8.sql`
+   - `migration_audit_fixes_9.sql`
+
+(There is no `migration_audit_fixes_1.sql` or `_4.sql` - those numbers were
+skipped, nothing is missing.)
+
+Then grab **Project Settings > API**: the **Project URL** and **anon public**
+key.
+
+### Post-migration manual steps
+
+- **Lead auto-archiving needs pg_cron.** Enable it under **Database >
+  Extensions**, then re-run `migration_audit_fixes_2.sql` (it schedules the job
+  automatically once pg_cron exists, and prints instructions if it doesn't).
+  Verify with `select * from cron.job;`
+- **Patreon campaign ID must be set by hand.** Set the `PATREON_CAMPAIGN_ID`
+  Edge Function secret (or insert a row into `patreon_campaign_config`) as the
+  studio owner. This is deliberately never auto-discovered - see the comment in
+  `supabase/functions/patreon-callback/index.ts`.
+- **Financial CHECK constraints ship as `NOT VALID`** so they can't fail against
+  existing data. Once you've confirmed no bad rows exist (the queries are in
+  `migration_audit_fixes_3.sql`), validate them.
+
+## 2. Auth
+
+Email/password works immediately. For Google sign-in: **Authentication >
+Providers > Google**, create an OAuth client at console.cloud.google.com, add
+Supabase's callback URL as an authorized redirect URI, then set your deployed
+URL under **Authentication > URL Configuration**.
+
+## 3. Edge Functions
+
+Deploy everything under `supabase/functions/` with the Supabase CLI:
+
+```
+supabase functions deploy <name>
+```
+
+Functions: `oauth-start-intent`, `google-drive-connect`,
+`google-drive-callback`, `google-drive-create-folders`, `studio-drive-upload`,
+`studio-drive-delete`, `freelancer-drive-upload`, `patreon-connect`,
+`patreon-callback`, `patreon-webhook`.
+
+Required secrets:
+
+| Secret | Used by |
+| --- | --- |
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | all |
+| `APP_URL` | OAuth callbacks (where to redirect back to) |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` | Drive |
+| `DRIVE_TOKEN_ENCRYPTION_KEY` | Drive (encrypts refresh tokens at rest) |
+| `PATREON_CLIENT_ID`, `PATREON_CLIENT_SECRET`, `PATREON_REDIRECT_URI` | Patreon |
+| `PATREON_CAMPAIGN_ID` | Patreon (see above - set this by hand) |
+| `PATREON_PRO_TIER_ID`, `PATREON_WEBHOOK_SECRET` | Patreon |
+
+See `GOOGLE_DRIVE_SETUP.md` and `PATREON_SETUP.md` for the full provider setup.
+
+## 4. Local development
 
 ```
 npm install
 ```
 
-Create a `.env.local` file in the project root:
+Create `.env.local`:
 
 ```
 VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_ANON_KEY=your-anon-key
 ```
 
-Then:
+Then `npm run dev`.
 
-```
-npm run dev
-```
+> `npm run dev` serves **only** at `http://localhost:5173`. It does not affect
+> the deployed site - that updates when you push to the connected GitHub repo.
 
-Try creating an account, adding a project, adding a shot, and dragging it between stages before deploying anywhere.
+## 5. Deploy (Cloudflare Pages)
 
-## 4. Deploy to Cloudflare Pages
+Push to GitHub, then **Workers & Pages > Create > Pages > Connect to Git**.
 
-1. Push this folder to a GitHub repository.
-2. In the Cloudflare dashboard, go to **Workers & Pages > Create > Pages > Connect to Git**, and select the repo.
-3. Build settings:
-   - **Framework preset:** Vite
-   - **Build command:** `npm run build`
-   - **Build output directory:** `dist`
-4. Under **Settings > Environment Variables**, add:
-   - `VITE_SUPABASE_URL` = your Supabase project URL
-   - `VITE_SUPABASE_ANON_KEY` = your Supabase anon public key
-5. Deploy. Cloudflare gives you a `*.pages.dev` URL immediately, and you can attach `studiokairegi.com` or a subdomain like `shots.studiokairegi.com` afterward under **Custom domains**.
+- **Framework preset:** Vite
+- **Build command:** `npm run build`
+- **Build output directory:** `dist`
+- **Environment variables:** `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`
 
-The anon key is safe to expose in the frontend, that's how Supabase is designed to work. Actual data access is enforced by the row-level security policies in `schema.sql`, not by hiding the key.
+The anon key is safe to expose - data access is enforced by row-level security,
+not by hiding the key.
 
-## Notes
+## Storage architecture
 
-- Every project and shot is tagged with the signed-in user's ID and filtered automatically by Supabase's row-level security, so two people using the same deployed app never see each other's data.
-- The export/import buttons in the header still work, they read from and write to Supabase.
-- If you ever want a shared team workspace instead of per-user isolation, that's a schema change (a `workspace_id` column instead of relying purely on `user_id`), just flag it and we can adjust.
+**Google Drive is the source of truth for production files. Supabase stores
+metadata only.** Studio attachments and freelancer deliverables both upload to
+the project's Drive folder; Supabase keeps the file name, Drive file ID, and
+URL. The legacy public `attachments` bucket is no longer written to.
+
+Uploads are capped at 50MB (Edge Function memory limit). Larger files need
+Drive's resumable upload API.
+
+## Free vs Pro
+
+Free: 3 active projects, 3 budget plans. Pro unlocks those plus Teams, Client
+Portal, Freelancer links, milestones, multi-currency, planner crew intelligence,
+scope/timeline, and templates.
+
+Pro comes from a Patreon subscription (synced via OAuth + webhook) or an admin
+override. Limits and Pro gating are enforced by database triggers, not just the
+UI - `is_admin` and `plan` on `user_settings` cannot be modified by the client.

@@ -56,10 +56,15 @@ export async function uploadFileToDrive(
   accessToken: string,
   folderId: string,
   fileName: string,
-  fileBytes: Uint8Array,
+  fileData: Uint8Array | Blob,
   mimeType: string
 ): Promise<{ id: string; url: string }> {
-  const boundary = "kaiflow-drive-upload-boundary";
+  // Randomized per upload rather than a fixed constant: a hardcoded
+  // boundary that happens to appear inside the uploaded file's own bytes
+  // would corrupt the multipart framing and produce a truncated or
+  // rejected upload. Vanishingly unlikely with this string, but the fix
+  // costs nothing and removes the class of bug entirely.
+  const boundary = `kairil-drive-${crypto.randomUUID()}`;
   const metadata = { name: fileName, parents: [folderId] };
 
   const metadataPart =
@@ -71,10 +76,17 @@ export async function uploadFileToDrive(
   const closing = `\r\n--${boundary}--`;
 
   const encoder = new TextEncoder();
+  // fileData is accepted as a Blob/File directly (not just Uint8Array) so
+  // callers can hand over the uploaded File as-is. Passing the File means
+  // Blob references its existing backing data rather than the caller first
+  // materialising the whole thing via arrayBuffer() and this then copying
+  // it again - which was costing roughly 2x the file size in resident
+  // memory for every upload, against an Edge Function memory ceiling far
+  // below what the old 200MB cap implied was safe.
   const body = new Blob([
     encoder.encode(metadataPart),
     encoder.encode(filePartHeader),
-    fileBytes,
+    fileData,
     encoder.encode(closing),
   ]);
 
@@ -96,4 +108,25 @@ export async function uploadFileToDrive(
   }
   const json = await res.json();
   return { id: json.id, url: `https://drive.google.com/file/d/${json.id}/view` };
+}
+
+// Moves a Drive file to the owner's trash (not a permanent delete) so a
+// mistaken removal in Kairil is still recoverable from Drive itself for
+// the usual 30 days. Returns false rather than throwing on failure - a
+// file that's already gone, or was manually deleted in Drive, shouldn't
+// block removing the attachment record from the shot.
+export async function trashDriveFile(accessToken: string, fileId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ trashed: true }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }

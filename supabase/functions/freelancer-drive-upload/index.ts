@@ -33,7 +33,14 @@ Deno.serve(async (req) => {
     // here isn't optional. 200MB covers real production deliverables
     // (frames, PSDs, short clips) without leaving the studio's Drive open
     // to unbounded uploads from anyone holding a single shot's link.
-    const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
+    // 200MB was never actually achievable: an Edge Function's memory
+    // ceiling is well under that, and the multipart body has to exist as a
+    // Blob alongside the incoming file, so the old cap advertised a size
+    // that would reliably OOM mid-upload rather than return a clean error.
+    // 50MB comfortably covers real frames/PSDs/short clips within the
+    // memory actually available. Raising this further needs Drive's
+    // resumable (chunked) upload API, not a bigger number here.
+    const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
     if (file.size > MAX_UPLOAD_BYTES) {
       return new Response(
         JSON.stringify({ error: `File is too large. The limit is ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB.` }),
@@ -89,7 +96,6 @@ Deno.serve(async (req) => {
     const refreshToken = await decryptText(connection.refresh_token_encrypted, encryptionKey);
     const accessToken = await getAccessToken(refreshToken);
 
-    const fileBytes = new Uint8Array(await file.arrayBuffer());
     const cleanTitle = (shot.title || "shot").replace(/[^\w\- ]+/g, "").trim();
     const driveFileName = `${cleanTitle} - ${file.name}`;
 
@@ -97,7 +103,7 @@ Deno.serve(async (req) => {
       accessToken,
       project.drive_deliverables_folder_id,
       driveFileName,
-      fileBytes,
+      file,
       file.type
     );
 
