@@ -101,6 +101,48 @@ function isLeadStageTerminal(stageId) {
 // excluded - a won deal has converted, it isn't outreach in progress.
 const ACTIVE_OUTREACH_STAGE_IDS = ["cold_email", "responded", "qualified", "proposal", "negotiation"];
 
+// Date-range options for the dashboard's outreach funnel (Cold email
+// success rate card). `days: null` means "All time" - no lower bound.
+const DASHBOARD_PERIOD_OPTIONS = [
+  { id: "30d", label: "Last 30 days", days: 30 },
+  { id: "90d", label: "Last 90 days", days: 90 },
+  { id: "6m", label: "Last 6 months", days: 182 },
+  { id: "12m", label: "Last 12 months", days: 365 },
+  { id: "all", label: "All time", days: null },
+];
+
+// Bare "YYYY-MM-DD" values (email dateSent) parsed via `new Date(str)` read
+// as UTC midnight, landing on the previous local calendar day for anyone
+// west of UTC - same issue as monthKey above. Activity-log timestamps are
+// full ISO strings and parse the same either way, so this guard is safe
+// for both.
+function parseDashboardDate(dateStr) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(dateStr || "") ? parseLocalDateStr(dateStr) : new Date(dateStr);
+}
+
+// True when `dateStr` falls within the last `days` days of `now` (inclusive,
+// not in the future). `days: null`/`undefined` always matches - used for the
+// "All time" option. A missing/invalid `dateStr` never matches a bounded
+// window, since there's nothing to place in it.
+function isWithinDashboardPeriod(dateStr, days, now = new Date()) {
+  if (days == null) return true;
+  if (!dateStr) return false;
+  const d = parseDashboardDate(dateStr);
+  if (isNaN(d.getTime())) return false;
+  const diffDays = (now - d) / 86400000;
+  return diffDays >= 0 && diffDays <= days;
+}
+
+// True when `dateStr` falls on the same calendar day as `now`. Used for the
+// "today" figures (new leads added today, cold emails sent today) which are
+// always "today" regardless of whichever funnel period is selected.
+function isToday(dateStr, now = new Date()) {
+  if (!dateStr) return false;
+  const d = parseDashboardDate(dateStr);
+  if (isNaN(d.getTime())) return false;
+  return d.toDateString() === now.toDateString();
+}
+
 const LEAD_PRIORITIES = [
   { id: "hot", label: "Hot", icon: "\u{1F525}" },
   { id: "warm", label: "Warm", icon: "\u{1F7E1}" },
@@ -1313,8 +1355,13 @@ function computeMemberShots(member, cards, projects) {
   return { shots: withProjectNames, pending, paid };
 }
 
+// "YYYY-MM-DD" (dateSent/paidDate/deadline) parsed via `new Date(str)` is
+// read as UTC midnight, which lands on the previous local calendar day for
+// anyone west of UTC - and therefore the previous month, right at month
+// boundaries. Route bare dates through parseLocalDateStr instead; full ISO
+// timestamps (activity log entries) parse the same either way.
 function monthKey(dateStr) {
-  const d = new Date(dateStr);
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(dateStr || "") ? parseLocalDateStr(dateStr) : new Date(dateStr);
   if (isNaN(d.getTime())) return null;
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
@@ -1439,6 +1486,11 @@ const DEFAULT_SETTINGS = {
   isAdmin: false,
   leadChannels: DEFAULT_LEAD_CHANNELS,
   followupSchedule: DEFAULT_FOLLOWUP_SCHEDULE,
+  // Channels toggled off from the dashboard's "Leads by channel" breakdown.
+  // Purely a display filter - hidden channels still exist, are still
+  // selectable on leads, and still show up everywhere else (CRM board
+  // filter chips, lead editor).
+  dashboardHiddenChannels: [],
 };
 
 function settingsFromRow(row) {
@@ -1465,6 +1517,7 @@ function settingsFromRow(row) {
       Array.isArray(row.followup_schedule) && row.followup_schedule.length === 5
         ? row.followup_schedule
         : DEFAULT_FOLLOWUP_SCHEDULE,
+    dashboardHiddenChannels: Array.isArray(row.dashboard_hidden_channels) ? row.dashboard_hidden_channels : [],
   };
 }
 
@@ -1483,21 +1536,37 @@ function settingsToRow(settings, userId) {
     is_admin: settings.isAdmin,
     lead_channels: settings.leadChannels || DEFAULT_LEAD_CHANNELS,
     followup_schedule: settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE,
+    dashboard_hidden_channels: settings.dashboardHiddenChannels || [],
   };
 }
 
 function computeDashboardStats(projects, cards, leads, invoices, fxRates = {}) {
   const activeProjects = projects.filter((p) => !p.archived);
-  const activeLeads = leads.filter((l) => !l.archivedAt && !isLeadStageTerminal(l.stage));
+  // "Active leads" means outreach actually in progress: contacted but not
+  // yet resolved. That excludes the untouched "New" pool (never contacted)
+  // and every terminal outcome - No Response, Lost, Disqualified, Closed,
+  // and Won (converted, no longer outreach). !isLeadStageTerminal() alone
+  // used to leave "New" leads counted as active, since pool isn't a
+  // terminal stage - only the true outreach stages should count. This
+  // mirrors ACTIVE_OUTREACH_STAGE_IDS, the same definition the dashboard's
+  // active-outreach breakdown already uses.
+  const activeLeads = leads.filter((l) => !l.archivedAt && ACTIVE_OUTREACH_STAGE_IDS.includes(l.stage));
   const dealsWon = leads.filter((l) => l.stage === "won").length;
   const dealsLost = leads.filter((l) => l.stage === "lost").length;
 
   const now = new Date();
+  // BUG FIX: "YYYY-MM-DD" deadlines were parsed with `new Date(p.deadline)`,
+  // which reads the string as UTC midnight - the previous local calendar day
+  // for anyone west of UTC. Two separate errors compounded: the parse itself,
+  // and diffing against a mid-day `now`, which made a deadline of *today*
+  // come out negative and drop off the list entirely. Parse locally and diff
+  // against local midnight, matching what computeFollowupStatus already does.
+  const todayStart = startOfLocalDay(now);
   const nearDeadline = activeProjects.filter((p) => {
     if (!p.deadline) return false;
-    const d = new Date(p.deadline);
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(p.deadline) ? parseLocalDateStr(p.deadline) : new Date(p.deadline);
     if (isNaN(d.getTime())) return false;
-    const diffDays = (d - now) / 86400000;
+    const diffDays = Math.round((startOfLocalDay(d) - todayStart) / 86400000);
     return diffDays >= 0 && diffDays <= 7;
   });
 
@@ -1512,9 +1581,13 @@ function computeDashboardStats(projects, cards, leads, invoices, fxRates = {}) {
   const lastMonth = lastMonthDate.getMonth();
   const lastMonthYear = lastMonthDate.getFullYear();
 
+  // BUG FIX: same UTC-midnight parsing issue as monthKey/nearDeadline above
+  // - paidDate is a bare "YYYY-MM-DD" string, so `new Date(inv.paidDate)`
+  // could land on the wrong local calendar month for anyone west of UTC,
+  // right at the edges of the month.
   const revenueThisMonth = invoices.reduce((sum, inv) => {
     if (inv.status !== "paid" || !inv.paidDate) return sum;
-    const d = new Date(inv.paidDate);
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(inv.paidDate) ? parseLocalDateStr(inv.paidDate) : new Date(inv.paidDate);
     if (d.getMonth() === thisMonth && d.getFullYear() === thisYear) {
       return sum + convertToUSD(inv.amountPaid, inv.currency, fxRates);
     }
@@ -1523,7 +1596,7 @@ function computeDashboardStats(projects, cards, leads, invoices, fxRates = {}) {
 
   const revenueLastMonth = invoices.reduce((sum, inv) => {
     if (inv.status !== "paid" || !inv.paidDate) return sum;
-    const d = new Date(inv.paidDate);
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(inv.paidDate) ? parseLocalDateStr(inv.paidDate) : new Date(inv.paidDate);
     if (d.getMonth() === lastMonth && d.getFullYear() === lastMonthYear) {
       return sum + convertToUSD(inv.amountPaid, inv.currency, fxRates);
     }
@@ -1791,6 +1864,17 @@ const STAGE_ACTIVITY_LABEL = {
   disqualified: "Disqualified",
   closed: "Closed",
 };
+
+// True if `lead` has a stage-change activity-log entry for `stageId` whose
+// timestamp satisfies `matches(ts)`. Shared by the Outreach performance
+// trend chart and the Cold email success rate funnel so both agree on what
+// counts as e.g. "responded" or "won" - an actual logged stage-change
+// event, not "the stage happens to be X right now" - instead of each
+// re-deriving its own copy of this check against hardcoded label strings.
+function hadStageEvent(lead, stageId, matches) {
+  const note = STAGE_ACTIVITY_LABEL[stageId];
+  return (lead.activityLog || []).some((a) => a.type === "stage_change" && a.note === note && matches(a.ts));
+}
 
 // Diffs the previous saved lead against the form about to be saved and
 // returns new activity-log entries for anything meaningful that changed.
@@ -4195,6 +4279,15 @@ export default function ShotTracker() {
         </div>
       </header>
 
+      {/* Mounted here - unconditionally, at the app root - rather than
+          inside DashboardPanel, so the floating pop-out window it can open
+          survives switching workspaces/tabs. DashboardPanel only unmounts
+          when the Dashboard workspace isn't active, and this component used
+          to live inside it; navigating to Leads/Finance/etc. tore it down
+          and, with it, any open pop-out. `visible` keeps its own on-page
+          tile showing only on the Dashboard, matching the old layout. */}
+      <StudioTimeCard userId={userId} visible={view === "projects" && workspace === "dashboard"} />
+
       {showTabs && (
         <div style={styles.tabRow}>
           <button
@@ -6060,7 +6153,7 @@ function StudioTimeSummaryModal({ userId, onClose }) {
     </div>
   );
 }
-function StudioTimeCard({ userId }) {
+function StudioTimeCard({ userId, visible = true }) {
   const [activeSession, setActiveSession] = useState(null); // { id, clockIn, sessionType } | null
   const [todaySeconds, setTodaySeconds] = useState(0); // completed sessions today, in seconds
   const [now, setNow] = useState(() => new Date());
@@ -6100,10 +6193,12 @@ function StudioTimeCard({ userId }) {
     setPipSupported(typeof window !== "undefined" && "documentPictureInPicture" in window);
   }, []);
 
-  // Close the floating window whenever it changes and on unmount (e.g.
-  // navigating off the Dashboard while it's open) - otherwise React tears
-  // down the portaled content but leaves the native window itself behind,
-  // with nothing in the app still holding a reference to close it.
+  // Close the floating window whenever it changes and on unmount (this
+  // component is now mounted once, persistently, at the app root - see its
+  // call site - so in practice "unmount" means signing out or closing the
+  // tab, not switching modules) - otherwise React tears down the portaled
+  // content but leaves the native window itself behind, with nothing in
+  // the app still holding a reference to close it.
   useEffect(() => {
     return () => {
       if (pipWindow) pipWindow.close();
@@ -6111,19 +6206,26 @@ function StudioTimeCard({ userId }) {
   }, [pipWindow]);
 
   // Closes the pop-out any time it's open while idle: the tracked
-  // session/phase ending while it's still open, or the brief window during
-  // a fresh clock-in before activeSession/pomodoroPhase have updated (see
-  // the comment on openPip below for why openPip itself can't guard on
-  // idle - the manual pop-out button guards with its own
-  // disabled={idle && !pipWindow} instead). Either way, this is what
-  // actually stops the fixed 240x240 window from settling on the wider
-  // "Start a focus session" setup grid.
+  // session/phase ending while it's still open, or a blocked/failed
+  // clock-in that leaves the app idle with the window already open. This
+  // is what actually stops the fixed-size window from settling on the
+  // wider "Start a focus session" setup grid.
+  //
+  // Guarded on !clockingIn: openPip()'s requestWindow() call and the
+  // clock-in's own Supabase insert both resolve independently, and
+  // requestWindow() often wins that race - the window can finish opening
+  // (setPipWindow fires) while activeSession/pomodoroPhase are still null,
+  // which makes `idle` momentarily true. Without this guard, that brief
+  // window is exactly the "idle" case above and this effect closes the
+  // popup the instant it opens, before clocking in ever finishes -
+  // clockingIn is true for that whole stretch, so it's a safe way to tell
+  // "still starting up" apart from "genuinely idle."
   useEffect(() => {
-    if (idle && pipWindow) {
+    if (idle && pipWindow && !clockingIn) {
       pipWindow.close();
       setPipWindow(null);
     }
-  }, [idle, pipWindow]);
+  }, [idle, pipWindow, clockingIn]);
 
   useEffect(() => {
     savePomodoroConfig(pomodoroConfig);
@@ -6407,7 +6509,7 @@ function StudioTimeCard({ userId }) {
   const openPip = async () => {
     if (!pipSupported || pipWindow) return;
     try {
-      const pw = await window.documentPictureInPicture.requestWindow({ width: 240, height: 240 });
+      const pw = await window.documentPictureInPicture.requestWindow({ width: 150, height: 180 });
       // This app's global styles (fonts, keyframes, hover/disabled rules)
       // live in one <style> tag; everything else is inline styles, which
       // render correctly in any document without copying anything else.
@@ -6489,11 +6591,11 @@ function StudioTimeCard({ userId }) {
         {clockError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{clockError}</p>}
         <button
           type="button"
-          style={{ ...styles.newButton, marginTop: 8 }}
+          style={{ ...styles.newButton, marginTop: 8, padding: "6px 12px", fontSize: 11.5 }}
           onClick={() => handleClockOut().catch(() => {})}
           disabled={clockingOut}
         >
-          {clockingOut ? <SpinnerIcon size={16} /> : <ClockIcon />}
+          {clockingOut ? <SpinnerIcon size={13} /> : <ClockIcon />}
           Clock Out
         </button>
       </div>
@@ -6512,14 +6614,18 @@ function StudioTimeCard({ userId }) {
         <div style={styles.studioTimeActionsRow}>
           <button
             type="button"
-            style={styles.newButton}
+            style={{ ...styles.newButton, padding: "6px 12px", fontSize: 11.5 }}
             onClick={() => handleClockIn("manual").catch(() => {})}
             disabled={initializing || clockingIn}
           >
-            {clockingIn ? <SpinnerIcon size={16} /> : <ClockIcon />}
+            {clockingIn ? <SpinnerIcon size={13} /> : <ClockIcon />}
             Clock In
           </button>
-          <button type="button" style={styles.pomodoroLinkButton} onClick={() => setShowPomodoroSetup((v) => !v)}>
+          <button
+            type="button"
+            style={{ ...styles.pomodoroLinkButton, fontSize: 11, padding: "6px 0" }}
+            onClick={() => setShowPomodoroSetup((v) => !v)}
+          >
             {showPomodoroSetup ? "Hide focus session setup" : "Start a focus session"}
           </button>
         </div>
@@ -6551,6 +6657,7 @@ function StudioTimeCard({ userId }) {
   const compactBusy = clockingIn || clockingOut;
   return (
     <>
+      {visible && (
       <div style={styles.studioTimeCompactWrap}>
       <div style={{ ...styles.studioTimeCompact, ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
         {(activeSession || pomodoroPhase) && <span style={styles.studioTimeStatusDot} />}
@@ -6616,6 +6723,7 @@ function StudioTimeCard({ userId }) {
         <PomodoroSetupForm config={pomodoroConfig} onChange={setPomodoroConfig} onStart={startPomodoro} busy={initializing || clockingIn} />
       )}
       </div>
+      )}
       {pipWindow && createPortal(<div style={styles.pipContent}>{trackingContent}</div>, pipWindow.document.body)}
       {showSummary && <StudioTimeSummaryModal userId={userId} onClose={() => setShowSummary(false)} />}
     </>
@@ -6673,6 +6781,10 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   const stats = computeDashboardStats(projects, cards, leads, invoices, fxRates);
   const cur = "$"; // Dashboard totals are always USD-converted for cross-project consistency
   const schedule = settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE;
+  // Scopes the "Cold email success rate" card's funnel (Sent/Responded/
+  // Qualified/Won/Lost/No response) and both rate figures. Defaults to
+  // "All time" so the card doesn't silently shrink on first load.
+  const [dashboardPeriod, setDashboardPeriod] = useState("all");
 
   const statItems = [
     { label: "Active projects", value: stats.activeProjectsCount, sub: `${stats.projectsCompleted} completed`, icon: <FolderIcon />, color: teal, onClick: onGoToProjects },
@@ -6709,27 +6821,55 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     value: activeOutreachLeads.filter((l) => l.stage === id).length,
   }));
 
-  const leadsByChannel = (settings.leadChannels || DEFAULT_LEAD_CHANNELS).map((channel) => ({
-    label: channel,
-    value: leads.filter((l) => l.channel === channel && !l.archivedAt).length,
-  }));
+  // "Leads by channel" only shows channels the studio hasn't switched off in
+  // Settings > Lead channels. Hiding is presentation-only: the channel stays
+  // selectable on leads and still works as a filter chip on the CRM board,
+  // and hiding it never changes any other figure on this dashboard.
+  const studioChannels = settings.leadChannels || DEFAULT_LEAD_CHANNELS;
+  const hiddenChannels = settings.dashboardHiddenChannels || [];
+  const leadsByChannel = studioChannels
+    .filter((channel) => !hiddenChannels.includes(channel))
+    .map((channel) => ({
+      label: channel,
+      value: leads.filter((l) => l.channel === channel && !l.archivedAt).length,
+    }));
+  const allChannelsHidden = studioChannels.length > 0 && studioChannels.every((c) => hiddenChannels.includes(c));
 
-  // Outreach totals are lifetime figures, including archived leads, so
-  // archiving a won/lost lead never distorts the historical success rate.
-  const coldEmailsSentTotal = leads.filter((l) => l.emails?.[0]?.sent).length;
-  // Matches the performance chart's definition below: an actual "Lead
-  // responded" stage-change event, not just "the stage moved past Cold
-  // Email" - a lead nudged straight to Qualified by the studio owner
-  // (no real reply) shouldn't inflate this the way the old stage-based
-  // check did.
-  const respondedTotal = leads.filter((l) =>
-    (l.activityLog || []).some((a) => a.type === "stage_change" && a.note === "Lead responded")
-  ).length;
-  const qualifiedTotal = leads.filter((l) => ["qualified", "proposal", "negotiation", "won"].includes(l.stage)).length;
-  const wonTotal = leads.filter((l) => l.stage === "won").length;
-  const lostTotal = leads.filter((l) => l.stage === "lost").length;
-  const noResponseTotal = leads.filter((l) => l.stage === "no_response").length;
-  const successRate = coldEmailsSentTotal > 0 ? (wonTotal / coldEmailsSentTotal) * 100 : 0;
+  const now = new Date();
+  const periodDays = DASHBOARD_PERIOD_OPTIONS.find((p) => p.id === dashboardPeriod)?.days ?? null;
+  const inPeriod = (dateStr) => isWithinDashboardPeriod(dateStr, periodDays, now);
+
+  // Every funnel figure except "Sent" is event-based: it counts leads with a
+  // matching stage-change entry in the activity log inside the selected
+  // window, not leads currently sitting in that stage. Two reasons. First, a
+  // current-stage snapshot carries no date, so there's nothing for a range
+  // filter to filter on. Second, it double-counts and drops depending on
+  // where a lead ended up - "Qualified" used to mean "at or beyond
+  // qualified", so a lead that qualified and then lost vanished from the
+  // qualified count entirely. Event-based counting is also what the Outreach
+  // performance chart below already does per month, so the card and the
+  // chart can no longer disagree. Archived leads are included throughout, so
+  // archiving a resolved lead never rewrites history.
+  const coldEmailsSentTotal = leads.filter((l) => l.emails?.[0]?.sent && inPeriod(l.emails[0].dateSent)).length;
+  const respondedTotal = leads.filter((l) => hadStageEvent(l, "responded", inPeriod)).length;
+  const qualifiedTotal = leads.filter((l) => hadStageEvent(l, "qualified", inPeriod)).length;
+  const wonTotal = leads.filter((l) => hadStageEvent(l, "won", inPeriod)).length;
+  const lostTotal = leads.filter((l) => hadStageEvent(l, "lost", inPeriod)).length;
+  const noResponseTotal = leads.filter((l) => hadStageEvent(l, "no_response", inPeriod)).length;
+
+  // A cold email "succeeding" is really about getting a reply - that's what
+  // the email itself controls, while closing the deal also depends on
+  // pricing, qualification and negotiation. So response rate is the headline
+  // and win rate sits beside it, rather than win rate alone standing in for
+  // the whole picture (which reads 0% for a campaign pulling steady replies).
+  const responseRate = coldEmailsSentTotal > 0 ? (respondedTotal / coldEmailsSentTotal) * 100 : 0;
+  const winRate = coldEmailsSentTotal > 0 ? (wonTotal / coldEmailsSentTotal) * 100 : 0;
+
+  // Today's figures always mean today, independent of whichever period is
+  // selected above - they answer "what came in today", not "today, within
+  // the selected window".
+  const newLeadsToday = leads.filter((l) => isToday(l.createdAt, now)).length;
+  const coldEmailsSentToday = leads.filter((l) => l.emails?.[0]?.sent && isToday(l.emails[0].dateSent, now)).length;
 
   // Needs Attention: a handful of counts that point at something the user
   // should actually act on today, each clickable straight into a filtered
@@ -6768,21 +6908,12 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   // current stage) so a lead that later moved to Lost still counts toward
   // the month it was actually emailed, responded to, etc.
   const outreachTrend = months.map(({ key, label }) => {
+    const inMonth = (ts) => monthKey(ts) === key;
     const coldEmails = leads.filter((l) => l.emails?.[0]?.sent && monthKey(l.emails[0].dateSent) === key).length;
-    const responded = leads.filter((l) =>
-      (l.activityLog || []).some((a) => a.type === "stage_change" && a.note === "Lead responded" && monthKey(a.ts) === key)
-    ).length;
-    const won = leads.filter((l) =>
-      (l.activityLog || []).some((a) => a.type === "stage_change" && a.note === "Won" && monthKey(a.ts) === key)
-    ).length;
-    const lost = leads.filter((l) =>
-      (l.activityLog || []).some((a) => a.type === "stage_change" && a.note === "Marked lost" && monthKey(a.ts) === key)
-    ).length;
-    const noResponse = leads.filter((l) =>
-      (l.activityLog || []).some(
-        (a) => a.type === "stage_change" && a.note === "No response after follow-ups" && monthKey(a.ts) === key
-      )
-    ).length;
+    const responded = leads.filter((l) => hadStageEvent(l, "responded", inMonth)).length;
+    const won = leads.filter((l) => hadStageEvent(l, "won", inMonth)).length;
+    const lost = leads.filter((l) => hadStageEvent(l, "lost", inMonth)).length;
+    const noResponse = leads.filter((l) => hadStageEvent(l, "no_response", inMonth)).length;
     return { label, "Cold Emails": coldEmails, Responded: responded, Won: won, Lost: lost, "No Response": noResponse };
   });
 
@@ -6790,7 +6921,6 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     <div style={styles.dashboardShell}>
       <div style={styles.dashboardTopStrip}>
         <DashboardGreeting user={user} compact />
-        <StudioTimeCard userId={userId} />
       </div>
 
       <div style={styles.dashboardKpiStrip}>
@@ -6846,13 +6976,33 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
 
         {/* Column B — pipeline snapshot */}
         <div style={styles.dashboardCol}>
-          <div className="kf-card" style={styles.dashboardCard} onClick={() => onGoToLeads()}>
+          <div className="kf-card" style={{ ...styles.dashboardCard, overflowY: "auto" }} onClick={() => onGoToLeads()}>
             <div style={styles.dashboardCardHeaderRow}>
               <span style={styles.dashboardCardHeader}>Cold email success rate</span>
+              <select
+                style={styles.dashboardPeriodSelect}
+                value={dashboardPeriod}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => {
+                  e.stopPropagation();
+                  setDashboardPeriod(e.target.value);
+                }}
+              >
+                {DASHBOARD_PERIOD_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
             </div>
-            <span style={styles.dashboardSuccessBig}>{successRate.toFixed(1)}%</span>
+            <div style={styles.dashboardRateRow}>
+              <span style={styles.dashboardSuccessBig}>{responseRate.toFixed(1)}%</span>
+              <span style={styles.dashboardKpiSub}>response rate</span>
+              <span style={styles.dashboardWinRateBadge}>{winRate.toFixed(1)}% win rate</span>
+            </div>
             <p style={styles.dashboardCardHeaderHint}>
-              {wonTotal} win{wonTotal === 1 ? "" : "s"} from {coldEmailsSentTotal} cold email{coldEmailsSentTotal === 1 ? "" : "s"}
+              {respondedTotal} response{respondedTotal === 1 ? "" : "s"} and {wonTotal} win{wonTotal === 1 ? "" : "s"} from{" "}
+              {coldEmailsSentTotal} cold email{coldEmailsSentTotal === 1 ? "" : "s"}
             </p>
             <div style={styles.dashboardMiniFunnelGrid}>
               <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Sent</span><strong>{coldEmailsSentTotal}</strong></div>
@@ -6862,15 +7012,31 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
               <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Lost</span><strong style={{ color: "#FF4D4D" }}>{lostTotal}</strong></div>
               <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>No response</span><strong>{noResponseTotal}</strong></div>
             </div>
+            <div style={styles.dashboardTodayRow}>
+              <span style={styles.dashboardTodayLabel}>Today</span>
+              <span style={styles.dashboardKpiSub}>{newLeadsToday} new lead{newLeadsToday === 1 ? "" : "s"}</span>
+              <span style={styles.dashboardKpiSub}>{coldEmailsSentToday} cold email{coldEmailsSentToday === 1 ? "" : "s"} sent</span>
+            </div>
           </div>
           <div className="kf-card" style={styles.dashboardCard}>
             <div style={styles.dashboardCardHeaderRow}>
               <span style={styles.dashboardCardHeader}>Pipeline breakdown</span>
+              {hiddenChannels.length > 0 && (
+                <span style={styles.dashboardCardHeaderHint}>
+                  {hiddenChannels.length} channel{hiddenChannels.length === 1 ? "" : "s"} hidden
+                </span>
+              )}
             </div>
             <div style={styles.dashboardDonutRow}>
               <DonutBreakdown data={shotsByStage} emptyLabel="No shots yet." centerLabel="Shots" size={88} compact />
               <DonutBreakdown data={leadsByActiveStage} emptyLabel="No active outreach." centerLabel="Leads" size={88} compact />
-              <DonutBreakdown data={leadsByChannel} emptyLabel="No channels tagged." centerLabel="Leads" size={88} compact />
+              <DonutBreakdown
+                data={leadsByChannel}
+                emptyLabel={allChannelsHidden ? "All channels hidden (Settings)." : "No channels tagged."}
+                centerLabel="Leads"
+                size={88}
+                compact
+              />
             </div>
           </div>
         </div>
@@ -7146,6 +7312,16 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
   const removeChannel = (channel) => {
     setForm({ ...form, leadChannels: channels.filter((c) => c !== channel) });
   };
+  // Dashboard visibility per channel. Stores the *hidden* set rather than the
+  // visible one, so a newly added channel shows up on the dashboard by
+  // default instead of silently disappearing until it's opted back in.
+  const hiddenChannels = form.dashboardHiddenChannels || [];
+  const toggleChannelDashboardVisibility = (channel) => {
+    const next = hiddenChannels.includes(channel)
+      ? hiddenChannels.filter((c) => c !== channel)
+      : [...hiddenChannels, channel];
+    setForm({ ...form, dashboardHiddenChannels: next });
+  };
 
   const [supportMessages, setSupportMessages] = useState(null);
   const [loadingInbox, setLoadingInbox] = useState(false);
@@ -7402,18 +7578,35 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
         <div style={styles.field}>
           <label style={styles.label}>Lead channels</label>
           <div style={styles.lostReasonGrid}>
-            {channels.map((channel) => (
-              <span key={channel} style={{ ...styles.fileNameRow, ...styles.cardTag, gap: 6, padding: "5px 6px 5px 12px" }}>
-                {channel}
-                <button
-                  type="button"
-                  style={{ ...styles.iconButton, width: 18, height: 18 }}
-                  onClick={() => removeChannel(channel)}
-                >
-                  <CloseIcon />
-                </button>
-              </span>
-            ))}
+            {channels.map((channel) => {
+              const isHidden = hiddenChannels.includes(channel);
+              return (
+                <span key={channel} style={{ ...styles.fileNameRow, ...styles.cardTag, gap: 6, padding: "5px 6px 5px 12px" }}>
+                  {channel}
+                  <button
+                    type="button"
+                    title={isHidden ? "Hidden from the Dashboard breakdown — click to show" : "Shown on the Dashboard breakdown — click to hide"}
+                    style={{
+                      ...styles.copyButton,
+                      padding: "2px 8px",
+                      fontSize: 10,
+                      color: isHidden ? textMuted : teal,
+                      borderColor: isHidden ? border : teal,
+                    }}
+                    onClick={() => toggleChannelDashboardVisibility(channel)}
+                  >
+                    {isHidden ? "Hidden" : "Shown"}
+                  </button>
+                  <button
+                    type="button"
+                    style={{ ...styles.iconButton, width: 18, height: 18 }}
+                    onClick={() => removeChannel(channel)}
+                  >
+                    <CloseIcon />
+                  </button>
+                </span>
+              );
+            })}
           </div>
           <div style={{ ...styles.fieldRow, marginTop: 8 }}>
             <input
@@ -7431,8 +7624,10 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
             </button>
           </div>
           <p style={styles.fieldHint}>
-            Track where leads come from. These show up as filters on the Leads board and as a
-            breakdown on the Dashboard.
+            Track where leads come from. These show up as filters on the Leads board.
+            "Shown"/"Hidden" controls only whether a channel appears in the Dashboard's
+            "Leads by channel" breakdown — a hidden channel is still selectable on leads
+            and still works as a filter everywhere else.
           </p>
         </div>
 
@@ -10528,7 +10723,7 @@ const styles = {
   },
   studioTimeValue: {
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 30,
+    fontSize: 20,
     fontWeight: 600,
     color: paper,
     letterSpacing: "0.02em",
@@ -10537,8 +10732,8 @@ const styles = {
   studioTimeStatus: {
     display: "flex",
     alignItems: "center",
-    gap: 6,
-    fontSize: 12,
+    gap: 5,
+    fontSize: 10.5,
     color: "#3DDC84",
     fontWeight: 600,
     fontFamily: "'Inter', sans-serif",
@@ -10581,21 +10776,21 @@ const styles = {
   },
   pomodoroControls: {
     display: "flex",
-    gap: 8,
-    marginTop: 10,
+    gap: 6,
+    marginTop: 8,
   },
   pomodoroSecondaryButton: {
     background: "transparent",
     border: `1px solid ${border}`,
     borderRadius: 999,
     color: textMuted,
-    padding: "7px 14px",
-    fontSize: 12.5,
+    padding: "5px 10px",
+    fontSize: 11,
     fontFamily: "'Inter', sans-serif",
     cursor: "pointer",
   },
   pipContent: {
-    padding: 16,
+    padding: 10,
     width: "100%",
     color: paper,
     fontFamily: "'Inter', sans-serif",
@@ -10798,12 +10993,57 @@ const styles = {
     flex: 1,
     minHeight: 0,
   },
+  dashboardPeriodSelect: {
+    background: "#171d20",
+    border: `1px solid ${border}`,
+    borderRadius: 6,
+    padding: "3px 6px",
+    color: textMuted,
+    fontSize: 10.5,
+    fontFamily: "'Inter', sans-serif",
+    outline: "none",
+    cursor: "pointer",
+    flexShrink: 0,
+  },
   dashboardSuccessBig: {
     fontFamily: "'Space Grotesk', sans-serif",
     fontSize: 30,
     fontWeight: 700,
     color: teal,
     lineHeight: 1.1,
+  },
+  dashboardRateRow: {
+    display: "flex",
+    alignItems: "baseline",
+    flexWrap: "wrap",
+    gap: 8,
+    rowGap: 4,
+  },
+  dashboardWinRateBadge: {
+    fontSize: 11.5,
+    fontWeight: 600,
+    color: "#4A90D9",
+    background: "rgba(74,144,217,0.12)",
+    borderRadius: 999,
+    padding: "3px 9px",
+  },
+  dashboardTodayRow: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 10,
+    marginTop: 8,
+    paddingTop: 8,
+    borderTop: `1px solid ${border}`,
+    flexShrink: 0,
+  },
+  dashboardTodayLabel: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 10,
+    fontWeight: 700,
+    letterSpacing: 0.3,
+    textTransform: "uppercase",
+    color: tealLight,
   },
   dashboardMiniFunnelGrid: {
     display: "grid",
