@@ -6181,6 +6181,10 @@ function StudioTimeCard({ userId, visible = true }) {
   // recent Firefox only, as of when this was built - not Safari.
   const [pipSupported, setPipSupported] = useState(false);
   const [pipWindow, setPipWindow] = useState(null);
+  // Non-blocking note shown when the floating window itself fails to open.
+  // Kept separate from clockError because a failed pop-out is not a failed
+  // session - the work session starts and runs normally either way.
+  const [pipNotice, setPipNotice] = useState("");
 
   const [showSummary, setShowSummary] = useState(false);
 
@@ -6225,6 +6229,9 @@ function StudioTimeCard({ userId, visible = true }) {
       pipWindow.close();
       setPipWindow(null);
     }
+    // The pop-out notice is only meaningful for a session that's running;
+    // once there's nothing being tracked it's just stale text.
+    if (idle && !clockingIn) setPipNotice("");
   }, [idle, pipWindow, clockingIn]);
 
   useEffect(() => {
@@ -6508,8 +6515,10 @@ function StudioTimeCard({ userId, visible = true }) {
   // the app is left idle with it still open.
   const openPip = async () => {
     if (!pipSupported || pipWindow) return;
+    setPipNotice("");
     try {
-      const pw = await window.documentPictureInPicture.requestWindow({ width: 150, height: 180 });
+      // Square by request - 150x180 was noticeably taller than it was wide.
+      const pw = await window.documentPictureInPicture.requestWindow({ width: 180, height: 180 });
       // This app's global styles (fonts, keyframes, hover/disabled rules)
       // live in one <style> tag; everything else is inline styles, which
       // render correctly in any document without copying anything else.
@@ -6526,9 +6535,19 @@ function StudioTimeCard({ userId, visible = true }) {
         justifyContent: "center",
       });
       pw.addEventListener("pagehide", () => setPipWindow(null), { once: true });
+      setPipNotice("");
       setPipWindow(pw);
     } catch (err) {
+      // requestWindow() can fail for reasons beyond "browser doesn't
+      // support it": a blocked popup permission, a PiP window already open
+      // elsewhere, or a platform restriction. Previously this was
+      // console-only, so an automatic pop-out that failed looked like the
+      // whole clock-in had failed - the session had in fact started fine,
+      // the floating window just never appeared. Surface it as a plain
+      // note, deliberately not as clockError: the session is not in an
+      // error state and nothing needs retrying.
       console.error("Couldn't open the popup window:", err);
+      setPipNotice("Floating timer couldn't be opened in this browser. Your session is still running.");
     }
   };
 
@@ -6719,6 +6738,7 @@ function StudioTimeCard({ userId, visible = true }) {
         )}
       </div>
       {clockError && <span style={{ ...styles.fieldHint, color: "#FF4D4D", fontSize: 11 }}>{clockError}</span>}
+      {pipNotice && <span style={{ ...styles.fieldHint, color: "#F2A65A", fontSize: 11 }}>{pipNotice}</span>}
       {idle && showPomodoroSetup && (
         <PomodoroSetupForm config={pomodoroConfig} onChange={setPomodoroConfig} onStart={startPomodoro} busy={initializing || clockingIn} />
       )}
@@ -6870,6 +6890,19 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   // the selected window".
   const newLeadsToday = leads.filter((l) => isToday(l.createdAt, now)).length;
   const coldEmailsSentToday = leads.filter((l) => l.emails?.[0]?.sent && isToday(l.emails[0].dateSent, now)).length;
+  // Today's cold-email success, measured the same way as the headline
+  // response rate above: replies received, not deals closed. Uses the same
+  // event source (a logged `responded` stage change) and the same
+  // isToday() window as the two figures beside it, so the row stays
+  // internally consistent.
+  //
+  // Both halves are same-day counts, so on any given day they describe
+  // today's activity rather than tracing one email through to its own
+  // reply - a reply today usually answers an email sent days ago. That's
+  // the intended reading of a daily campaign figure; the period-filtered
+  // funnel above is where cohort-style rates live.
+  const respondedToday = leads.filter((l) => hadStageEvent(l, "responded", (ts) => isToday(ts, now))).length;
+  const successRateToday = coldEmailsSentToday > 0 ? (respondedToday / coldEmailsSentToday) * 100 : null;
 
   // Needs Attention: a handful of counts that point at something the user
   // should actually act on today, each clickable straight into a filtered
@@ -7016,6 +7049,10 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
               <span style={styles.dashboardTodayLabel}>Today</span>
               <span style={styles.dashboardKpiSub}>{newLeadsToday} new lead{newLeadsToday === 1 ? "" : "s"}</span>
               <span style={styles.dashboardKpiSub}>{coldEmailsSentToday} cold email{coldEmailsSentToday === 1 ? "" : "s"} sent</span>
+              <span style={styles.dashboardKpiSub}>{respondedToday} response{respondedToday === 1 ? "" : "s"}</span>
+              <span style={styles.dashboardKpiSub}>
+                {successRateToday === null ? "\u2014" : `${successRateToday.toFixed(0)}%`} success
+              </span>
             </div>
           </div>
           <div className="kf-card" style={styles.dashboardCard}>
