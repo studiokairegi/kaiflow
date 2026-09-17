@@ -15,7 +15,6 @@ import {
   YAxis,
   CartesianGrid,
   Legend,
-  ReferenceLine,
 } from "recharts";
 
 const PALETTE = [
@@ -368,34 +367,10 @@ function HoursTooltip({ active, payload, label }) {
   );
 }
 
-// `targetHours`, when given, draws the scheduled daily target as a dashed
-// line and highlights any day that sits above it, so overtime is readable
-// straight off the graph rather than only from the numbers beside it.
-const OVERTIME_ACCENT = "#F2A65A";
-
-function HoursTrendDot({ cx, cy, payload, targetHours }) {
-  if (cx == null || cy == null || payload?.value == null) return null;
-  // Weekend/unscheduled work has no target to exceed, so it never renders
-  // as an "overtime" dot even when its hours are high - only a scheduled
-  // day's excess over the target counts as overtime.
-  const over = !payload.unscheduled && targetHours != null && payload.value > targetHours + 0.001;
-  const fill = payload.unscheduled ? "#9B8AD8" : over ? OVERTIME_ACCENT : "#2FBFA6";
-  return (
-    <circle
-      cx={cx}
-      cy={cy}
-      r={over || payload.unscheduled ? 4 : 2.5}
-      fill={fill}
-      stroke={over || payload.unscheduled ? fill : "none"}
-      strokeWidth={over || payload.unscheduled ? 1.5 : 0}
-    />
-  );
-}
-
-export function HoursTrendChart({ data, targetHours }) {
+export function HoursTrendChart({ data }) {
   const hasData = data.some((d) => d.value > 0);
   return (
-    <div style={{ width: "100%", height: 200 }}>
+    <div style={{ width: "100%", height: 220 }}>
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
           <defs>
@@ -415,15 +390,6 @@ export function HoursTrendChart({ data, targetHours }) {
             tickFormatter={(v) => `${v}h`}
           />
           <Tooltip content={<HoursTooltip />} />
-          {targetHours != null && (
-            <ReferenceLine
-              y={targetHours}
-              stroke={OVERTIME_ACCENT}
-              strokeDasharray="4 4"
-              strokeOpacity={0.7}
-              label={{ value: `Target ${targetHours}h`, position: "insideTopRight", fill: OVERTIME_ACCENT, fontSize: 10 }}
-            />
-          )}
           <Area
             type="monotone"
             dataKey="value"
@@ -432,8 +398,6 @@ export function HoursTrendChart({ data, targetHours }) {
             strokeWidth={2}
             fill="url(#hoursFill)"
             connectNulls={false}
-            dot={targetHours != null ? <HoursTrendDot targetHours={targetHours} /> : false}
-            activeDot={{ r: 4 }}
           />
         </AreaChart>
       </ResponsiveContainer>

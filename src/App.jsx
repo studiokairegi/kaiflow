@@ -5848,9 +5848,8 @@ function dayKey(d) {
 
 // The studio's normal schedule: Monday-Friday, 09:00-17:00, i.e. an 8h
 // target per weekday. Anything clocked beyond a day's target is overtime;
-// weekends carry a 0h target, so time worked on them is overtime in full.
+// weekends have no scheduled target; weekend work counts as unscheduled time, not overtime.
 const WORKDAY_TARGET_SECONDS = 8 * 3600;
-const SCHEDULE_LABEL = "Mon\u2013Fri, 9:00\u20135:00 (8h/day)";
 
 function isScheduledWorkday(date) {
   const day = date.getDay(); // 0 = Sunday, 6 = Saturday
@@ -6293,13 +6292,11 @@ function StudioTimeSummaryModal({ userId, onClose }) {
   const trendData = breakdownDays.map((d) => ({
     label: d.shortLabel,
     value: d.isFuture ? null : Math.round((d.seconds / 3600) * 100) / 100,
-    overtime: Math.round((d.overtimeSeconds / 3600) * 100) / 100,
-    unscheduled: !d.isScheduled,
   }));
 
   return (
     <div style={styles.overlay} onClick={onClose}>
-      <div style={{ ...styles.modal, maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+      <div style={{ ...styles.modal, maxWidth: 600, gap: 18 }} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <h3 style={styles.modalTitle}>Studio Time Summary</h3>
           <button style={styles.iconButton} onClick={onClose}>
@@ -6328,7 +6325,7 @@ function StudioTimeSummaryModal({ userId, onClose }) {
           <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{error}</p>
         ) : (
           <>
-            <HoursTrendChart data={trendData} targetHours={WORKDAY_TARGET_SECONDS / 3600} />
+            <HoursTrendChart data={trendData} />
 
             <div>
               <span style={styles.label}>Daily breakdown</span>
@@ -6376,15 +6373,14 @@ function StudioTimeSummaryModal({ userId, onClose }) {
                 <span style={styles.label}>Worked</span>
                 <span style={styles.summaryStatValue}>{formatWorkDuration(stats.totalSeconds)}</span>
                 <span style={styles.summaryStatHint}>
-                  All clocked time {period === "week" ? "this week" : "this month"} so far.
+                  Clocked time this {period === "week" ? "week" : "month"}.
                 </span>
               </div>
               <div style={styles.summaryStat}>
                 <span style={styles.label}>Target</span>
                 <span style={styles.summaryStatValue}>{formatWorkDuration(stats.targetSeconds)}</span>
                 <span style={styles.summaryStatHint}>
-                  {stats.elapsedScheduledDays} scheduled weekday{stats.elapsedScheduledDays === 1 ? "" : "s"} elapsed
-                  {" \u00d7 8h"}.
+                  {stats.elapsedScheduledDays} weekday{stats.elapsedScheduledDays === 1 ? "" : "s"} elapsed {"\u00d7"} 8h.
                 </span>
               </div>
               <div style={styles.summaryStat}>
@@ -6398,9 +6394,9 @@ function StudioTimeSummaryModal({ userId, onClose }) {
                   {stats.overtimeSeconds > 0 ? formatWorkDuration(stats.overtimeSeconds) : "\u2014"}
                 </span>
                 <span style={styles.summaryStatHint}>
-                  Time beyond the 8h target on scheduled weekdays.
+                  Beyond the weekday target.
                   {stats.unscheduledSeconds > 0
-                    ? ` Weekend time (${formatWorkDuration(stats.unscheduledSeconds)}) is counted in Worked, not here.`
+                    ? ` (+${formatWorkDuration(stats.unscheduledSeconds)} weekend, in Worked.)`
                     : ""}
                 </span>
               </div>
@@ -6416,30 +6412,12 @@ function StudioTimeSummaryModal({ userId, onClose }) {
                 <span style={styles.summaryStatValue}>
                   {stats.elapsedScheduledDays > 0 ? `${formatWorkDuration(stats.averageSeconds)}/day` : "\u2014"}
                 </span>
-                <span style={styles.summaryStatHint}>
-                  Worked {"\u00f7"} elapsed scheduled weekdays - 0h days included.
-                </span>
+                <span style={styles.summaryStatHint}>Per elapsed weekday.</span>
               </div>
               <div style={styles.summaryStat}>
                 <span style={styles.label}>In focus sessions</span>
                 <span style={styles.summaryStatValue}>{focusRatio}%</span>
-                <span style={styles.summaryStatHint}>Share of clocked time spent in Pomodoro focus sessions.</span>
-              </div>
-            </div>
-
-            <p style={styles.summaryStatHint}>Schedule: {SCHEDULE_LABEL}.</p>
-
-            <div>
-              <span style={styles.label}>Focus vs. manual time</span>
-              <div style={{ marginTop: 8 }}>
-                <DonutBreakdown
-                  data={[
-                    { label: "Focus sessions", value: Math.round((stats.pomodoroSeconds / 3600) * 10) / 10 },
-                    { label: "Manual", value: Math.round((stats.manualSeconds / 3600) * 10) / 10 },
-                  ]}
-                  emptyLabel="No studio time clocked in this period yet."
-                  centerLabel="Hours"
-                />
+                <span style={styles.summaryStatHint}>Share of clocked time in Pomodoro sessions.</span>
               </div>
             </div>
           </>
@@ -11337,8 +11315,8 @@ const styles = {
   },
   summaryStatsRow: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))",
-    gap: 12,
+    gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+    gap: 16,
   },
   summaryStat: {
     display: "flex",
