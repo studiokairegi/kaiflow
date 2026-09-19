@@ -62,7 +62,7 @@ Deno.serve(async (req) => {
     // never-linked folders sitting in the user's Drive.
     const { data: existingProject, error: existingProjectError } = await supabase
       .from("projects")
-      .select("id")
+      .select("id, drive_folder_id, drive_folder_url, drive_references_folder_id, drive_deliverables_folder_id")
       .eq("id", projectId)
       .eq("user_id", user.id)
       .maybeSingle();
@@ -71,6 +71,27 @@ Deno.serve(async (req) => {
         status: 404,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    }
+
+    // Idempotency guard: the client already avoids calling this when it
+    // has a driveFolderId in local state, but that alone doesn't stop two
+    // browser tabs (or a retried request) from racing here before either
+    // has that state - both would see "no folder" and each create a full
+    // duplicate set of Drive folders. Re-checking the authoritative row
+    // here, immediately before doing any Drive work, closes that race:
+    // whichever request's project update lands first wins, and any later
+    // one just returns those already-created folders instead of making a
+    // second set.
+    if (existingProject.drive_folder_id) {
+      return new Response(
+        JSON.stringify({
+          folderId: existingProject.drive_folder_id,
+          folderUrl: existingProject.drive_folder_url,
+          referencesFolderId: existingProject.drive_references_folder_id,
+          deliverablesFolderId: existingProject.drive_deliverables_folder_id,
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     const { data: connection, error: connError } = await supabase

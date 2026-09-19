@@ -107,7 +107,40 @@ export async function uploadFileToDrive(
     throw new Error(`Drive upload failed: ${res.status} ${errBody}`);
   }
   const json = await res.json();
+  // New Drive files are private to the uploading account by default. The
+  // studio's account is the only one that ever authenticates to Drive here
+  // - the freelancer/client only ever get a stored file URL - so without
+  // this, every attachment/deliverable link 404s with Google's "you need
+  // access" screen for anyone who isn't signed into that exact account,
+  // including the freelancer who just uploaded it. Applied here rather than
+  // in each caller so both the studio attachment path and the freelancer
+  // deliverable path get it automatically.
+  await shareFileWithAnyone(accessToken, json.id);
   return { id: json.id, url: `https://drive.google.com/file/d/${json.id}/view` };
+}
+
+// Best-effort: a sharing hiccup shouldn't fail an upload that otherwise
+// succeeded - the file is still safely in Drive, just needs a manual share
+// (Drive > right-click > Share > Anyone with the link) - so this logs and
+// returns false rather than throwing.
+export async function shareFileWithAnyone(accessToken: string, fileId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ role: "reader", type: "anyone" }),
+    });
+    if (!res.ok) {
+      console.error(`Sharing Drive file ${fileId} failed: ${res.status} ${await res.text()}`);
+    }
+    return res.ok;
+  } catch (err) {
+    console.error(`Sharing Drive file ${fileId} failed:`, err);
+    return false;
+  }
 }
 
 // Moves a Drive file to the owner's trash (not a permanent delete) so a

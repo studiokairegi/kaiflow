@@ -287,6 +287,8 @@ function emptyProject(overrides = {}) {
   return {
     name: "",
     client: "",
+    clientAddress: "",
+    clientTaxId: "",
     notes: "",
     shotCount: "",
     budget: "",
@@ -319,21 +321,85 @@ function calculateAutoBudget(projectCards) {
   return projectCards.reduce((sum, c) => sum + parseMoney(c.rate), 0);
 }
 
-function projectBudgetSummary(project, projectCards, projectInvoices) {
+// Once a proforma has a receipt generated from it, or a receipt has a
+// final invoice generated from it, the earlier document is superseded -
+// it's still kept (and still downloadable) as a record of that stage, but
+// its amount must drop out of revenue/budget totals, or the same payment
+// would be counted once per document in its chain (proforma + receipt +
+// invoice all "paid" would triple-count a single €150 job).
+function excludeSupersededInvoices(allInvoices) {
+  const supersededIds = new Set(
+    allInvoices.filter((inv) => inv.convertedFromId).map((inv) => inv.convertedFromId)
+  );
+  return allInvoices.filter((inv) => !supersededIds.has(inv.id));
+}
+
+function projectBudgetSummary(project, projectCards, allProjectInvoices, fxRates) {
   const totalBudget =
     project.budgetMode === "auto"
       ? calculateAutoBudget(projectCards)
       : parseMoney(project.budget);
-  const amountPaid = projectInvoices.reduce((sum, inv) => sum + parseMoney(inv.amountPaid), 0);
+  // See excludeSupersededInvoices: without this, a paid proforma that later
+  // gets a receipt (and then a final invoice) generated from it would have
+  // its amount counted again at every stage of its own document chain.
+  const projectInvoices = excludeSupersededInvoices(allProjectInvoices);
+  // Invoices can be issued in a different currency than the project itself
+  // (multi-currency is a Pro feature elsewhere in the app), so this can't
+  // just sum raw amountPaid numbers across invoices - that silently adds
+  // e.g. USD and EUR together as if they were the same unit. Each invoice's
+  // amountPaid is converted into the project's own currency before summing,
+  // using the same live-FX-rate infrastructure the Finance panel already
+  // uses for its USD rollups.
+  const projectCurrency = project.currency || "$";
+  const amountPaid = projectInvoices.reduce(
+    (sum, inv) => sum + convertAmount(inv.amountPaid, inv.currency || "$", projectCurrency, fxRates),
+    0
+  );
   const outstanding = Math.max(0, totalBudget - amountPaid);
   return { totalBudget, amountPaid, outstanding };
 }
 
-function emptyInvoice(projectId, suggestedNumber, currency = "$") {
+const DOC_TYPES = [
+  { id: "proforma", label: "Proforma" },
+  { id: "invoice", label: "Invoice" },
+  { id: "receipt", label: "Receipt" },
+];
+const DOC_TYPE_PREFIX = { proforma: "PRO", invoice: "INV", receipt: "REC" };
+const DOC_TYPE_TITLE = { proforma: "Proforma Invoice", invoice: "Invoice", receipt: "Receipt" };
+
+function emptyLineItem() {
+  return { id: genShareToken(), description: "", qty: "1", unitPrice: "" };
+}
+
+function lineItemsTotal(lineItems) {
+  return (lineItems || []).reduce((sum, li) => sum + parseMoney(li.qty) * parseMoney(li.unitPrice), 0);
+}
+
+// The trailing part of a document number after its first "-" is the
+// shared series - "2026-001" in "PRO-2026-001", or "0004" in "INV-0004".
+// Swapping just the prefix keeps a proforma, its receipt, and its final
+// invoice referencing the same document, the way an accountant expects,
+// instead of jumping to an unrelated number each time the type changes.
+function docSeries(number) {
+  const s = String(number || "");
+  const i = s.indexOf("-");
+  return i === -1 ? s : s.slice(i + 1);
+}
+
+function numberForDocType(existingNumber, docType) {
+  const series = docSeries(existingNumber);
+  const prefix = DOC_TYPE_PREFIX[docType] || DOC_TYPE_PREFIX.invoice;
+  return series ? `${prefix}-${series}` : "";
+}
+
+function emptyInvoice(projectId, suggestedNumber, currency = "$", docType = "invoice") {
   return {
     projectId,
     invoiceNumber: suggestedNumber,
+    docType,
     description: "",
+    lineItems: [],
+    amountMode: "manual",
     amount: "",
     amountPaid: "",
     currency,
@@ -341,6 +407,7 @@ function emptyInvoice(projectId, suggestedNumber, currency = "$") {
     dueDate: "",
     status: "unpaid",
     paidDate: "",
+    convertedFromId: null,
   };
 }
 
@@ -349,7 +416,10 @@ function invoiceFromRow(row) {
     id: row.id,
     projectId: row.project_id,
     invoiceNumber: row.invoice_number,
+    docType: row.doc_type || "invoice",
     description: row.description,
+    lineItems: Array.isArray(row.line_items) ? row.line_items : [],
+    amountMode: row.amount_mode || "manual",
     amount: row.amount,
     amountPaid: row.amount_paid,
     currency: row.currency || "$",
@@ -357,41 +427,54 @@ function invoiceFromRow(row) {
     dueDate: row.due_date,
     status: row.status,
     paidDate: row.paid_date || "",
+    convertedFromId: row.converted_from_id || null,
   };
 }
 
 function invoiceToRow(invoice, userId) {
+  // Line items are the source of truth for the amount when that mode is
+  // on - recomputed here (not just trusted from the form) so a saved
+  // invoice's amount can never drift out of sync with its own line items,
+  // regardless of what UI state produced the save.
+  const amount =
+    invoice.amountMode === "items" ? lineItemsTotal(invoice.lineItems) : parseMoney(invoice.amount);
   return {
     project_id: invoice.projectId,
     invoice_number: invoice.invoiceNumber,
+    doc_type: invoice.docType || "invoice",
     description: invoice.description,
-    amount: parseMoney(invoice.amount),
+    line_items: invoice.amountMode === "items" ? invoice.lineItems || [] : [],
+    amount_mode: invoice.amountMode || "manual",
+    amount,
     amount_paid: parseMoney(invoice.amountPaid),
     currency: invoice.currency || "$",
     issue_date: invoice.issueDate,
     due_date: invoice.dueDate,
     status: invoice.status,
     paid_date: invoice.paidDate || "",
+    converted_from_id: invoice.convertedFromId || null,
     user_id: userId,
   };
 }
 
-function nextInvoiceNumber(existingInvoices) {
+function nextInvoiceNumber(existingInvoices, docType = "invoice") {
+  const prefix = DOC_TYPE_PREFIX[docType] || DOC_TYPE_PREFIX.invoice;
   const max = existingInvoices.reduce((m, inv) => {
     const match = String(inv.invoiceNumber || "").match(/(\d+)$/);
     const n = match ? parseInt(match[1], 10) : 0;
     return Math.max(m, n);
   }, 0);
-  return `INV-${String(max + 1).padStart(4, "0")}`;
+  return `${prefix}-${String(max + 1).padStart(4, "0")}`;
 }
 
-function nextInvoiceNumbers(existingInvoices, count) {
+function nextInvoiceNumbers(existingInvoices, count, docType = "invoice") {
+  const prefix = DOC_TYPE_PREFIX[docType] || DOC_TYPE_PREFIX.invoice;
   const max = existingInvoices.reduce((m, inv) => {
     const match = String(inv.invoiceNumber || "").match(/(\d+)$/);
     const n = match ? parseInt(match[1], 10) : 0;
     return Math.max(m, n);
   }, 0);
-  return Array.from({ length: count }, (_, i) => `INV-${String(max + i + 1).padStart(4, "0")}`);
+  return Array.from({ length: count }, (_, i) => `${prefix}-${String(max + i + 1).padStart(4, "0")}`);
 }
 
 const CURRENCIES = [
@@ -453,6 +536,22 @@ function convertToUSD(amount, currencySymbol, fxRates) {
   const rate = fxRates?.[code];
   if (!rate) return value;
   return value / rate;
+}
+
+// Converts an amount from one currency symbol to another via USD as the
+// pivot (fxRates is USD-based: units of `code` per 1 USD). Used for project
+// budget summaries, where invoices can be issued in a different currency
+// than the project itself - see projectBudgetSummary below. Falls back to
+// the unconverted amount if either currency's rate is unavailable, same as
+// convertToUSD, rather than producing a number that's silently wrong.
+function convertAmount(amount, fromSymbol, toSymbol, fxRates) {
+  if (fromSymbol === toSymbol) return parseMoney(amount);
+  const usd = convertToUSD(amount, fromSymbol, fxRates);
+  const toCode = CURRENCY_CODE_BY_SYMBOL[toSymbol] || "USD";
+  if (toCode === "USD") return usd;
+  const rate = fxRates?.[toCode];
+  if (!rate) return usd;
+  return usd * rate;
 }
 
 const MILESTONE_LABELS = ["Upfront payment", "Mid-project payment", "Delivery payment"];
@@ -1441,8 +1540,12 @@ function lastSixMonthKeys() {
   return keys;
 }
 
-function computeFinanceData(projects, invoices, expenses, fxRates = {}) {
+function computeFinanceData(projects, allInvoices, expenses, fxRates = {}) {
   const months = lastSixMonthKeys();
+  // See excludeSupersededInvoices: without this, a paid proforma that
+  // later gets a receipt (and then a final invoice) generated from it
+  // would have its amount counted again at every stage.
+  const invoices = excludeSupersededInvoices(allInvoices);
 
   const revenueByMonth = months.map(({ key, label }) => {
     const total = invoices
@@ -1538,6 +1641,16 @@ function computeFinanceData(projects, invoices, expenses, fxRates = {}) {
 const DEFAULT_SETTINGS = {
   studioName: "Studio Kairegi",
   studioTagline: "Anime-style animation & production",
+  // Billing/registration details for invoice headers - separate from the
+  // studioName brand above because a sole proprietor's registered legal
+  // name (what an accountant needs on the document) can differ from the
+  // studio's public-facing name. Left blank, invoices fall back to
+  // studioName so nothing breaks for studios that don't need the distinction.
+  studioLegalName: "",
+  studioAddress: "",
+  studioTaxId: "",
+  studioVatStatus: "",
+  studioEtimsNumber: "",
   currencySymbol: "$",
   milestoneDefaults: MILESTONE_DEFAULTS,
   defaultLandingTab: "dashboard",
@@ -1567,6 +1680,11 @@ function settingsFromRow(row) {
   return {
     studioName: row.studio_name || DEFAULT_SETTINGS.studioName,
     studioTagline: row.studio_tagline || DEFAULT_SETTINGS.studioTagline,
+    studioLegalName: row.studio_legal_name || "",
+    studioAddress: row.studio_address || "",
+    studioTaxId: row.studio_tax_id || "",
+    studioVatStatus: row.studio_vat_status || "",
+    studioEtimsNumber: row.studio_etims_number || "",
     currencySymbol: row.currency_symbol || DEFAULT_SETTINGS.currencySymbol,
     milestoneDefaults:
       Array.isArray(row.milestone_defaults) && row.milestone_defaults.length === 3
@@ -1596,6 +1714,11 @@ function settingsToRow(settings, userId) {
     user_id: userId,
     studio_name: settings.studioName,
     studio_tagline: settings.studioTagline,
+    studio_legal_name: settings.studioLegalName || "",
+    studio_address: settings.studioAddress || "",
+    studio_tax_id: settings.studioTaxId || "",
+    studio_vat_status: settings.studioVatStatus || "",
+    studio_etims_number: settings.studioEtimsNumber || "",
     currency_symbol: settings.currencySymbol,
     milestone_defaults: settings.milestoneDefaults,
     default_landing_tab: settings.defaultLandingTab,
@@ -1611,7 +1734,11 @@ function settingsToRow(settings, userId) {
   };
 }
 
-function computeDashboardStats(projects, cards, leads, invoices, fxRates = {}) {
+function computeDashboardStats(projects, cards, leads, allInvoices, fxRates = {}) {
+  // See excludeSupersededInvoices: a proforma that's since had a receipt
+  // (and then a final invoice) generated from it must drop out here too,
+  // or its amount gets counted at every stage of its own document chain.
+  const invoices = excludeSupersededInvoices(allInvoices);
   const activeProjects = projects.filter((p) => !p.archived);
   // "Active leads" means outreach actually in progress: contacted but not
   // yet resolved. That excludes the untouched "New" pool (never contacted)
@@ -1707,38 +1834,128 @@ function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS) {
   const doc = new jsPDF();
   const balance = parseMoney(invoice.amount) - parseMoney(invoice.amountPaid);
   const cur = invoice.currency || settings.currencySymbol || "$";
+  const left = 20;
+  const right = 190;
+  let y = 22;
 
+  // --- Studio header: legal name, tagline, and registration details ---
   doc.setFontSize(18);
-  doc.text(settings.studioName || "Studio Kairegi", 20, 22);
-  doc.setFontSize(11);
-  doc.setTextColor(100);
-  doc.text(settings.studioTagline || "Anime-style animation & production", 20, 29);
-
   doc.setTextColor(0);
-  doc.setFontSize(14);
-  doc.text(`Invoice ${invoice.invoiceNumber}`, 20, 45);
+  doc.text(settings.studioLegalName || settings.studioName || "Studio Kairegi", left, y);
+  y += 7;
 
   doc.setFontSize(10);
-  doc.text(`Issue date: ${invoice.issueDate || "-"}`, 20, 53);
-  doc.text(`Due date: ${invoice.dueDate || "-"}`, 20, 59);
-  doc.text(`Status: ${invoice.status === "paid" ? "Paid" : "Unpaid"}`, 20, 65);
+  doc.setTextColor(100);
+  if (settings.studioTagline) {
+    doc.text(settings.studioTagline, left, y);
+    y += 5.5;
+  }
+  if (settings.studioAddress) {
+    const addrLines = doc.splitTextToSize(settings.studioAddress, 105);
+    doc.text(addrLines, left, y);
+    y += addrLines.length * 4.5;
+  }
+  const studioTaxLine = [
+    settings.studioTaxId ? `Tax ID: ${settings.studioTaxId}` : "",
+    settings.studioVatStatus ? `VAT: ${settings.studioVatStatus}` : "",
+  ]
+    .filter(Boolean)
+    .join("   \u00b7   ");
+  if (studioTaxLine) {
+    doc.text(studioTaxLine, left, y);
+    y += 4.5;
+  }
+  if (settings.studioEtimsNumber) {
+    doc.text(`eTIMS no.: ${settings.studioEtimsNumber}`, left, y);
+    y += 4.5;
+  }
 
-  doc.text(`Bill to: ${project?.client || "-"}`, 130, 53);
-  doc.text(`Project: ${project?.name || "-"}`, 130, 59);
+  // --- Document title ---
+  y += 8;
+  doc.setFontSize(14);
+  doc.setTextColor(0);
+  const docType = invoice.docType || "invoice";
+  doc.text(`${DOC_TYPE_TITLE[docType] || "Invoice"} ${invoice.invoiceNumber}`, left, y);
+  const detailsTop = y + 8;
+
+  // --- Left column: issue/due date and status ---
+  // A receipt implies payment already happened, so it states when rather
+  // than asking Paid/Unpaid; a proforma is "awaiting payment" rather than
+  // flatly "Unpaid", since nothing was ever due yet at that stage.
+  let statusLabel;
+  if (docType === "receipt") {
+    statusLabel = `Payment received${invoice.paidDate ? ` on ${invoice.paidDate}` : ""}`;
+  } else if (docType === "proforma") {
+    statusLabel = invoice.status === "paid" ? "Paid" : "Awaiting payment";
+  } else {
+    statusLabel = invoice.status === "paid" ? "Paid" : "Unpaid";
+  }
+  doc.setFontSize(10);
+  doc.text(`Issue date: ${invoice.issueDate || "-"}`, left, detailsTop);
+  doc.text(`Due date: ${invoice.dueDate || "-"}`, left, detailsTop + 6);
+  doc.text(`Status: ${statusLabel}`, left, detailsTop + 12);
+  const leftColBottom = detailsTop + 12;
+
+  // --- Right column: bill-to, with the client's address/tax ID when on file ---
+  let billY = detailsTop;
+  doc.text(`Bill to: ${project?.client || "-"}`, 130, billY);
+  billY += 6;
+  if (project?.clientAddress) {
+    const clientAddrLines = doc.splitTextToSize(project.clientAddress, 60);
+    doc.text(clientAddrLines, 130, billY);
+    billY += clientAddrLines.length * 4.5;
+  }
+  if (project?.clientTaxId) {
+    doc.text(`Tax ID: ${project.clientTaxId}`, 130, billY);
+    billY += 4.5;
+  }
+  doc.text(`Project: ${project?.name || "-"}`, 130, billY);
+  const rightColBottom = billY;
+
+  const dividerY = Math.max(leftColBottom, rightColBottom) + 9;
+  doc.setDrawColor(200);
+  doc.line(left, dividerY, right, dividerY);
+
+  doc.setFontSize(11);
+  doc.setTextColor(0);
+  const hasLineItems =
+    invoice.amountMode === "items" && Array.isArray(invoice.lineItems) && invoice.lineItems.length > 0;
+  let lineY;
+
+  if (hasLineItems) {
+    let rowY = dividerY + 10;
+    doc.text("Description", left, rowY);
+    doc.text("Qty", 120, rowY, { align: "right" });
+    doc.text("Unit price", 150, rowY, { align: "right" });
+    doc.text("Amount", 170, rowY, { align: "right" });
+    rowY += 8;
+    doc.setFontSize(10);
+    invoice.lineItems.forEach((li) => {
+      const rowLines = doc.splitTextToSize(li.description || "-", 85);
+      const rowAmount = parseMoney(li.qty) * parseMoney(li.unitPrice);
+      doc.text(rowLines, left, rowY);
+      doc.text(String(li.qty ?? ""), 120, rowY, { align: "right" });
+      doc.text(`${cur}${formatMoney(li.unitPrice)}`, 150, rowY, { align: "right" });
+      doc.text(`${cur}${formatMoney(rowAmount)}`, 170, rowY, { align: "right" });
+      rowY += Math.max(rowLines.length, 1) * 6;
+    });
+    rowY += 4;
+    doc.setFontSize(11);
+    doc.text("Subtotal", 150, rowY, { align: "right" });
+    doc.text(`${cur}${formatMoney(invoice.amount)}`, 170, rowY, { align: "right" });
+    lineY = rowY + 10;
+  } else {
+    doc.text("Description", left, dividerY + 10);
+    doc.text("Amount", 170, dividerY + 10, { align: "right" });
+    doc.setFontSize(10);
+    const descLines = doc.splitTextToSize(invoice.description || "Animation services", 140);
+    doc.text(descLines, left, dividerY + 18);
+    doc.text(`${cur}${formatMoney(invoice.amount)}`, 170, dividerY + 18, { align: "right" });
+    lineY = dividerY + 18 + descLines.length * 6 + 6;
+  }
 
   doc.setDrawColor(200);
-  doc.line(20, 74, 190, 74);
-
-  doc.setFontSize(11);
-  doc.text("Description", 20, 84);
-  doc.text("Amount", 170, 84, { align: "right" });
-  doc.setFontSize(10);
-  const descLines = doc.splitTextToSize(invoice.description || "Animation services", 140);
-  doc.text(descLines, 20, 92);
-  doc.text(`${cur}${formatMoney(invoice.amount)}`, 170, 92, { align: "right" });
-
-  const lineY = 92 + descLines.length * 6 + 6;
-  doc.line(20, lineY, 190, lineY);
+  doc.line(left, lineY, right, lineY);
 
   doc.setFontSize(10);
   doc.text("Amount paid", 130, lineY + 10);
@@ -1749,10 +1966,18 @@ function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS) {
 
   doc.setFontSize(9);
   doc.setTextColor(130);
-  doc.text(`Thank you for working with ${settings.studioName || "Studio Kairegi"}.`, 20, lineY + 40);
+  const studioDisplayName = settings.studioLegalName || settings.studioName || "Studio Kairegi";
+  const noteByType = {
+    proforma: "This is a proforma invoice / advance payment request. A final invoice will be issued upon delivery.",
+    receipt: `This receipt confirms payment received. Thank you for working with ${studioDisplayName}.`,
+    invoice: `Thank you for working with ${studioDisplayName}.`,
+  };
+  const noteLines = doc.splitTextToSize(noteByType[docType] || noteByType.invoice, 170);
+  doc.text(noteLines, left, lineY + 40);
 
   doc.save(`${invoice.invoiceNumber || "invoice"}.pdf`);
 }
+
 
 function cardFromRow(row) {
   return {
@@ -1794,7 +2019,17 @@ function cardToRow(card, userId) {
     assigned_pay: parseMoney(card.assignedPay),
     assigned_paid: card.assignedPaid || false,
     share_token: card.shareToken || null,
-    attachments: card.attachments || [],
+    // Deliberately NOT including attachments (or deliverables, which was
+    // already left out here) - both are mutated exclusively through their
+    // own atomic append/remove RPCs (append_shot_file / remove_shot_file /
+    // studio-drive-delete), which touch just the one changed entry. Writing
+    // the whole locally-snapshotted array back on every ordinary shot save
+    // (renaming it, moving its stage, editing notes, etc.) would silently
+    // clobber anything a concurrent upload/removal - in this tab or
+    // another - had appended or removed since this editor's form state was
+    // last synced with the database. Omitting the key means Supabase's
+    // partial UPDATE simply doesn't touch that column, leaving whatever's
+    // actually in the database alone.
     user_id: userId,
   };
 }
@@ -1849,6 +2084,8 @@ function emptyLead(stage = "pool", channel = "") {
     email: "",
     website: "",
     country: "",
+    billingAddress: "",
+    taxId: "",
     notes: "",
     stage,
     channel,
@@ -1877,6 +2114,8 @@ function leadFromRow(row) {
     email: row.email,
     website: row.website,
     country: row.country,
+    billingAddress: row.billing_address || "",
+    taxId: row.tax_id || "",
     notes: row.notes,
     stage: row.stage,
     channel: row.channel || "",
@@ -1907,6 +2146,8 @@ function leadToRow(lead, userId) {
     email: lead.email,
     website: lead.website,
     country: lead.country,
+    billing_address: lead.billingAddress || "",
+    tax_id: lead.taxId || "",
     notes: lead.notes,
     stage: lead.stage,
     channel: lead.channel || "",
@@ -2393,7 +2634,7 @@ export default function ShotTracker() {
   const [editingBudgetPlanner, setEditingBudgetPlanner] = useState(null);
   const [editingTeamMember, setEditingTeamMember] = useState(null);
   const [showMilestoneModal, setShowMilestoneModal] = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [settingsReturnView, setSettingsReturnView] = useState("projects");
   const [showTutorial, setShowTutorial] = useState(false);
   const [showSupportModal, setShowSupportModal] = useState(false);
   const [tutorialHighlightTarget, setTutorialHighlightTarget] = useState(null);
@@ -2777,7 +3018,7 @@ export default function ShotTracker() {
       console.error("Settings save failed:", e);
       flashSave(false);
     }
-    setShowSettingsModal(false);
+    setView(settingsReturnView);
   };
 
   // Adds a new channel to the shared, per-studio channel list (used by the
@@ -2818,7 +3059,7 @@ export default function ShotTracker() {
   };
 
   const handleReplayTutorial = () => {
-    setShowSettingsModal(false);
+    setView(settingsReturnView);
     setShowTutorial(true);
   };
 
@@ -2868,6 +3109,8 @@ export default function ShotTracker() {
         id: p.id,
         name: p.name,
         client: p.client,
+        clientAddress: p.client_address || "",
+        clientTaxId: p.client_tax_id || "",
         notes: p.notes,
         budget: p.budget,
         budgetMode: p.budget_mode || "manual",
@@ -2950,6 +3193,8 @@ export default function ShotTracker() {
           .update({
             name: project.name,
             client: project.client,
+            client_address: project.clientAddress || "",
+            client_tax_id: project.clientTaxId || "",
             notes: project.notes,
             budget: project.budget,
             budget_mode: project.budgetMode,
@@ -2968,36 +3213,30 @@ export default function ShotTracker() {
           ),
         }));
       } else {
-        const { data: inserted, error } = await supabase
-          .from("projects")
-          .insert({
-            name: project.name,
-            client: project.client,
-            notes: project.notes,
-            budget: project.budget,
-            budget_mode: project.budgetMode,
-            currency: project.currency,
-            deadline: project.deadline,
-            priority: project.priority,
-            share_enabled: project.shareEnabled,
-            share_token: shareToken,
-            user_id: userId,
-          })
-          .select()
-          .single();
+        // Previously this did two separate requests (insert project, then
+        // insert the generated shot rows), so a failure on the shots insert
+        // left a real project behind with zero shots and no automatic way
+        // to retry just the missing part. create_project_with_shots() wraps
+        // both inserts in one database transaction: either the project and
+        // its full shot checklist are created together, or neither is.
+        const { data: result, error } = await supabase.rpc("create_project_with_shots", {
+          p_name: project.name,
+          p_client: project.client,
+          p_client_address: project.clientAddress || "",
+          p_client_tax_id: project.clientTaxId || "",
+          p_notes: project.notes,
+          p_budget: project.budget,
+          p_budget_mode: project.budgetMode,
+          p_currency: project.currency,
+          p_deadline: project.deadline,
+          p_priority: project.priority,
+          p_share_enabled: project.shareEnabled,
+          p_share_token: shareToken,
+          p_shot_count: parseInt(project.shotCount, 10) || 0,
+        });
         if (error) throw error;
-
-        let newCards = [];
-        const checklist = generateShotChecklist(project.shotCount, inserted.id, project.client);
-        if (checklist.length > 0) {
-          const rows = checklist.map((c) => cardToRow(c, userId));
-          const { data: insertedShots, error: shotsError } = await supabase
-            .from("shots")
-            .insert(rows)
-            .select();
-          if (shotsError) throw shotsError;
-          newCards = (insertedShots || []).map(cardFromRow);
-        }
+        const inserted = result.project;
+        const newCards = (result.shots || []).map(cardFromRow);
 
         setData((prev) => ({
           ...prev,
@@ -3007,6 +3246,8 @@ export default function ShotTracker() {
               id: inserted.id,
               name: inserted.name,
               client: inserted.client,
+              clientAddress: inserted.client_address || "",
+              clientTaxId: inserted.client_tax_id || "",
               notes: inserted.notes,
               budget: inserted.budget,
               budgetMode: inserted.budget_mode || "manual",
@@ -3045,6 +3286,11 @@ export default function ShotTracker() {
         }
       }
       flashSave(true);
+      // Only close the editor once the save actually succeeded - closing
+      // unconditionally (as this used to do) meant a failed save silently
+      // discarded whatever the user had just typed, with no way to recover
+      // it short of retyping the whole form.
+      setEditingProject(null);
     } catch (e) {
       console.error("Project save failed:", e);
       flashSave(false);
@@ -3052,29 +3298,75 @@ export default function ShotTracker() {
       // lead->project link survive to attach itself to a later,
       // unrelated project.
       if (!project.id && pendingLeadLinkId) setPendingLeadLinkId(null);
+      // Keep the editor open on failure so the user can retry or fix
+      // whatever caused the error without losing their unsaved changes.
     }
-    setEditingProject(null);
   };
 
   const handleDeleteProject = async (id) => {
     setSaveState("saving");
     try {
+      // Best-effort: trash the project's Drive folder (and everything
+      // nested under it - References/Cuts/Deliverables) before removing the
+      // database row. This is deliberately non-fatal: if Drive cleanup
+      // fails (not connected, token expired, API hiccup) the project
+      // deletion below still proceeds, since the user asked to delete the
+      // project, not to be blocked by an external service.
+      const projectToDelete = projects.find((p) => p.id === id);
+      if (projectToDelete?.driveFolderId) {
+        try {
+          const {
+            data: { session: currentSession },
+          } = await supabase.auth.getSession();
+          if (currentSession) {
+            const res = await fetch(functionUrl("studio-drive-delete-project"), {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${currentSession.access_token}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ projectId: id }),
+            });
+            if (!res.ok) {
+              const result = await res.json().catch(() => ({}));
+              console.error("Trashing project Drive folder failed:", result?.error);
+            }
+          }
+        } catch (driveErr) {
+          console.error("Trashing project Drive folder failed:", driveErr);
+        }
+      }
+
       const { error } = await supabase.from("projects").delete().eq("id", id);
       if (error) throw error;
+      // The database cascades this deletion into shots/invoices/activity
+      // and nulls out expenses.project_id and leads.linked_project_id (see
+      // schema.sql), but the in-memory state doesn't mirror any of that on
+      // its own. Previously only projects/cards were filtered locally, so
+      // Finance, Activity, and CRM could keep showing invoices, expenses,
+      // and lead links that pointed at a project that no longer existed
+      // until the next full reload.
       setData((prev) => ({
         ...prev,
         projects: prev.projects.filter((p) => p.id !== id),
         cards: prev.cards.filter((c) => c.projectId !== id),
+        invoices: prev.invoices.filter((inv) => inv.projectId !== id),
+        activity: prev.activity.filter((a) => a.projectId !== id),
+        expenses: prev.expenses.map((e) => (e.projectId === id ? { ...e, projectId: null } : e)),
+        leads: prev.leads.map((l) => (l.linkedProjectId === id ? { ...l, linkedProjectId: null } : l)),
       }));
       flashSave(true);
+      // Only close the editor and navigate away once deletion actually
+      // succeeded - doing this unconditionally used to make a failed
+      // delete look like it had gone through.
+      setEditingProject(null);
+      if (selectedProjectId === id) {
+        setView("projects");
+        setSelectedProjectId(null);
+      }
     } catch (e) {
       console.error("Project delete failed:", e);
       flashSave(false);
-    }
-    setEditingProject(null);
-    if (selectedProjectId === id) {
-      setView("projects");
-      setSelectedProjectId(null);
     }
   };
 
@@ -3153,11 +3445,12 @@ export default function ShotTracker() {
         setData((prev) => ({ ...prev, cards: [...prev.cards, cardFromRow(inserted)] }));
       }
       flashSave(true);
+      setEditingCard(null);
     } catch (e) {
       console.error("Shot save failed:", e);
       flashSave(false);
+      // Keep the editor open on failure so unsaved edits aren't lost.
     }
-    setEditingCard(null);
   };
 
   const handleDeleteCard = async (id) => {
@@ -3167,11 +3460,11 @@ export default function ShotTracker() {
       if (error) throw error;
       setData((prev) => ({ ...prev, cards: prev.cards.filter((c) => c.id !== id) }));
       flashSave(true);
+      setEditingCard(null);
     } catch (e) {
       console.error("Shot delete failed:", e);
       flashSave(false);
     }
-    setEditingCard(null);
   };
 
   const moveCardStage = async (id, stage) => {
@@ -3198,6 +3491,18 @@ export default function ShotTracker() {
     } catch (e) {
       console.error("Stage move failed:", e);
       flashSave(false);
+      // The optimistic update above already moved the card in the UI. If
+      // the database write failed, roll it back to the pre-move snapshot
+      // instead of leaving the UI showing a stage that was never actually
+      // saved (previously this just flashed an error and left the card
+      // wherever the optimistic update had put it, out of sync with the
+      // database until the next reload).
+      if (existing) {
+        setData((prev) => ({
+          ...prev,
+          cards: prev.cards.map((c) => (c.id === id ? existing : c)),
+        }));
+      }
     }
   };
 
@@ -3352,6 +3657,8 @@ export default function ShotTracker() {
       emptyProject({
         name: lead.companyName,
         client: lead.contactPerson || lead.companyName,
+        clientAddress: lead.billingAddress || "",
+        clientTaxId: lead.taxId || "",
         notes: lead.projectNotes || lead.notes,
         budget: lead.proposedBudget,
         currency: settings.currencySymbol,
@@ -3387,11 +3694,12 @@ export default function ShotTracker() {
         setData((prev) => ({ ...prev, invoices: [...prev.invoices, invoiceFromRow(inserted)] }));
       }
       flashSave(true);
+      setEditingInvoice(null);
     } catch (e) {
       console.error("Invoice save failed:", e);
       flashSave(false);
+      // Keep the editor open on failure so unsaved edits aren't lost.
     }
-    setEditingInvoice(null);
   };
 
   const handleDeleteInvoice = async (id) => {
@@ -3401,11 +3709,11 @@ export default function ShotTracker() {
       if (error) throw error;
       setData((prev) => ({ ...prev, invoices: prev.invoices.filter((inv) => inv.id !== id) }));
       flashSave(true);
+      setEditingInvoice(null);
     } catch (e) {
       console.error("Invoice delete failed:", e);
       flashSave(false);
     }
-    setEditingInvoice(null);
   };
 
   const handleMarkInvoicePaid = async (invoice) => {
@@ -3418,15 +3726,41 @@ export default function ShotTracker() {
     await handleSaveInvoice(updated);
   };
 
+  // Opens a prefilled New document form seeded from an existing proforma
+  // or receipt, rather than saving anything directly - same pattern as
+  // handleMarkWon's prefilled New Project form, so the person reviews
+  // (and can adjust dates, description, amounts) before it's actually
+  // saved as its own row. The number keeps the source's series with the
+  // new type's prefix swapped in, so a proforma, its receipt, and its
+  // final invoice all read as the same document as it progresses.
+  const handleGenerateFollowupDoc = (source, targetDocType) => {
+    const projectInvoicesForNumbering = invoices.filter((inv) => inv.projectId === source.projectId);
+    const suggestedNumber =
+      numberForDocType(source.invoiceNumber, targetDocType) ||
+      nextInvoiceNumber(projectInvoicesForNumbering, targetDocType);
+    const isReceipt = targetDocType === "receipt";
+    setEditingInvoice({
+      ...emptyInvoice(source.projectId, suggestedNumber, source.currency, targetDocType),
+      description: source.description,
+      lineItems: source.lineItems || [],
+      amountMode: source.amountMode || "manual",
+      amount: source.amount,
+      amountPaid: isReceipt ? source.amount : source.amountPaid,
+      status: isReceipt ? "paid" : "unpaid",
+      paidDate: isReceipt ? new Date().toISOString().slice(0, 10) : "",
+      convertedFromId: source.id,
+    });
+  };
+
   const handleCreateMilestones = async (percentages) => {
     const projectInvoices = invoices.filter((inv) => inv.projectId === selectedProjectId);
     const project = projects.find((p) => p.id === selectedProjectId);
     const projectShots = cards.filter((c) => c.projectId === selectedProjectId);
     const { totalBudget } = projectBudgetSummary(project, projectShots, projectInvoices);
     const numbers = nextInvoiceNumbers(projectInvoices, 3);
-    for (let i = 0; i < 3; i++) {
+    const rows = [0, 1, 2].map((i) => {
       const amount = ((totalBudget * (parseFloat(percentages[i]) || 0)) / 100).toFixed(2);
-      await handleSaveInvoice({
+      return {
         projectId: selectedProjectId,
         invoiceNumber: numbers[i],
         description: MILESTONE_LABELS[i],
@@ -3436,9 +3770,30 @@ export default function ShotTracker() {
         issueDate: new Date().toISOString().slice(0, 10),
         dueDate: "",
         status: "unpaid",
+      };
+    });
+    setSaveState("saving");
+    try {
+      // create_milestone_invoices() inserts all 3 rows in a single INSERT,
+      // so a failure partway through can't leave a broken partial milestone
+      // set (e.g. just the upfront payment with the other two missing) the
+      // way three sequential handleSaveInvoice() calls used to.
+      const { data: insertedRows, error } = await supabase.rpc("create_milestone_invoices", {
+        p_rows: rows,
       });
+      if (error) throw error;
+      setData((prev) => ({
+        ...prev,
+        invoices: [...prev.invoices, ...(insertedRows || []).map(invoiceFromRow)],
+      }));
+      flashSave(true);
+      setShowMilestoneModal(false);
+    } catch (e) {
+      console.error("Milestone invoice creation failed:", e);
+      flashSave(false);
+      // Keep the milestone modal open on failure so the user can retry
+      // rather than silently ending up with zero milestone invoices.
     }
-    setShowMilestoneModal(false);
   };
 
   const handleSaveExpense = async (expense) => {
@@ -4168,7 +4523,7 @@ export default function ShotTracker() {
   const selectedProject = projects.find((p) => p.id === selectedProjectId);
   const projectCards = cards.filter((c) => c.projectId === selectedProjectId);
   const { delivered: deliveredCount, percent: overallPercent } = projectProgress(projectCards);
-  const showTabs = view !== "board";
+  const showTabs = view === "projects";
   const hasProAccess = settings.isAdmin || settings.plan === "pro";
   const activeProjectCount = projects.filter((p) => !p.archived).length;
   const atProjectLimit = !hasProAccess && activeProjectCount >= FREE_PROJECT_LIMIT;
@@ -4221,6 +4576,10 @@ export default function ShotTracker() {
             <button style={styles.backButton} onClick={() => setView("projects")}>
               <BackIcon />
             </button>
+          ) : view === "settings" ? (
+            <button style={styles.backButton} onClick={() => setView(settingsReturnView)}>
+              <BackIcon />
+            </button>
           ) : (
             <div style={styles.logoMark}><img src="/logo.png" alt="Kairil" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
           )}
@@ -4228,6 +4587,8 @@ export default function ShotTracker() {
             <h1 style={styles.title}>
               {view === "board"
                 ? selectedProject?.name || "Project"
+                : view === "settings"
+                ? "Settings"
                 : workspace === "leads"
                 ? "Leads"
                 : workspace === "dashboard"
@@ -4239,7 +4600,11 @@ export default function ShotTracker() {
                 : "Kairil"}
             </h1>
             <p style={styles.subtitle}>
-              {view === "board" ? selectedProject?.client || settings.studioName : session.user.email}
+              {view === "board"
+                ? selectedProject?.client || settings.studioName
+                : view === "settings"
+                ? "Studio & account preferences"
+                : session.user.email}
             </p>
           </div>
         </div>
@@ -4255,7 +4620,10 @@ export default function ShotTracker() {
           <button
             className={tutorialHighlightTarget === "settings" ? "kf-tutorial-highlight" : undefined}
             style={styles.iconButtonGhost}
-            onClick={() => setShowSettingsModal(true)}
+            onClick={() => {
+              if (view !== "settings") setSettingsReturnView(view);
+              setView("settings");
+            }}
             title="Settings"
           >
             <GearIcon />
@@ -4263,7 +4631,7 @@ export default function ShotTracker() {
           <button style={styles.iconButtonGhost} onClick={handleSignOut} title="Sign out">
             <SignOutIcon />
           </button>
-          {view === "board" && boardTab === "invoices" ? (
+          {view === "settings" ? null : view === "board" && boardTab === "invoices" ? (
             <button
               style={styles.newButton}
               onClick={() =>
@@ -4488,6 +4856,25 @@ export default function ShotTracker() {
             <div style={{ ...styles.progressFill, width: `${overallPercent}%` }} />
           </div>
         </div>
+      )}
+
+      {view === "settings" && (
+        <SettingsPage
+          settings={settings}
+          email={session.user.email}
+          driveEmail={driveEmail}
+          onConnectDrive={handleConnectDrive}
+          patreonEmail={patreonEmail}
+          patreonConnected={patreonConnected}
+          patreonIsPro={patreonIsPro}
+          onConnectPatreon={handleConnectPatreon}
+          onReplayTutorial={handleReplayTutorial}
+          onOpenSupport={() => {
+            setView(settingsReturnView);
+            setShowSupportModal(true);
+          }}
+          onSave={handleSaveSettings}
+        />
       )}
 
       {view === "projects" && workspace === "dashboard" && (
@@ -4888,10 +5275,12 @@ export default function ShotTracker() {
           }
           onEdit={setEditingInvoice}
           onMarkPaid={handleMarkInvoicePaid}
+          onGenerateFollowup={handleGenerateFollowupDoc}
           onDownload={(inv) => downloadInvoicePDF(inv, selectedProject, settings)}
           onOpenMilestones={() => setShowMilestoneModal(true)}
           currencySymbol={selectedProject?.currency || settings.currencySymbol}
           hasProAccess={hasProAccess}
+          fxRates={fxRates}
         />
       )}
 
@@ -4916,26 +5305,6 @@ export default function ShotTracker() {
           currencySymbol={selectedProject?.currency || settings.currencySymbol}
           onCancel={() => setShowMilestoneModal(false)}
           onCreate={handleCreateMilestones}
-        />
-      )}
-
-      {showSettingsModal && (
-        <SettingsModal
-          settings={settings}
-          email={session.user.email}
-          driveEmail={driveEmail}
-          onConnectDrive={handleConnectDrive}
-          patreonEmail={patreonEmail}
-          patreonConnected={patreonConnected}
-          patreonIsPro={patreonIsPro}
-          onConnectPatreon={handleConnectPatreon}
-          onReplayTutorial={handleReplayTutorial}
-          onOpenSupport={() => {
-            setShowSettingsModal(false);
-            setShowSupportModal(true);
-          }}
-          onCancel={() => setShowSettingsModal(false)}
-          onSave={handleSaveSettings}
         />
       )}
 
@@ -5013,6 +5382,8 @@ export default function ShotTracker() {
           onCreateDriveFolders={handleCreateDriveFolders}
           hasProAccess={hasProAccess}
           atProjectLimit={atProjectLimit}
+          shotCount={cards.filter((c) => c.projectId === editingProject.id).length}
+          invoiceCount={invoices.filter((inv) => inv.projectId === editingProject.id).length}
         />
       )}
 
@@ -5848,7 +6219,7 @@ function dayKey(d) {
 
 // The studio's normal schedule: Monday-Friday, 09:00-17:00, i.e. an 8h
 // target per weekday. Anything clocked beyond a day's target is overtime;
-// weekends have no scheduled target; weekend work counts as unscheduled time, not overtime.
+// weekends carry a 0h target, so time worked on them is overtime in full.
 const WORKDAY_TARGET_SECONDS = 8 * 3600;
 
 function isScheduledWorkday(date) {
@@ -7630,7 +8001,7 @@ function TutorialModal({ onComplete, onStepChange }) {
   );
 }
 
-function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEmail, patreonIsPro, patreonConnected, onConnectPatreon, onReplayTutorial, onOpenSupport, onCancel, onSave }) {
+function SettingsPage({ settings, email, driveEmail, onConnectDrive, patreonEmail, patreonIsPro, patreonConnected, onConnectPatreon, onReplayTutorial, onOpenSupport, onSave }) {
   const [form, setForm] = useState(settings);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const [notificationPermission, setNotificationPermission] = useState(
@@ -7690,372 +8061,434 @@ function SettingsModal({ settings, email, driveEmail, onConnectDrive, patreonEma
   };
 
   return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-        <div style={styles.modalHeader}>
-          <span style={styles.modalTitle}>Settings</span>
-          <button style={styles.iconButton} onClick={onCancel}>
-            <CloseIcon />
-          </button>
-        </div>
-
-        <div style={styles.field}>
-          <label style={styles.label}>Account email</label>
-          <p style={styles.fieldHint}>{email}</p>
-        </div>
-
-        <div style={styles.field}>
-          <label style={styles.label}>Plan</label>
-          {settings.isAdmin ? (
-            <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>{"\ud83d\udc51"} Admin {"\u2014"} full access</p>
-          ) : settings.plan === "pro" ? (
-            <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>Pro</p>
-          ) : (
-            <>
-              <p style={styles.fieldHint}>Free</p>
-              <p style={styles.fieldHint}>
-                Teams, Client Portal, Freelancer links, milestones, and multiple currencies are Pro features.
-                Free accounts are also limited to {FREE_PROJECT_LIMIT} active projects.
-              </p>
-            </>
-          )}
-        </div>
-
-        <div style={styles.field}>
-          <label style={styles.label}>Patreon</label>
-          {settings.isAdmin ? (
-            <p style={styles.fieldHint}>
-              {patreonConnected ? `Connected${patreonEmail ? ` as ${patreonEmail}` : ""}` : "Not connected"}, admin
-              override enabled so this doesn't affect your access either way.
-            </p>
-          ) : !patreonConnected ? (
-            <>
-              <p style={styles.fieldHint}>
-                Connect your Patreon account to unlock Pro automatically if you're subscribed to the Pro tier.
-              </p>
-              <button type="button" style={styles.addRevisionButton} onClick={onConnectPatreon}>
-                Connect Patreon
-              </button>
-            </>
-          ) : patreonIsPro ? (
-            <>
-              <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>
-                {"\u2713"} Connected{patreonEmail ? ` as ${patreonEmail}` : ""} {"\u00b7"} Pro member
-              </p>
-              <a
-                href={PATREON_MANAGE_URL}
-                target="_blank"
-                rel="noreferrer"
-                style={{ ...styles.fieldHint, color: teal }}
-              >
-                Manage membership on Patreon
-              </a>
-            </>
-          ) : (
-            <>
-              <p style={styles.fieldHint}>
-                Connected{patreonEmail ? ` as ${patreonEmail}` : ""}, not currently subscribed to Pro.
-              </p>
-              <div style={styles.fieldRow}>
-                <a href={PATREON_CHECKOUT_URL} target="_blank" rel="noreferrer" style={styles.newButton}>
-                  Become a Patron
-                </a>
-                <button type="button" style={styles.addRevisionButton} onClick={onConnectPatreon}>
-                  Refresh status
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-
-        <div style={styles.field}>
-          <label style={styles.label}>Help</label>
-          <div style={styles.fieldRow}>
-            <button type="button" style={styles.addRevisionButton} onClick={onReplayTutorial}>
-              Replay tutorial
-            </button>
-            <button type="button" style={styles.addRevisionButton} onClick={onOpenSupport}>
-              Report a problem
-            </button>
-          </div>
-        </div>
-
-        {settings.isAdmin && (
+    <div style={styles.settingsPageWrap}>
+      <div style={styles.settingsGrid}>
+        <div style={styles.settingsSection}>
+          <h2 style={styles.settingsSectionTitle}>Account</h2>
           <div style={styles.field}>
-            <label style={styles.label}>Support inbox</label>
-            {supportMessages === null ? (
-              <button type="button" style={styles.addRevisionButton} onClick={loadSupportInbox} disabled={loadingInbox}>
-                {loadingInbox ? "Loading..." : "Load recent messages"}
-              </button>
-            ) : supportMessages.length === 0 ? (
-              <p style={styles.fieldHint}>Nothing's come in yet.</p>
+            <label style={styles.label}>Account email</label>
+            <p style={styles.fieldHint}>{email}</p>
+          </div>
+
+          <div style={styles.field}>
+            <label style={styles.label}>Plan</label>
+            {settings.isAdmin ? (
+              <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>{"\ud83d\udc51"} Admin {"\u2014"} full access</p>
+            ) : settings.plan === "pro" ? (
+              <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>Pro</p>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 220, overflowY: "auto" }}>
-                {supportMessages.map((m) => (
-                  <div key={m.id} style={{ ...styles.fileNameRow, flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
-                      <span style={{ ...styles.fieldHint, color: paper }}>{m.email}</span>
-                      <span style={styles.fieldHint}>{new Date(m.created_at).toLocaleDateString()}</span>
-                    </div>
-                    <p style={{ fontSize: 13, color: paper, margin: 0 }}>{m.message}</p>
-                    {m.page_context && <span style={styles.fieldHint}>from: {m.page_context}</span>}
-                  </div>
-                ))}
-              </div>
+              <>
+                <p style={styles.fieldHint}>Free</p>
+                <p style={styles.fieldHint}>
+                  Teams, Client Portal, Freelancer links, milestones, and multiple currencies are Pro features.
+                  Free accounts are also limited to {FREE_PROJECT_LIMIT} active projects.
+                </p>
+              </>
             )}
           </div>
-        )}
 
-        <div style={styles.field}>
-          <label style={styles.label}>Google Drive</label>
-          {driveEmail ? (
-            <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>Connected as {driveEmail}</p>
-          ) : (
-            <>
-              <p style={styles.fieldHint}>
-                Connect to auto-create project folders and let freelancer uploads land straight in
-                Drive.
-              </p>
-              <button type="button" style={styles.addRevisionButton} onClick={onConnectDrive}>
-                Connect Google Drive
-              </button>
-            </>
-          )}
-        </div>
-
-        <div style={styles.field}>
-          <label style={styles.label}>Notifications</label>
-          <div style={styles.lostReasonGrid}>
-            <button
-              type="button"
-              style={{
-                ...styles.reviewStatusButton,
-                borderColor: form.notificationsEnabled !== false ? teal : border,
-                color: form.notificationsEnabled !== false ? tealLight : textMuted,
-                background: form.notificationsEnabled !== false ? "rgba(47,191,166,0.1)" : "transparent",
-              }}
-              onClick={() => setForm({ ...form, notificationsEnabled: true })}
-            >
-              On
-            </button>
-            <button
-              type="button"
-              style={{
-                ...styles.reviewStatusButton,
-                borderColor: form.notificationsEnabled === false ? teal : border,
-                color: form.notificationsEnabled === false ? tealLight : textMuted,
-                background: form.notificationsEnabled === false ? "rgba(47,191,166,0.1)" : "transparent",
-              }}
-              onClick={() => setForm({ ...form, notificationsEnabled: false })}
-            >
-              Off
-            </button>
-          </div>
-          <p style={styles.fieldHint}>
-            {form.notificationsEnabled === false
-              ? "Off - Kairil won't send desktop notifications, even if your browser allows them."
-              : "On - controls Pomodoro-break and CRM follow-up alerts. Your browser's own permission below still has to be granted too."}
-          </p>
-        </div>
-
-        <div style={styles.field}>
-          <label style={styles.label}>Desktop notification permission</label>
-          {notificationPermission === "unsupported" ? (
-            <p style={styles.fieldHint}>Your browser doesn't support desktop notifications.</p>
-          ) : notificationPermission === "granted" ? (
-            <p style={{ ...styles.fieldHint, color: "#3DDC86" }}>
-              Granted - you'll get a notification for Pomodoro breaks and when leads need attention
-              {form.notificationsEnabled === false ? " once you turn notifications back on above." : "."}
-            </p>
-          ) : notificationPermission === "denied" ? (
-            <p style={styles.fieldHint}>
-              Blocked in your browser's site settings. Allow notifications for this site to turn these back on.
-            </p>
-          ) : (
-            <>
-              <p style={styles.fieldHint}>
-                Get notified when a focus session's break starts, and when leads need follow-up -
-                even if Kairil isn't the tab you're looking at.
-              </p>
-              <button type="button" style={styles.addRevisionButton} onClick={handleEnableNotifications}>
-                Enable notifications
-              </button>
-            </>
-          )}
-        </div>
-
-        <div style={styles.field}>
-          <label style={styles.label}>Studio name</label>
-          <input style={styles.input} value={form.studioName} onChange={set("studioName")} />
-        </div>
-
-        <div style={styles.field}>
-          <label style={styles.label}>Studio tagline</label>
-          <input style={styles.input} value={form.studioTagline} onChange={set("studioTagline")} />
-          <p style={styles.fieldHint}>Shown on generated invoice PDFs.</p>
-        </div>
-
-        <div style={styles.field}>
-          <label style={styles.label}>Currency symbol</label>
-          <input
-            style={{ ...styles.input, maxWidth: 80 }}
-            value={form.currencySymbol}
-            onChange={set("currencySymbol")}
-          />
-          <p style={styles.fieldHint}>
-            Used as the studio default. Projects and invoices can pick their own currency too.
-          </p>
-        </div>
-
-        <div style={styles.field}>
-          <label style={styles.label}>Studio logo URL (optional)</label>
-          <input
-            style={styles.input}
-            value={form.logoUrl || ""}
-            onChange={set("logoUrl")}
-            placeholder="https://..."
-          />
-          <p style={styles.fieldHint}>
-            A direct link to your logo image. Shown on the client portal.
-          </p>
-        </div>
-
-        <div style={styles.fieldRow}>
           <div style={styles.field}>
-            <label style={styles.label}>Default landing tab</label>
-            <select style={styles.input} value={form.defaultLandingTab} onChange={set("defaultLandingTab")}>
-              <option value="dashboard">Dashboard</option>
-              <option value="projects">Projects</option>
-              <option value="leads">Leads</option>
-              <option value="finance">Finance</option>
-            </select>
+            <label style={styles.label}>Patreon</label>
+            {settings.isAdmin ? (
+              <p style={styles.fieldHint}>
+                {patreonConnected ? `Connected${patreonEmail ? ` as ${patreonEmail}` : ""}` : "Not connected"}, admin
+                override enabled so this doesn't affect your access either way.
+              </p>
+            ) : !patreonConnected ? (
+              <>
+                <p style={styles.fieldHint}>
+                  Connect your Patreon account to unlock Pro automatically if you're subscribed to the Pro tier.
+                </p>
+                <button type="button" style={styles.addRevisionButton} onClick={onConnectPatreon}>
+                  Connect Patreon
+                </button>
+              </>
+            ) : patreonIsPro ? (
+              <>
+                <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>
+                  {"\u2713"} Connected{patreonEmail ? ` as ${patreonEmail}` : ""} {"\u00b7"} Pro member
+                </p>
+                <a
+                  href={PATREON_MANAGE_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ ...styles.fieldHint, color: teal }}
+                >
+                  Manage membership on Patreon
+                </a>
+              </>
+            ) : (
+              <>
+                <p style={styles.fieldHint}>
+                  Connected{patreonEmail ? ` as ${patreonEmail}` : ""}, not currently subscribed to Pro.
+                </p>
+                <div style={styles.fieldRow}>
+                  <a href={PATREON_CHECKOUT_URL} target="_blank" rel="noreferrer" style={styles.newButton}>
+                    Become a Patron
+                  </a>
+                  <button type="button" style={styles.addRevisionButton} onClick={onConnectPatreon}>
+                    Refresh status
+                  </button>
+                </div>
+              </>
+            )}
           </div>
+        </div>
+
+        <div style={styles.settingsSection}>
+          <h2 style={styles.settingsSectionTitle}>Studio branding</h2>
           <div style={styles.field}>
-            <label style={styles.label}>Default shot priority</label>
-            <select
-              style={styles.input}
-              value={form.defaultShotPriority}
-              onChange={set("defaultShotPriority")}
-            >
-              <option value="low">Low</option>
-              <option value="normal">Normal</option>
-              <option value="rush">Rush</option>
-            </select>
+            <label style={styles.label}>Studio name</label>
+            <input style={styles.input} value={form.studioName} onChange={set("studioName")} />
           </div>
-        </div>
 
-        <div style={styles.field}>
-          <label style={styles.label}>Default milestone split (%)</label>
-          <div style={styles.fieldRow}>
-            {form.milestoneDefaults.map((val, i) => (
-              <input
-                key={i}
-                style={styles.input}
-                type="number"
-                min="0"
-                max="100"
-                value={val}
-                onChange={setMilestone(i)}
-              />
-            ))}
+          <div style={styles.field}>
+            <label style={styles.label}>Studio tagline</label>
+            <input style={styles.input} value={form.studioTagline} onChange={set("studioTagline")} />
+            <p style={styles.fieldHint}>Shown on generated invoice PDFs.</p>
           </div>
-          <p style={styles.fieldHint}>
-            Upfront / Mid-project / Delivery. Used as the starting point on "Set up milestones."
-          </p>
-        </div>
 
-        <div style={styles.field}>
-          <label style={styles.label}>Lead channels</label>
-          <div style={styles.lostReasonGrid}>
-            {channels.map((channel) => {
-              const isHidden = hiddenChannels.includes(channel);
-              return (
-                <span key={channel} style={{ ...styles.fileNameRow, ...styles.cardTag, gap: 6, padding: "5px 6px 5px 12px" }}>
-                  {channel}
-                  <button
-                    type="button"
-                    title={isHidden ? "Hidden from the Dashboard breakdown — click to show" : "Shown on the Dashboard breakdown — click to hide"}
-                    style={{
-                      ...styles.copyButton,
-                      padding: "2px 8px",
-                      fontSize: 10,
-                      color: isHidden ? textMuted : teal,
-                      borderColor: isHidden ? border : teal,
-                    }}
-                    onClick={() => toggleChannelDashboardVisibility(channel)}
-                  >
-                    {isHidden ? "Hidden" : "Shown"}
-                  </button>
-                  <button
-                    type="button"
-                    style={{ ...styles.iconButton, width: 18, height: 18 }}
-                    onClick={() => removeChannel(channel)}
-                  >
-                    <CloseIcon />
-                  </button>
-                </span>
-              );
-            })}
-          </div>
-          <div style={{ ...styles.fieldRow, marginTop: 8 }}>
+          <div style={styles.field}>
+            <label style={styles.label}>Legal name (optional)</label>
             <input
               style={styles.input}
-              value={newChannel}
-              onChange={(e) => setNewChannel(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") addChannel();
-              }}
-              placeholder="e.g. TikTok"
+              value={form.studioLegalName || ""}
+              onChange={set("studioLegalName")}
+              placeholder="e.g. registered business name"
             />
-            <button type="button" style={styles.addRevisionButton} onClick={addChannel}>
-              <PlusIcon />
-              Add channel
-            </button>
+            <p style={styles.fieldHint}>
+              Used on invoice headers instead of the studio name above, if set.
+            </p>
           </div>
-          <p style={styles.fieldHint}>
-            Track where leads come from. These show up as filters on the Leads board.
-            "Shown"/"Hidden" controls only whether a channel appears in the Dashboard's
-            "Leads by channel" breakdown — a hidden channel is still selectable on leads
-            and still works as a filter everywhere else.
-          </p>
+
+          <div style={styles.field}>
+            <label style={styles.label}>Studio address (optional)</label>
+            <textarea
+              style={{ ...styles.input, minHeight: 60, resize: "vertical" }}
+              value={form.studioAddress || ""}
+              onChange={set("studioAddress")}
+            />
+          </div>
+
+          <div style={styles.field}>
+            <label style={styles.label}>Tax ID / VAT number (optional)</label>
+            <input
+              style={styles.input}
+              value={form.studioTaxId || ""}
+              onChange={set("studioTaxId")}
+            />
+          </div>
+
+          <div style={styles.field}>
+            <label style={styles.label}>VAT status (optional)</label>
+            <input
+              style={styles.input}
+              value={form.studioVatStatus || ""}
+              onChange={set("studioVatStatus")}
+              placeholder="e.g. VAT registered / exempt"
+            />
+          </div>
+
+          <div style={styles.field}>
+            <label style={styles.label}>eTIMS number (optional)</label>
+            <input
+              style={styles.input}
+              value={form.studioEtimsNumber || ""}
+              onChange={set("studioEtimsNumber")}
+            />
+          </div>
+
+          <div style={styles.field}>
+            <label style={styles.label}>Currency symbol</label>
+            <input
+              style={{ ...styles.input, maxWidth: 80 }}
+              value={form.currencySymbol}
+              onChange={set("currencySymbol")}
+            />
+            <p style={styles.fieldHint}>
+              Used as the studio default. Projects and invoices can pick their own currency too.
+            </p>
+          </div>
+
+          <div style={styles.field}>
+            <label style={styles.label}>Studio logo URL (optional)</label>
+            <input
+              style={styles.input}
+              value={form.logoUrl || ""}
+              onChange={set("logoUrl")}
+              placeholder="https://..."
+            />
+            <p style={styles.fieldHint}>
+              A direct link to your logo image. Shown on the client portal.
+            </p>
+          </div>
         </div>
 
-        <div style={styles.field}>
-          <label style={styles.label}>Follow-up cadence (days after initial email)</label>
+        <div style={styles.settingsSection}>
+          <h2 style={styles.settingsSectionTitle}>Defaults</h2>
           <div style={styles.fieldRow}>
-            {(form.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE).map((step, i) => (
-              <input
-                key={step.label}
+            <div style={styles.field}>
+              <label style={styles.label}>Default landing tab</label>
+              <select style={styles.input} value={form.defaultLandingTab} onChange={set("defaultLandingTab")}>
+                <option value="dashboard">Dashboard</option>
+                <option value="projects">Projects</option>
+                <option value="leads">Leads</option>
+                <option value="finance">Finance</option>
+              </select>
+            </div>
+            <div style={styles.field}>
+              <label style={styles.label}>Default shot priority</label>
+              <select
                 style={styles.input}
-                type="number"
-                min="0"
-                disabled={i === 0}
-                value={step.dayOffset}
-                title={step.label}
-                onChange={(e) => {
-                  const next = (form.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE).map((s, j) =>
-                    j === i ? { ...s, dayOffset: Number(e.target.value) } : s
-                  );
-                  setForm({ ...form, followupSchedule: next });
-                }}
-              />
-            ))}
+                value={form.defaultShotPriority}
+                onChange={set("defaultShotPriority")}
+              >
+                <option value="low">Low</option>
+                <option value="normal">Normal</option>
+                <option value="rush">Rush</option>
+              </select>
+            </div>
           </div>
-          <p style={styles.fieldHint}>
-            Initial / Follow-up 1 / 2 / 3 / 4. After the 4th follow-up goes unanswered, a lead
-            automatically moves to No Response.
-          </p>
+
+          <div style={styles.field}>
+            <label style={styles.label}>Default milestone split (%)</label>
+            <div style={styles.fieldRow}>
+              {form.milestoneDefaults.map((val, i) => (
+                <input
+                  key={i}
+                  style={styles.input}
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={val}
+                  onChange={setMilestone(i)}
+                />
+              ))}
+            </div>
+            <p style={styles.fieldHint}>
+              Upfront / Mid-project / Delivery. Used as the starting point on "Set up milestones."
+            </p>
+          </div>
         </div>
 
-        <div style={styles.modalFooter}>
-          <div style={{ flex: 1 }} />
-          <button style={styles.cancelButton} onClick={onCancel}>
-            Cancel
-          </button>
-          <button style={styles.saveButton} onClick={() => onSave(form)}>
-            Save settings
-          </button>
+        <div style={styles.settingsSection}>
+          <h2 style={styles.settingsSectionTitle}>Lead channels</h2>
+          <div style={styles.field}>
+            <div style={styles.lostReasonGrid}>
+              {channels.map((channel) => {
+                const isHidden = hiddenChannels.includes(channel);
+                return (
+                  <span key={channel} style={{ ...styles.fileNameRow, ...styles.cardTag, gap: 6, padding: "5px 6px 5px 12px" }}>
+                    {channel}
+                    <button
+                      type="button"
+                      title={isHidden ? "Hidden from the Dashboard breakdown — click to show" : "Shown on the Dashboard breakdown — click to hide"}
+                      style={{
+                        ...styles.copyButton,
+                        padding: "2px 8px",
+                        fontSize: 10,
+                        color: isHidden ? textMuted : teal,
+                        borderColor: isHidden ? border : teal,
+                      }}
+                      onClick={() => toggleChannelDashboardVisibility(channel)}
+                    >
+                      {isHidden ? "Hidden" : "Shown"}
+                    </button>
+                    <button
+                      type="button"
+                      style={{ ...styles.iconButton, width: 18, height: 18 }}
+                      onClick={() => removeChannel(channel)}
+                    >
+                      <CloseIcon />
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+            <div style={{ ...styles.fieldRow, marginTop: 8 }}>
+              <input
+                style={styles.input}
+                value={newChannel}
+                onChange={(e) => setNewChannel(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") addChannel();
+                }}
+                placeholder="e.g. TikTok"
+              />
+              <button type="button" style={styles.addRevisionButton} onClick={addChannel}>
+                <PlusIcon />
+                Add channel
+              </button>
+            </div>
+            <p style={styles.fieldHint}>
+              Track where leads come from. These show up as filters on the Leads board.
+              "Shown"/"Hidden" controls only whether a channel appears in the Dashboard's
+              "Leads by channel" breakdown — a hidden channel is still selectable on leads
+              and still works as a filter everywhere else.
+            </p>
+          </div>
         </div>
+
+        <div style={styles.settingsSection}>
+          <h2 style={styles.settingsSectionTitle}>Follow-up cadence</h2>
+          <div style={styles.field}>
+            <label style={styles.label}>Days after initial email</label>
+            <div style={styles.fieldRow}>
+              {(form.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE).map((step, i) => (
+                <input
+                  key={step.label}
+                  style={styles.input}
+                  type="number"
+                  min="0"
+                  disabled={i === 0}
+                  value={step.dayOffset}
+                  title={step.label}
+                  onChange={(e) => {
+                    const next = (form.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE).map((s, j) =>
+                      j === i ? { ...s, dayOffset: Number(e.target.value) } : s
+                    );
+                    setForm({ ...form, followupSchedule: next });
+                  }}
+                />
+              ))}
+            </div>
+            <p style={styles.fieldHint}>
+              Initial / Follow-up 1 / 2 / 3 / 4. After the 4th follow-up goes unanswered, a lead
+              automatically moves to No Response.
+            </p>
+          </div>
+        </div>
+
+        <div style={styles.settingsSection}>
+          <h2 style={styles.settingsSectionTitle}>Notifications</h2>
+          <div style={styles.field}>
+            <label style={styles.label}>Notifications</label>
+            <div style={styles.lostReasonGrid}>
+              <button
+                type="button"
+                style={{
+                  ...styles.reviewStatusButton,
+                  borderColor: form.notificationsEnabled !== false ? teal : border,
+                  color: form.notificationsEnabled !== false ? tealLight : textMuted,
+                  background: form.notificationsEnabled !== false ? "rgba(47,191,166,0.1)" : "transparent",
+                }}
+                onClick={() => setForm({ ...form, notificationsEnabled: true })}
+              >
+                On
+              </button>
+              <button
+                type="button"
+                style={{
+                  ...styles.reviewStatusButton,
+                  borderColor: form.notificationsEnabled === false ? teal : border,
+                  color: form.notificationsEnabled === false ? tealLight : textMuted,
+                  background: form.notificationsEnabled === false ? "rgba(47,191,166,0.1)" : "transparent",
+                }}
+                onClick={() => setForm({ ...form, notificationsEnabled: false })}
+              >
+                Off
+              </button>
+            </div>
+            <p style={styles.fieldHint}>
+              {form.notificationsEnabled === false
+                ? "Off - Kairil won't send desktop notifications, even if your browser allows them."
+                : "On - controls Pomodoro-break and CRM follow-up alerts. Your browser's own permission below still has to be granted too."}
+            </p>
+          </div>
+
+          <div style={styles.field}>
+            <label style={styles.label}>Desktop notification permission</label>
+            {notificationPermission === "unsupported" ? (
+              <p style={styles.fieldHint}>Your browser doesn't support desktop notifications.</p>
+            ) : notificationPermission === "granted" ? (
+              <p style={{ ...styles.fieldHint, color: "#3DDC86" }}>
+                Granted - you'll get a notification for Pomodoro breaks and when leads need attention
+                {form.notificationsEnabled === false ? " once you turn notifications back on above." : "."}
+              </p>
+            ) : notificationPermission === "denied" ? (
+              <p style={styles.fieldHint}>
+                Blocked in your browser's site settings. Allow notifications for this site to turn these back on.
+              </p>
+            ) : (
+              <>
+                <p style={styles.fieldHint}>
+                  Get notified when a focus session's break starts, and when leads need follow-up -
+                  even if Kairil isn't the tab you're looking at.
+                </p>
+                <button type="button" style={styles.addRevisionButton} onClick={handleEnableNotifications}>
+                  Enable notifications
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div style={styles.settingsSection}>
+          <h2 style={styles.settingsSectionTitle}>Integrations</h2>
+          <div style={styles.field}>
+            <label style={styles.label}>Google Drive</label>
+            {driveEmail ? (
+              <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>Connected as {driveEmail}</p>
+            ) : (
+              <>
+                <p style={styles.fieldHint}>
+                  Connect to auto-create project folders and let freelancer uploads land straight in
+                  Drive.
+                </p>
+                <button type="button" style={styles.addRevisionButton} onClick={onConnectDrive}>
+                  Connect Google Drive
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div style={styles.settingsSection}>
+          <h2 style={styles.settingsSectionTitle}>Help & support</h2>
+          <div style={styles.field}>
+            <label style={styles.label}>Help</label>
+            <div style={styles.fieldRow}>
+              <button type="button" style={styles.addRevisionButton} onClick={onReplayTutorial}>
+                Replay tutorial
+              </button>
+              <button type="button" style={styles.addRevisionButton} onClick={onOpenSupport}>
+                Report a problem
+              </button>
+            </div>
+          </div>
+
+          {settings.isAdmin && (
+            <div style={styles.field}>
+              <label style={styles.label}>Support inbox</label>
+              {supportMessages === null ? (
+                <button type="button" style={styles.addRevisionButton} onClick={loadSupportInbox} disabled={loadingInbox}>
+                  {loadingInbox ? "Loading..." : "Load recent messages"}
+                </button>
+              ) : supportMessages.length === 0 ? (
+                <p style={styles.fieldHint}>Nothing's come in yet.</p>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 220, overflowY: "auto" }}>
+                  {supportMessages.map((m) => (
+                    <div key={m.id} style={{ ...styles.fileNameRow, flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
+                        <span style={{ ...styles.fieldHint, color: paper }}>{m.email}</span>
+                        <span style={styles.fieldHint}>{new Date(m.created_at).toLocaleDateString()}</span>
+                      </div>
+                      <p style={{ fontSize: 13, color: paper, margin: 0 }}>{m.message}</p>
+                      {m.page_context && <span style={styles.fieldHint}>from: {m.page_context}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={styles.settingsFooterBar}>
+        <button style={styles.saveButton} onClick={() => onSave(form)}>
+          Save settings
+        </button>
       </div>
     </div>
   );
@@ -8115,10 +8548,29 @@ function ActivityPanel({ entries, cards, onRefresh }) {
   );
 }
 
-function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkPaid, onDownload, onOpenMilestones, currencySymbol, hasProAccess }) {
+function InvoicesPanel({
+  project,
+  projectCards,
+  invoices,
+  onNew,
+  onEdit,
+  onMarkPaid,
+  onGenerateFollowup,
+  onDownload,
+  onOpenMilestones,
+  currencySymbol,
+  hasProAccess,
+  fxRates,
+}) {
   const cur = currencySymbol || "$";
   if (!project) return null;
-  const { totalBudget, amountPaid, outstanding } = projectBudgetSummary(project, projectCards, invoices);
+  const { totalBudget, amountPaid, outstanding } = projectBudgetSummary(project, projectCards, invoices, fxRates);
+  // Whether a receipt/invoice has already been generated from a given
+  // proforma/receipt, so the "Generate..." action only shows up once per
+  // step - re-clicking it wouldn't lose anything (it just opens another
+  // prefilled draft), but offering it after the fact reads as broken.
+  const hasFollowup = (sourceId, targetType) =>
+    invoices.some((other) => other.convertedFromId === sourceId && other.docType === targetType);
 
   return (
     <div style={styles.invoicesWrap}>
@@ -8168,21 +8620,32 @@ function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkP
         <div style={styles.invoiceList}>
           {invoices.map((inv) => {
             const balance = parseMoney(inv.amount) - parseMoney(inv.amountPaid);
+            const docType = inv.docType || "invoice";
+            const docTypeLabel = DOC_TYPES.find((t) => t.id === docType)?.label || "Invoice";
+            const hasLineItems = inv.amountMode === "items" && (inv.lineItems || []).length > 0;
+            const summaryText =
+              inv.description ||
+              (hasLineItems
+                ? `${inv.lineItems.length} line item${inv.lineItems.length === 1 ? "" : "s"}`
+                : "");
             return (
               <div key={inv.id} className="kf-card" style={styles.invoiceCard} onClick={() => onEdit(inv)}>
                 <div style={styles.invoiceCardTop}>
                   <span style={styles.invoiceNumber}>{inv.invoiceNumber}</span>
-                  <span
-                    style={{
-                      ...styles.invoiceStatusTag,
-                      color: inv.status === "paid" ? "#3DDC84" : "#F2A65A",
-                      borderColor: inv.status === "paid" ? "#3DDC84" : "#F2A65A",
-                    }}
-                  >
-                    {inv.status === "paid" ? "Paid" : "Unpaid"}
-                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={styles.docTypeTag}>{docTypeLabel}</span>
+                    <span
+                      style={{
+                        ...styles.invoiceStatusTag,
+                        color: inv.status === "paid" ? "#3DDC84" : "#F2A65A",
+                        borderColor: inv.status === "paid" ? "#3DDC84" : "#F2A65A",
+                      }}
+                    >
+                      {inv.status === "paid" ? "Paid" : "Unpaid"}
+                    </span>
+                  </div>
                 </div>
-                {inv.description && <div style={styles.cardMeta}>{inv.description}</div>}
+                {summaryText && <div style={styles.cardMeta}>{summaryText}</div>}
                 <div style={styles.invoiceAmountsRow}>
                   <span style={styles.fieldHint}>
                     Amount {inv.currency || cur}
@@ -8205,6 +8668,28 @@ function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkP
                       Mark as paid
                     </button>
                   )}
+                  {docType === "proforma" && !hasFollowup(inv.id, "receipt") && (
+                    <button
+                      style={styles.cancelButton}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onGenerateFollowup(inv, "receipt");
+                      }}
+                    >
+                      Generate receipt
+                    </button>
+                  )}
+                  {docType !== "invoice" && !hasFollowup(inv.id, "invoice") && (
+                    <button
+                      style={styles.cancelButton}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onGenerateFollowup(inv, "invoice");
+                      }}
+                    >
+                      Generate invoice
+                    </button>
+                  )}
                   <button
                     style={{ ...styles.cancelButton, display: "flex", alignItems: "center", gap: 6 }}
                     onClick={(e) => {
@@ -8225,7 +8710,7 @@ function InvoicesPanel({ project, projectCards, invoices, onNew, onEdit, onMarkP
   );
 }
 
-function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders, hasProAccess, atProjectLimit }) {
+function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders, hasProAccess, atProjectLimit, shotCount, invoiceCount }) {
   const [form, setForm] = useState(project);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const [linkCopied, setLinkCopied] = useState(false);
@@ -8248,6 +8733,12 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
   };
 
   const handleCreateFolders = async () => {
+    // Guard against double-firing this request (e.g. a fast double-click)
+    // client-side; the edge function itself now also checks for an
+    // existing drive_folder_id server-side, which is the actual defense
+    // against two tabs/requests racing to create folders for the same
+    // project.
+    if (creatingFolders || form.driveFolderId) return;
     setDriveError("");
     setCreatingFolders(true);
     try {
@@ -8291,6 +8782,27 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
             value={form.client}
             onChange={set("client")}
             placeholder="e.g. Vicente Carro"
+          />
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Billing address (optional)</label>
+          <textarea
+            style={{ ...styles.input, minHeight: 60, resize: "vertical" }}
+            value={form.clientAddress || ""}
+            onChange={set("clientAddress")}
+            placeholder={"e.g. S\u00f3lt\u00fan 5, door 203,\nReykjav\u00edk 105, Iceland"}
+          />
+          <p style={styles.fieldHint}>Printed on this client's invoices, under "Bill to".</p>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label}>Tax ID / VAT number (optional)</label>
+          <input
+            style={styles.input}
+            value={form.clientTaxId || ""}
+            onChange={set("clientTaxId")}
+            placeholder="e.g. VAT/RSK no. 162704"
           />
         </div>
 
@@ -8448,11 +8960,26 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
         <div style={styles.field}>
           <label style={styles.label}>Deadline</label>
           <input
+            type="date"
             style={styles.input}
-            value={form.deadline || ""}
+            // A plain text field let this column accumulate values like "Aug 15",
+            // "15/08", "next Friday" - impossible to sort or compare reliably.
+            // A native date input always writes/reads ISO (YYYY-MM-DD), so every
+            // deadline set from here on is consistent without needing a data
+            // migration for existing rows: the column stays `text`, this just
+            // standardizes what new values look like. An old free-text value
+            // that isn't ISO-formatted shows the field as blank (the browser
+            // can't parse it into the picker) rather than crashing, and the
+            // hint below covers that case instead of the value silently
+            // appearing to disappear.
+            value={/^\d{4}-\d{2}-\d{2}$/.test(form.deadline || "") ? form.deadline : ""}
             onChange={set("deadline")}
-            placeholder="e.g. Aug 15"
           />
+          {form.deadline && !/^\d{4}-\d{2}-\d{2}$/.test(form.deadline) && (
+            <p style={styles.fieldHint}>
+              Currently set to "{form.deadline}" - pick a date above to replace it.
+            </p>
+          )}
         </div>
 
         <div style={styles.field}>
@@ -8477,7 +9004,28 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
 
         <div style={styles.modalFooter}>
           {!isNew && (
-            <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
+            <button
+              style={styles.deleteButton}
+              onClick={() => {
+                // Deletion cascades into every shot, invoice, and activity
+                // entry on this project (and trashes its Drive folder), so
+                // an accidental click here is much more destructive than
+                // most other deletes in the app - it needs a confirmation
+                // that actually says what's about to be removed.
+                const parts = [];
+                if (shotCount > 0) parts.push(`${shotCount} shot${shotCount === 1 ? "" : "s"}`);
+                if (invoiceCount > 0) parts.push(`${invoiceCount} invoice${invoiceCount === 1 ? "" : "s"}`);
+                const detail = parts.length > 0 ? ` This will also delete ${parts.join(" and ")}.` : "";
+                const driveNote = form.driveFolderId ? " Its Google Drive folder will be moved to trash." : "";
+                if (
+                  window.confirm(
+                    `Delete "${form.name || "Untitled project"}"?${detail}${driveNote} This action cannot be undone.`
+                  )
+                ) {
+                  onDelete(form.id);
+                }
+              }}
+            >
               <TrashIcon />
               Delete
             </button>
@@ -8686,6 +9234,19 @@ function LeadEditor({
               </div>
             </div>
 
+            {(form.billingAddress || form.taxId) && (
+              <div style={styles.fieldRow}>
+                <div style={styles.field}>
+                  <label style={styles.label}>Billing address</label>
+                  <p style={styles.readOnlyValue}>{form.billingAddress || "\u2014"}</p>
+                </div>
+                <div style={styles.field}>
+                  <label style={styles.label}>Tax ID / VAT number</label>
+                  <p style={styles.readOnlyValue}>{form.taxId || "\u2014"}</p>
+                </div>
+              </div>
+            )}
+
             {form.notes && (
               <div style={styles.field}>
                 <label style={styles.label}>Client notes</label>
@@ -8820,6 +9381,28 @@ function LeadEditor({
                   placeholder="e.g. United States"
                 />
               </div>
+            </div>
+
+            <div style={styles.field}>
+              <label style={styles.label}>Billing address (optional)</label>
+              <textarea
+                style={{ ...styles.input, minHeight: 60, resize: "vertical" }}
+                value={form.billingAddress || ""}
+                onChange={set("billingAddress")}
+                placeholder="For invoices, if you have it yet"
+              />
+            </div>
+
+            <div style={styles.field}>
+              <label style={styles.label}>Tax ID / VAT number (optional)</label>
+              <input
+                style={styles.input}
+                value={form.taxId || ""}
+                onChange={set("taxId")}
+              />
+              <p style={styles.fieldHint}>
+                Carried over automatically when this lead is marked Won and becomes a project.
+              </p>
             </div>
 
             <div style={styles.field}>
@@ -9203,7 +9786,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
     setUploadError("");
     setUploading(true);
     try {
-      if (!form.projectId) throw new Error("Save the shot before adding attachments.");
+      if (!form.id) throw new Error("Save the shot before adding attachments.");
       const {
         data: { session: currentSession },
       } = await supabase.auth.getSession();
@@ -9252,14 +9835,30 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
     // array back would silently drop anything appended by a concurrent
     // upload since this editor loaded. remove_shot_file matches and
     // removes by url in a single atomic UPDATE instead.
+    //
+    // For Drive-backed attachments this needs to go through the
+    // studio-drive-delete edge function rather than calling remove_shot_file
+    // directly - calling the RPC alone only dropped the metadata entry and
+    // left the actual file sitting in Drive forever ("Attachment removed"
+    // in the UI while the file quietly stuck around). The edge function
+    // trashes the Drive file (when there is one) and then performs the same
+    // metadata removal server-side.
     if (form.id && target?.url) {
       try {
-        const { error } = await supabase.rpc("remove_shot_file", {
-          p_shot_id: form.id,
-          p_column: "attachments",
-          p_url: target.url,
+        const {
+          data: { session: currentSession },
+        } = await supabase.auth.getSession();
+        if (!currentSession) throw new Error("Not signed in");
+        const res = await fetch(functionUrl("studio-drive-delete"), {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${currentSession.access_token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ shotId: form.id, driveFileId: target.driveFileId || null, url: target.url }),
         });
-        if (error) throw error;
+        const result = await res.json();
+        if (!res.ok || !result?.success) throw new Error(result?.error || "Couldn't remove attachment");
       } catch (err) {
         console.error("Removing attachment failed:", err);
       }
@@ -9472,22 +10071,28 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
           </div>
         ))}
 
-        <input
-          ref={fileInputRef}
-          type="file"
-          style={{ display: "none" }}
-          onChange={handleFileSelected}
-        />
-        <button
-          type="button"
-          style={styles.addRevisionButton}
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
-        >
-          <PlusIcon />
-          {uploading ? "Uploading..." : "Add attachment"}
-        </button>
-        {uploadError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{uploadError}</p>}
+        {isNew ? (
+          <p style={styles.fieldHint}>Save this shot first, then you can add attachments.</p>
+        ) : (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              style={{ display: "none" }}
+              onChange={handleFileSelected}
+            />
+            <button
+              type="button"
+              style={styles.addRevisionButton}
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+            >
+              <PlusIcon />
+              {uploading ? "Uploading..." : "Add attachment"}
+            </button>
+            {uploadError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{uploadError}</p>}
+          </>
+        )}
 
         {(form.deliverables || []).length > 0 && (
           <>
@@ -10484,9 +11089,12 @@ function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew, currencyS
 }
 
 function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySymbol, hasProAccess }) {
-  const [form, setForm] = useState({ currency: currencySymbol || "$", ...invoice });
+  const [form, setForm] = useState({ currency: currencySymbol || "$", amountMode: "manual", ...invoice });
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
-  const balance = parseMoney(form.amount) - parseMoney(form.amountPaid);
+  const docType = form.docType || "invoice";
+  const hasLineItems = form.amountMode === "items";
+  const computedTotal = hasLineItems ? lineItemsTotal(form.lineItems) : parseMoney(form.amount);
+  const balance = computedTotal - parseMoney(form.amountPaid);
   const cur = form.currency || currencySymbol || "$";
 
   useEffect(() => {
@@ -10495,19 +11103,75 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
     }
   }, [hasProAccess]);
 
+  const setLineItem = (idx, patch) => {
+    const next = [...(form.lineItems || [])];
+    next[idx] = { ...next[idx], ...patch };
+    setForm({ ...form, lineItems: next });
+  };
+
+  const handlePickDocType = (targetType) => {
+    setForm((f) => {
+      // Only a still-unsaved document's number follows the type around -
+      // once it's saved, switching the type shouldn't silently renumber
+      // something that might already be on a document the client has.
+      const nextNumber = isNew ? numberForDocType(f.invoiceNumber, targetType) || f.invoiceNumber : f.invoiceNumber;
+      if (targetType === "receipt") {
+        const total = f.amountMode === "items" ? lineItemsTotal(f.lineItems) : parseMoney(f.amount);
+        return {
+          ...f,
+          docType: targetType,
+          invoiceNumber: nextNumber,
+          status: "paid",
+          amountPaid: f.amountPaid || String(total),
+          paidDate: f.paidDate || new Date().toISOString().slice(0, 10),
+        };
+      }
+      return { ...f, docType: targetType, invoiceNumber: nextNumber };
+    });
+  };
+
   return (
     <div style={styles.overlay} onClick={onCancel}>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
-          <span style={styles.modalTitle}>{isNew ? "New invoice" : "Edit invoice"}</span>
+          <span style={styles.modalTitle}>
+            {isNew ? `New ${DOC_TYPES.find((t) => t.id === docType)?.label.toLowerCase() || "invoice"}` : "Edit document"}
+          </span>
           <button style={styles.iconButton} onClick={onCancel}>
             <CloseIcon />
           </button>
         </div>
 
+        <div style={styles.field}>
+          <label style={styles.label}>Document type</label>
+          <div style={styles.reviewStatusRow}>
+            {DOC_TYPES.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                style={{
+                  ...styles.reviewStatusButton,
+                  borderColor: docType === t.id ? teal : border,
+                  color: docType === t.id ? teal : textMuted,
+                  background: docType === t.id ? "rgba(47,191,166,0.1)" : "transparent",
+                }}
+                onClick={() => handlePickDocType(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          {docType === "proforma" && (
+            <p style={styles.fieldHint}>An advance payment request - not the final invoice yet.</p>
+          )}
+          {docType === "receipt" && (
+            <p style={styles.fieldHint}>Confirms payment already received, so it won't ask Paid/Unpaid below.</p>
+          )}
+        </div>
+
         <div style={styles.fieldRow}>
           <div style={styles.field}>
-            <label style={styles.label}>Invoice number</label>
+            <label style={styles.label}>Document number</label>
             <input
               style={styles.input}
               value={form.invoiceNumber}
@@ -10538,25 +11202,110 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
         </div>
 
         <div style={styles.field}>
-          <label style={styles.label}>Description</label>
-          <textarea
-            style={styles.textarea}
-            value={form.description}
-            onChange={set("description")}
-            placeholder="e.g. Cleanup and compositing, Cuts 01-12"
-            rows={2}
-          />
+          <label style={styles.label}>Amount mode</label>
+          <div style={styles.reviewStatusRow}>
+            <button
+              type="button"
+              style={{
+                ...styles.reviewStatusButton,
+                borderColor: !hasLineItems ? teal : border,
+                color: !hasLineItems ? teal : textMuted,
+                background: !hasLineItems ? "rgba(47,191,166,0.1)" : "transparent",
+              }}
+              onClick={() => setForm({ ...form, amountMode: "manual" })}
+            >
+              Single amount
+            </button>
+            <button
+              type="button"
+              style={{
+                ...styles.reviewStatusButton,
+                borderColor: hasLineItems ? teal : border,
+                color: hasLineItems ? teal : textMuted,
+                background: hasLineItems ? "rgba(47,191,166,0.1)" : "transparent",
+              }}
+              onClick={() =>
+                setForm({
+                  ...form,
+                  amountMode: "items",
+                  lineItems: form.lineItems && form.lineItems.length ? form.lineItems : [emptyLineItem()],
+                })
+              }
+            >
+              Line items
+            </button>
+          </div>
         </div>
+
+        {hasLineItems ? (
+          <div style={styles.field}>
+            <label style={styles.label}>Line items</label>
+            {(form.lineItems || []).map((li, idx) => (
+              <div key={li.id} style={styles.lineItemRow}>
+                <input
+                  style={{ ...styles.input, flex: 3 }}
+                  value={li.description}
+                  onChange={(e) => setLineItem(idx, { description: e.target.value })}
+                  placeholder="e.g. Genga -> douga cleanup, set 1"
+                />
+                <input
+                  style={{ ...styles.input, flex: 1, minWidth: 50 }}
+                  value={li.qty}
+                  onChange={(e) => setLineItem(idx, { qty: e.target.value })}
+                  placeholder="Qty"
+                />
+                <input
+                  style={{ ...styles.input, flex: 1, minWidth: 70 }}
+                  value={li.unitPrice}
+                  onChange={(e) => setLineItem(idx, { unitPrice: e.target.value })}
+                  placeholder="Unit price"
+                />
+                <span style={{ ...styles.fieldHint, minWidth: 70, textAlign: "right" }}>
+                  {cur}{formatMoney(parseMoney(li.qty) * parseMoney(li.unitPrice))}
+                </span>
+                {form.lineItems.length > 1 && (
+                  <button
+                    type="button"
+                    style={styles.iconButton}
+                    onClick={() => setForm({ ...form, lineItems: form.lineItems.filter((_, i) => i !== idx) })}
+                  >
+                    <TrashIcon />
+                  </button>
+                )}
+              </div>
+            ))}
+            <button
+              type="button"
+              style={styles.addRevisionButton}
+              onClick={() => setForm({ ...form, lineItems: [...(form.lineItems || []), emptyLineItem()] })}
+            >
+              + Add line
+            </button>
+          </div>
+        ) : (
+          <div style={styles.field}>
+            <label style={styles.label}>Description</label>
+            <textarea
+              style={styles.textarea}
+              value={form.description}
+              onChange={set("description")}
+              placeholder="e.g. Cleanup and compositing, Cuts 01-12"
+              rows={2}
+            />
+          </div>
+        )}
 
         <div style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Amount</label>
             <input
               style={styles.input}
-              value={form.amount}
-              onChange={set("amount")}
+              value={hasLineItems ? formatMoney(computedTotal) : form.amount}
+              onChange={hasLineItems ? undefined : set("amount")}
+              disabled={hasLineItems}
               placeholder="e.g. 500"
             />
+            {hasLineItems && <p style={styles.fieldHint}>Calculated from line items above.</p>}
           </div>
           <div style={styles.field}>
             <label style={styles.label}>Amount paid</label>
@@ -10590,44 +11339,60 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
           </div>
         </div>
 
-        <p style={styles.fieldHint}>Balance due: {cur}{formatMoney(balance)}</p>
+        <p style={styles.fieldHint}>
+          {docType === "receipt"
+            ? `Amount received: ${cur}${formatMoney(parseMoney(form.amountPaid))}`
+            : `Balance due: ${cur}${formatMoney(balance)}`}
+        </p>
 
-        <div style={styles.field}>
-          <label style={styles.label}>Status</label>
-          <div style={styles.reviewStatusRow}>
-            <button
-              type="button"
-              style={{
-                ...styles.reviewStatusButton,
-                borderColor: form.status !== "paid" ? "#F2A65A" : border,
-                color: form.status !== "paid" ? "#F2A65A" : textMuted,
-                background: form.status !== "paid" ? "rgba(242,166,90,0.1)" : "transparent",
-              }}
-              onClick={() => setForm({ ...form, status: "unpaid" })}
-            >
-              Unpaid
-            </button>
-            <button
-              type="button"
-              style={{
-                ...styles.reviewStatusButton,
-                borderColor: form.status === "paid" ? "#3DDC84" : border,
-                color: form.status === "paid" ? "#3DDC84" : textMuted,
-                background: form.status === "paid" ? "rgba(61,220,132,0.1)" : "transparent",
-              }}
-              onClick={() =>
-                setForm({
-                  ...form,
-                  status: "paid",
-                  amountPaid: form.amount,
-                  paidDate: form.paidDate || new Date().toISOString().slice(0, 10),
-                })
-              }
-            >
-              Paid
-            </button>
+        {docType === "receipt" ? (
+          <div style={styles.field}>
+            <label style={styles.label}>Payment date</label>
+            <input
+              style={styles.input}
+              type="date"
+              value={form.paidDate || ""}
+              onChange={set("paidDate")}
+            />
           </div>
-        </div>
+        ) : (
+          <div style={styles.field}>
+            <label style={styles.label}>Status</label>
+            <div style={styles.reviewStatusRow}>
+              <button
+                type="button"
+                style={{
+                  ...styles.reviewStatusButton,
+                  borderColor: form.status !== "paid" ? "#F2A65A" : border,
+                  color: form.status !== "paid" ? "#F2A65A" : textMuted,
+                  background: form.status !== "paid" ? "rgba(242,166,90,0.1)" : "transparent",
+                }}
+                onClick={() => setForm({ ...form, status: "unpaid" })}
+              >
+                {docType === "proforma" ? "Awaiting payment" : "Unpaid"}
+              </button>
+              <button
+                type="button"
+                style={{
+                  ...styles.reviewStatusButton,
+                  borderColor: form.status === "paid" ? "#3DDC84" : border,
+                  color: form.status === "paid" ? "#3DDC84" : textMuted,
+                  background: form.status === "paid" ? "rgba(61,220,132,0.1)" : "transparent",
+                }}
+                onClick={() =>
+                  setForm({
+                    ...form,
+                    status: "paid",
+                    amountPaid: hasLineItems ? String(computedTotal) : form.amount,
+                    paidDate: form.paidDate || new Date().toISOString().slice(0, 10),
+                  })
+                }
+              >
+                Paid
+              </button>
+            </div>
+          </div>
+        )}
 
         <div style={styles.modalFooter}>
           {!isNew && (
@@ -10642,9 +11407,15 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
           </button>
           <button
             style={styles.saveButton}
-            onClick={() => onSave({ ...form, invoiceNumber: form.invoiceNumber || "INV-0001" })}
+            onClick={() =>
+              onSave({
+                ...form,
+                invoiceNumber: form.invoiceNumber || `${DOC_TYPE_PREFIX[docType] || "INV"}-0001`,
+                amount: hasLineItems ? String(computedTotal) : form.amount,
+              })
+            }
           >
-            Save invoice
+            Save {DOC_TYPES.find((t) => t.id === docType)?.label.toLowerCase() || "invoice"}
           </button>
         </div>
       </div>
@@ -11126,6 +11897,46 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     gap: 20,
+  },
+  settingsPageWrap: {
+    padding: "8px 28px 32px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 20,
+  },
+  settingsGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+    gap: 18,
+    alignItems: "start",
+  },
+  settingsSection: {
+    background: inkSoft,
+    border: `1px solid ${border}`,
+    borderRadius: 16,
+    padding: 20,
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+    boxShadow: shadowSoft,
+  },
+  settingsSectionTitle: {
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontSize: 14,
+    fontWeight: 600,
+    color: paper,
+    margin: 0,
+    paddingBottom: 4,
+    borderBottom: `1px solid ${border}`,
+  },
+  settingsFooterBar: {
+    display: "flex",
+    justifyContent: "flex-end",
+    position: "sticky",
+    bottom: 0,
+    background: ink,
+    borderTop: `1px solid ${border}`,
+    padding: "14px 0 4px",
   },
   greetingTitle: {
     fontFamily: "'Space Grotesk', sans-serif",
@@ -11851,6 +12662,15 @@ const styles = {
     padding: "2px 10px",
     fontFamily: "'IBM Plex Mono', monospace",
   },
+  docTypeTag: {
+    fontSize: 10,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    color: textMuted,
+    border: `1px solid ${border}`,
+    borderRadius: 999,
+    padding: "2px 8px",
+  },
   invoiceAmountsRow: {
     display: "flex",
     gap: 16,
@@ -11859,6 +12679,12 @@ const styles = {
     display: "flex",
     gap: 8,
     marginTop: 4,
+  },
+  lineItemRow: {
+    display: "flex",
+    gap: 8,
+    alignItems: "center",
+    marginBottom: 8,
   },
   projectIconMark: {
     width: 32,

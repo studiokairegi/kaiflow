@@ -50,6 +50,10 @@ Safe order:
    - `migration_audit_fixes_8.sql`
    - `migration_audit_fixes_9.sql`
    - `migration_audit_fixes_10.sql`
+   - `migration_audit_fixes_11.sql`
+   - `migration_audit_fixes_12.sql`
+   - `migration_project_client_billing_rpc.sql` (must come after
+     `migration_audit_fixes_8.sql`, which creates the function it replaces)
 
 (There is no `migration_audit_fixes_1.sql` or `_4.sql` - those numbers were
 skipped, nothing is missing.)
