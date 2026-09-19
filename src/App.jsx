@@ -2924,6 +2924,8 @@ export default function ShotTracker() {
       driveFolderUrl: result.folderUrl,
       driveDeliverablesFolderId: result.deliverablesFolderId,
       driveReferencesFolderId: result.referencesFolderId,
+      driveCutsFolderId: result.cutsFolderId,
+      driveAttachmentsFolderId: result.attachmentsFolderId,
     };
     setData((prev) => ({
       ...prev,
@@ -8738,7 +8740,7 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
     // existing drive_folder_id server-side, which is the actual defense
     // against two tabs/requests racing to create folders for the same
     // project.
-    if (creatingFolders || form.driveFolderId) return;
+    if (creatingFolders) return;
     setDriveError("");
     setCreatingFolders(true);
     try {

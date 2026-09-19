@@ -1,11 +1,11 @@
 // POST /freelancer-drive-upload
 // multipart/form-data with fields: token (the shot's share token), file
 //
-// No login involved. The share token is the only credential. This function
-// looks up which studio/project/shot the token belongs to, uses that
-// studio's stored Drive connection to upload the file, then records the
-// deliverable and an activity log entry, all server-side so the studio's
-// Drive credentials are never exposed to the freelancer's browser.
+// Uploads freelancer deliverables directly into the shot's:
+// Project / Deliverables / Cut XX /
+//
+// Legacy shots without a per-shot Drive folder fall back to the
+// project-level Deliverables folder.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { decryptText } from "../_shared/crypto.ts";
@@ -22,29 +22,32 @@ Deno.serve(async (req) => {
     const file = formData.get("file");
 
     if (!token || typeof token !== "string" || !(file instanceof File)) {
-      return new Response(JSON.stringify({ error: "Missing token or file" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ error: "Missing token or file" }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
     }
 
-    // This endpoint is reachable with no login, guarded only by the
-    // unguessable share token - so unlike the rest of the app, a size cap
-    // here isn't optional. 200MB covers real production deliverables
-    // (frames, PSDs, short clips) without leaving the studio's Drive open
-    // to unbounded uploads from anyone holding a single shot's link.
-    // 200MB was never actually achievable: an Edge Function's memory
-    // ceiling is well under that, and the multipart body has to exist as a
-    // Blob alongside the incoming file, so the old cap advertised a size
-    // that would reliably OOM mid-upload rather than return a clean error.
-    // 50MB comfortably covers real frames/PSDs/short clips within the
-    // memory actually available. Raising this further needs Drive's
-    // resumable (chunked) upload API, not a bigger number here.
+    // 50MB limit for the current non-resumable Edge Function upload path.
     const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
     if (file.size > MAX_UPLOAD_BYTES) {
       return new Response(
-        JSON.stringify({ error: `File is too large. The limit is ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB.` }),
-        { status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({
+          error: `File is too large. The limit is ${
+            MAX_UPLOAD_BYTES / (1024 * 1024)
+          }MB.`,
+        }),
+        {
+          status: 413,
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "application/json",
+          },
+        }
       );
     }
 
@@ -53,59 +56,154 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
+    // -----------------------------------------------------------------------
+    // 1. Resolve the share token to the authoritative shot.
+    // -----------------------------------------------------------------------
+
     const { data: shot, error: shotError } = await supabase
       .from("shots")
-      .select("id, project_id, user_id, title, stage, assigned_to, deliverables")
+      .select(
+        [
+          "id",
+          "project_id",
+          "user_id",
+          "title",
+          "stage",
+          "assigned_to",
+          "deliverables",
+          "drive_deliverables_folder_id",
+        ].join(", ")
+      )
       .eq("share_token", token)
       .maybeSingle();
 
     if (shotError || !shot) {
-      return new Response(JSON.stringify({ error: "This link isn't valid." }), {
-        status: 404,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const { data: project } = await supabase
-      .from("projects")
-      .select("drive_deliverables_folder_id")
-      .eq("id", shot.project_id)
-      .maybeSingle();
-
-    if (!project?.drive_deliverables_folder_id) {
       return new Response(
-        JSON.stringify({ error: "not_connected", message: "This project isn't set up with Drive yet." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: "This link isn't valid." }),
+        {
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
       );
     }
 
-    const { data: connection } = await supabase
-      .from("google_drive_connections")
-      .select("refresh_token_encrypted")
-      .eq("user_id", shot.user_id)
-      .maybeSingle();
+    // -----------------------------------------------------------------------
+    // 2. Resolve the upload destination.
+    //
+    // Preferred:
+    //   shots.drive_deliverables_folder_id
+    //
+    // Legacy fallback:
+    //   projects.drive_deliverables_folder_id
+    //
+    // The shot ID is authoritative, so repeated "Cut 01" titles in different
+    // projects cannot accidentally route an upload to another shot.
+    // -----------------------------------------------------------------------
 
-    if (!connection) {
+    let deliverablesFolderId =
+      shot.drive_deliverables_folder_id || null;
+
+    if (!deliverablesFolderId) {
+      const { data: project, error: projectError } = await supabase
+        .from("projects")
+        .select("drive_deliverables_folder_id")
+        .eq("id", shot.project_id)
+        .maybeSingle();
+
+      if (projectError) {
+        return new Response(
+          JSON.stringify({
+            error: "Unable to determine the project's Drive folder.",
+          }),
+          {
+            status: 500,
+            headers: {
+              ...corsHeaders,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+      }
+
+      deliverablesFolderId =
+        project?.drive_deliverables_folder_id || null;
+    }
+
+    if (!deliverablesFolderId) {
       return new Response(
-        JSON.stringify({ error: "not_connected", message: "The studio's Drive connection is missing." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({
+          error: "not_connected",
+          message:
+            "This project isn't set up with a Deliverables Drive folder yet.",
+        }),
+        {
+          status: 400,
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "application/json",
+          },
+        }
       );
     }
 
-    const encryptionKey = Deno.env.get("DRIVE_TOKEN_ENCRYPTION_KEY")!;
-    const refreshToken = await decryptText(connection.refresh_token_encrypted, encryptionKey);
+    // -----------------------------------------------------------------------
+    // 3. Get the studio's Google Drive connection.
+    // -----------------------------------------------------------------------
+
+    const { data: connection, error: connectionError } =
+      await supabase
+        .from("google_drive_connections")
+        .select("refresh_token_encrypted")
+        .eq("user_id", shot.user_id)
+        .maybeSingle();
+
+    if (connectionError || !connection) {
+      return new Response(
+        JSON.stringify({
+          error: "not_connected",
+          message: "The studio's Drive connection is missing.",
+        }),
+        {
+          status: 400,
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+    }
+
+    const encryptionKey =
+      Deno.env.get("DRIVE_TOKEN_ENCRYPTION_KEY")!;
+
+    const refreshToken = await decryptText(
+      connection.refresh_token_encrypted,
+      encryptionKey
+    );
+
     const accessToken = await getAccessToken(refreshToken);
 
-    const cleanTitle = (shot.title || "shot").replace(/[^\w\- ]+/g, "").trim();
+    // -----------------------------------------------------------------------
+    // 4. Upload directly into the resolved Deliverables/Cut XX folder.
+    // -----------------------------------------------------------------------
+
+    const cleanTitle = (shot.title || "shot")
+      .replace(/[^\w\- ]+/g, "")
+      .trim();
+
     const driveFileName = `${cleanTitle} - ${file.name}`;
 
     const uploaded = await uploadFileToDrive(
       accessToken,
-      project.drive_deliverables_folder_id,
+      deliverablesFolderId,
       driveFileName,
       file,
       file.type
     );
+
+    // -----------------------------------------------------------------------
+    // 5. Record the deliverable against the authoritative shot.
+    // -----------------------------------------------------------------------
 
     const nextDeliverable = {
       name: file.name,
@@ -114,44 +212,86 @@ Deno.serve(async (req) => {
       uploadedAt: new Date().toISOString(),
     };
 
-    const { error: updateError } = await supabase.rpc("append_shot_file", {
-      p_shot_id: shot.id,
-      p_column: "deliverables",
-      p_entry: [nextDeliverable],
-    });
+    const { error: updateError } = await supabase.rpc(
+      "append_shot_file",
+      {
+        p_shot_id: shot.id,
+        p_column: "deliverables",
+        p_entry: [nextDeliverable],
+      }
+    );
 
     if (updateError) {
-      // The file made it to Drive but we couldn't record it against the
-      // shot, don't tell the freelancer this succeeded since the studio
-      // won't see it anywhere in Kairil.
+      // The file exists in Drive but isn't linked to the shot.
       return new Response(
         JSON.stringify({
-          error: "The file uploaded to Drive but couldn't be recorded, please tell the studio directly.",
+          error:
+            "The file uploaded to Drive but couldn't be recorded, please tell the studio directly.",
         }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        {
+          status: 500,
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "application/json",
+          },
+        }
       );
     }
 
-    const { error: logError } = await supabase.from("activity_log").insert({
-      user_id: shot.user_id,
-      project_id: shot.project_id,
-      shot_id: shot.id,
-      event_type: "freelancer_upload",
-      description: `${shot.assigned_to || "A freelancer"} uploaded "${file.name}" to Drive for ${shot.title}`,
-    });
+    // -----------------------------------------------------------------------
+    // 6. Activity log.
+    // -----------------------------------------------------------------------
+
+    const { error: logError } = await supabase
+      .from("activity_log")
+      .insert({
+        user_id: shot.user_id,
+        project_id: shot.project_id,
+        shot_id: shot.id,
+        event_type: "freelancer_upload",
+        description: `${
+          shot.assigned_to || "A freelancer"
+        } uploaded "${file.name}" to Drive for ${shot.title}`,
+      });
+
     if (logError) {
-      // Non-fatal, the deliverable is safely recorded above, this is just
-      // the activity feed entry.
-      console.error("Activity log insert failed:", logError.message);
+      // Non-fatal: the deliverable itself is already safely recorded.
+      console.error(
+        "Activity log insert failed:",
+        logError.message
+      );
     }
 
-    return new Response(JSON.stringify({ success: true, url: uploaded.url }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({
+        success: true,
+        url: uploaded.url,
+      }),
+      {
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json",
+        },
+      }
+    );
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    const message =
+      err instanceof Error ? err.message : String(err);
+
+    console.error(
+      "freelancer-drive-upload error:",
+      message
+    );
+
+    return new Response(
+      JSON.stringify({ error: message }),
+      {
+        status: 500,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json",
+        },
+      }
+    );
   }
 });
