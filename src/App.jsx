@@ -5455,6 +5455,18 @@ function useDriveFolderAction({ project, driveEmail, onCreateDriveFolders, onReq
     }
   };
 
+  const syncFolders = async () => {
+    if (creatingFolders) return;
+    setCreatingFolders(true);
+    try {
+      await onCreateDriveFolders(project.id, project.name || "Untitled project");
+    } catch (err) {
+      onDriveError(err.message || "Could not sync the Drive folders, please try again.");
+    } finally {
+      setCreatingFolders(false);
+    }
+  };
+
   const handleDriveAction = (e) => {
     e?.stopPropagation?.();
     if (!driveEmail) {
@@ -5486,7 +5498,7 @@ function useDriveFolderAction({ project, driveEmail, onCreateDriveFolders, onReq
     ? "Open Google Drive folder"
     : "Create Google Drive folder";
 
-  return { creatingFolders, handleDriveAction, connected, hasFolder, label, tooltip };
+  return { creatingFolders, handleDriveAction, syncFolders, connected, hasFolder, label, tooltip };
 }
 
 function ProjectsGrid({
@@ -5626,6 +5638,7 @@ function ProjectCard({
           >
             {drive.creatingFolders ? <SpinnerIcon /> : <FolderIcon />}
           </button>
+          <button type="button" style={{ ...styles.addRevisionButton, marginLeft: 4 }} onClick={(e) => { e.stopPropagation(); drive.syncFolders(); }} disabled={drive.creatingFolders} title="Sync Google Drive folders">{drive.creatingFolders ? "Syncing..." : "Sync"}</button>
           <button
             style={styles.iconButton}
             onClick={(e) => {
