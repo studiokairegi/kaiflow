@@ -3267,6 +3267,12 @@ export default function ShotTracker() {
           cards: [...prev.cards, ...newCards],
         }));
 
+        try {
+          await handleCreateDriveFolders(inserted.id, inserted.name);
+        } catch (driveErr) {
+          console.error("Drive folder provisioning failed:", driveErr);
+        }
+
         if (pendingLeadLinkId) {
           const linkId = pendingLeadLinkId;
           setPendingLeadLinkId(null);

@@ -23,7 +23,7 @@ import { decryptText } from "../_shared/crypto.ts";
 import { getAccessToken, createDriveFolder } from "../_shared/google.ts";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
 
-const CUT_TITLE_REGEX = /^Cut [0-9]+$/;
+const CUT_TITLE_REGEX = /^Cut [0-9]+$/i;
 
 Deno.serve(async (req) => {
   const opt = handleOptions(req);
