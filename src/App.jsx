@@ -1500,9 +1500,11 @@ function teamMemberToRow(member, userId) {
 }
 
 function computeMemberShots(member, cards, projects) {
-  const matching = cards.filter(
-    (c) => (c.assignedTo || "").trim().toLowerCase() === member.name.trim().toLowerCase() && member.name.trim()
-  );
+  const matching = cards.filter((c) => {
+    if (!member.name.trim()) return false;
+    if (c.assignedMemberId) return c.assignedMemberId === member.id;
+    return (c.assignedTo || "").trim().toLowerCase() === member.name.trim().toLowerCase();
+  });
   const pending = matching
     .filter((c) => !c.assignedPaid && parseMoney(c.assignedPay) > 0)
     .reduce((sum, c) => sum + parseMoney(c.assignedPay), 0);
@@ -1994,6 +1996,7 @@ function cardFromRow(row) {
     revisions: Array.isArray(row.revisions) ? row.revisions : [],
     revisionVersion: row.revision_version || 1,
     assignedTo: row.assigned_to || "",
+    assignedMemberId: row.assigned_member_id || "",
     assignedPay: row.assigned_pay || "",
     assignedPaid: row.assigned_paid || false,
     shareToken: row.share_token || null,
@@ -2016,6 +2019,7 @@ function cardToRow(card, userId) {
     revisions: card.revisions || [],
     revision_version: card.revisionVersion || 1,
     assigned_to: card.assignedTo || "",
+    assigned_member_id: card.assignedMemberId || null,
     assigned_pay: parseMoney(card.assignedPay),
     assigned_paid: card.assignedPaid || false,
     share_token: card.shareToken || null,
@@ -10013,12 +10017,18 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
 
         <div style={styles.field}>
           <label style={styles.label}>Assigned to</label>
-          <input
+          <select
             style={styles.input}
-            value={form.assignedTo || ""}
-            onChange={set("assignedTo")}
-            placeholder="e.g. Kevin (in-betweener)"
-          />
+            value={form.assignedMemberId || ""}
+            onChange={(e) => { const member = teamMembers.find((tm) => tm.id === e.target.value); setForm({ ...form, assignedMemberId: member?.id || "", assignedTo: member?.name || "" }); }}
+          >
+            <option value="">Unassigned</option>
+            {teamMembers.map((tm) => (
+              <option key={tm.id} value={tm.id}>
+                {tm.name}{tm.role ? ` · ${tm.role}` : ""}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div style={styles.fieldRow}>
