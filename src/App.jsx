@@ -5372,6 +5372,7 @@ export default function ShotTracker() {
           onPersistShareToken={handlePersistShotShareToken}
           onLogExpense={handleLogShotExpense}
           hasProAccess={hasProAccess}
+          teamMembers={teamMembers}
         />
       )}
 
@@ -13333,5 +13334,4 @@ const styles = {
     cursor: "pointer",
   },
 };
-
 
