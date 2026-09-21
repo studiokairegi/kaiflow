@@ -5184,7 +5184,6 @@ export default function ShotTracker() {
           hasProAccess={hasProAccess}
           templates={plannerTemplates}
           projects={projects}
-          teamMembers={teamMembers}
           onSave={handleSaveBudgetPlanner}
           onDelete={handleDeleteBudgetPlanner}
           onDuplicate={handleDuplicateBudgetPlanner}
@@ -9731,7 +9730,7 @@ function LeadEditor({
   );
 }
 
-function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess }) {
+function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess, teamMembers = [] }) {
   const [form, setForm] = useState(card);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
 
@@ -13334,3 +13333,5 @@ const styles = {
     cursor: "pointer",
   },
 };
+
+
