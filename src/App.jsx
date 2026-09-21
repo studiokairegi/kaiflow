@@ -8741,6 +8741,8 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
   const [linkCopied, setLinkCopied] = useState(false);
   const [creatingFolders, setCreatingFolders] = useState(false);
   const [driveError, setDriveError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const saveLockRef = useRef(false);
 
   const shareUrl = form.shareToken
     ? `${window.location.origin}${window.location.pathname}?share=project&token=${form.shareToken}`
@@ -9061,9 +9063,25 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
           </button>
           <button
             style={styles.saveButton}
-            onClick={() => onSave({ ...form, name: form.name || "Untitled project" })}
+            disabled={saving}
+            onClick={async () => {
+              if (saveLockRef.current) return;
+
+              saveLockRef.current = true;
+              setSaving(true);
+
+              try {
+                await onSave({
+                  ...form,
+                  name: form.name || "Untitled project",
+                });
+              } finally {
+                saveLockRef.current = false;
+                setSaving(false);
+              }
+            }}
           >
-            Save project
+            {saving ? "Saving..." : "Save project"}
           </button>
         </div>
         </>
