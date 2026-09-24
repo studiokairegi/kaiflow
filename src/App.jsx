@@ -664,9 +664,15 @@ const TEAM_TO_CREW_AVAILABILITY = { available: "available", busy: "partial", una
 // two independently-built lists (Team roster vs. Planner), not the same
 // list twice, so a roster department has to be translated to the
 // matching Planner id rather than passed through as-is. "Other" (Team's
-// catch-all) has no Planner equivalent, so it - and anything unrecognized
-// - falls back to the Planner's first department rather than silently
-// saving a department value the dropdown can't display.
+// catch-all) has no Planner equivalent, and anything else unrecognized
+// doesn't have a safe default either: silently dropping the member into
+// Pre-production (or any real department) would misclassify them for
+// department-level reporting with no visible sign anything was wrong.
+// "unmapped" is a sentinel, not a real Planner department - it's
+// deliberately left out of PLANNER_DEPARTMENTS so nothing budget-related
+// picks it up, and the crew-row department dropdown surfaces it
+// explicitly so a person makes a real choice instead of it hiding as a
+// normal-looking department.
 const TEAM_TO_PLANNER_DEPARTMENT = {
   "Pre-production": "preproduction",
   "Storyboard / Animatic": "storyboard",
@@ -685,7 +691,7 @@ function crewRowFromTeamMember(tm) {
     teamMemberId: tm.id,
     name: tm.name || "",
     role: tm.role || "",
-    department: TEAM_TO_PLANNER_DEPARTMENT[tm.department] || PLANNER_DEPARTMENTS[0].id,
+    department: TEAM_TO_PLANNER_DEPARTMENT[tm.department] || "unmapped",
     rateType: TEAM_TO_CREW_RATE_TYPE[tm.rateType] || "per_hour",
     rate: tm.rateAmount ? String(tm.rateAmount) : "",
     units: "",
@@ -698,6 +704,11 @@ function crewRowFromTeamMember(tm) {
     // value is only a sensible starting point here, not the same field -
     // still fully editable, same as everything else on the row.
     capacityUnits: tm.capacityValue ? String(tm.capacityValue) : "",
+    // When this row was snapshotted from the roster (brief §22) - used
+    // only to detect that the roster has since changed, never re-read
+    // live. The Planner explicitly does NOT become a live view of Team
+    // data; see the staleness check in PlannerWorkspace below.
+    snapshotAt: new Date().toISOString(),
   };
 }
 
@@ -708,6 +719,35 @@ const SKILL_LEVELS = [
   { value: 4, label: "4 · Senior" },
   { value: 5, label: "5 · Expert" },
 ];
+
+// Compares a saved crew row against what crewRowFromTeamMember would
+// produce from the roster TODAY, without ever writing anything back
+// automatically (brief §22: Planner stays a deliberate snapshot, not a
+// live view). Returns null when there's nothing to say (row isn't linked
+// to a roster member, or that member no longer exists) - otherwise a
+// { archived, diffs } summary for the UI to show a "changed since" note
+// and let the user apply specific fields, one at a time, on request.
+const CREW_STALENESS_FIELDS = [
+  ["name", "Name"],
+  ["role", "Role"],
+  ["department", "Department"],
+  ["rateType", "Rate type"],
+  ["rate", "Rate"],
+  ["skillLevel", "Skill level"],
+  ["dependability", "Dependability"],
+  ["availability", "Availability"],
+  ["capacityUnits", "Capacity"],
+];
+function computeCrewStaleness(row, teamMembers) {
+  if (!row.teamMemberId) return null;
+  const tm = (teamMembers || []).find((m) => m.id === row.teamMemberId);
+  if (!tm) return null;
+  const fresh = crewRowFromTeamMember(tm);
+  const diffs = CREW_STALENESS_FIELDS.filter(([field]) => String(fresh[field]) !== String(row[field] ?? "")).map(
+    ([field, label]) => ({ field, label, newValue: fresh[field] })
+  );
+  return { archived: tm.status === "archived", diffs };
+}
 
 // Phase 3 — built-in starting templates. These are not stored server-side;
 // a user's own saved templates (Phase 11) live in planner_templates and are
@@ -1400,6 +1440,16 @@ function skillLevelLabel(level) {
   return SKILL_LEVEL_LABELS[level] || "Intermediate";
 }
 
+// "★★★★☆ 4.8" - a simple 5-star visual for a rating out of 5. Used for
+// both external (Upwork) and internal ratings, but never mixes the two:
+// each call site passes one rating from one source, and the two are
+// always labelled separately (brief §15/§38 - never a blended score).
+function starRating(rating) {
+  const n = Math.max(0, Math.min(5, Number(rating) || 0));
+  const full = Math.round(n);
+  return "\u2605".repeat(full) + "\u2606".repeat(5 - full);
+}
+
 // Tiers per planner_crew_allocation.txt section 6.
 function dependabilityTier(score) {
   const n = Number(score);
@@ -1428,6 +1478,32 @@ function formatMemberRate(member, currencySymbol) {
   return member.rate || "";
 }
 
+// Names that more than one roster member (active or archived) shares.
+// UUID is always the real identity, but wherever a human has to pick a
+// name out of a list, a shared name needs a second cue or they can't
+// tell the two people apart. Case/whitespace-insensitive, matching how
+// the legacy assign-by-name fallback itself compares names.
+function findDuplicateMemberNames(teamMembers) {
+  const counts = new Map();
+  for (const m of teamMembers) {
+    const key = (m.name || "").trim().toLowerCase();
+    if (!key) continue;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return new Set([...counts.entries()].filter(([, n]) => n > 1).map(([key]) => key));
+}
+
+// Label for a team member in a picker: appends a disambiguator (role,
+// else email, else the id's first 8 chars) only when their name collides
+// with someone else's, so ordinary rosters stay uncluttered.
+function disambiguatedMemberLabel(member, duplicateNames) {
+  const base = member.name || "Untitled member";
+  const key = base.trim().toLowerCase();
+  if (!duplicateNames.has(key)) return base;
+  const detail = member.role || member.email || `#${(member.id || "").slice(0, 8)}`;
+  return `${base} (${detail})`;
+}
+
 function emptyTeamMember() {
   return {
     name: "",
@@ -1448,6 +1524,16 @@ function emptyTeamMember() {
     defaultSpeedValue: 0,
     defaultSpeedUnit: "",
     notes: "",
+    status: "active",
+    archivedAt: null,
+    memberType: "freelancer",
+    rateCurrency: "$",
+    upworkRating: null,
+    upworkReviewCount: null,
+    upworkProfileUrl: "",
+    paymentMethod: "",
+    paymentCurrency: "",
+    paymentCountry: "",
   };
 }
 
@@ -1472,6 +1558,16 @@ function teamMemberFromRow(row) {
     defaultSpeedValue: row.default_speed_value || 0,
     defaultSpeedUnit: row.default_speed_unit || "",
     notes: row.notes,
+    status: row.status || "active",
+    archivedAt: row.archived_at || null,
+    memberType: row.member_type || "freelancer",
+    rateCurrency: row.rate_currency || "$",
+    upworkRating: row.upwork_rating == null ? null : Number(row.upwork_rating),
+    upworkReviewCount: row.upwork_review_count == null ? null : Number(row.upwork_review_count),
+    upworkProfileUrl: row.upwork_profile_url || "",
+    paymentMethod: row.payment_method || "",
+    paymentCurrency: row.payment_currency || "",
+    paymentCountry: row.payment_country || "",
   };
 }
 
@@ -1491,31 +1587,209 @@ function teamMemberToRow(member, userId) {
     capacity_unit: member.capacityUnit || "hours/week",
     skills: Array.isArray(member.skills) ? member.skills : [],
     skill_level: Number(member.skillLevel) || 3,
-    dependability_score: Number(member.dependabilityScore) || 80,
+    // `|| 80` previously coerced a genuine, deliberately-entered score of 0
+    // into the default of 80. Use nullish coalescing so only a truly
+    // missing value (null/undefined/NaN) falls back to the default.
+    dependability_score: Number.isFinite(Number(member.dependabilityScore))
+      ? Number(member.dependabilityScore)
+      : 80,
     default_speed_value: Number(member.defaultSpeedValue) || 0,
     default_speed_unit: member.defaultSpeedUnit || "",
     notes: member.notes,
     user_id: userId,
+    status: member.status || "active",
+    archived_at: member.archivedAt || null,
+    member_type: member.memberType === "internal" ? "internal" : "freelancer",
+    rate_currency: member.rateCurrency || "$",
+    // Upwork rating/review count are external, self-reported metadata -
+    // never derived from or blended with internal reviews (brief §15).
+    upwork_rating: member.upworkRating === "" || member.upworkRating == null ? null : Number(member.upworkRating),
+    upwork_review_count:
+      member.upworkReviewCount === "" || member.upworkReviewCount == null ? null : Number(member.upworkReviewCount),
+    upwork_profile_url: member.upworkProfileUrl || "",
+    payment_method: member.paymentMethod || "",
+    payment_currency: member.paymentCurrency || "",
+    payment_country: member.paymentCountry || "",
   };
 }
 
-function computeMemberShots(member, cards, projects) {
+// Masks a payment-details string for display outside of the direct edit
+// field: keeps only the last 4 characters visible ("•••• 1234"), matching
+// the brief's roster-card example. Never used to decide what gets sent to
+// the server - purely a rendering helper.
+function maskPaymentDetails(text) {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return "";
+  if (trimmed.length <= 4) return "\u2022\u2022\u2022\u2022";
+  return `\u2022\u2022\u2022\u2022 ${trimmed.slice(-4)}`;
+}
+
+function paymentDetailsFromRow(row) {
+  if (!row) return { accountHolderName: "", paymentDetails: "" };
+  return {
+    accountHolderName: row.account_holder_name || "",
+    paymentDetails: row.payment_details || "",
+  };
+}
+
+function paymentDetailsToRow(teamMemberId, userId, details) {
+  return {
+    team_member_id: teamMemberId,
+    user_id: userId,
+    account_holder_name: details.accountHolderName || "",
+    payment_details: details.paymentDetails || "",
+  };
+}
+
+function rateHistoryFromRow(row) {
+  return {
+    id: row.id,
+    rateAmount: row.rate_amount,
+    rateType: row.rate_type,
+    rateCurrency: row.rate_currency || "$",
+    effectiveDate: row.effective_date,
+  };
+}
+
+function emptyPortfolioItem() {
+  return {
+    title: "",
+    description: "",
+    thumbnailUrl: "",
+    externalUrl: "",
+    rolePerformed: "",
+    skillsDemonstrated: [],
+    projectCategory: "",
+    itemDate: "",
+    clientName: "",
+  };
+}
+
+function portfolioItemFromRow(row) {
+  return {
+    id: row.id,
+    title: row.title || "",
+    description: row.description || "",
+    thumbnailUrl: row.thumbnail_url || "",
+    externalUrl: row.external_url || "",
+    rolePerformed: row.role_performed || "",
+    skillsDemonstrated: Array.isArray(row.skills_demonstrated) ? row.skills_demonstrated : [],
+    projectCategory: row.project_category || "",
+    itemDate: row.item_date || "",
+    clientName: row.client_name || "",
+  };
+}
+
+function portfolioItemToRow(teamMemberId, userId, item) {
+  return {
+    team_member_id: teamMemberId,
+    user_id: userId,
+    title: item.title || "Untitled piece",
+    description: item.description || "",
+    thumbnail_url: item.thumbnailUrl || "",
+    external_url: item.externalUrl || "",
+    role_performed: item.rolePerformed || "",
+    skills_demonstrated: Array.isArray(item.skillsDemonstrated) ? item.skillsDemonstrated : [],
+    project_category: item.projectCategory || "",
+    item_date: item.itemDate || null,
+    client_name: item.clientName || "",
+  };
+}
+
+function emptyReview() {
+  return { rating: 5, reviewText: "", reviewer: "", reviewDate: new Date().toISOString().slice(0, 10), projectId: "" };
+}
+
+function reviewFromRow(row) {
+  return {
+    id: row.id,
+    rating: row.rating,
+    reviewText: row.review_text || "",
+    reviewer: row.reviewer || "",
+    reviewDate: row.review_date,
+    projectId: row.project_id || "",
+  };
+}
+
+function reviewToRow(teamMemberId, userId, review) {
+  return {
+    team_member_id: teamMemberId,
+    user_id: userId,
+    rating: Number(review.rating) || 5,
+    review_text: review.reviewText || "",
+    reviewer: review.reviewer || "",
+    review_date: review.reviewDate || new Date().toISOString().slice(0, 10),
+    project_id: review.projectId || null,
+  };
+}
+
+// Internal reviews only, never blended with an external Upwork rating
+// (brief §15/§38). null when there are no reviews yet, rather than
+// pretending a 0-review average is a real score of 0.
+function averageInternalRating(reviews) {
+  if (!reviews || reviews.length === 0) return null;
+  return reviews.reduce((sum, r) => sum + (Number(r.rating) || 0), 0) / reviews.length;
+}
+
+function computeMemberShots(member, cards, projects, teamMembers = []) {
   const matching = cards.filter((c) => {
     if (!member.name.trim()) return false;
     if (c.assignedMemberId) return c.assignedMemberId === member.id;
-    return (c.assignedTo || "").trim().toLowerCase() === member.name.trim().toLowerCase();
+    const legacyName = (c.assignedTo || "").trim().toLowerCase();
+    if (!legacyName) return false;
+    const legacyMatches = teamMembers.filter((m) => (m.name || "").trim().toLowerCase() === legacyName);
+    return legacyMatches.length === 1 && legacyMatches[0].id === member.id;
   });
-  const pending = matching
+  const withProjectNames = matching.map((c) => {
+    const project = projects.find((p) => p.id === c.projectId);
+    return { ...c, projectName: project?.name || "-", currency: project?.currency || "$" };
+  });
+  // Grouped by currency rather than summed into one number: a member can
+  // easily be paid out of a USD project and a EUR project in the same
+  // roster, and adding $100 + €100 and labelling the result "$200" is
+  // simply wrong, not just imprecise. See brief §25.
+  const addTo = (map, currency, amount) => {
+    map[currency] = (map[currency] || 0) + amount;
+    return map;
+  };
+  const pendingByCurrency = withProjectNames
     .filter((c) => !c.assignedPaid && parseMoney(c.assignedPay) > 0)
-    .reduce((sum, c) => sum + parseMoney(c.assignedPay), 0);
-  const paid = matching
-    .filter((c) => c.assignedPaid)
-    .reduce((sum, c) => sum + parseMoney(c.assignedPay), 0);
-  const withProjectNames = matching.map((c) => ({
-    ...c,
-    projectName: projects.find((p) => p.id === c.projectId)?.name || "-",
-  }));
-  return { shots: withProjectNames, pending, paid };
+    .reduce((map, c) => addTo(map, c.currency, parseMoney(c.assignedPay)), {});
+  const paidByCurrency = withProjectNames
+    .filter((c) => c.assignedPaid && parseMoney(c.assignedPay) > 0)
+    .reduce((map, c) => addTo(map, c.currency, parseMoney(c.assignedPay)), {});
+  return { shots: withProjectNames, pendingByCurrency, paidByCurrency };
+}
+
+// "$120.00" / "€45.50 · $10.00" etc. — renders a {currency: amount} map as
+// a compact string, one term per currency, so mixed-currency totals stay
+// visibly separate instead of being silently combined.
+function formatCurrencyTotals(byCurrency) {
+  const entries = Object.entries(byCurrency).filter(([, amount]) => amount > 0);
+  if (entries.length === 0) return null;
+  return entries.map(([currency, amount]) => `${currency}${formatMoney(amount)}`).join(" \u00b7 ");
+}
+
+// Shots still relying on the legacy free-text assignedTo match (no
+// assigned_member_id yet). Classifies each into:
+//  - unique: exactly one roster member's name matches exactly
+//    (case/whitespace-insensitive) -> a safe candidate to link
+//  - ambiguous: more than one member matches -> a human has to pick
+//  - unmatched: no member matches -> nothing to link automatically
+// Never guesses between multiple same-named people (brief §5/§30).
+function computeLegacyAssignmentMatches(cards, teamMembers) {
+  const unresolved = cards.filter((c) => (c.assignedTo || "").trim() && !c.assignedMemberId);
+  const unique = [];
+  const ambiguous = [];
+  const unmatched = [];
+  for (const c of unresolved) {
+    const name = c.assignedTo.trim().toLowerCase();
+    const matches = teamMembers.filter((m) => (m.name || "").trim().toLowerCase() === name);
+    if (matches.length === 1) unique.push({ card: c, member: matches[0] });
+    else if (matches.length > 1) ambiguous.push({ card: c, candidates: matches });
+    else unmatched.push({ card: c });
+  }
+  return { unique, ambiguous, unmatched };
 }
 
 // "YYYY-MM-DD" (dateSent/paidDate/deadline) parsed via `new Date(str)` is
@@ -1675,6 +1949,9 @@ const DEFAULT_SETTINGS = {
   // notifications off without digging into browser chrome. This is that
   // toggle; notifyBrowser() checks it before ever calling Notification().
   notificationsEnabled: true,
+  // Configurable per-studio payment-method list for Teams (brief §13),
+  // rather than hardcoding the options everywhere they're offered.
+  paymentMethodOptions: ["Bank transfer", "PayPal", "Payoneer", "M-Pesa", "Wise", "Cash", "Other"],
 };
 
 function settingsFromRow(row) {
@@ -1708,6 +1985,10 @@ function settingsFromRow(row) {
         : DEFAULT_FOLLOWUP_SCHEDULE,
     dashboardHiddenChannels: Array.isArray(row.dashboard_hidden_channels) ? row.dashboard_hidden_channels : [],
     notificationsEnabled: row.notifications_enabled !== false,
+    paymentMethodOptions:
+      Array.isArray(row.payment_method_options) && row.payment_method_options.length > 0
+        ? row.payment_method_options
+        : DEFAULT_SETTINGS.paymentMethodOptions,
   };
 }
 
@@ -1733,6 +2014,10 @@ function settingsToRow(settings, userId) {
     followup_schedule: settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE,
     dashboard_hidden_channels: settings.dashboardHiddenChannels || [],
     notifications_enabled: settings.notificationsEnabled !== false,
+    payment_method_options:
+      Array.isArray(settings.paymentMethodOptions) && settings.paymentMethodOptions.length > 0
+        ? settings.paymentMethodOptions
+        : DEFAULT_SETTINGS.paymentMethodOptions,
   };
 }
 
@@ -2637,6 +2922,9 @@ export default function ShotTracker() {
   const [editingExpense, setEditingExpense] = useState(null);
   const [editingBudgetPlanner, setEditingBudgetPlanner] = useState(null);
   const [editingTeamMember, setEditingTeamMember] = useState(null);
+  const [teamMemberSaveError, setTeamMemberSaveError] = useState("");
+  const [teamsLoadError, setTeamsLoadError] = useState("");
+  const loggingPaymentFor = useRef(new Set()); // shot ids currently mid-flight in handleLogShotExpense
   const [showMilestoneModal, setShowMilestoneModal] = useState(false);
   const [settingsReturnView, setSettingsReturnView] = useState("projects");
   const [showTutorial, setShowTutorial] = useState(false);
@@ -3107,7 +3395,17 @@ export default function ShotTracker() {
       if (leadsRes.error) throw leadsRes.error;
       if (invoicesRes.error) throw invoicesRes.error;
       if (expensesRes.error) throw expensesRes.error;
-      if (teamRes.error) throw teamRes.error;
+      // Teams is intentionally NOT fatal to the rest of loadData: a missing/
+      // unrun Teams migration (e.g. the status/archived_at columns) would
+      // otherwise abort projects/shots/invoices/etc. too, blanking the
+      // whole app over one module's schema problem. The error is still
+      // surfaced (not swallowed) via teamsLoadError.
+      if (teamRes.error) {
+        console.error("Teams data failed to load:", teamRes.error);
+        setTeamsLoadError(teamRes.error.message || "Team data failed to load.");
+      } else {
+        setTeamsLoadError("");
+      }
       if (activityRes.error) throw activityRes.error;
       if (plannersRes.error) throw plannersRes.error;
       if (plannerTemplatesRes.error) throw plannerTemplatesRes.error;
@@ -3135,7 +3433,7 @@ export default function ShotTracker() {
       const nextLeads = (leadsRes.data || []).map(leadFromRow);
       const nextInvoices = (invoicesRes.data || []).map(invoiceFromRow);
       const nextExpenses = (expensesRes.data || []).map(expenseFromRow);
-      const nextTeamMembers = (teamRes.data || []).map(teamMemberFromRow);
+      const nextTeamMembers = teamRes.error ? [] : (teamRes.data || []).map(teamMemberFromRow);
       const nextActivity = (activityRes.data || []).map((a) => ({
         id: a.id,
         projectId: a.project_id,
@@ -3841,33 +4139,59 @@ export default function ShotTracker() {
   };
 
   const handleLogShotExpense = async (card) => {
-    // Only mark the shot paid if the expense actually saved - otherwise a
-    // failed insert (network blip, RLS issue, whatever) would still leave
-    // the shot showing as paid with no expense record behind it.
+    // Runs the expense insert + shots.assigned_paid update as one atomic
+    // server-side operation (log_shot_payment RPC, see
+    // migration_teams_payment_atomicity.sql) instead of two separate
+    // client calls. A retried/duplicate call for the same shot is a
+    // guaranteed no-op there (unique index on expenses.shot_id) rather
+    // than a second expense record.
     // Tag the expense with the project's own currency, not the expense-form
     // default - without this, every crew payment silently got recorded as
     // USD regardless of the project's real currency (e.g. a ¥5,000 payment
     // on a JPY project logged as a $5,000 expense), corrupting profit/
     // expense totals for that project from then on.
+    if (loggingPaymentFor.current.has(card.id)) return; // client-side double-click guard
+    loggingPaymentFor.current.add(card.id);
     const project = data.projects.find((p) => p.id === card.projectId);
-    const expenseSaved = await handleSaveExpense({
-      projectId: card.projectId,
-      category: "Animator Payments",
-      description: `${card.title || "Shot"}${card.assignedTo ? " \u2014 " + card.assignedTo : ""}`,
-      amount: card.assignedPay,
-      currency: project?.currency || "$",
-      date: new Date().toISOString().slice(0, 10),
-    });
-    if (!expenseSaved) return;
+    const description = `${card.title || "Shot"}${card.assignedTo ? " \u2014 " + card.assignedTo : ""}`;
+    const amount = parseMoney(card.assignedPay);
+    const currency = project?.currency || "$";
+    const date = new Date().toISOString().slice(0, 10);
     try {
-      const { error } = await supabase.from("shots").update({ assigned_paid: true }).eq("id", card.id);
+      const { data: result, error } = await supabase.rpc("log_shot_payment", {
+        p_shot_id: card.id,
+        p_project_id: card.projectId,
+        p_category: "Animator Payments",
+        p_description: description,
+        p_amount: amount,
+        p_currency: currency,
+        p_date: date,
+      });
       if (error) throw error;
+      const row = Array.isArray(result) ? result[0] : result;
       setData((prev) => ({
         ...prev,
         cards: prev.cards.map((c) => (c.id === card.id ? { ...c, assignedPaid: true } : c)),
+        expenses: row?.already_paid
+          ? prev.expenses // already recorded by an earlier call - don't duplicate locally either
+          : [
+              ...prev.expenses,
+              expenseFromRow({
+                id: row?.expense_id,
+                project_id: card.projectId,
+                category: "Animator Payments",
+                description,
+                amount,
+                currency,
+                date,
+              }),
+            ],
       }));
     } catch (e) {
-      console.error("Marking shot as paid failed:", e);
+      console.error("Logging shot payment failed:", e);
+      flashSave(false);
+    } finally {
+      loggingPaymentFor.current.delete(card.id);
     }
   };
 
@@ -3893,26 +4217,69 @@ export default function ShotTracker() {
         if (error) throw error;
         setData((prev) => ({ ...prev, teamMembers: [...prev.teamMembers, teamMemberFromRow(inserted)] }));
       }
+      // Only close the editor and clear the "which member is open" state on
+      // a confirmed success. A failed save previously fell through to the
+      // same setEditingTeamMember(null) below regardless of the outcome,
+      // silently discarding whatever the user had just typed.
       flashSave(true);
+      setEditingTeamMember(null);
+      setTeamMemberSaveError("");
     } catch (e) {
       console.error("Team member save failed:", e);
       flashSave(false);
+      setTeamMemberSaveError(e?.message || "Save failed. Your changes were not saved — please try again.");
+      // Editor stays open; entered values live in the editor's own local
+      // form state and are untouched by this catch.
     }
-    setEditingTeamMember(null);
   };
 
-  const handleDeleteTeamMember = async (id) => {
+  // Archives instead of deleting: preserves the row's UUID so historical
+  // shot assignments, payments, and Planner snapshots that reference it
+  // keep working. See migration_teams_phase1_safety.sql for the status/
+  // archived_at columns this relies on.
+  const handleArchiveTeamMember = async (id) => {
     setSaveState("saving");
     try {
-      const { error } = await supabase.from("team_members").delete().eq("id", id);
+      const { error } = await supabase
+        .from("team_members")
+        .update({ status: "archived", archived_at: new Date().toISOString() })
+        .eq("id", id);
       if (error) throw error;
-      setData((prev) => ({ ...prev, teamMembers: prev.teamMembers.filter((m) => m.id !== id) }));
+      setData((prev) => ({
+        ...prev,
+        teamMembers: prev.teamMembers.map((m) =>
+          m.id === id ? { ...m, status: "archived", archivedAt: new Date().toISOString() } : m
+        ),
+      }));
       flashSave(true);
+      setEditingTeamMember(null);
+      setTeamMemberSaveError("");
     } catch (e) {
-      console.error("Team member delete failed:", e);
+      console.error("Team member archive failed:", e);
       flashSave(false);
+      setTeamMemberSaveError(e?.message || "Archive failed. This member was not removed — please try again.");
+      // Do not close the editor and do not remove the member from the
+      // roster/UI — a failed archive must not look like a successful one.
     }
-    setEditingTeamMember(null);
+  };
+
+  // Links a legacy assignedTo-only shot to a real team_member UUID without
+  // touching assignedTo itself. Only ever called with a single resolved
+  // member (an unambiguous name match, or a member the user explicitly
+  // picked for an ambiguous one) — never guesses. See brief §5/§30.
+  const handleBackfillShotAssignment = async (cardId, memberId) => {
+    try {
+      const { error } = await supabase.from("shots").update({ assigned_member_id: memberId }).eq("id", cardId);
+      if (error) throw error;
+      setData((prev) => ({
+        ...prev,
+        cards: prev.cards.map((c) => (c.id === cardId ? { ...c, assignedMemberId: memberId } : c)),
+      }));
+      return true;
+    } catch (e) {
+      console.error("Linking legacy assignment failed:", e);
+      return false;
+    }
   };
 
   const handleDeleteExpense = async (id) => {
@@ -5159,6 +5526,8 @@ export default function ShotTracker() {
           settings={settings}
           onEdit={setEditingTeamMember}
           onNew={() => setEditingTeamMember(emptyTeamMember())}
+          loadError={teamsLoadError}
+          onBackfillAssignment={handleBackfillShotAssignment}
         />
       )}
 
@@ -5345,11 +5714,16 @@ export default function ShotTracker() {
       {editingTeamMember && (
         <TeamMemberEditor
           member={editingTeamMember}
-          onCancel={() => setEditingTeamMember(null)}
+          onCancel={() => { setEditingTeamMember(null); setTeamMemberSaveError(""); }}
           onSave={handleSaveTeamMember}
-          onDelete={handleDeleteTeamMember}
+          onArchive={handleArchiveTeamMember}
           isNew={!editingTeamMember.id}
           currencySymbol={settings.currencySymbol}
+          saveError={teamMemberSaveError}
+          paymentMethodOptions={settings.paymentMethodOptions}
+          teamMembers={teamMembers}
+          cards={cards}
+          projects={projects}
         />
       )}
 
@@ -5878,12 +6252,79 @@ function FinancePanel({ projects, invoices, expenses, settings, onEditExpense, o
   );
 }
 
-function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew }) {
+function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loadError, onBackfillAssignment }) {
   const cur = settings.currencySymbol || "$";
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const archivedCount = teamMembers.filter((m) => m.status === "archived").length;
+  const statusFilteredMembers = includeArchived
+    ? teamMembers
+    : teamMembers.filter((m) => m.status !== "archived");
+  const duplicateNames = findDuplicateMemberNames(teamMembers);
+  const legacyMatches = computeLegacyAssignmentMatches(cards, teamMembers);
+  const legacyReviewCount = legacyMatches.unique.length + legacyMatches.ambiguous.length + legacyMatches.unmatched.length;
+  const [showLegacyReview, setShowLegacyReview] = useState(false);
+
+  // Search (brief §17): name, email, role, department, skills, Upwork
+  // profile - all fields already present on every already-loaded member,
+  // so this is a plain client-side filter with no extra queries per
+  // keystroke. Portfolio-title matching is left out for now: portfolio
+  // items aren't part of the bulk roster load (see the on-demand fetch in
+  // TeamMemberEditor), and fetching every member's portfolio just to
+  // support search would be exactly the "expensive on every keystroke"
+  // pattern the brief warns against.
+  const [search, setSearch] = useState("");
+  const searchLower = search.trim().toLowerCase();
+  const matchesSearch = (m) => {
+    if (!searchLower) return true;
+    const haystack = [m.name, m.email, m.role, m.department, m.upworkProfileUrl, ...(m.skills || [])]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(searchLower);
+  };
+
+  // Filters (§18): a compact popover rather than every filter permanently
+  // on screen, with the active count shown on the toggle button.
+  const [showFilters, setShowFilters] = useState(false);
+  const [filters, setFilters] = useState({ department: "", role: "", availability: "", memberType: "", skill: "" });
+  const activeFilterCount = Object.values(filters).filter(Boolean).length;
+  const matchesFilters = (m) => {
+    if (filters.department && m.department !== filters.department) return false;
+    if (filters.role && m.role !== filters.role) return false;
+    if (filters.availability && m.availability !== filters.availability) return false;
+    if (filters.memberType && m.memberType !== filters.memberType) return false;
+    if (filters.skill && !(m.skills || []).includes(filters.skill)) return false;
+    return true;
+  };
+  const departmentOptions = [...new Set(teamMembers.map((m) => m.department).filter(Boolean))].sort();
+  const roleOptions = [...new Set(teamMembers.map((m) => m.role).filter(Boolean))].sort();
+  const skillOptions = [...new Set(teamMembers.flatMap((m) => m.skills || []))].sort();
+
+  const visibleMembers = statusFilteredMembers.filter((m) => matchesSearch(m) && matchesFilters(m));
+
+  // Grouping (§19, V1 scope): no hardcoded department list - built purely
+  // from whatever departments actually appear on the roster. Sorting by
+  // department (with a stable name tiebreaker) and inserting a header
+  // whenever the department changes avoids restructuring the existing
+  // per-member card list into a nested map.
+  const [groupBy, setGroupBy] = useState("none");
+  const orderedMembers =
+    groupBy === "department"
+      ? [...visibleMembers].sort((a, b) => {
+          const da = a.department || "No department";
+          const db = b.department || "No department";
+          return da === db ? (a.name || "").localeCompare(b.name || "") : da.localeCompare(db);
+        })
+      : visibleMembers;
 
   if (teamMembers.length === 0) {
     return (
       <div style={styles.invoicesWrap}>
+        {loadError && (
+          <p style={{ ...styles.fieldHint, color: "#FF4D4D" }} role="alert">
+            Team data couldn't be loaded: {loadError}
+          </p>
+        )}
         <div style={styles.projectsEmpty}>
           <div style={styles.projectsEmptyIcon}><TeamIcon /></div>
           <p style={styles.projectsEmptyText}>No team members yet</p>
@@ -5898,15 +6339,131 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew }) {
 
   return (
     <div style={styles.invoicesWrap}>
+      {loadError && (
+        <p style={{ ...styles.fieldHint, color: "#FF4D4D" }} role="alert">
+          Team data couldn't be loaded: {loadError}
+        </p>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+        <input
+          style={{ ...styles.input, maxWidth: 260 }}
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search name, email, role, skills..."
+          aria-label="Search team members"
+        />
+        <div style={{ position: "relative" }}>
+          <button type="button" style={styles.tabButton} onClick={() => setShowFilters((v) => !v)}>
+            Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+          </button>
+          {showFilters && (
+            <div
+              style={{
+                position: "absolute", top: "100%", left: 0, zIndex: 5, marginTop: 4,
+                background: "#131b1a", border: "1px solid #2a3634", borderRadius: 8, padding: 10, minWidth: 220,
+                display: "flex", flexDirection: "column", gap: 8,
+              }}
+            >
+              <select style={styles.input} value={filters.department} onChange={(e) => setFilters({ ...filters, department: e.target.value })}>
+                <option value="">All departments</option>
+                {departmentOptions.map((d) => (<option key={d} value={d}>{d}</option>))}
+              </select>
+              <select style={styles.input} value={filters.role} onChange={(e) => setFilters({ ...filters, role: e.target.value })}>
+                <option value="">All roles</option>
+                {roleOptions.map((r) => (<option key={r} value={r}>{r}</option>))}
+              </select>
+              <select style={styles.input} value={filters.skill} onChange={(e) => setFilters({ ...filters, skill: e.target.value })}>
+                <option value="">All skills</option>
+                {skillOptions.map((s) => (<option key={s} value={s}>{s}</option>))}
+              </select>
+              <select style={styles.input} value={filters.availability} onChange={(e) => setFilters({ ...filters, availability: e.target.value })}>
+                <option value="">Any availability</option>
+                {AVAILABILITY_OPTIONS.map((a) => (<option key={a} value={a}>{AVAILABILITY_LABELS[a] || a}</option>))}
+              </select>
+              <select style={styles.input} value={filters.memberType} onChange={(e) => setFilters({ ...filters, memberType: e.target.value })}>
+                <option value="">Freelancer or internal</option>
+                <option value="freelancer">Freelancer</option>
+                <option value="internal">Internal</option>
+              </select>
+              {activeFilterCount > 0 && (
+                <button
+                  type="button"
+                  style={styles.tabButton}
+                  onClick={() => setFilters({ department: "", role: "", availability: "", memberType: "", skill: "" })}
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        <select style={styles.input} value={groupBy} onChange={(e) => setGroupBy(e.target.value)}>
+          <option value="none">All members</option>
+          <option value="department">Group by department</option>
+        </select>
+      </div>
+      {archivedCount > 0 && (
+        <label style={{ ...styles.fieldHint, display: "flex", alignItems: "center", gap: 6, marginBottom: 8, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={includeArchived}
+            onChange={(e) => setIncludeArchived(e.target.checked)}
+          />
+          Include archived ({archivedCount})
+        </label>
+      )}
+      {legacyReviewCount > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <button
+            type="button"
+            style={styles.tabButton}
+            onClick={() => setShowLegacyReview((v) => !v)}
+          >
+            {showLegacyReview ? "Hide" : "Review"} legacy assignments ({legacyReviewCount})
+          </button>
+          {showLegacyReview && (
+            <LegacyAssignmentReview
+              matches={legacyMatches}
+              onLink={onBackfillAssignment}
+            />
+          )}
+        </div>
+      )}
       <div style={styles.invoiceList}>
-        {teamMembers.map((member) => {
-          const { shots, pending, paid } = computeMemberShots(member, cards, projects);
+        {orderedMembers.map((member, idx) => {
+          const { shots, pendingByCurrency, paidByCurrency } = computeMemberShots(member, cards, projects, teamMembers);
           const dependability = dependabilityTier(member.dependabilityScore ?? 80);
           const formattedRate = formatMemberRate(member, cur);
+          const isArchived = member.status === "archived";
+          const groupKey = groupBy === "department" ? member.department || "No department" : null;
+          const prevGroupKey = idx === 0 ? undefined : orderedMembers[idx - 1].department || "No department";
+          const showGroupHeader = groupKey !== null && groupKey !== prevGroupKey;
           return (
-            <div key={member.id} className="kf-card" style={styles.invoiceCard} onClick={() => onEdit(member)}>
+            <React.Fragment key={member.id}>
+              {showGroupHeader && (
+                <div style={{ ...styles.fieldDivider, marginTop: idx === 0 ? 0 : 12 }}>
+                  {groupKey} ({orderedMembers.filter((m) => (m.department || "No department") === groupKey).length})
+                </div>
+              )}
+              <div
+              className="kf-card"
+              style={{ ...styles.invoiceCard, opacity: isArchived ? 0.6 : 1 }}
+              onClick={() => onEdit(member)}
+              role="button"
+              tabIndex={0}
+              aria-label={`Edit ${member.name || "team member"}`}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onEdit(member);
+                }
+              }}
+            >
               <div style={styles.invoiceCardTop}>
-                <span style={styles.invoiceNumber}>{member.name || "Untitled member"}</span>
+                <span style={styles.invoiceNumber}>
+                  {disambiguatedMemberLabel(member, duplicateNames)}
+                  {isArchived && <span style={{ ...styles.fieldHint, marginLeft: 6 }}>(archived)</span>}
+                </span>
                 <span
                   style={{
                     ...styles.invoiceStatusTag,
@@ -5922,6 +6479,12 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew }) {
                   {member.role}
                   {member.role && member.department ? " · " : ""}
                   {member.department}
+                </div>
+              )}
+              {member.memberType === "freelancer" && member.upworkRating != null && (
+                <div style={styles.fieldHint}>
+                  {starRating(member.upworkRating)} {member.upworkRating.toFixed?.(1) ?? member.upworkRating}
+                  {member.upworkReviewCount != null ? ` (${member.upworkReviewCount})` : ""} {"\u00b7 Upwork"}
                 </div>
               )}
               {member.skills?.length > 0 && (
@@ -5955,12 +6518,10 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew }) {
               )}
               <div style={styles.invoiceAmountsRow}>
                 <span style={{ ...styles.fieldHint, color: "#F2A65A" }}>
-                  Pending {cur}
-                  {formatMoney(pending)}
+                  Pending {formatCurrencyTotals(pendingByCurrency) || `${cur}0.00`}
                 </span>
                 <span style={{ ...styles.fieldHint, color: "#3DDC84" }}>
-                  Paid {cur}
-                  {formatMoney(paid)}
+                  Paid {formatCurrencyTotals(paidByCurrency) || `${cur}0.00`}
                 </span>
               </div>
               {shots.length > 0 && (
@@ -5977,9 +6538,124 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew }) {
                 </div>
               )}
             </div>
+            </React.Fragment>
           );
         })}
       </div>
+      {visibleMembers.length === 0 && (search || activeFilterCount > 0) && (
+        <p style={styles.fieldHint}>No team members match your search/filters.</p>
+      )}
+    </div>
+  );
+}
+
+// Review UI for computeLegacyAssignmentMatches(): shots still linked to a
+// crew member only by free-text assignedTo. Unique name matches can be
+// linked one at a time or all at once; ambiguous ones get a per-shot
+// picker so a human — never the app — decides between same-named people;
+// unmatched shots are listed for awareness only, nothing to link.
+function LegacyAssignmentReview({ matches, onLink }) {
+  const [linking, setLinking] = useState(null); // card id currently being linked
+  const [linkingAll, setLinkingAll] = useState(false); // batch link in progress
+  const [picks, setPicks] = useState({}); // cardId -> chosen member id, for ambiguous rows
+
+  const link = async (cardId, memberId) => {
+    if (!memberId) return;
+    setLinking(cardId);
+    await onLink(cardId, memberId);
+    setLinking(null);
+  };
+
+  const linkAllUnique = async () => {
+    if (linkingAll) return;
+    setLinkingAll(true);
+    try {
+      for (const { card, member } of matches.unique) {
+        // eslint-disable-next-line no-await-in-loop
+        await link(card.id, member.id);
+      }
+    } finally {
+      setLinkingAll(false);
+    }
+  };
+
+  return (
+    <div style={{ ...styles.invoicesWrap, marginTop: 8, border: "1px solid #2a3634", borderRadius: 8, padding: 12 }}>
+      {matches.unique.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <p style={styles.fieldHint}>
+              {matches.unique.length} shot{matches.unique.length === 1 ? "" : "s"} match exactly one roster member by
+              name &mdash; safe to link.
+            </p>
+            <button type="button" style={styles.tabButton} disabled={linkingAll} onClick={linkAllUnique}>
+              {linkingAll ? "Linking..." : "Link all"}
+            </button>
+          </div>
+          {matches.unique.map(({ card, member }) => (
+            <div key={card.id} style={{ ...styles.invoiceAmountsRow, marginTop: 4 }}>
+              <span style={styles.fieldHint}>
+                {card.title || "Untitled shot"} &middot; "{card.assignedTo}" &rarr; {member.name}
+                {member.role ? ` (${member.role})` : ""}
+              </span>
+              <button
+                type="button"
+                style={styles.tabButton}
+                disabled={linking === card.id}
+                onClick={() => link(card.id, member.id)}
+              >
+                {linking === card.id ? "Linking\u2026" : "Link"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {matches.ambiguous.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <p style={styles.fieldHint}>
+            {matches.ambiguous.length} shot{matches.ambiguous.length === 1 ? "" : "s"} match more than one roster
+            member with the same name &mdash; pick which one before linking.
+          </p>
+          {matches.ambiguous.map(({ card, candidates }) => (
+            <div key={card.id} style={{ ...styles.invoiceAmountsRow, marginTop: 4 }}>
+              <span style={styles.fieldHint}>
+                {card.title || "Untitled shot"} &middot; "{card.assignedTo}"
+              </span>
+              <select
+                style={{ ...styles.input, width: 200 }}
+                value={picks[card.id] || ""}
+                onChange={(e) => setPicks({ ...picks, [card.id]: e.target.value })}
+              >
+                <option value="">Which {card.assignedTo}?</option>
+                {candidates.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}{c.email ? ` \u2014 ${c.email}` : c.role ? ` (${c.role})` : ""}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                style={styles.tabButton}
+                disabled={!picks[card.id] || linking === card.id}
+                onClick={() => link(card.id, picks[card.id])}
+              >
+                {linking === card.id ? "Linking\u2026" : "Link"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {matches.unmatched.length > 0 && (
+        <div>
+          <p style={styles.fieldHint}>
+            {matches.unmatched.length} shot{matches.unmatched.length === 1 ? "" : "s"} are assigned to a name that
+            doesn't match anyone on the roster &mdash; nothing to link automatically. Add them as a team member, or
+            fix the shot's "Assigned to" spelling, if this is unexpected.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -9752,6 +10428,7 @@ function LeadEditor({
 function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess, teamMembers = [] }) {
   const [form, setForm] = useState(card);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+  const duplicateMemberNames = findDuplicateMemberNames(teamMembers);
 
   const handleSetStatus = (status) => {
     if (status === "revisions" && form.reviewStatus !== "revisions" && form.revisions.length === 0) {
@@ -10038,14 +10715,42 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
           <select
             style={styles.input}
             value={form.assignedMemberId || ""}
-            onChange={(e) => { const member = teamMembers.find((tm) => tm.id === e.target.value); setForm({ ...form, assignedMemberId: member?.id || "", assignedTo: member?.name || "" }); }}
+            onChange={(e) => {
+              const member = teamMembers.find((tm) => tm.id === e.target.value);
+              setForm({
+                ...form,
+                assignedMemberId: member?.id || "",
+                assignedTo: member?.name || "",
+                // Prefill the pay field from the member's current rate, but
+                // only when the field is still empty - once a project-
+                // specific rate has been entered (by the user, or by an
+                // earlier prefill they may have already edited), switching
+                // the assigned member again must never silently overwrite
+                // it. A later change to the member's own rate can't touch
+                // this shot's assignedPay either way, since it's stored
+                // here rather than looked up live (brief §10 / §31).
+                assignedPay:
+                  parseMoney(form.assignedPay) > 0
+                    ? form.assignedPay
+                    : member?.rateAmount
+                    ? String(member.rateAmount)
+                    : form.assignedPay,
+              });
+            }}
           >
             <option value="">Unassigned</option>
-            {teamMembers.map((tm) => (
-              <option key={tm.id} value={tm.id}>
-                {tm.name}{tm.role ? ` � ${tm.role}` : ""}
-              </option>
-            ))}
+            {teamMembers
+              /* Archived members drop out of the normal assignment picker,
+                 but if this shot is already assigned to one, keep that
+                 option visible so the field doesn't silently blank out. */
+              .filter((tm) => tm.status !== "archived" || tm.id === form.assignedMemberId)
+              .map((tm) => (
+                <option key={tm.id} value={tm.id}>
+                  {disambiguatedMemberLabel(tm, duplicateMemberNames)}
+                  {!duplicateMemberNames.has((tm.name || "").trim().toLowerCase()) && tm.role ? ` � ${tm.role}` : ""}
+                  {tm.status === "archived" ? " (archived)" : ""}
+                </option>
+              ))}
           </select>
         </div>
 
@@ -10292,6 +10997,8 @@ function PlannerWorkspace({
   const [showWarnings, setShowWarnings] = useState(false);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const setPreset = (percent) => setForm({ ...form, targetProfitPercent: percent });
+  const duplicateMemberNames = findDuplicateMemberNames(teamMembers || []);
+  const [showStaleFor, setShowStaleFor] = useState(null); // crew row id currently showing its roster-diff panel
 
   const setDept = (deptId) => (e) => {
     setForm({
@@ -10552,7 +11259,10 @@ function PlannerWorkspace({
                 <div style={styles.plannerCrewRow}>
                   <input style={{ ...styles.input, flex: 1 }} placeholder="Name" value={person.name} onChange={(e) => updateCrewMember(idx, "name", e.target.value)} />
                   <input style={{ ...styles.input, flex: 1 }} placeholder="Role" value={person.role} onChange={(e) => updateCrewMember(idx, "role", e.target.value)} />
-                  <select style={{ ...styles.input, width: 150 }} value={person.department} onChange={(e) => updateCrewMember(idx, "department", e.target.value)}>
+                  <select style={{ ...styles.input, width: 150, ...(person.department === "unmapped" ? { borderColor: "#F2A65A" } : {}) }} value={person.department} onChange={(e) => updateCrewMember(idx, "department", e.target.value)}>
+                    {person.department === "unmapped" && (
+                      <option value="unmapped">{"Unmapped \u2014 pick a department"}</option>
+                    )}
                     {PLANNER_DEPARTMENTS.map((d) => (<option key={d.id} value={d.id}>{d.label}</option>))}
                   </select>
                   <select style={{ ...styles.input, width: 120 }} value={person.rateType} onChange={(e) => updateCrewMember(idx, "rateType", e.target.value)}>
@@ -10594,6 +11304,53 @@ function PlannerWorkspace({
                     {person.teamMemberId && ` \u00b7 linked to roster`}
                   </span>
                 </div>
+                {person.department === "unmapped" && (
+                  <div style={{ ...styles.fieldHint, color: "#F2A65A", marginTop: 2 }}>
+                    {"No matching Planner department for this person's Team department \u2014 pick one above so they show up correctly in department-level totals."}
+                  </div>
+                )}
+                {(() => {
+                  const staleness = computeCrewStaleness(person, teamMembers);
+                  if (!staleness) return null;
+                  return (
+                    <>
+                      {staleness.archived && (
+                        <div style={{ ...styles.fieldHint, marginTop: 2 }}>
+                          This person has since been archived on the roster &mdash; they stay on this plan as-is.
+                        </div>
+                      )}
+                      {staleness.diffs.length > 0 && (
+                        <div style={{ marginTop: 2 }}>
+                          <button
+                            type="button"
+                            style={{ ...styles.fieldHint, background: "none", border: "none", padding: 0, color: "#F2A65A", cursor: "pointer", textDecoration: "underline" }}
+                            onClick={() => setShowStaleFor(showStaleFor === person.id ? null : person.id)}
+                          >
+                            Roster data has changed since this plan was created ({staleness.diffs.length})
+                          </button>
+                          {showStaleFor === person.id && (
+                            <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 4 }}>
+                              {staleness.diffs.map((d) => (
+                                <div key={d.field} style={{ ...styles.invoiceAmountsRow }}>
+                                  <span style={styles.fieldHint}>
+                                    {d.label}: this plan has "{String(person[d.field] ?? "")}", roster now says "{String(d.newValue)}"
+                                  </span>
+                                  <button
+                                    type="button"
+                                    style={styles.tabButton}
+                                    onClick={() => updateCrewMember(idx, d.field, d.newValue)}
+                                  >
+                                    Use roster value
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             );
           })}
@@ -10610,9 +11367,17 @@ function PlannerWorkspace({
               }}
             >
               <option value="">+ Add from Team roster…</option>
-              {teamMembers.map((tm) => (
-                <option key={tm.id} value={tm.id}>{tm.name}{tm.role ? ` · ${tm.role}` : ""}</option>
-              ))}
+              {teamMembers
+                // Archived members must not be offered when adding new
+                // crew to a plan (they can still exist inside historical
+                // Planner snapshots already saved before archiving).
+                .filter((tm) => tm.status !== "archived")
+                .map((tm) => (
+                  <option key={tm.id} value={tm.id}>
+                    {disambiguatedMemberLabel(tm, duplicateMemberNames)}
+                    {!duplicateMemberNames.has((tm.name || "").trim().toLowerCase()) && tm.role ? ` · ${tm.role}` : ""}
+                  </option>
+                ))}
             </select>
           )}
           <div style={styles.budgetSummaryRow}>
@@ -10785,11 +11550,148 @@ function PlannerWorkspace({
   );
 }
 
-function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew, currencySymbol }) {
+function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currencySymbol, saveError, paymentMethodOptions, teamMembers, cards, projects }) {
   const [form, setForm] = useState({ ...emptyTeamMember(), ...member });
   const [customSkill, setCustomSkill] = useState("");
+  const [confirmingArchive, setConfirmingArchive] = useState(false);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const cur = currencySymbol || "$";
+
+  // Payment details and rate history live in their own tables (brief
+  // §9/§12) and are fetched only when this specific member's editor is
+  // open - never as part of the bulk roster load - so a normal roster
+  // view never even receives this data over the wire.
+  const [paymentDetails, setPaymentDetails] = useState({ accountHolderName: "", paymentDetails: "" });
+  const [paymentDetailsLoaded, setPaymentDetailsLoaded] = useState(false);
+  const [revealPaymentDetails, setRevealPaymentDetails] = useState(false);
+  const [paymentSaveState, setPaymentSaveState] = useState("idle"); // idle | saving | saved | error
+  const [rateHistory, setRateHistory] = useState([]);
+  const [portfolioItems, setPortfolioItems] = useState([]);
+  const [reviews, setReviews] = useState([]);
+  const [addingPortfolioItem, setAddingPortfolioItem] = useState(false);
+  const [newPortfolioItem, setNewPortfolioItem] = useState(emptyPortfolioItem());
+  const [addingReview, setAddingReview] = useState(false);
+  const [newReview, setNewReview] = useState(emptyReview());
+
+  useEffect(() => {
+    if (isNew || !member.id) return;
+    let cancelled = false;
+    (async () => {
+      const [paymentRes, historyRes, portfolioRes, reviewsRes] = await Promise.all([
+        supabase.from("team_member_payment_details").select("*").eq("team_member_id", member.id).maybeSingle(),
+        supabase
+          .from("team_member_rate_history")
+          .select("*")
+          .eq("team_member_id", member.id)
+          .order("effective_date", { ascending: false }),
+        supabase
+          .from("team_member_portfolio_items")
+          .select("*")
+          .eq("team_member_id", member.id)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("team_member_reviews")
+          .select("*")
+          .eq("team_member_id", member.id)
+          .order("review_date", { ascending: false }),
+      ]);
+      if (cancelled) return;
+      if (!paymentRes.error) {
+        setPaymentDetails(paymentDetailsFromRow(paymentRes.data));
+        setPaymentDetailsLoaded(true);
+      }
+      if (!historyRes.error) {
+        setRateHistory((historyRes.data || []).map(rateHistoryFromRow));
+      }
+      if (!portfolioRes.error) {
+        setPortfolioItems((portfolioRes.data || []).map(portfolioItemFromRow));
+      }
+      if (!reviewsRes.error) {
+        setReviews((reviewsRes.data || []).map(reviewFromRow));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [member.id, isNew]);
+
+  const savePaymentDetails = async () => {
+    setPaymentSaveState("saving");
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const userId = session?.user?.id;
+      const { error } = await supabase
+        .from("team_member_payment_details")
+        .upsert(paymentDetailsToRow(form.id, userId, paymentDetails));
+      if (error) throw error;
+      setPaymentSaveState("saved");
+    } catch (e) {
+      console.error("Saving payment details failed:", e);
+      setPaymentSaveState("error");
+    }
+  };
+
+  const savePortfolioItem = async () => {
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const userId = session?.user?.id;
+      const { data: inserted, error } = await supabase
+        .from("team_member_portfolio_items")
+        .insert(portfolioItemToRow(form.id, userId, newPortfolioItem))
+        .select()
+        .single();
+      if (error) throw error;
+      setPortfolioItems([portfolioItemFromRow(inserted), ...portfolioItems]);
+      setNewPortfolioItem(emptyPortfolioItem());
+      setAddingPortfolioItem(false);
+    } catch (e) {
+      console.error("Saving portfolio item failed:", e);
+    }
+  };
+
+  const deletePortfolioItem = async (id) => {
+    try {
+      const { error } = await supabase.from("team_member_portfolio_items").delete().eq("id", id);
+      if (error) throw error;
+      setPortfolioItems(portfolioItems.filter((p) => p.id !== id));
+    } catch (e) {
+      console.error("Deleting portfolio item failed:", e);
+    }
+  };
+
+  const saveReview = async () => {
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const userId = session?.user?.id;
+      const { data: inserted, error } = await supabase
+        .from("team_member_reviews")
+        .insert(reviewToRow(form.id, userId, newReview))
+        .select()
+        .single();
+      if (error) throw error;
+      setReviews([reviewFromRow(inserted), ...reviews]);
+      setNewReview(emptyReview());
+      setAddingReview(false);
+    } catch (e) {
+      console.error("Saving review failed:", e);
+    }
+  };
+
+  const deleteReview = async (id) => {
+    try {
+      const { error } = await supabase.from("team_member_reviews").delete().eq("id", id);
+      if (error) throw error;
+      setReviews(reviews.filter((r) => r.id !== id));
+    } catch (e) {
+      console.error("Deleting review failed:", e);
+    }
+  };
 
   const toggleSkill = (skill) => {
     const has = (form.skills || []).includes(skill);
@@ -10959,7 +11861,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew, currencyS
             </select>
           </div>
           <div style={styles.field}>
-            <label style={styles.label}>Rate amount ({cur})</label>
+            <label style={styles.label}>Rate amount</label>
             <input
               style={styles.input}
               type="number"
@@ -10970,7 +11872,30 @@ function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew, currencyS
               placeholder="e.g. 150"
             />
           </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Currency</label>
+            <input
+              style={styles.input}
+              value={form.rateCurrency || "$"}
+              onChange={set("rateCurrency")}
+              placeholder={cur}
+            />
+          </div>
         </div>
+        {!isNew && rateHistory.length > 0 && (
+          <div style={styles.field}>
+            <label style={styles.label}>Rate history</label>
+            <p style={styles.fieldHint}>
+              Read-only record of past rates &mdash; changing the rate above only affects future assignments;
+              it never rewrites what a past assignment was actually paid.
+            </p>
+            {rateHistory.slice(0, 5).map((h) => (
+              <p key={h.id} style={styles.fieldHint}>
+                {h.effectiveDate}: {h.rateCurrency}{formatMoney(h.rateAmount)} ({rateTypeLabel(h.rateType)})
+              </p>
+            ))}
+          </div>
+        )}
         <div style={styles.field}>
           <label style={styles.label}>Rate note (optional)</label>
           <input
@@ -10984,6 +11909,137 @@ function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew, currencyS
             can't calculate on its own.
           </p>
         </div>
+
+        <div style={styles.fieldDivider}>Freelancer info</div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Member type</label>
+            <select style={styles.input} value={form.memberType || "freelancer"} onChange={set("memberType")}>
+              <option value="freelancer">Freelancer</option>
+              <option value="internal">Internal</option>
+            </select>
+          </div>
+        </div>
+        {form.memberType === "freelancer" && (
+          <>
+            <div style={styles.fieldRow}>
+              <div style={styles.field}>
+                <label style={styles.label}>Upwork rating (0&ndash;5)</label>
+                <input
+                  style={styles.input}
+                  type="number"
+                  min="0"
+                  max="5"
+                  step="0.1"
+                  value={form.upworkRating ?? ""}
+                  onChange={set("upworkRating")}
+                  placeholder="e.g. 4.8"
+                />
+              </div>
+              <div style={styles.field}>
+                <label style={styles.label}>Review count</label>
+                <input
+                  style={styles.input}
+                  type="number"
+                  min="0"
+                  value={form.upworkReviewCount ?? ""}
+                  onChange={set("upworkReviewCount")}
+                  placeholder="e.g. 32"
+                />
+              </div>
+            </div>
+            <div style={styles.field}>
+              <label style={styles.label}>Upwork profile URL</label>
+              <input
+                style={styles.input}
+                value={form.upworkProfileUrl || ""}
+                onChange={set("upworkProfileUrl")}
+                placeholder="https://www.upwork.com/freelancers/~..."
+              />
+            </div>
+            <p style={styles.fieldHint}>
+              External reputation only &mdash; kept separate from this studio's own internal performance
+              rating and never blended into it.
+            </p>
+          </>
+        )}
+
+        <div style={styles.fieldDivider}>Payments</div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Payment method</label>
+            <select style={styles.input} value={form.paymentMethod || ""} onChange={set("paymentMethod")}>
+              <option value="">Not set</option>
+              {(paymentMethodOptions || []).map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Payment currency</label>
+            <input
+              style={styles.input}
+              value={form.paymentCurrency || ""}
+              onChange={set("paymentCurrency")}
+              placeholder={cur}
+            />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Payment country</label>
+            <input style={styles.input} value={form.paymentCountry || ""} onChange={set("paymentCountry")} />
+          </div>
+        </div>
+
+        {isNew ? (
+          <p style={styles.fieldHint}>Save this member first, then come back to add payment account details.</p>
+        ) : (
+          <>
+            <div style={styles.field}>
+              <label style={styles.label}>Account holder name</label>
+              <input
+                style={styles.input}
+                value={paymentDetails.accountHolderName}
+                onChange={(e) => setPaymentDetails({ ...paymentDetails, accountHolderName: e.target.value })}
+              />
+            </div>
+            <div style={styles.field}>
+              <label style={styles.label}>Account / phone / IBAN details</label>
+              {revealPaymentDetails ? (
+                <input
+                  style={styles.input}
+                  value={paymentDetails.paymentDetails}
+                  onChange={(e) => setPaymentDetails({ ...paymentDetails, paymentDetails: e.target.value })}
+                  placeholder="e.g. M-Pesa number, IBAN, PayPal email"
+                  autoFocus
+                />
+              ) : (
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <span style={styles.input}>
+                    {paymentDetails.paymentDetails ? maskPaymentDetails(paymentDetails.paymentDetails) : "Not set"}
+                  </span>
+                  <button type="button" style={styles.tabButton} onClick={() => setRevealPaymentDetails(true)}>
+                    {paymentDetails.paymentDetails ? "Edit" : "Add"}
+                  </button>
+                </div>
+              )}
+              <p style={styles.fieldHint}>
+                Never shown on roster cards, and only fetched when this profile is opened &mdash; not as part
+                of the normal roster list.
+              </p>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button type="button" style={styles.tabButton} onClick={savePaymentDetails} disabled={paymentSaveState === "saving"}>
+                {paymentSaveState === "saving" ? "Saving\u2026" : "Save payment details"}
+              </button>
+              {paymentSaveState === "saved" && <span style={styles.fieldHint}>Saved.</span>}
+              {paymentSaveState === "error" && (
+                <span style={{ ...styles.fieldHint, color: "#FF4D4D" }}>Failed to save &mdash; try again.</span>
+              )}
+            </div>
+          </>
+        )}
 
         <div style={styles.fieldDivider}>Availability &amp; capacity</div>
 
@@ -11114,12 +12170,241 @@ function TeamMemberEditor({ member, onCancel, onSave, onDelete, isNew, currencyS
           />
         </div>
 
+        {!isNew && (
+          <>
+            {cards && projects && (() => {
+              const { shots } = computeMemberShots(form, cards, projects, teamMembers);
+              if (shots.length === 0) {
+                return (
+                  <>
+                    <div style={styles.fieldDivider}>Work history</div>
+                    <p style={styles.fieldHint}>No shots assigned to this person yet.</p>
+                  </>
+                );
+              }
+              const projectCounts = new Map();
+              for (const s of shots) {
+                projectCounts.set(s.projectName, (projectCounts.get(s.projectName) || 0) + 1);
+              }
+              const active = shots.filter((s) => s.reviewStatus !== "approved");
+              const completed = shots.filter((s) => s.reviewStatus === "approved");
+              return (
+                <>
+                  <div style={styles.fieldDivider}>Work history</div>
+                  <p style={styles.fieldHint}>
+                    {[...projectCounts.entries()].map(([name, n]) => `${name} (${n})`).join(", ")}
+                  </p>
+                  <p style={styles.fieldHint}>
+                    {active.length} active {"\u00b7"} {completed.length} completed
+                  </p>
+                  {shots.slice(0, 8).map((s) => (
+                    <div key={s.id} style={{ ...styles.invoiceAmountsRow, marginBottom: 2 }}>
+                      <span style={styles.fieldHint}>
+                        {s.title || "Untitled shot"} {"\u00b7"} {s.projectName}
+                      </span>
+                      <span style={{ ...styles.fieldHint, color: REVIEW_COLORS[s.reviewStatus] }}>
+                        {REVIEW_LABELS[s.reviewStatus] || s.reviewStatus}
+                        {s.assignedPaid ? " \u00b7 paid" : ""}
+                      </span>
+                    </div>
+                  ))}
+                  {shots.length > 8 && <p style={styles.fieldHint}>+{shots.length - 8} more</p>}
+                </>
+              );
+            })()}
+
+            <div style={styles.fieldDivider}>Portfolio</div>
+            {portfolioItems.length === 0 && !addingPortfolioItem && (
+              <p style={styles.fieldHint}>No portfolio items yet.</p>
+            )}
+            {portfolioItems.map((item) => (
+              <div key={item.id} style={{ ...styles.invoiceAmountsRow, marginBottom: 4 }}>
+                <span style={styles.fieldHint}>
+                  {item.title}
+                  {item.rolePerformed ? ` \u00b7 ${item.rolePerformed}` : ""}
+                  {item.projectCategory ? ` \u00b7 ${item.projectCategory}` : ""}
+                  {item.externalUrl ? (
+                    <>
+                      {" "}
+                      &middot;{" "}
+                      <a href={item.externalUrl} target="_blank" rel="noreferrer" style={{ color: "inherit" }}>
+                        link
+                      </a>
+                    </>
+                  ) : null}
+                </span>
+                <button type="button" style={styles.tabButton} onClick={() => deletePortfolioItem(item.id)}>
+                  Remove
+                </button>
+              </div>
+            ))}
+            {addingPortfolioItem ? (
+              <div style={{ border: "1px solid #2a3634", borderRadius: 8, padding: 10, marginTop: 6 }}>
+                <div style={styles.fieldRow}>
+                  <div style={styles.field}>
+                    <label style={styles.label}>Title</label>
+                    <input
+                      style={styles.input}
+                      value={newPortfolioItem.title}
+                      onChange={(e) => setNewPortfolioItem({ ...newPortfolioItem, title: e.target.value })}
+                    />
+                  </div>
+                  <div style={styles.field}>
+                    <label style={styles.label}>Role performed</label>
+                    <input
+                      style={styles.input}
+                      value={newPortfolioItem.rolePerformed}
+                      onChange={(e) => setNewPortfolioItem({ ...newPortfolioItem, rolePerformed: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div style={styles.field}>
+                  <label style={styles.label}>Description</label>
+                  <textarea
+                    style={styles.textarea}
+                    rows={2}
+                    value={newPortfolioItem.description}
+                    onChange={(e) => setNewPortfolioItem({ ...newPortfolioItem, description: e.target.value })}
+                  />
+                </div>
+                <div style={styles.fieldRow}>
+                  <div style={styles.field}>
+                    <label style={styles.label}>External URL</label>
+                    <input
+                      style={styles.input}
+                      value={newPortfolioItem.externalUrl}
+                      onChange={(e) => setNewPortfolioItem({ ...newPortfolioItem, externalUrl: e.target.value })}
+                      placeholder="https://..."
+                    />
+                  </div>
+                  <div style={styles.field}>
+                    <label style={styles.label}>Category</label>
+                    <input
+                      style={styles.input}
+                      value={newPortfolioItem.projectCategory}
+                      onChange={(e) => setNewPortfolioItem({ ...newPortfolioItem, projectCategory: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                  <button type="button" style={styles.tabButton} onClick={() => setAddingPortfolioItem(false)}>
+                    Cancel
+                  </button>
+                  <button type="button" style={styles.saveButton} onClick={savePortfolioItem}>
+                    Add item
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button type="button" style={styles.tabButton} onClick={() => setAddingPortfolioItem(true)}>
+                <PlusIcon /> Add portfolio item
+              </button>
+            )}
+
+            <div style={styles.fieldDivider}>Performance</div>
+            <p style={styles.fieldHint}>
+              Studio rating {averageInternalRating(reviews) != null ? (
+                <>
+                  {starRating(averageInternalRating(reviews))} {averageInternalRating(reviews).toFixed(1)} (
+                  {reviews.length} review{reviews.length === 1 ? "" : "s"})
+                </>
+              ) : (
+                "No internal reviews yet"
+              )}
+              {" \u2014 kept separate from the Upwork rating above; neither is derived from the other."}
+            </p>
+            {reviews.map((r) => (
+              <div key={r.id} style={{ ...styles.invoiceAmountsRow, marginBottom: 4 }}>
+                <span style={styles.fieldHint}>
+                  {starRating(r.rating)} {r.reviewDate}
+                  {r.reviewer ? ` \u00b7 ${r.reviewer}` : ""}
+                  {r.reviewText ? ` \u00b7 ${r.reviewText}` : ""}
+                </span>
+                <button type="button" style={styles.tabButton} onClick={() => deleteReview(r.id)}>
+                  Remove
+                </button>
+              </div>
+            ))}
+            {addingReview ? (
+              <div style={{ border: "1px solid #2a3634", borderRadius: 8, padding: 10, marginTop: 6 }}>
+                <div style={styles.fieldRow}>
+                  <div style={styles.field}>
+                    <label style={styles.label}>Rating</label>
+                    <select
+                      style={styles.input}
+                      value={newReview.rating}
+                      onChange={(e) => setNewReview({ ...newReview, rating: e.target.value })}
+                    >
+                      {[5, 4, 3, 2, 1].map((n) => (
+                        <option key={n} value={n}>{n} star{n === 1 ? "" : "s"}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div style={styles.field}>
+                    <label style={styles.label}>Reviewer</label>
+                    <input
+                      style={styles.input}
+                      value={newReview.reviewer}
+                      onChange={(e) => setNewReview({ ...newReview, reviewer: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div style={styles.field}>
+                  <label style={styles.label}>Review</label>
+                  <textarea
+                    style={styles.textarea}
+                    rows={2}
+                    value={newReview.reviewText}
+                    onChange={(e) => setNewReview({ ...newReview, reviewText: e.target.value })}
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                  <button type="button" style={styles.tabButton} onClick={() => setAddingReview(false)}>
+                    Cancel
+                  </button>
+                  <button type="button" style={styles.saveButton} onClick={saveReview}>
+                    Add review
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button type="button" style={styles.tabButton} onClick={() => setAddingReview(true)}>
+                <PlusIcon /> Add review
+              </button>
+            )}
+          </>
+        )}
+
+        {saveError && (
+          <p style={{ ...styles.fieldHint, color: "#FF4D4D" }} role="alert">
+            {saveError}
+          </p>
+        )}
+
         <div style={styles.modalFooter}>
-          {!isNew && (
-            <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
+          {!isNew && form.status !== "archived" && !confirmingArchive && (
+            <button style={styles.deleteButton} onClick={() => setConfirmingArchive(true)}>
               <TrashIcon />
-              Delete
+              Archive
             </button>
+          )}
+          {!isNew && confirmingArchive && (
+            <>
+              <span style={{ ...styles.fieldHint, marginRight: 8 }}>
+                Archive {form.name || "this member"}? Their history is kept — this just removes them from
+                the active roster and assignment lists.
+              </span>
+              <button style={styles.cancelButton} onClick={() => setConfirmingArchive(false)}>
+                Never mind
+              </button>
+              <button style={styles.deleteButton} onClick={() => onArchive(form.id)}>
+                <TrashIcon />
+                Confirm archive
+              </button>
+            </>
+          )}
+          {!isNew && form.status === "archived" && (
+            <span style={styles.fieldHint}>Archived{form.archivedAt ? ` ${new Date(form.archivedAt).toLocaleDateString()}` : ""}</span>
           )}
           <div style={{ flex: 1 }} />
           <button style={styles.cancelButton} onClick={onCancel}>
