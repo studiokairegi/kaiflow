@@ -1529,9 +1529,7 @@ function emptyTeamMember() {
     memberType: "freelancer",
     rateCurrency: "$",
     upworkRating: null,
-    upworkReviewCount: null,
-    upworkProfileUrl: "",
-    paymentMethod: "",
+    upworkReviewCount: null,    paymentMethod: "",
     paymentCurrency: "",
     paymentCountry: "",
   };
@@ -1563,9 +1561,7 @@ function teamMemberFromRow(row) {
     memberType: row.member_type || "freelancer",
     rateCurrency: row.rate_currency || "$",
     upworkRating: row.upwork_rating == null ? null : Number(row.upwork_rating),
-    upworkReviewCount: row.upwork_review_count == null ? null : Number(row.upwork_review_count),
-    upworkProfileUrl: row.upwork_profile_url || "",
-    paymentMethod: row.payment_method || "",
+    upworkReviewCount: row.upwork_review_count == null ? null : Number(row.upwork_review_count),    paymentMethod: row.payment_method || "",
     paymentCurrency: row.payment_currency || "",
     paymentCountry: row.payment_country || "",
   };
@@ -1605,9 +1601,7 @@ function teamMemberToRow(member, userId) {
     // never derived from or blended with internal reviews (brief §15).
     upwork_rating: member.upworkRating === "" || member.upworkRating == null ? null : Number(member.upworkRating),
     upwork_review_count:
-      member.upworkReviewCount === "" || member.upworkReviewCount == null ? null : Number(member.upworkReviewCount),
-    upwork_profile_url: member.upworkProfileUrl || "",
-    payment_method: member.paymentMethod || "",
+      member.upworkReviewCount === "" || member.upworkReviewCount == null ? null : Number(member.upworkReviewCount),    payment_method: member.paymentMethod || "",
     payment_currency: member.paymentCurrency || "",
     payment_country: member.paymentCountry || "",
   };
@@ -6276,7 +6270,7 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
   const searchLower = search.trim().toLowerCase();
   const matchesSearch = (m) => {
     if (!searchLower) return true;
-    const haystack = [m.name, m.email, m.role, m.department, m.upworkProfileUrl, ...(m.skills || [])]
+    const haystack = [m.name, m.email, m.role, m.department, ...(m.skills || [])]
       .filter(Boolean)
       .join(" ")
       .toLowerCase();
@@ -11948,17 +11942,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                   placeholder="e.g. 32"
                 />
               </div>
-            </div>
-            <div style={styles.field}>
-              <label style={styles.label}>Upwork profile URL</label>
-              <input
-                style={styles.input}
-                value={form.upworkProfileUrl || ""}
-                onChange={set("upworkProfileUrl")}
-                placeholder="https://www.upwork.com/freelancers/~..."
-              />
-            </div>
-            <p style={styles.fieldHint}>
+            </div>\n<p style={styles.fieldHint}>
               External reputation only &mdash; kept separate from this studio's own internal performance
               rating and never blended into it.
             </p>
