@@ -2910,6 +2910,7 @@ export default function ShotTracker() {
   const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices" | "activity"
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [selectedActivityId, setSelectedActivityId] = useState(null);
+  const [highlightedShotId, setHighlightedShotId] = useState(null);
   const [editingCard, setEditingCard] = useState(null);
   const [editingProject, setEditingProject] = useState(null);
   const [editingLead, setEditingLead] = useState(null);
@@ -3694,6 +3695,21 @@ export default function ShotTracker() {
   const handleOpenActivity = (entry) => {
     const shot = cards.find((c) => c.id === entry.shotId);
     if (!shot) return;
+
+    if (entry.type === "freelancer_upload") {
+      setSelectedProjectId(shot.projectId);
+      setView("board");
+      setBoardTab("shots");
+      setEditingCard(null);
+      setSelectedActivityId(null);
+      setHighlightedShotId(shot.id);
+      setTimeout(() => {
+        document.getElementById(`shot-card-${shot.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 0);
+      setTimeout(() => setHighlightedShotId(null), 3000);
+      return;
+    }
+
     setSelectedActivityId(entry.id);
     setEditingCard(shot);
   };
@@ -5594,10 +5610,12 @@ export default function ShotTracker() {
                   {stageCards.map((card) => (
                     <div
                       key={card.id}
+                      id={`shot-card-${card.id}`}
                       onPointerDown={(e) => handlePointerDown(e, card)}
                       onClick={() => handleCardClick(card)}
                       style={{
                         ...styles.card,
+                        ...(highlightedShotId === card.id ? { boxShadow: "0 0 0 3px #f59e0b, 0 8px 24px rgba(245, 158, 11, 0.25)", transform: "scale(1.02)" } : {}),
                         opacity: dragStateRef.current?.id === card.id && dragVisual ? 0.4 : 1,
                         touchAction: dragStateRef.current?.id === card.id && dragVisual ? "none" : "pan-y",
                       }}
@@ -14668,4 +14686,3 @@ const styles = {
     cursor: "pointer",
   },
 };
-
