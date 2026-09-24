@@ -2909,6 +2909,7 @@ export default function ShotTracker() {
   const [view, setView] = useState("projects");
   const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices" | "activity"
   const [selectedProjectId, setSelectedProjectId] = useState(null);
+  const [selectedActivityId, setSelectedActivityId] = useState(null);
   const [editingCard, setEditingCard] = useState(null);
   const [editingProject, setEditingProject] = useState(null);
   const [editingLead, setEditingLead] = useState(null);
@@ -3688,6 +3689,13 @@ export default function ShotTracker() {
       console.error("Archive toggle failed:", e);
       flashSave(false);
     }
+  };
+
+  const handleOpenActivity = (entry) => {
+    const shot = cards.find((c) => c.id === entry.shotId);
+    if (!shot) return;
+    setSelectedActivityId(entry.id);
+    setEditingCard(shot);
   };
 
   const handleSaveCard = async (card) => {
@@ -5663,6 +5671,7 @@ export default function ShotTracker() {
           entries={activity.filter((a) => a.projectId === selectedProjectId)}
           cards={cards}
           onRefresh={loadData}
+          onOpenActivity={handleOpenActivity}
         />
       )}
 
@@ -5733,8 +5742,13 @@ export default function ShotTracker() {
       {editingCard && (
         <CardEditor
           card={editingCard}
-          onCancel={() => setEditingCard(null)}
+          onCancel={() => {
+            setEditingCard(null);
+            setSelectedActivityId(null);
+          }}
           onSave={handleSaveCard}
+          highlightActivityId={selectedActivityId}
+          activityEntries={activity.filter((a) => a.shotId === editingCard?.id)}
           onDelete={handleDeleteCard}
           isNew={!editingCard.id}
           onPersistShareToken={handlePersistShotShareToken}
@@ -9207,7 +9221,7 @@ function formatActivityTime(iso) {
   });
 }
 
-function ActivityPanel({ entries, cards, onRefresh }) {
+function ActivityPanel({ entries, cards, onRefresh, onOpenActivity }) {
   const sorted = [...entries].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
   return (
@@ -9224,7 +9238,17 @@ function ActivityPanel({ entries, cards, onRefresh }) {
           {sorted.map((entry) => {
             const shot = cards.find((c) => c.id === entry.shotId);
             return (
-              <div key={entry.id} style={styles.invoiceCard}>
+              <button
+                key={entry.id}
+                type="button"
+                style={{
+                  ...styles.invoiceCard,
+                  ...(shot && onOpenActivity ? { cursor: "pointer", textAlign: "left", width: "100%" } : {}),
+                }}
+                onClick={() => shot && onOpenActivity?.(entry)}
+                disabled={!shot || !onOpenActivity}
+                title={shot ? "Open the related shot" : "The related shot is no longer available"}
+              >
                 <div style={styles.invoiceCardTop}>
                   <span style={styles.invoiceNumber}>
                     {ACTIVITY_ICONS[entry.type] || "\u2022"} {entry.message}
@@ -9234,7 +9258,7 @@ function ActivityPanel({ entries, cards, onRefresh }) {
                   <span style={styles.fieldHint}>{formatActivityTime(entry.createdAt)}</span>
                   {shot && <span style={styles.fieldHint}>{shot.title}</span>}
                 </div>
-              </div>
+              </button>
             );
           })}
         </div>
@@ -10419,7 +10443,7 @@ function LeadEditor({
   );
 }
 
-function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess, teamMembers = [] }) {
+function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess, teamMembers = [], highlightActivityId = null, activityEntries = [] }) {
   const [form, setForm] = useState(card);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const duplicateMemberNames = findDuplicateMemberNames(teamMembers);
@@ -10589,6 +10613,29 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
           </button>
         </div>
 
+        {highlightActivityId && (() => {
+          const highlightedActivity = activityEntries.find((entry) => entry.id === highlightActivityId);
+          if (!highlightedActivity) return null;
+          return (
+            <div
+              style={{
+                marginBottom: 14,
+                padding: "10px 12px",
+                borderRadius: 8,
+                border: "1px solid rgba(61, 220, 132, 0.45)",
+                background: "rgba(61, 220, 132, 0.08)",
+              }}
+              aria-live="polite"
+            >
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: "#3DDC84", marginBottom: 4 }}>
+                Highlighted activity
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{highlightedActivity.message}</div>
+              <div style={{ ...styles.fieldHint, marginTop: 3 }}>{formatActivityTime(highlightedActivity.createdAt)}</div>
+            </div>
+          );
+        })()}
+
         <div style={styles.field}>
           <label style={styles.label}>Shot name</label>
           <input
@@ -10741,7 +10788,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
               .map((tm) => (
                 <option key={tm.id} value={tm.id}>
                   {disambiguatedMemberLabel(tm, duplicateMemberNames)}
-                  {!duplicateMemberNames.has((tm.name || "").trim().toLowerCase()) && tm.role ? ` · ${tm.role}` : ""}
+                  {!duplicateMemberNames.has((tm.name || "").trim().toLowerCase()) && tm.role ? ` ï¿½ ${tm.role}` : ""}
                   {tm.status === "archived" ? " (archived)" : ""}
                 </option>
               ))}
