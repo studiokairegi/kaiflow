@@ -3693,10 +3693,10 @@ export default function ShotTracker() {
   };
 
   const handleOpenActivity = (entry) => {
-    const shot = cards.find((c) => c.id === entry.shotId);
+    const shot = cards.find((c) => String(c.id) === String(entry.shotId));
     if (!shot) return;
 
-    if (entry.type === "freelancer_upload") {
+    if (String(entry.type || "").trim().toLowerCase() === "freelancer_upload") {
       setSelectedProjectId(shot.projectId);
       setView("board");
       setBoardTab("shots");
@@ -9254,7 +9254,7 @@ function ActivityPanel({ entries, cards, onRefresh, onOpenActivity }) {
       ) : (
         <div style={styles.invoiceList}>
           {sorted.map((entry) => {
-            const shot = cards.find((c) => c.id === entry.shotId);
+            const shot = cards.find((c) => String(c.id) === String(entry.shotId));
             return (
               <button
                 key={entry.id}
