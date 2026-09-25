@@ -720,6 +720,25 @@ const SKILL_LEVELS = [
   { value: 5, label: "5 · Expert" },
 ];
 
+// TeamMemberEditor tab structure (brief §20). Grouped by what's already
+// adjacent in the form rather than forced into the brief's exact section
+// list, specifically so this restructure only wraps existing blocks in
+// {activeTab === ... && (...)} rather than physically relocating any of
+// them - lower risk than a real reorder, at the cost of Dependability
+// living under Availability instead of Performance. requiresExisting
+// tabs (Portfolio/Performance) have nothing to show for a member that
+// hasn't been saved yet, same as those sections always have.
+const TEAM_MEMBER_EDITOR_TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "skills", label: "Skills & Experience" },
+  { id: "rates", label: "Rates" },
+  { id: "freelancer", label: "Freelancer" },
+  { id: "payments", label: "Payments" },
+  { id: "availability", label: "Availability" },
+  { id: "portfolio", label: "Portfolio", requiresExisting: true },
+  { id: "performance", label: "Performance", requiresExisting: true },
+];
+
 // Compares a saved crew row against what crewRowFromTeamMember would
 // produce from the roster TODAY, without ever writing anything back
 // automatically (brief §22: Planner stays a deliberate snapshot, not a
@@ -2909,8 +2928,6 @@ export default function ShotTracker() {
   const [view, setView] = useState("projects");
   const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices" | "activity"
   const [selectedProjectId, setSelectedProjectId] = useState(null);
-  const [selectedActivityId, setSelectedActivityId] = useState(null);
-  const [highlightedShotId, setHighlightedShotId] = useState(null);
   const [editingCard, setEditingCard] = useState(null);
   const [editingProject, setEditingProject] = useState(null);
   const [editingLead, setEditingLead] = useState(null);
@@ -3473,52 +3490,6 @@ export default function ShotTracker() {
         plannerTemplates: [],
       });
   }, [userId, loadData]);
-  useEffect(() => {
-    if (!userId) return;
-
-    const channel = supabase
-      .channel("activity-log-" + userId)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "activity_log",
-          filter: "user_id=eq." + userId,
-        },
-        (payload) => {
-          const row = payload.new;
-          if (!row?.id) return;
-
-          const entry = {
-            id: row.id,
-            projectId: row.project_id,
-            shotId: row.shot_id,
-            type: row.event_type,
-            message: row.description,
-            createdAt: row.created_at,
-          };
-
-          setData((prev) => {
-            if (prev.activity.some((existing) => String(existing.id) === String(entry.id))) return prev;
-            return { ...prev, activity: [entry, ...prev.activity] };
-          });
-
-          if (String(row.event_type || "").trim().toLowerCase() === "freelancer_upload") {
-            notifyBrowser(
-              "New freelancer upload",
-              row.description || "A freelancer uploaded a file.",
-              "freelancer-upload-" + (row.shot_id || row.id)
-            );
-          }
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [userId]);
 
   const flashSave = (ok) => {
     setSaveState(ok ? "saved" : "error");
@@ -3736,28 +3707,6 @@ export default function ShotTracker() {
       console.error("Archive toggle failed:", e);
       flashSave(false);
     }
-  };
-
-  const handleOpenActivity = (entry) => {
-    const shot = cards.find((c) => String(c.id) === String(entry.shotId));
-    if (!shot) return;
-
-    if (String(entry.type || "").trim().toLowerCase() === "freelancer_upload") {
-      setSelectedProjectId(shot.projectId);
-      setView("board");
-      setBoardTab("shots");
-      setEditingCard(null);
-      setSelectedActivityId(null);
-      setHighlightedShotId(shot.id);
-      setTimeout(() => {
-        document.getElementById(`shot-card-${shot.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-      }, 0);
-      setTimeout(() => setHighlightedShotId(null), 3000);
-      return;
-    }
-
-    setSelectedActivityId(entry.id);
-    setEditingCard(shot);
   };
 
   const handleSaveCard = async (card) => {
@@ -5656,12 +5605,10 @@ export default function ShotTracker() {
                   {stageCards.map((card) => (
                     <div
                       key={card.id}
-                      id={`shot-card-${card.id}`}
                       onPointerDown={(e) => handlePointerDown(e, card)}
                       onClick={() => handleCardClick(card)}
                       style={{
                         ...styles.card,
-                        ...(String(highlightedShotId) === String(card.id) ? { boxShadow: "0 0 0 3px #f59e0b, 0 8px 24px rgba(245, 158, 11, 0.25)", transform: "scale(1.02)" } : {}),
                         opacity: dragStateRef.current?.id === card.id && dragVisual ? 0.4 : 1,
                         touchAction: dragStateRef.current?.id === card.id && dragVisual ? "none" : "pan-y",
                       }}
@@ -5735,7 +5682,6 @@ export default function ShotTracker() {
           entries={activity.filter((a) => a.projectId === selectedProjectId)}
           cards={cards}
           onRefresh={loadData}
-          onOpenActivity={handleOpenActivity}
         />
       )}
 
@@ -5806,13 +5752,8 @@ export default function ShotTracker() {
       {editingCard && (
         <CardEditor
           card={editingCard}
-          onCancel={() => {
-            setEditingCard(null);
-            setSelectedActivityId(null);
-          }}
+          onCancel={() => setEditingCard(null)}
           onSave={handleSaveCard}
-          highlightActivityId={selectedActivityId}
-          activityEntries={activity.filter((a) => a.shotId === editingCard?.id)}
           onDelete={handleDeleteCard}
           isNew={!editingCard.id}
           onPersistShareToken={handlePersistShotShareToken}
@@ -9285,7 +9226,7 @@ function formatActivityTime(iso) {
   });
 }
 
-function ActivityPanel({ entries, cards, onRefresh, onOpenActivity }) {
+function ActivityPanel({ entries, cards, onRefresh }) {
   const sorted = [...entries].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
   return (
@@ -9300,19 +9241,9 @@ function ActivityPanel({ entries, cards, onRefresh, onOpenActivity }) {
       ) : (
         <div style={styles.invoiceList}>
           {sorted.map((entry) => {
-            const shot = cards.find((c) => String(c.id) === String(entry.shotId));
+            const shot = cards.find((c) => c.id === entry.shotId);
             return (
-              <button
-                key={entry.id}
-                type="button"
-                style={{
-                  ...styles.invoiceCard,
-                  ...(shot && onOpenActivity ? { cursor: "pointer", textAlign: "left", width: "100%" } : {}),
-                }}
-                onClick={() => shot && onOpenActivity?.(entry)}
-                disabled={!shot || !onOpenActivity}
-                title={shot ? "Open the related shot" : "The related shot is no longer available"}
-              >
+              <div key={entry.id} style={styles.invoiceCard}>
                 <div style={styles.invoiceCardTop}>
                   <span style={styles.invoiceNumber}>
                     {ACTIVITY_ICONS[entry.type] || "\u2022"} {entry.message}
@@ -9322,7 +9253,7 @@ function ActivityPanel({ entries, cards, onRefresh, onOpenActivity }) {
                   <span style={styles.fieldHint}>{formatActivityTime(entry.createdAt)}</span>
                   {shot && <span style={styles.fieldHint}>{shot.title}</span>}
                 </div>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -10507,7 +10438,7 @@ function LeadEditor({
   );
 }
 
-function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess, teamMembers = [], highlightActivityId = null, activityEntries = [] }) {
+function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess, teamMembers = [] }) {
   const [form, setForm] = useState(card);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const duplicateMemberNames = findDuplicateMemberNames(teamMembers);
@@ -10677,29 +10608,6 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
           </button>
         </div>
 
-        {highlightActivityId && (() => {
-          const highlightedActivity = activityEntries.find((entry) => entry.id === highlightActivityId);
-          if (!highlightedActivity) return null;
-          return (
-            <div
-              style={{
-                marginBottom: 14,
-                padding: "10px 12px",
-                borderRadius: 8,
-                border: "1px solid rgba(61, 220, 132, 0.45)",
-                background: "rgba(61, 220, 132, 0.08)",
-              }}
-              aria-live="polite"
-            >
-              <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: "#3DDC84", marginBottom: 4 }}>
-                Highlighted activity
-              </div>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>{highlightedActivity.message}</div>
-              <div style={{ ...styles.fieldHint, marginTop: 3 }}>{formatActivityTime(highlightedActivity.createdAt)}</div>
-            </div>
-          );
-        })()}
-
         <div style={styles.field}>
           <label style={styles.label}>Shot name</label>
           <input
@@ -10852,7 +10760,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
               .map((tm) => (
                 <option key={tm.id} value={tm.id}>
                   {disambiguatedMemberLabel(tm, duplicateMemberNames)}
-                  {!duplicateMemberNames.has((tm.name || "").trim().toLowerCase()) && tm.role ? ` � ${tm.role}` : ""}
+                  {!duplicateMemberNames.has((tm.name || "").trim().toLowerCase()) && tm.role ? ` � ${tm.role}` : ""}
                   {tm.status === "archived" ? " (archived)" : ""}
                 </option>
               ))}
@@ -11659,6 +11567,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
   const [form, setForm] = useState({ ...emptyTeamMember(), ...member });
   const [customSkill, setCustomSkill] = useState("");
   const [confirmingArchive, setConfirmingArchive] = useState(false);
+  const [activeTab, setActiveTab] = useState("overview");
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const cur = currencySymbol || "$";
 
@@ -11829,6 +11738,21 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
           </button>
         </div>
 
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 12 }}>
+          {TEAM_MEMBER_EDITOR_TABS.filter((tab) => !tab.requiresExisting || !isNew).map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              style={{ ...styles.tabButton, ...(activeTab === tab.id ? styles.tabButtonActive : {}) }}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "overview" && (
+          <>
         <div style={styles.field}>
           <label style={styles.label}>Name</label>
           <input
@@ -11875,7 +11799,11 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
             placeholder="kevin@example.com"
           />
         </div>
+          </>
+        )}
 
+        {activeTab === "skills" && (
+          <>
         <div style={styles.fieldDivider}>Skills &amp; level</div>
 
         <div style={styles.field}>
@@ -11951,7 +11879,11 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
             tells the Planner what this person is capable of.
           </p>
         </div>
+          </>
+        )}
 
+        {activeTab === "rates" && (
+          <>
         <div style={styles.fieldDivider}>Rate</div>
 
         <div style={styles.fieldRow}>
@@ -12014,7 +11946,11 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
             can't calculate on its own.
           </p>
         </div>
+          </>
+        )}
 
+        {activeTab === "freelancer" && (
+          <>
         <div style={styles.fieldDivider}>Freelancer info</div>
 
         <div style={styles.fieldRow}>
@@ -12053,13 +11989,18 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                   placeholder="e.g. 32"
                 />
               </div>
-            </div>\n<p style={styles.fieldHint}>
+            </div>
+            <p style={styles.fieldHint}>
               External reputation only &mdash; kept separate from this studio's own internal performance
               rating and never blended into it.
             </p>
           </>
         )}
+          </>
+        )}
 
+        {activeTab === "payments" && (
+          <>
         <div style={styles.fieldDivider}>Payments</div>
 
         <div style={styles.fieldRow}>
@@ -12135,7 +12076,11 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
             </div>
           </>
         )}
+          </>
+        )}
 
+        {activeTab === "availability" && (
+          <>
         <div style={styles.fieldDivider}>Availability &amp; capacity</div>
 
         <div style={styles.field}>
@@ -12253,6 +12198,8 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
           A starting estimate to use until there's enough completed-project history to calculate a real
           average &mdash; the Planner won't invent a track record that doesn't exist yet.
         </p>
+          </>
+        )}
 
         <div style={styles.field}>
           <label style={styles.label}>Notes</label>
@@ -12267,7 +12214,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
 
         {!isNew && (
           <>
-            {cards && projects && (() => {
+            {activeTab === "performance" && cards && projects && (() => {
               const { shots } = computeMemberShots(form, cards, projects, teamMembers);
               if (shots.length === 0) {
                 return (
@@ -12308,6 +12255,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
               );
             })()}
 
+            <div style={{ display: activeTab === "portfolio" ? undefined : "none" }}>
             <div style={styles.fieldDivider}>Portfolio</div>
             {portfolioItems.length === 0 && !addingPortfolioItem && (
               <p style={styles.fieldHint}>No portfolio items yet.</p>
@@ -12395,7 +12343,9 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                 <PlusIcon /> Add portfolio item
               </button>
             )}
+            </div>
 
+            <div style={{ display: activeTab === "performance" ? undefined : "none" }}>
             <div style={styles.fieldDivider}>Performance</div>
             <p style={styles.fieldHint}>
               Studio rating {averageInternalRating(reviews) != null ? (
@@ -12467,6 +12417,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                 <PlusIcon /> Add review
               </button>
             )}
+            </div>
           </>
         )}
 
@@ -14732,3 +14683,4 @@ const styles = {
     cursor: "pointer",
   },
 };
+

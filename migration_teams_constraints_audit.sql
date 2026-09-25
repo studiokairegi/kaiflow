@@ -142,3 +142,7 @@ end $$;
 --        alter table team_members validate constraint team_members_availability_valid;
 --      (VALIDATE CONSTRAINT takes a lighter lock than adding the
 --      constraint fresh would, and doesn't block concurrent reads.)
+--
+-- UPDATE: this was done. Live data was checked directly and found clean
+-- against every constraint above - see migration_teams_validate_constraints.sql,
+-- which runs step 3 for all nine constraints added here.
