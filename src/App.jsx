@@ -3473,6 +3473,52 @@ export default function ShotTracker() {
         plannerTemplates: [],
       });
   }, [userId, loadData]);
+  useEffect(() => {
+    if (!userId) return;
+
+    const channel = supabase
+      .channel("activity-log-" + userId)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "activity_log",
+          filter: "user_id=eq." + userId,
+        },
+        (payload) => {
+          const row = payload.new;
+          if (!row?.id) return;
+
+          const entry = {
+            id: row.id,
+            projectId: row.project_id,
+            shotId: row.shot_id,
+            type: row.event_type,
+            message: row.description,
+            createdAt: row.created_at,
+          };
+
+          setData((prev) => {
+            if (prev.activity.some((existing) => String(existing.id) === String(entry.id))) return prev;
+            return { ...prev, activity: [entry, ...prev.activity] };
+          });
+
+          if (String(row.event_type || "").trim().toLowerCase() === "freelancer_upload") {
+            notifyBrowser(
+              "New freelancer upload",
+              row.description || "A freelancer uploaded a file.",
+              "freelancer-upload-" + (row.shot_id || row.id)
+            );
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userId]);
 
   const flashSave = (ok) => {
     setSaveState(ok ? "saved" : "error");
