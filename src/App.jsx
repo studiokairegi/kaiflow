@@ -5615,7 +5615,7 @@ export default function ShotTracker() {
                       onClick={() => handleCardClick(card)}
                       style={{
                         ...styles.card,
-                        ...(highlightedShotId === card.id ? { boxShadow: "0 0 0 3px #f59e0b, 0 8px 24px rgba(245, 158, 11, 0.25)", transform: "scale(1.02)" } : {}),
+                        ...(String(highlightedShotId) === String(card.id) ? { boxShadow: "0 0 0 3px #f59e0b, 0 8px 24px rgba(245, 158, 11, 0.25)", transform: "scale(1.02)" } : {}),
                         opacity: dragStateRef.current?.id === card.id && dragVisual ? 0.4 : 1,
                         touchAction: dragStateRef.current?.id === card.id && dragVisual ? "none" : "pan-y",
                       }}
