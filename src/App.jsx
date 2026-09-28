@@ -12,6 +12,14 @@ import {
   LeadOutreachTrendChart,
   HoursTrendChart,
 } from "./DashboardCharts.jsx";
+import {
+  buildPipeline,
+  cutProgress,
+  projectProgress as pipelineProjectProgress,
+  boardColumns,
+  isProjectComplete,
+  DELIVERED_STAGE_KEY,
+} from "./pipeline.js";
 
 const STAGES = [
   { id: "character_design", label: "Character Design" },
@@ -248,18 +256,80 @@ function outcomeReasonsForStage(stageId) {
 // dashboard breakdown.
 const DEFAULT_LEAD_CHANNELS = ["Referral", "Cold Email", "Instagram", "Website"];
 
+// Progress math lives in src/pipeline.js (design report v2 §6, §15) — this
+// is the only file allowed to duplicate it, and only as the thin adapter
+// below, which feeds pipeline.js the project's pipeline of stage rows.
+// Until the project_stages schema migration ships (phase 2+), every
+// project uses the same "legacy" pipeline built from STAGES, so behavior
+// is unchanged; see src/pipeline.regression.test.mjs (all checks pass
+// against this exact STAGES list, confirming stagePercent/projectProgress
+// below produce identical output to the plain-STAGES math they replace).
+const LEGACY_PIPELINE = buildPipeline(
+  STAGES.map((s, i) => ({
+    stageKey: s.id,
+    name: s.label,
+    phase: null,
+    sortOrder: i * 10,
+    kind: s.id === "delivered" ? "terminal" : "stage",
+    isEnabled: true,
+  }))
+);
+
 function stagePercent(stageId) {
-  const index = STAGES.findIndex((s) => s.id === stageId);
-  if (index === -1) return 0;
-  return Math.round((index / (STAGES.length - 1)) * 100);
+  const p = cutProgress(LEGACY_PIPELINE, stageId);
+  return p === null ? 0 : p;
 }
 
 function projectProgress(projectCards) {
-  const delivered = projectCards.filter((c) => c.stage === "delivered").length;
-  if (projectCards.length === 0) return { delivered, percent: 0 };
-  const total = projectCards.reduce((sum, c) => sum + stagePercent(c.stage), 0);
-  const percent = Math.round(total / projectCards.length);
-  return { delivered, percent };
+  const result = pipelineProjectProgress(
+    LEGACY_PIPELINE,
+    projectCards.map((c) => c.stage)
+  );
+  // Adapter shape kept as {delivered, percent} for existing call sites;
+  // percent is null for "no shots yet" per D3 (approved) — callers guard
+  // for that rather than silently rendering "null%".
+  return { delivered: result.delivered, percent: result.percent };
+}
+
+// The project's own pipeline (design report v2 §3, §10.1 step 4): falls
+// back to the shared LEGACY_PIPELINE whenever a project has no
+// project_stages rows loaded yet — which is both the normal state for
+// every existing project before the phase-2 schema migration ships, and
+// a safe default if that migration's backfill step somehow missed one.
+function getProjectPipeline(project) {
+  if (project && project.pipelineStages && project.pipelineStages.length > 0) {
+    return buildPipeline(project.pipelineStages);
+  }
+  return LEGACY_PIPELINE;
+}
+
+// Per-project replacements for the legacy-only adapters above. Every new
+// call site should use these two, not stagePercent/projectProgress, once
+// a project's own pipeline is available.
+function stagePercentFor(project, stageId) {
+  const p = cutProgress(getProjectPipeline(project), stageId);
+  return p === null ? 0 : p;
+}
+
+function projectProgressFor(project, projectCards) {
+  const result = pipelineProjectProgress(
+    getProjectPipeline(project),
+    projectCards.map((c) => c.stage)
+  );
+  return { delivered: result.delivered, percent: result.percent, state: result.state };
+}
+
+// One-line pipeline summary for cards/headers (design report v2 §9, §15).
+// Only rendered for canonical (full/custom) projects — legacy projects
+// keep today's exact card/header appearance with no added line, per the
+// approved correction to §5.2 (D3).
+function pipelineSummaryLabel(project) {
+  const preset = project?.pipelinePreset;
+  if (preset !== "full" && preset !== "custom") return null;
+  const pipeline = getProjectPipeline(project);
+  if (pipeline.n === 0) return "No pipeline configured";
+  if (preset === "full") return `Full pipeline \u00b7 ${pipeline.n} stages`;
+  return pipeline.enabled.map((r) => r.name).join(" \u2192 ");
 }
 
 function emptyCard(stage, projectId, priority = "normal") {
@@ -303,6 +373,13 @@ function emptyProject(overrides = {}) {
     driveFolderUrl: null,
     driveDeliverablesFolderId: null,
     driveReferencesFolderId: null,
+    // New projects default to the canonical Full pipeline (design report
+    // v2 §4, §10.1 step 5). pipelineStageKeys only matters when
+    // pipelinePreset is "custom" - it's the picker's working selection
+    // before the project (and its project_stages rows) exist yet.
+    pipelinePreset: "full",
+    pipelineStageKeys: [],
+    pipelineStages: [],
     ...overrides,
   };
 }
@@ -2070,7 +2147,7 @@ function computeDashboardStats(projects, cards, leads, allInvoices, fxRates = {}
 
   const projectsCompleted = activeProjects.filter((p) => {
     const shots = cards.filter((c) => c.projectId === p.id);
-    return shots.length > 0 && shots.every((s) => s.stage === "delivered");
+    return isProjectComplete(shots.map((s) => s.stage));
   }).length;
 
   const thisMonth = now.getMonth();
@@ -2901,8 +2978,9 @@ export default function ShotTracker() {
     activity: [],
     budgetPlanners: [],
     plannerTemplates: [],
+    pipelineLibrary: [],
   });
-  const { projects, cards, leads, invoices, expenses, teamMembers, activity, budgetPlanners, plannerTemplates } = data;
+  const { projects, cards, leads, invoices, expenses, teamMembers, activity, budgetPlanners, plannerTemplates, pipelineLibrary } = data;
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   // Keeps the module-level flag notifyBrowser() checks in sync with the
   // account setting. Runs on every settings load/change, including the
@@ -3392,7 +3470,7 @@ export default function ShotTracker() {
     if (!userId) return;
     setLoading(true);
     try {
-      const [projectsRes, shotsRes, leadsRes, invoicesRes, expensesRes, teamRes, activityRes, plannersRes, plannerTemplatesRes] = await Promise.all([
+      const [projectsRes, shotsRes, leadsRes, invoicesRes, expensesRes, teamRes, activityRes, plannersRes, plannerTemplatesRes, pipelineLibraryRes, projectStagesRes] = await Promise.all([
         supabase.from("projects").select("*").order("created_at"),
         supabase.from("shots").select("*").order("created_at"),
         supabase.from("leads").select("*").order("created_at"),
@@ -3402,6 +3480,14 @@ export default function ShotTracker() {
         supabase.from("activity_log").select("*").order("created_at", { ascending: false }),
         supabase.from("budget_planners").select("*").order("created_at", { ascending: false }),
         supabase.from("planner_templates").select("*").order("created_at", { ascending: false }),
+        // Pipeline redesign phase 3 (design report v2 §3, §15). Both
+        // queries are wrapped so that running this client BEFORE the
+        // phase-2 schema migration ships (tables don't exist yet) fails
+        // softly into the pre-migration LEGACY_PIPELINE fallback below,
+        // rather than breaking the whole load - same non-fatal spirit as
+        // the Teams isolation right below.
+        supabase.from("pipeline_stages").select("*").then((r) => r, () => ({ data: [], error: null })),
+        supabase.from("project_stages").select("*").then((r) => r, () => ({ data: [], error: null })),
       ]);
       if (projectsRes.error) throw projectsRes.error;
       if (shotsRes.error) throw shotsRes.error;
@@ -3422,6 +3508,27 @@ export default function ShotTracker() {
       if (activityRes.error) throw activityRes.error;
       if (plannersRes.error) throw plannersRes.error;
       if (plannerTemplatesRes.error) throw plannerTemplatesRes.error;
+      // pipeline_stages/project_stages errors (e.g. relation doesn't exist
+      // yet, pre-migration) are swallowed rather than thrown: the rest of
+      // the app must keep working against a database that hasn't run
+      // migration_project_pipeline_phase2.sql yet.
+      const pipelineLibrary = pipelineLibraryRes.error ? [] : pipelineLibraryRes.data || [];
+      const projectStageRows = projectStagesRes.error ? [] : projectStagesRes.data || [];
+      const libraryById = new Map(pipelineLibrary.map((r) => [r.id, r]));
+      const stagesByProject = new Map();
+      for (const row of projectStageRows) {
+        const lib = libraryById.get(row.library_stage_id);
+        const list = stagesByProject.get(row.project_id) || [];
+        list.push({
+          stageKey: row.stage_key,
+          name: lib ? lib.name : row.stage_key,
+          phase: lib ? lib.phase : null,
+          sortOrder: row.sort_order,
+          kind: lib ? lib.kind : "stage",
+          isEnabled: row.is_enabled,
+        });
+        stagesByProject.set(row.project_id, list);
+      }
       const nextProjects = (projectsRes.data || []).map((p) => ({
         id: p.id,
         name: p.name,
@@ -3441,6 +3548,12 @@ export default function ShotTracker() {
         driveFolderUrl: p.drive_folder_url || null,
         driveDeliverablesFolderId: p.drive_deliverables_folder_id || null,
         driveReferencesFolderId: p.drive_references_folder_id || null,
+        // Undefined (rather than 'legacy') when the phase-2 migration
+        // hasn't shipped yet, so getProjectPipeline() below can tell
+        // "no column yet" apart from "explicitly legacy" if that ever
+        // matters later; both fall back to LEGACY_PIPELINE today.
+        pipelinePreset: p.pipeline_preset,
+        pipelineStages: stagesByProject.get(p.id) || [],
       }));
       const nextCards = (shotsRes.data || []).map(cardFromRow);
       const nextLeads = (leadsRes.data || []).map(leadFromRow);
@@ -3467,6 +3580,7 @@ export default function ShotTracker() {
         activity: nextActivity,
         budgetPlanners: nextBudgetPlanners,
         plannerTemplates: nextPlannerTemplates,
+        pipelineLibrary,
       });
     } catch (e) {
       console.error("Shot Tracker load failed:", e);
@@ -3488,6 +3602,7 @@ export default function ShotTracker() {
         activity: [],
         budgetPlanners: [],
         plannerTemplates: [],
+        pipelineLibrary: [],
       });
   }, [userId, loadData]);
 
@@ -3536,6 +3651,14 @@ export default function ShotTracker() {
         // to retry just the missing part. create_project_with_shots() wraps
         // both inserts in one database transaction: either the project and
         // its full shot checklist are created together, or neither is.
+        //
+        // The 15-arg overload (design report v2 §3.5, §8d of the phase-2
+        // migration) additionally seeds this project's own pipeline —
+        // Full or Custom — inside the same transaction, via the AFTER
+        // INSERT trigger on `projects` plus (for Custom) one
+        // set_project_pipeline call. Requires
+        // migration_project_pipeline_phase2.sql to have been run.
+        const pipelinePreset = project.pipelinePreset === "custom" ? "custom" : "full";
         const { data: result, error } = await supabase.rpc("create_project_with_shots", {
           p_name: project.name,
           p_client: project.client,
@@ -3550,10 +3673,39 @@ export default function ShotTracker() {
           p_share_enabled: project.shareEnabled,
           p_share_token: shareToken,
           p_shot_count: parseInt(project.shotCount, 10) || 0,
+          p_pipeline_preset: pipelinePreset,
+          p_stage_keys: pipelinePreset === "custom" ? project.pipelineStageKeys || [] : null,
         });
         if (error) throw error;
         const inserted = result.project;
         const newCards = (result.shots || []).map(cardFromRow);
+
+        // Fetch the pipeline this project actually ended up with (the
+        // trigger + set_project_pipeline already ran server-side; this
+        // just reads the result back so the board/cards render it
+        // immediately instead of waiting for the next full reload).
+        let insertedPipelineStages = [];
+        try {
+          const { data: psRows, error: psErr } = await supabase
+            .from("project_stages")
+            .select("*")
+            .eq("project_id", inserted.id);
+          if (!psErr && psRows) {
+            insertedPipelineStages = psRows.map((row) => {
+              const lib = pipelineLibrary.find((l) => l.id === row.library_stage_id);
+              return {
+                stageKey: row.stage_key,
+                name: lib ? lib.name : row.stage_key,
+                phase: lib ? lib.phase : null,
+                sortOrder: row.sort_order,
+                kind: lib ? lib.kind : "stage",
+                isEnabled: row.is_enabled,
+              };
+            });
+          }
+        } catch (psFetchErr) {
+          console.error("Fetching the new project's pipeline failed:", psFetchErr);
+        }
 
         setData((prev) => ({
           ...prev,
@@ -3577,6 +3729,8 @@ export default function ShotTracker() {
               driveFolderUrl: inserted.drive_folder_url || null,
               driveDeliverablesFolderId: inserted.drive_deliverables_folder_id || null,
               driveReferencesFolderId: inserted.drive_references_folder_id || null,
+              pipelinePreset: inserted.pipeline_preset || pipelinePreset,
+              pipelineStages: insertedPipelineStages,
             },
           ],
           cards: [...prev.cards, ...newCards],
@@ -3623,6 +3777,171 @@ export default function ShotTracker() {
       if (!project.id && pendingLeadLinkId) setPendingLeadLinkId(null);
       // Keep the editor open on failure so the user can retry or fix
       // whatever caused the error without losing their unsaved changes.
+    }
+  };
+
+  // Applies a project's pipeline change via the set_project_pipeline RPC
+  // (design report v2 §3.5, §7): enable/disable only, never writes to
+  // shots. p_enabled_keys is the FULL resulting set of enabled,
+  // non-terminal stage keys for the project - callers compute that set
+  // from the project's current pipeline before calling this.
+  const applyProjectPipeline = async (project, nextEnabledKeys) => {
+    const { data: rows, error } = await supabase.rpc("set_project_pipeline", {
+      p_project_id: project.id,
+      p_enabled_keys: nextEnabledKeys,
+    });
+    if (error) throw error;
+    const nextStages = (rows || []).map((row) => {
+      const lib = pipelineLibrary.find((l) => l.id === row.library_stage_id);
+      return {
+        stageKey: row.stage_key,
+        name: lib ? lib.name : row.stage_key,
+        phase: lib ? lib.phase : null,
+        sortOrder: row.sort_order,
+        kind: lib ? lib.kind : "stage",
+        isEnabled: row.is_enabled,
+      };
+    });
+    setData((prev) => ({
+      ...prev,
+      projects: prev.projects.map((p) => (p.id === project.id ? { ...p, pipelineStages: nextStages } : p)),
+    }));
+  };
+
+  // Like applyProjectPipeline, but for a CANONICAL project's "Full pipeline
+  // / Custom pipeline" toggle in ProjectEditor (design report v2 §4, §7
+  // "Custom -> Full" / "Full -> Custom"): also updates projects.pipeline_preset,
+  // which applyProjectPipeline deliberately does not touch (it's used for
+  // legacy stage customization and single-stage re-enabling, neither of
+  // which should ever change a project's preset). Refuses to run on a
+  // legacy project — the RPC itself enforces that; the legacy editing
+  // flow in ProjectEditor never calls this.
+  const applyProjectPipelinePreset = async (project, preset, enabledKeys) => {
+    const { data: rows, error } = await supabase.rpc("set_project_pipeline_preset", {
+      p_project_id: project.id,
+      p_preset: preset,
+      p_enabled_keys: preset === "custom" ? enabledKeys : null,
+    });
+    if (error) throw error;
+    const nextStages = (rows || []).map((row) => {
+      const lib = pipelineLibrary.find((l) => l.id === row.library_stage_id);
+      return {
+        stageKey: row.stage_key,
+        name: lib ? lib.name : row.stage_key,
+        phase: lib ? lib.phase : null,
+        sortOrder: row.sort_order,
+        kind: lib ? lib.kind : "stage",
+        isEnabled: row.is_enabled,
+      };
+    });
+    setData((prev) => ({
+      ...prev,
+      projects: prev.projects.map((p) =>
+        p.id === project.id ? { ...p, pipelinePreset: preset, pipelineStages: nextStages } : p
+      ),
+    }));
+  };
+
+  // The explicit "Move to the new pipeline..." action (design report v2
+  // §9.4, §10.2). Only ever called after the user has reviewed the
+  // client-side preview and confirmed — this RPC actually performs the
+  // swap and moves the mapped shots, all in one transaction, and returns
+  // a migration_id the (not-yet-built) undo action would use.
+  const handleMigratePipeline = async (project, targetPreset, targetKeys, mapping) => {
+    const { data: result, error } = await supabase.rpc("migrate_project_pipeline", {
+      p_project_id: project.id,
+      p_target_preset: targetPreset,
+      p_target_keys: targetPreset === "custom" ? targetKeys : null,
+      p_mapping: mapping,
+    });
+    if (error) throw error;
+
+    const { data: psRows, error: psErr } = await supabase
+      .from("project_stages")
+      .select("*")
+      .eq("project_id", project.id);
+    if (psErr) throw psErr;
+    const nextStages = (psRows || []).map((row) => {
+      const lib = pipelineLibrary.find((l) => l.id === row.library_stage_id);
+      return {
+        stageKey: row.stage_key,
+        name: lib ? lib.name : row.stage_key,
+        phase: lib ? lib.phase : null,
+        sortOrder: row.sort_order,
+        kind: lib ? lib.kind : "stage",
+        isEnabled: row.is_enabled,
+      };
+    });
+
+    const { data: shotRows, error: shotErr } = await supabase.from("shots").select("*").eq("project_id", project.id);
+    if (shotErr) throw shotErr;
+    const nextShotCards = (shotRows || []).map(cardFromRow);
+
+    setData((prev) => ({
+      ...prev,
+      projects: prev.projects.map((p) =>
+        p.id === project.id ? { ...p, pipelinePreset: targetPreset, pipelineStages: nextStages } : p
+      ),
+      cards: [...prev.cards.filter((c) => c.projectId !== project.id), ...nextShotCards],
+    }));
+
+    return result;
+  };
+
+  // Undo for the migration above (design report v2 §10.2, §17). Restores
+  // the exact pre-migration project_stages rows and moves the affected
+  // shots back — refused server-side (and here surfaced as a thrown
+  // error) if any of those shots have moved since, so it can never
+  // silently overwrite newer progress.
+  const handleUndoMigratePipeline = async (project, migrationId) => {
+    const { error } = await supabase.rpc("undo_project_pipeline_migration", { p_migration_id: migrationId });
+    if (error) throw error;
+
+    const { data: psRows, error: psErr } = await supabase
+      .from("project_stages")
+      .select("*")
+      .eq("project_id", project.id);
+    if (psErr) throw psErr;
+    const nextStages = (psRows || []).map((row) => {
+      const lib = pipelineLibrary.find((l) => l.id === row.library_stage_id);
+      return {
+        stageKey: row.stage_key,
+        name: lib ? lib.name : row.stage_key,
+        phase: lib ? lib.phase : null,
+        sortOrder: row.sort_order,
+        kind: lib ? lib.kind : "stage",
+        isEnabled: row.is_enabled,
+      };
+    });
+
+    const { data: shotRows, error: shotErr } = await supabase.from("shots").select("*").eq("project_id", project.id);
+    if (shotErr) throw shotErr;
+    const nextShotCards = (shotRows || []).map(cardFromRow);
+
+    setData((prev) => ({
+      ...prev,
+      projects: prev.projects.map((p) =>
+        p.id === project.id ? { ...p, pipelinePreset: "legacy", pipelineStages: nextStages } : p
+      ),
+      cards: [...prev.cards.filter((c) => c.projectId !== project.id), ...nextShotCards],
+    }));
+  };
+
+  // "Re-enable <stage>" from a stranded board lane (design report v2 §8,
+  // §10 "re-enable"): adds this one stage back to the enabled set,
+  // leaving every other stage's enabled/disabled state untouched. Per
+  // invariant I4 (report §6.4), the cuts already sitting in this stage
+  // automatically get their prior progress back — nothing is written to
+  // them here.
+  const handleReenableStage = async (project, stageKey) => {
+    const pipeline = getProjectPipeline(project);
+    const nextEnabled = Array.from(new Set([...pipeline.enabled.map((r) => r.stageKey), stageKey]));
+    try {
+      await applyProjectPipeline(project, nextEnabled);
+      flashSave(true);
+    } catch (e) {
+      console.error("Re-enabling stage failed:", e);
+      flashSave(false);
     }
   };
 
@@ -4577,7 +4896,7 @@ export default function ShotTracker() {
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
-    setData({ projects: [], cards: [], leads: [], invoices: [], expenses: [], teamMembers: [], activity: [], budgetPlanners: [], plannerTemplates: [] });
+    setData({ projects: [], cards: [], leads: [], invoices: [], expenses: [], teamMembers: [], activity: [], budgetPlanners: [], plannerTemplates: [], pipelineLibrary: [] });
     setView("projects");
     setSelectedProjectId(null);
   };
@@ -4914,7 +5233,9 @@ export default function ShotTracker() {
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId);
   const projectCards = cards.filter((c) => c.projectId === selectedProjectId);
-  const { delivered: deliveredCount, percent: overallPercent } = projectProgress(projectCards);
+  const { delivered: deliveredCount, percent: overallPercent } = projectProgressFor(selectedProject, projectCards);
+  const boardPipeline = getProjectPipeline(selectedProject);
+  const boardRecognizedKeys = new Set(boardPipeline.rows.map((r) => r.stageKey));
   const showTabs = view === "projects";
   const hasProAccess = settings.isAdmin || settings.plan === "pro";
   const activeProjectCount = projects.filter((p) => !p.archived).length;
@@ -5043,7 +5364,13 @@ export default function ShotTracker() {
             <button
               style={styles.newButton}
               onClick={() =>
-                setEditingCard(emptyCard(STAGES[0].id, selectedProjectId, settings.defaultShotPriority))
+                setEditingCard(
+                  emptyCard(
+                    boardPipeline.enabled[0]?.stageKey || DELIVERED_STAGE_KEY,
+                    selectedProjectId,
+                    settings.defaultShotPriority
+                  )
+                )
               }
             >
               <PlusIcon />
@@ -5236,16 +5563,23 @@ export default function ShotTracker() {
 
       {view === "board" && boardTab === "shots" && (
         <div style={styles.progressBar}>
+          {pipelineSummaryLabel(selectedProject) && (
+            <div style={{ ...styles.progressLabel, fontSize: 11.5, opacity: 0.75, marginBottom: 4 }}>
+              {pipelineSummaryLabel(selectedProject)}
+            </div>
+          )}
           <div style={styles.progressLabelRow}>
             <span style={styles.progressLabel}>
               {projectCards.length === 0
                 ? "No shots yet"
                 : `${deliveredCount} of ${projectCards.length} shots delivered`}
             </span>
-            <span style={styles.progressPercent}>{overallPercent}%</span>
+            {overallPercent !== null && (
+              <span style={styles.progressPercent}>{overallPercent}%</span>
+            )}
           </div>
           <div style={styles.progressTrack}>
-            <div style={{ ...styles.progressFill, width: `${overallPercent}%` }} />
+            <div style={{ ...styles.progressFill, width: `${overallPercent ?? 0}%` }} />
           </div>
         </div>
       )}
@@ -5577,25 +5911,50 @@ export default function ShotTracker() {
 
       {view === "board" && boardTab === "shots" && (
         <div style={{ ...styles.board, touchAction: dragVisual ? "none" : "auto" }}>
-          {STAGES.map((stage) => {
-            const stageCards = projectCards.filter((c) => c.stage === stage.id);
-            const isOver = dragOverStage === stage.id;
+          {boardColumns(boardPipeline, projectCards.map((c) => c.stage)).map((col) => {
+            const stageCards =
+              col.kind === "unrecognized"
+                ? projectCards.filter((c) => !boardRecognizedKeys.has(c.stage))
+                : projectCards.filter((c) => c.stage === col.stageKey);
+            const isOver = dragOverStage === col.stageKey;
+            // Only enabled stages and Delivered are valid drop targets /
+            // can receive new shots (design report v2 §8): a "stranded"
+            // column (a disabled stage that still holds cuts) or the
+            // "unrecognized" catch-all are display-only — cuts can be
+            // dragged OUT of them to any live column, never into them.
+            const isLive = col.kind === "enabled" || col.kind === "delivered";
             return (
               <div
-                key={stage.id}
-                data-stage={stage.id}
-                style={{ ...styles.column, ...(isOver ? styles.columnOver : {}) }}
+                key={col.stageKey || "unrecognized"}
+                data-stage={isLive ? col.stageKey : undefined}
+                style={{
+                  ...styles.column,
+                  ...(isOver ? styles.columnOver : {}),
+                  ...(isLive ? {} : { opacity: 0.6 }),
+                }}
               >
                 <div style={styles.columnHeader}>
-                  <span style={styles.columnLabel}>{stage.label}</span>
+                  <span style={styles.columnLabel}>
+                    {col.name}
+                    {col.kind === "stranded" && " · Not in pipeline"}
+                  </span>
                   <span style={styles.columnCount}>{stageCards.length}</span>
                 </div>
+                {col.kind === "stranded" && (
+                  <button
+                    type="button"
+                    style={{ ...styles.emptyAdd, fontSize: 11.5 }}
+                    onClick={() => handleReenableStage(selectedProject, col.stageKey)}
+                  >
+                    Re-enable {col.name}
+                  </button>
+                )}
                 <div style={styles.columnBody}>
-                  {stageCards.length === 0 && (
+                  {stageCards.length === 0 && isLive && (
                     <button
                       style={styles.emptyAdd}
                       onClick={() =>
-                        setEditingCard(emptyCard(stage.id, selectedProjectId, settings.defaultShotPriority))
+                        setEditingCard(emptyCard(col.stageKey, selectedProjectId, settings.defaultShotPriority))
                       }
                     >
                       <PlusIcon />
@@ -5639,7 +5998,7 @@ export default function ShotTracker() {
                         <div
                           style={{
                             ...styles.cardProgressFill,
-                            width: `${stagePercent(card.stage)}%`,
+                            width: `${stagePercentFor(selectedProject, card.stage)}%`,
                           }}
                         />
                       </div>
@@ -5782,7 +6141,13 @@ export default function ShotTracker() {
           hasProAccess={hasProAccess}
           atProjectLimit={atProjectLimit}
           shotCount={cards.filter((c) => c.projectId === editingProject.id).length}
+          projectCards={cards.filter((c) => c.projectId === editingProject.id)}
           invoiceCount={invoices.filter((inv) => inv.projectId === editingProject.id).length}
+          pipelineLibrary={pipelineLibrary}
+          onApplyPipeline={applyProjectPipeline}
+          onApplyPipelinePreset={applyProjectPipelinePreset}
+          onMigratePipeline={handleMigratePipeline}
+          onUndoMigratePipeline={handleUndoMigratePipeline}
         />
       )}
 
@@ -5998,7 +6363,7 @@ function ProjectCard({
   onDriveError,
 }) {
   const projectCards = cards.filter((c) => c.projectId === project.id);
-  const { delivered, percent } = projectProgress(projectCards);
+  const { delivered, percent } = projectProgressFor(project, projectCards);
   const drive = useDriveFolderAction({
     project,
     driveEmail,
@@ -6057,14 +6422,19 @@ function ProjectCard({
       </div>
       <div style={styles.projectName}>{project.name || "Untitled project"}</div>
       {project.client && <div style={styles.projectClient}>{project.client}</div>}
+      {pipelineSummaryLabel(project) && (
+        <div style={{ ...styles.projectClient, fontSize: 11.5, opacity: 0.75 }}>
+          {pipelineSummaryLabel(project)}
+        </div>
+      )}
       <div style={styles.projectStats}>
         <span style={styles.progressLabel}>
           {projectCards.length === 0 ? "No shots yet" : `${delivered} of ${projectCards.length} delivered`}
         </span>
-        <span style={styles.progressPercent}>{percent}%</span>
+        {percent !== null && <span style={styles.progressPercent}>{percent}%</span>}
       </div>
       <div style={styles.progressTrack}>
-        <div style={{ ...styles.progressFill, width: `${percent}%` }} />
+        <div style={{ ...styles.progressFill, width: `${percent ?? 0}%` }} />
       </div>
     </div>
   );
@@ -8228,10 +8598,42 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     },
   ];
 
-  const shotsByStage = STAGES.map((s) => ({
-    label: s.label,
-    value: cards.filter((c) => c.stage === s.id).length,
-  }));
+  // Design report v2 §11, §D4: group by each shot's own project's pipeline
+  // row rather than a single global stage list. This is necessary, not
+  // cosmetic — a canonical project's "genga" and a legacy project's
+  // "genga" are literally the same shots.stage string but deliberately
+  // different stages (design report v2 §1.2), so counting by raw stage
+  // string would silently merge them. Legacy stages are kept in their own
+  // section below, never combined with a canonical stage of the same name.
+  const stageBuckets = new Map(); // key: `${family}:${stageKey}` (per-project family, not raw string)
+  let deliveredShotCount = 0;
+  let unrecognizedShotCount = 0;
+  for (const c of cards) {
+    const shotProject = projects.find((p) => p.id === c.projectId);
+    const shotPipeline = getProjectPipeline(shotProject);
+    const row = shotPipeline.byKey.get(c.stage);
+    if (!row) {
+      unrecognizedShotCount += 1;
+      continue;
+    }
+    if (row.kind === "terminal") {
+      deliveredShotCount += 1;
+      continue;
+    }
+    const family = shotProject?.pipelinePreset === "full" || shotProject?.pipelinePreset === "custom" ? "canonical" : "legacy";
+    const key = `${family}:${row.stageKey}`;
+    const existing = stageBuckets.get(key);
+    if (existing) existing.count += 1;
+    else stageBuckets.set(key, { name: row.name, family, order: row.sortOrder, count: 1 });
+  }
+  const shotsByStage = [...stageBuckets.values()]
+    .filter((b) => b.family === "canonical")
+    .sort((a, b) => a.order - b.order)
+    .map((b) => ({ label: b.name, value: b.count }));
+  const legacyShotsByStage = [...stageBuckets.values()]
+    .filter((b) => b.family === "legacy")
+    .sort((a, b) => a.order - b.order)
+    .map((b) => ({ label: b.name, value: b.count }));
 
   // Active-outreach breakdown deliberately excludes the untouched pool and
   // every terminal outcome, per the "active outreach" definition: leads
@@ -8467,6 +8869,15 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
             </div>
             <div style={styles.dashboardDonutRow}>
               <DonutBreakdown data={shotsByStage} emptyLabel="No shots yet." centerLabel="Shots" size={88} compact />
+              {legacyShotsByStage.length > 0 && (
+                <DonutBreakdown
+                  data={legacyShotsByStage}
+                  emptyLabel="No legacy shots."
+                  centerLabel="Legacy"
+                  size={88}
+                  compact
+                />
+              )}
               <DonutBreakdown data={leadsByActiveStage} emptyLabel="No active outreach." centerLabel="Leads" size={88} compact />
               <DonutBreakdown
                 data={leadsByChannel}
@@ -9424,7 +9835,7 @@ function InvoicesPanel({
   );
 }
 
-function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders, hasProAccess, atProjectLimit, shotCount, invoiceCount }) {
+function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders, hasProAccess, atProjectLimit, shotCount, invoiceCount, pipelineLibrary, onApplyPipeline, onApplyPipelinePreset, projectCards, onMigratePipeline, onUndoMigratePipeline }) {
   const [form, setForm] = useState(project);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const [linkCopied, setLinkCopied] = useState(false);
@@ -9432,6 +9843,99 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
   const [driveError, setDriveError] = useState("");
   const [saving, setSaving] = useState(false);
   const saveLockRef = useRef(false);
+  const [pipelineSaving, setPipelineSaving] = useState(false);
+  const [pipelineError, setPipelineError] = useState("");
+  const [customizingLegacy, setCustomizingLegacy] = useState(false);
+  const [showMigrationDialog, setShowMigrationDialog] = useState(false);
+
+  // The project's own pipeline for existing projects; for a brand-new
+  // project (no project_stages rows yet) this is just what the picker
+  // below builds live from form.pipelinePreset/pipelineStageKeys.
+  const canonicalStages = (pipelineLibrary || [])
+    .filter((s) => s.family === "canonical" && s.is_selectable)
+    .sort((a, b) => a.default_order - b.default_order);
+  const phaseOrder = ["pre_production", "production", "post_production"];
+  const phaseLabels = {
+    pre_production: "Pre-production",
+    production: "Production",
+    post_production: "Post-production",
+  };
+  const isLegacyProject = !isNew && (project.pipelinePreset === "legacy" || !project.pipelinePreset);
+  const legacyPipeline = isLegacyProject ? buildPipeline(project.pipelineStages || []) : null;
+
+  // Working selection for the enable/disable checkboxes. Scoped
+  // correctly for whichever pipeline this project actually has — a
+  // legacy project's working keys are legacy stage keys (e.g.
+  // "character_design"); a canonical Custom project's are canonical ids
+  // (e.g. "genga"). Mixing the two was a bug caught before this shipped:
+  // a legacy project must never see canonical stage ids in its checkbox
+  // state, and vice versa.
+  const workingEnabledKeys = isLegacyProject
+    ? form.pipelineStageKeys && form.pipelineStageKeys.length > 0
+      ? form.pipelineStageKeys
+      : legacyPipeline.enabled.map((r) => r.stageKey)
+    : form.pipelinePreset === "custom"
+      ? form.pipelineStageKeys && form.pipelineStageKeys.length > 0
+        ? form.pipelineStageKeys
+        : !isNew
+          ? (project.pipelineStages || []).filter((s) => s.kind === "stage" && s.isEnabled).map((s) => s.stageKey)
+          : []
+      : canonicalStages.map((s) => s.id);
+
+  const toggleStage = (stageKey) => {
+    const next = workingEnabledKeys.includes(stageKey)
+      ? workingEnabledKeys.filter((k) => k !== stageKey)
+      : [...workingEnabledKeys, stageKey];
+    setForm({ ...form, pipelineStageKeys: next });
+  };
+
+  const previewLabel = () => {
+    if (form.pipelinePreset === "full") return `Full pipeline · ${canonicalStages.length} stages`;
+    if (workingEnabledKeys.length === 0) return "No pipeline configured — select at least one stage";
+    return canonicalStages
+      .filter((s) => workingEnabledKeys.includes(s.id))
+      .map((s) => s.name)
+      .join(" → ");
+  };
+
+  // Only shown for an existing canonical project whose enabled set
+  // differs from what's already saved — new projects apply their
+  // pipeline at creation time (via handleSaveProject's create call),
+  // and legacy projects use the separate "Customize legacy stages" flow
+  // below instead.
+  const savedEnabledKeys = !isNew
+    ? (project.pipelineStages || []).filter((s) => s.kind === "stage" && s.isEnabled).map((s) => s.stageKey).sort()
+    : null;
+  const pipelineDirty =
+    !isNew &&
+    !isLegacyProject &&
+    form.pipelinePreset === "custom" &&
+    JSON.stringify([...workingEnabledKeys].sort()) !== JSON.stringify(savedEnabledKeys);
+  const presetDirty = !isNew && !isLegacyProject && form.pipelinePreset !== project.pipelinePreset;
+
+  const handleSavePipeline = async () => {
+    setPipelineError("");
+    setPipelineSaving(true);
+    try {
+      if (isLegacyProject) {
+        // Legacy stage customization never changes pipeline_preset —
+        // applyProjectPipeline only enables/disables within the project's
+        // existing (legacy) family.
+        await onApplyPipeline(project, workingEnabledKeys);
+      } else if (form.pipelinePreset === "full") {
+        await onApplyPipelinePreset(project, "full", canonicalStages.map((s) => s.id));
+      } else {
+        if (workingEnabledKeys.length === 0) {
+          throw new Error("Select at least one stage.");
+        }
+        await onApplyPipelinePreset(project, "custom", workingEnabledKeys);
+      }
+      setForm((f) => ({ ...f, pipelineStageKeys: workingEnabledKeys }));
+    } catch (e) {
+      setPipelineError(e.message || "Couldn't save the pipeline.");
+    }
+    setPipelineSaving(false);
+  };
 
   const shareUrl = form.shareToken
     ? `${window.location.origin}${window.location.pathname}?share=project&token=${form.shareToken}`
@@ -9539,6 +10043,148 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
             </p>
           </div>
         )}
+
+        <div style={styles.field}>
+          <label style={styles.label}>Pipeline</label>
+
+          {isLegacyProject ? (
+            <>
+              <p style={styles.fieldHint}>
+                Legacy pipeline (frozen) —{" "}
+                {legacyPipeline.rows
+                  .filter((r) => r.kind === "stage")
+                  .map((r) => r.name)
+                  .join(" → ")}
+                {" → Delivered"}
+              </p>
+              {!customizingLegacy ? (
+                <div style={styles.reviewStatusRow}>
+                  <button
+                    type="button"
+                    style={styles.addRevisionButton}
+                    onClick={() => setCustomizingLegacy(true)}
+                  >
+                    Customize legacy stages
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.addRevisionButton}
+                    onClick={() => setShowMigrationDialog(true)}
+                  >
+                    Move to the new pipeline…
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
+                    {legacyPipeline.rows
+                      .filter((r) => r.kind === "stage")
+                      .map((r) => (
+                        <label key={r.stageKey} style={styles.checkboxLabel}>
+                          <input
+                            type="checkbox"
+                            checked={workingEnabledKeys.includes(r.stageKey)}
+                            onChange={() => toggleStage(r.stageKey)}
+                          />
+                          {r.name}
+                        </label>
+                      ))}
+                  </div>
+                  {pipelineError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{pipelineError}</p>}
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <button
+                      type="button"
+                      style={styles.addRevisionButton}
+                      disabled={pipelineSaving}
+                      onClick={handleSavePipeline}
+                    >
+                      {pipelineSaving ? "Saving…" : "Save pipeline changes"}
+                    </button>
+                    <button type="button" style={styles.addRevisionButton} onClick={() => setCustomizingLegacy(false)}>
+                      Done
+                    </button>
+                  </div>
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <div style={styles.reviewStatusRow}>
+                <button
+                  type="button"
+                  style={{
+                    ...styles.reviewStatusButton,
+                    borderColor: form.pipelinePreset === "full" ? teal : border,
+                    color: form.pipelinePreset === "full" ? teal : textMuted,
+                    background: form.pipelinePreset === "full" ? "rgba(47,191,166,0.1)" : "transparent",
+                  }}
+                  onClick={() => setForm({ ...form, pipelinePreset: "full" })}
+                >
+                  Full pipeline
+                </button>
+                <button
+                  type="button"
+                  style={{
+                    ...styles.reviewStatusButton,
+                    borderColor: form.pipelinePreset === "custom" ? teal : border,
+                    color: form.pipelinePreset === "custom" ? teal : textMuted,
+                    background: form.pipelinePreset === "custom" ? "rgba(47,191,166,0.1)" : "transparent",
+                  }}
+                  onClick={() => setForm({ ...form, pipelinePreset: "custom" })}
+                >
+                  Custom pipeline
+                </button>
+              </div>
+
+              {form.pipelinePreset === "custom" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+                  {phaseOrder.map((phase) => {
+                    const inPhase = canonicalStages.filter((s) => s.phase === phase);
+                    if (inPhase.length === 0) return null;
+                    return (
+                      <div key={phase}>
+                        <p style={{ ...styles.fieldHint, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
+                          {phaseLabels[phase]}
+                        </p>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 16px" }}>
+                          {inPhase.map((s) => (
+                            <label key={s.id} style={styles.checkboxLabel}>
+                              <input
+                                type="checkbox"
+                                checked={workingEnabledKeys.includes(s.id)}
+                                onChange={() => toggleStage(s.id)}
+                              />
+                              {s.name}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <p style={{ ...styles.fieldHint, marginTop: 8 }}>
+                Pipeline: {previewLabel()}
+                {form.pipelinePreset === "custom" && workingEnabledKeys.length > 0 && " → Delivered"}
+              </p>
+
+              {!isNew && (pipelineDirty || presetDirty) && (
+                <>
+                  {pipelineError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{pipelineError}</p>}
+                  <button
+                    type="button"
+                    style={{ ...styles.addRevisionButton, marginTop: 4 }}
+                    disabled={pipelineSaving || (form.pipelinePreset === "custom" && workingEnabledKeys.length === 0)}
+                    onClick={handleSavePipeline}
+                  >
+                    {pipelineSaving ? "Saving…" : "Save pipeline changes"}
+                  </button>
+                </>
+              )}
+            </>
+          )}
+        </div>
 
         <div style={styles.field}>
           <label style={styles.label}>
@@ -9774,6 +10420,291 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
           </button>
         </div>
         </>
+        )}
+      </div>
+      {showMigrationDialog && (
+        <PipelineMigrationDialog
+          project={project}
+          projectCards={projectCards || []}
+          pipelineLibrary={pipelineLibrary}
+          onCancel={() => setShowMigrationDialog(false)}
+          onMigrate={onMigratePipeline}
+          onUndo={onUndoMigratePipeline}
+          onDone={() => setShowMigrationDialog(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// The explicit legacy -> canonical migration workflow (design report v2
+// §9.4, §10.2). Every number shown here — before/after completion, which
+// cuts get credited with stages they never actually did — is computed
+// with the exact same pipeline.js functions the rest of the app uses,
+// client-side, against a HYPOTHETICAL target pipeline built from the
+// picker's current choices. Nothing is written to the database until the
+// user reviews this and clicks the final confirm button, which is the
+// only thing that calls the migrate_project_pipeline RPC.
+function PipelineMigrationDialog({ project, projectCards, pipelineLibrary, onCancel, onMigrate, onUndo, onDone }) {
+  const canonicalStages = (pipelineLibrary || [])
+    .filter((s) => s.family === "canonical" && s.is_selectable)
+    .sort((a, b) => a.default_order - b.default_order);
+  const phaseOrder = ["pre_production", "production", "post_production"];
+  const phaseLabels = { pre_production: "Pre-production", production: "Production", post_production: "Post-production" };
+
+  const [targetPreset, setTargetPreset] = useState("full");
+  const [targetKeys, setTargetKeys] = useState(canonicalStages.map((s) => s.id));
+  // Same-name matches are pre-filled and flagged for confirmation; every
+  // other occupied legacy stage starts blank and required (final decision
+  // D1, approved).
+  const SAME_NAME_MATCHES = { layout: "layout", genga: "genga", douga: "douga", editing: "editing", compositing: "compositing" };
+  const [mapping, setMapping] = useState(SAME_NAME_MATCHES);
+  const [confirmed, setConfirmed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [migrateError, setMigrateError] = useState("");
+  const [result, setResult] = useState(null);
+  const [undoing, setUndoing] = useState(false);
+  const [undone, setUndone] = useState(false);
+  const [undoError, setUndoError] = useState("");
+
+  const legacyPipeline = buildPipeline(project.pipelineStages || []);
+  // Legacy stages with at least one non-Delivered cut currently sitting
+  // in them — only these need a mapping (design report v2 §9.4 step 2).
+  const occupiedLegacyStages = legacyPipeline.rows.filter(
+    (r) => r.kind === "stage" && projectCards.some((c) => c.stage === r.stageKey)
+  );
+
+  const effectiveTargetKeys = targetPreset === "full" ? canonicalStages.map((s) => s.id) : targetKeys;
+  const toggleTargetKey = (key) => {
+    setTargetKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  };
+  const setMappingFor = (legacyKey, canonicalKey) => setMapping((m) => ({ ...m, [legacyKey]: canonicalKey }));
+
+  const allMapped = occupiedLegacyStages.every(
+    (r) => mapping[r.stageKey] && effectiveTargetKeys.includes(mapping[r.stageKey])
+  );
+  const canConfirm = allMapped && effectiveTargetKeys.length > 0 && confirmed && !saving;
+
+  // Hypothetical target pipeline, built the same way the seeding trigger
+  // would build it, purely for the client-side preview below.
+  const targetRows = canonicalStages
+    .map((s) => ({
+      stageKey: s.id,
+      name: s.name,
+      phase: s.phase,
+      sortOrder: s.default_order,
+      kind: "stage",
+      isEnabled: effectiveTargetKeys.includes(s.id),
+    }))
+    .concat([{ stageKey: "delivered", name: "Delivered", phase: null, sortOrder: 1000, kind: "terminal", isEnabled: true }]);
+  const targetPipeline = buildPipeline(targetRows);
+  const mappedStageKeys = projectCards.map((c) => (c.stage === "delivered" ? "delivered" : mapping[c.stage] || c.stage));
+
+  const before = pipelineProjectProgress(legacyPipeline, projectCards.map((c) => c.stage));
+  const after = pipelineProjectProgress(targetPipeline, mappedStageKeys);
+
+  // Canonical stages this migration would enable that have no same-named
+  // legacy counterpart — i.e. stages the old system never tracked at all
+  // (design report v2 §9.4 step 3 "tip").
+  const untrackedCanonicalNames = canonicalStages
+    .filter((s) => effectiveTargetKeys.includes(s.id) && !Object.values(SAME_NAME_MATCHES).includes(s.id))
+    .map((s) => s.name);
+  const creditedCutCount = mappedStageKeys.filter((k) => {
+    const row = targetPipeline.byKey.get(k);
+    if (!row || row.kind !== "stage") return false;
+    return untrackedCanonicalNames.some((name) => {
+      const untrackedRow = targetPipeline.rows.find((r) => r.name === name);
+      return untrackedRow && untrackedRow.sortOrder < row.sortOrder;
+    });
+  }).length;
+
+  const handleConfirm = async () => {
+    setMigrateError("");
+    setSaving(true);
+    try {
+      const r = await onMigrate(project, targetPreset, targetPreset === "custom" ? targetKeys : null, mapping);
+      setResult(r);
+    } catch (e) {
+      setMigrateError(e.message || "Couldn't move this project to the new pipeline.");
+    }
+    setSaving(false);
+  };
+
+  const handleUndo = async () => {
+    setUndoError("");
+    setUndoing(true);
+    try {
+      await onUndo(project, result.migration_id);
+      setUndone(true);
+    } catch (e) {
+      setUndoError(e.message || "Couldn't undo — the cuts may have moved since.");
+    }
+    setUndoing(false);
+  };
+
+  return (
+    <div style={{ ...styles.overlay, zIndex: 60 }} onClick={onCancel}>
+      <div style={{ ...styles.modal, maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <span style={styles.modalTitle}>Move to the new pipeline</span>
+          <button style={styles.iconButton} onClick={onCancel}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        {result ? (
+          <>
+            <p style={styles.fieldHint}>
+              {undone
+                ? "Undone — this project is back on its legacy pipeline."
+                : <>
+                    Done. Completion {before.percent === null ? "—" : `${before.percent}%`} → {after.percent === null ? "—" : `${after.percent}%`}.
+                    Delivered cuts ({before.delivered}) are unaffected.
+                  </>}
+            </p>
+            {undoError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{undoError}</p>}
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              {!undone && (
+                <button type="button" style={styles.addRevisionButton} onClick={handleUndo} disabled={undoing}>
+                  {undoing ? "Undoing…" : "Undo"}
+                </button>
+              )}
+              <button type="button" style={styles.addRevisionButton} onClick={onDone}>
+                Done
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={styles.field}>
+              <label style={styles.label}>Target pipeline</label>
+              <div style={styles.reviewStatusRow}>
+                <button
+                  type="button"
+                  style={{
+                    ...styles.reviewStatusButton,
+                    borderColor: targetPreset === "full" ? teal : border,
+                    color: targetPreset === "full" ? teal : textMuted,
+                    background: targetPreset === "full" ? "rgba(47,191,166,0.1)" : "transparent",
+                  }}
+                  onClick={() => setTargetPreset("full")}
+                >
+                  Full pipeline
+                </button>
+                <button
+                  type="button"
+                  style={{
+                    ...styles.reviewStatusButton,
+                    borderColor: targetPreset === "custom" ? teal : border,
+                    color: targetPreset === "custom" ? teal : textMuted,
+                    background: targetPreset === "custom" ? "rgba(47,191,166,0.1)" : "transparent",
+                  }}
+                  onClick={() => setTargetPreset("custom")}
+                >
+                  Custom pipeline
+                </button>
+              </div>
+              {targetPreset === "custom" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                  {phaseOrder.map((phase) => {
+                    const inPhase = canonicalStages.filter((s) => s.phase === phase);
+                    if (inPhase.length === 0) return null;
+                    return (
+                      <div key={phase}>
+                        <p style={{ ...styles.fieldHint, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
+                          {phaseLabels[phase]}
+                        </p>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 16px" }}>
+                          {inPhase.map((s) => (
+                            <label key={s.id} style={styles.checkboxLabel}>
+                              <input type="checkbox" checked={targetKeys.includes(s.id)} onChange={() => toggleTargetKey(s.id)} />
+                              {s.name}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {occupiedLegacyStages.length > 0 && (
+              <div style={styles.field}>
+                <label style={styles.label}>Map occupied legacy stages</label>
+                <p style={styles.fieldHint}>
+                  Every stage below currently holds at least one cut. Choose where each one moves to.
+                </p>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
+                  {occupiedLegacyStages.map((r) => (
+                    <div key={r.stageKey} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 13, minWidth: 150 }}>{r.name}</span>
+                      <span style={{ color: textMuted, fontSize: 13 }}>→</span>
+                      <select
+                        style={{ ...styles.input, flex: 1 }}
+                        value={mapping[r.stageKey] || ""}
+                        onChange={(e) => setMappingFor(r.stageKey, e.target.value)}
+                      >
+                        <option value="">Select a stage…</option>
+                        {canonicalStages
+                          .filter((s) => effectiveTargetKeys.includes(s.id))
+                          .map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                      </select>
+                      {SAME_NAME_MATCHES[r.stageKey] === mapping[r.stageKey] && (
+                        <span style={{ ...styles.fieldHint, whiteSpace: "nowrap" }}>same name — confirm</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={styles.field}>
+              <label style={styles.label}>Impact</label>
+              <p style={{ fontSize: 14 }}>
+                Before (legacy): <strong>{before.percent === null ? "—" : `${before.percent}%`}</strong>
+                {"  →  "}
+                After ({targetPreset === "full" ? "Full" : "Custom"}):{" "}
+                <strong>{after.percent === null ? "—" : `${after.percent}%`}</strong>
+              </p>
+              <p style={styles.fieldHint}>
+                Delivered cuts: {before.delivered} → {after.delivered} (unaffected)
+              </p>
+              {untrackedCanonicalNames.length > 0 && creditedCutCount > 0 && (
+                <p style={{ ...styles.fieldHint, marginTop: 6 }}>
+                  {creditedCutCount} cut{creditedCutCount === 1 ? "" : "s"} will be counted as having passed stage
+                  {untrackedCanonicalNames.length === 1 ? "" : "s"} the old system never tracked (
+                  {untrackedCanonicalNames.join(", ")}). No work is being recorded for {untrackedCanonicalNames.length === 1 ? "it" : "them"} —
+                  only the stage count changed. If that's not what you want, choose Custom and enable only the stages this project actually uses.
+                </p>
+              )}
+            </div>
+
+            {migrateError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{migrateError}</p>}
+
+            <label style={styles.checkboxLabel}>
+              <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
+              I've reviewed the mapping and understand the effect on progress
+            </label>
+
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button type="button" style={styles.addRevisionButton} onClick={onCancel} disabled={saving}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                style={{ ...styles.addRevisionButton, opacity: canConfirm ? 1 : 0.5, cursor: canConfirm ? "pointer" : "not-allowed" }}
+                disabled={!canConfirm}
+                onClick={handleConfirm}
+              >
+                {saving ? "Moving…" : "Move to new pipeline"}
+              </button>
+            </div>
+          </>
         )}
       </div>
     </div>

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { supabase, functionUrl } from "./supabaseClient";
+import { buildPipeline, projectProgress as pipelineProjectProgress } from "./pipeline.js";
 
 const ink = "#14191c";
 const inkSoft = "#1c2327";
@@ -23,28 +24,34 @@ const REVIEW_LABELS = {
   revisions: "Requested Revisions",
 };
 
-// Mirrors the pipeline order in App.jsx, kept here too since this file is
-// used for public pages that don't import the authenticated app.
-const STAGE_ORDER = [
-  "character_design",
-  "bg_lighting",
-  "storyboard",
-  "layout",
-  "genga",
-  "douga",
-  "backgrounds",
-  "frametest",
-  "cleanup",
-  "compositing",
-  "editing",
-  "delivered",
+// Progress math is no longer duplicated here (design report v2 §12, §15):
+// pipeline.js is the single source of truth. Until the project_stages
+// schema migration ships, every shared project still uses the same
+// legacy pipeline every project in the app uses today, built from the
+// same 12 stages this file used to hard-code as STAGE_ORDER.
+const LEGACY_STAGES = [
+  ["character_design", "Character Design"],
+  ["bg_lighting", "BG & Lighting Design"],
+  ["storyboard", "Storyboard"],
+  ["layout", "Layout"],
+  ["genga", "Genga"],
+  ["douga", "Douga"],
+  ["backgrounds", "Backgrounds"],
+  ["frametest", "Frame Test"],
+  ["cleanup", "Cleanup & Color"],
+  ["compositing", "Compositing"],
+  ["editing", "Editing"],
 ];
-
-function stagePosition(stageId) {
-  const i = STAGE_ORDER.indexOf(stageId);
-  if (i === -1) return 0;
-  return Math.round((i / (STAGE_ORDER.length - 1)) * 100);
-}
+const LEGACY_PIPELINE = buildPipeline(
+  LEGACY_STAGES.map(([id, label], i) => ({
+    stageKey: id,
+    name: label,
+    phase: null,
+    sortOrder: i * 10,
+    kind: "stage",
+    isEnabled: true,
+  })).concat([{ stageKey: "delivered", name: "Delivered", phase: null, sortOrder: 1000, kind: "terminal", isEnabled: true }])
+);
 
 export function genShareToken() {
   // These are public portal credentials (a client or freelancer with the
@@ -96,6 +103,7 @@ function ErrorState({ message }) {
 
 export function ClientPortalView({ token }) {
   const [rows, setRows] = useState(null);
+  const [pipeline, setPipeline] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -106,6 +114,33 @@ export function ClientPortalView({ token }) {
         return;
       }
       setRows(data);
+
+      // Additive RPC (design report v2 §12) — the project's own pipeline,
+      // for real stage names and project-specific completion instead of
+      // always assuming the shared LEGACY_PIPELINE fallback. Swallowed on
+      // failure (e.g. this RPC doesn't exist yet, pre-migration) so the
+      // portal keeps working exactly as it does today.
+      try {
+        const { data: pipelineRows, error: pipelineError } = await supabase.rpc("get_shared_project_pipeline", {
+          p_token: token,
+        });
+        if (!pipelineError && pipelineRows && pipelineRows.length > 0) {
+          setPipeline(
+            buildPipeline(
+              pipelineRows.map((r) => ({
+                stageKey: r.stage_key,
+                name: r.name,
+                phase: r.phase,
+                sortOrder: r.sort_order,
+                kind: r.kind,
+                isEnabled: r.is_enabled,
+              }))
+            )
+          );
+        }
+      } catch (pipelineFetchErr) {
+        console.error("Fetching the shared project's pipeline failed:", pipelineFetchErr);
+      }
     })();
   }, [token]);
 
@@ -118,9 +153,12 @@ export function ClientPortalView({ token }) {
     stage: r.shot_stage,
     reviewStatus: r.shot_review_status,
   }));
-  const percent = shots.length
-    ? Math.round(shots.reduce((sum, s) => sum + stagePosition(s.stage), 0) / shots.length)
-    : 0;
+  const activePipeline = pipeline || LEGACY_PIPELINE;
+  const stageName = (stageKey) => activePipeline.byKey.get(stageKey)?.name || String(stageKey || "").replace(/_/g, " ");
+  const { percent } = pipelineProjectProgress(
+    activePipeline,
+    shots.map((s) => s.stage)
+  );
 
   return (
     <div style={wrapStyle}>
@@ -136,10 +174,12 @@ export function ClientPortalView({ token }) {
         <div style={cardStyle}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 13 }}>
             <span>Overall progress</span>
-            <span style={{ color: teal, fontFamily: "monospace" }}>{percent}%</span>
+            <span style={{ color: teal, fontFamily: "monospace" }}>
+              {percent === null ? "No shots yet" : `${percent}%`}
+            </span>
           </div>
           <div style={{ height: 8, borderRadius: 999, background: "rgba(255,255,255,0.06)", overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${percent}%`, background: teal }} />
+            <div style={{ height: "100%", width: `${percent ?? 0}%`, background: teal }} />
           </div>
           {project.deadline && (
             <p style={{ marginTop: 10, fontSize: 12.5, color: textMuted }}>Expected: {project.deadline}</p>
@@ -157,7 +197,7 @@ export function ClientPortalView({ token }) {
               <div>
                 <div style={{ fontSize: 13.5 }}>{s.title}</div>
                 <div style={{ fontSize: 11.5, color: textMuted, textTransform: "capitalize" }}>
-                  {String(s.stage || "").replace(/_/g, " ")}
+                  {stageName(s.stage)}
                 </div>
               </div>
               <span
@@ -181,6 +221,7 @@ export function ClientPortalView({ token }) {
 
 export function FreelancerView({ token }) {
   const [shot, setShot] = useState(null);
+  const [stageInfo, setStageInfo] = useState(null);
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
@@ -194,6 +235,19 @@ export function FreelancerView({ token }) {
       return;
     }
     setShot(data[0]);
+
+    // Additive RPC (design report v2 §12) — this cut's real stage name
+    // (e.g. "Shiage" instead of the raw "shiage" key). Swallowed on
+    // failure so the portal keeps working exactly as it does today if
+    // this RPC isn't available yet (pre-migration).
+    try {
+      const { data: stageRows, error: stageError } = await supabase.rpc("get_shared_shot_stage", { p_token: token });
+      if (!stageError && stageRows && stageRows.length > 0) {
+        setStageInfo(stageRows[0]);
+      }
+    } catch (stageFetchErr) {
+      console.error("Fetching the shared shot's stage failed:", stageFetchErr);
+    }
   }, [token]);
 
   useEffect(() => {
@@ -283,7 +337,7 @@ export function FreelancerView({ token }) {
 
         <div style={cardStyle}>
           <p style={{ fontSize: 12.5, color: textMuted, marginBottom: shot.assigned_to ? 6 : 0 }}>
-            Stage: {String(shot.stage || "").replace(/_/g, " ")}
+            Stage: {stageInfo?.name || String(shot.stage || "").replace(/_/g, " ")}
           </p>
           {shot.assigned_to && (
             <p style={{ fontSize: 12.5, color: textMuted, margin: 0 }}>Assigned to: {shot.assigned_to}</p>
