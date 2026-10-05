@@ -3006,6 +3006,7 @@ export default function ShotTracker() {
   const [view, setView] = useState("projects");
   const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices" | "activity"
   const [selectedProjectId, setSelectedProjectId] = useState(null);
+  const [selectedActivityId, setSelectedActivityId] = useState(null);
   const [editingCard, setEditingCard] = useState(null);
   const [editingProject, setEditingProject] = useState(null);
   const [editingLead, setEditingLead] = useState(null);
@@ -3605,6 +3606,40 @@ export default function ShotTracker() {
         pipelineLibrary: [],
       });
   }, [userId, loadData]);
+
+  useEffect(() => {
+    if (!userId) return;
+
+    const channel = supabase
+      .channel("activity-log-" + userId)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "activity_log", filter: "user_id=eq." + userId }, (payload) => {
+        const row = payload.new;
+        if (!row?.id) return;
+
+        const entry = {
+          id: row.id,
+          projectId: row.project_id,
+          shotId: row.shot_id,
+          type: row.event_type,
+          message: row.description,
+          createdAt: row.created_at,
+        };
+
+        setData((prev) => {
+          if (prev.activity.some((existing) => String(existing.id) === String(entry.id))) return prev;
+          return { ...prev, activity: [entry, ...prev.activity] };
+        });
+
+        if (String(row.event_type || "").trim().toLowerCase() === "freelancer_upload") {
+          notifyBrowser("New freelancer upload", row.description || "A freelancer uploaded a file.", "freelancer-upload-" + (row.shot_id || row.id));
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userId]);
 
   const flashSave = (ok) => {
     setSaveState(ok ? "saved" : "error");
@@ -5027,6 +5062,14 @@ export default function ShotTracker() {
     window.addEventListener("pointercancel", handlePointerUp);
   };
 
+  const handleOpenActivity = (entry) => {
+    if (!entry?.shotId) return;
+    const card = cards.find((c) => String(c.id) === String(entry.shotId));
+    if (!card) return;
+    setSelectedActivityId(entry.id);
+    setEditingCard(card);
+  };
+
   const handleCardClick = (card) => {
     if (suppressClickRef.current) {
       suppressClickRef.current = false;
@@ -6041,6 +6084,7 @@ export default function ShotTracker() {
           entries={activity.filter((a) => a.projectId === selectedProjectId)}
           cards={cards}
           onRefresh={loadData}
+          onOpenActivity={handleOpenActivity}
         />
       )}
 
@@ -6111,7 +6155,9 @@ export default function ShotTracker() {
       {editingCard && (
         <CardEditor
           card={editingCard}
-          onCancel={() => setEditingCard(null)}
+          highlightActivityId={selectedActivityId}
+          activityEntries={activity.filter((a) => String(a.shotId) === String(editingCard?.id))}
+          onCancel={() => { setEditingCard(null); setSelectedActivityId(null); }}
           onSave={handleSaveCard}
           onDelete={handleDeleteCard}
           isNew={!editingCard.id}
@@ -9637,7 +9683,7 @@ function formatActivityTime(iso) {
   });
 }
 
-function ActivityPanel({ entries, cards, onRefresh }) {
+function ActivityPanel({ entries, cards, onRefresh, onOpenActivity }) {
   const sorted = [...entries].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
   return (
@@ -9652,9 +9698,9 @@ function ActivityPanel({ entries, cards, onRefresh }) {
       ) : (
         <div style={styles.invoiceList}>
           {sorted.map((entry) => {
-            const shot = cards.find((c) => c.id === entry.shotId);
+            const shot = cards.find((c) => String(c.id) === String(entry.shotId));
             return (
-              <div key={entry.id} style={styles.invoiceCard}>
+              <button type='button' key={entry.id} style={styles.invoiceCard} onClick={() => onOpenActivity(entry)}>
                 <div style={styles.invoiceCardTop}>
                   <span style={styles.invoiceNumber}>
                     {ACTIVITY_ICONS[entry.type] || "\u2022"} {entry.message}
@@ -9664,7 +9710,7 @@ function ActivityPanel({ entries, cards, onRefresh }) {
                   <span style={styles.fieldHint}>{formatActivityTime(entry.createdAt)}</span>
                   {shot && <span style={styles.fieldHint}>{shot.title}</span>}
                 </div>
-              </div>
+              </button>
             );
           })}
         </div>
@@ -11369,7 +11415,7 @@ function LeadEditor({
   );
 }
 
-function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess, teamMembers = [] }) {
+function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess, teamMembers = [], highlightActivityId = null, activityEntries = [] }) {
   const [form, setForm] = useState(card);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const duplicateMemberNames = findDuplicateMemberNames(teamMembers);
@@ -11691,7 +11737,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
               .map((tm) => (
                 <option key={tm.id} value={tm.id}>
                   {disambiguatedMemberLabel(tm, duplicateMemberNames)}
-                  {!duplicateMemberNames.has((tm.name || "").trim().toLowerCase()) && tm.role ? ` · ${tm.role}` : ""}
+                  {!duplicateMemberNames.has((tm.name || "").trim().toLowerCase()) && tm.role ? ` ï¿½ ${tm.role}` : ""}
                   {tm.status === "archived" ? " (archived)" : ""}
                 </option>
               ))}
@@ -11794,6 +11840,21 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
 
         {(form.deliverables || []).length > 0 && (
           <>
+            {highlightActivityId && activityEntries.some((entry) => String(entry.id) === String(highlightActivityId)) && (
+              <div style={{ ...styles.invoiceCard, border: `1px solid ${teal}` }}>
+                <div style={styles.invoiceCardTop}>
+                  <span style={styles.invoiceNumber}>Activity</span>
+                </div>
+                <div style={styles.invoiceAmountsRow}>
+                  <span style={styles.fieldHint}>
+                    {activityEntries.find((entry) => String(entry.id) === String(highlightActivityId))?.message || ""}
+                  </span>
+                  <span style={styles.fieldHint}>
+                    {formatActivityTime(activityEntries.find((entry) => String(entry.id) === String(highlightActivityId))?.createdAt)}
+                  </span>
+                </div>
+              </div>
+            )}
             <div style={styles.fieldDivider}>Freelancer submissions</div>
             {form.deliverables.map((file, i) => (
               <div key={i} style={styles.fileNameRow}>
