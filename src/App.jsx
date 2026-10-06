@@ -1036,67 +1036,37 @@ function computeBudgetPlan(plan) {
 }
 
 // ---------------------------------------------------------------------------
-// Planner Intelligence (spec: planner_i.txt / planner_crew_allocation.txt)
-// Deterministic, rule-based only. No AI. Every function here is small,
-// pure, and traceable back to the inputs that produced its output so the
-// UI can always explain *why* a warning fired.
+// Planner engine
+// One chain, and everything else derives from it:
+//   client price -> your profit -> production budget -> safety reserve
+//   -> money you can spend -> split by department -> committed to people -> left
+// Pure functions only. The screen reads computePlanSummary() and nothing else,
+// so there is exactly one place where any number on the page comes from.
 // ---------------------------------------------------------------------------
 
-// 1. Financial health — actual planned margin vs target, using real crew +
-// department costs when available instead of the flat target-only estimate.
-function computePlannerFinancialHealth(plan, totalCrewCost) {
-  const budget = parseMoney(plan.budget);
-  const targetProfitPercent = parseMoney(plan.targetProfitPercent);
-  const expectedProfit = budget * (targetProfitPercent / 100);
-  const productionBudget = budget - expectedProfit;
-  const plannedCosts = totalCrewCost; // crew is the concrete planned cost we know about
-  const actualMargin = budget > 0 ? ((budget - plannedCosts) / budget) * 100 : 0;
-  const compareMargin = Math.max(targetProfitPercent, 20);
-  let state = "green";
-  if (actualMargin < 10) state = "red";
-  else if (actualMargin < 20) state = "yellow";
-  const meetsTarget = actualMargin >= targetProfitPercent;
-  return {
-    budget,
-    targetProfitPercent,
-    expectedProfit,
-    productionBudget,
-    actualMargin,
-    state,
-    meetsTarget,
-    differencePoints: actualMargin - targetProfitPercent,
-    compareMargin,
-  };
+const PLANNER_OVER_TOLERANCE = 0.5; // currency units; avoids "over by $0.00" from rounding
+const PLANNER_VERDICT_COLORS = { empty: "#8b9a98", good: "#3DDC84", watch: "#F2A65A", over: "#FF4D4D" };
+
+function moneyWhole(cur, n) {
+  const v = Math.round(Math.abs(n) || 0);
+  return `${n < 0 && v !== 0 ? "-" : ""}${cur}${cur.length > 1 ? " " : ""}${v.toLocaleString()}`;
 }
 
-// 2. Department allocation intelligence
-function computeAllocationState(departmentAllocations) {
-  const totalPercent = Object.values(departmentAllocations || {}).reduce(
-    (sum, v) => sum + parseMoney(v),
-    0
-  );
-  const rounded = Math.round(totalPercent * 100) / 100;
-  if (rounded > 100) return { totalPercent: rounded, state: "over", diffPercent: rounded - 100 };
-  if (rounded < 100) return { totalPercent: rounded, state: "under", diffPercent: 100 - rounded };
-  return { totalPercent: rounded, state: "exact", diffPercent: 0 };
+// Whole numbers stay clean ($900), real cents are kept ($2.50) - for rates and per-person costs.
+function moneyFlex(cur, n) {
+  const v = Math.abs(n) || 0;
+  const text = Number.isInteger(Math.round(v * 100) / 100) && Math.round(v * 100) % 100 === 0
+    ? Math.round(v).toLocaleString()
+    : v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${n < 0 ? "-" : ""}${cur}${cur.length > 1 ? " " : ""}${text}`;
 }
 
-// 3. Contingency intelligence
 function recommendedContingencyPercent(complexity) {
   if (complexity === "high" || complexity === "very_high") return 10;
   if (complexity === "medium") return 7.5;
   return 5;
 }
 
-function computeContingencyState(contingencyPercent, complexity) {
-  const recommended = recommendedContingencyPercent(complexity);
-  const value = parseMoney(contingencyPercent);
-  if (value <= 0) return { state: "none", recommended, value };
-  if (value < recommended) return { state: "below", recommended, value };
-  return { state: "ok", recommended, value };
-}
-
-// 4/12. Crew cost calculation + ratio
 function computeCrewMemberCost(person) {
   const rate = parseMoney(person.rate);
   const units = parseMoney(person.units);
@@ -1108,32 +1078,9 @@ function computeTotalCrewCost(crew) {
   return (crew || []).reduce((sum, p) => sum + computeCrewMemberCost(p), 0);
 }
 
-function computeCrewCostRatio(totalCrewCost, productionBudget) {
-  const ratio = productionBudget > 0 ? (totalCrewCost / productionBudget) * 100 : 0;
-  let state = "healthy";
-  if (ratio > 75) state = "critical";
-  else if (ratio > 60) state = "watch";
-  return { ratio, state };
-}
+// Wording for the quantity next to each pay type ("30 shots x $20").
+const CREW_UNIT_LABELS = { per_shot: "shots", per_second: "seconds", per_hour: "hours", per_day: "days", fixed: "" };
 
-// ---------------------------------------------------------------------------
-// Crew allocation intelligence (spec: planner_crew_allocation.txt)
-// Deterministic scoring + explanation per crew member — not a full
-// combinatorial optimizer, but every score is traceable to the same inputs
-// the spec calls out: skill fit, availability, dependability, deadline
-// pressure and cost.
-// ---------------------------------------------------------------------------
-
-function dependabilityLabel(value) {
-  const v = parseMoney(value);
-  if (v >= 90) return { label: "Highly dependable", tier: "high" };
-  if (v >= 75) return { label: "Reliable", tier: "good" };
-  if (v >= 60) return { label: "Variable", tier: "watch" };
-  return { label: "Risky", tier: "risk" };
-}
-
-// Overload check (spec section 16): assigned units vs the person's declared
-// capacity for this plan.
 function computeCrewCapacityState(person) {
   const capacity = parseMoney(person.capacityUnits);
   const assigned = parseMoney(person.units);
@@ -1142,111 +1089,86 @@ function computeCrewCapacityState(person) {
   return { state: "ok" };
 }
 
-// Deadline weighting (spec section 10/14): which factors matter most
-// changes with how tight the schedule is.
-function deadlineWeighting(deadlineRiskState) {
-  if (deadlineRiskState === "risk") {
-    return { availability: 3, speed: 3, dependability: 2.5, skill: 1.5, cost: 0.5 };
-  }
-  if (deadlineRiskState === "tight") {
-    return { availability: 2, speed: 2, skill: 1.5, dependability: 1.5, cost: 1 };
-  }
-  return { availability: 1, speed: 1, skill: 1.5, dependability: 1, cost: 1.5 }; // comfortable/unknown
+function dependabilityLabel(value) {
+  const v = parseMoney(value);
+  if (v >= 90) return "Highly dependable";
+  if (v >= 75) return "Reliable";
+  if (v >= 60) return "Variable";
+  return "Risky";
 }
 
-// A single crew member's fit score for this plan + a human-readable
-// explanation, in the spirit of spec section 23 ("Recommended: Jane —
-// strong match because...") rather than an opaque number.
-function computeCrewMemberFit(person, deadlineRiskState) {
-  const weights = deadlineWeighting(deadlineRiskState);
-  const skill = parseMoney(person.skillLevel) || 3;
-  const dependability = parseMoney(person.dependability) || 75;
-  const availability = person.availability || "available";
-  const dep = dependabilityLabel(dependability);
-  const capacity = computeCrewCapacityState(person);
-
-  let score = 0;
-  const reasons = [];
-
-  if (availability === "available") { score += weights.availability * 20; reasons.push({ type: "ok", text: "Available for the project" }); }
-  else if (availability === "partial") { score += weights.availability * 10; reasons.push({ type: "warn", text: "Only partially available" }); }
-  else { reasons.push({ type: "warn", text: "Marked unavailable" }); }
-
-  score += weights.skill * (skill * 4);
-  reasons.push({ type: "ok", text: `Skill level ${skill}/5` });
-
-  score += weights.dependability * (dependability / 5);
-  reasons.push({ type: dep.tier === "risk" ? "warn" : "ok", text: `${dep.label} (${dependability}/100)` });
-
-  if (capacity.state === "over") {
-    score -= 15;
-    reasons.push({ type: "warn", text: `Exceeds declared capacity by ${capacity.overBy} unit(s)` });
-  }
-
-  const cost = computeCrewMemberCost(person);
-  if (cost > 0) score += weights.cost * Math.max(0, 20 - Math.log2(cost + 1));
-
-  return { score: Math.round(score), reasons, capacity, dependabilityInfo: dep };
-}
-
-// 5. Double-spending detection between a department's allocation and the
-// crew cost assigned to that same department.
-function computeDepartmentSpend(plan, productionBudget) {
-  const allocations = plan.departmentAllocations || {};
-  const crew = plan.crew || [];
-  return PLANNER_DEPARTMENTS.map((dept) => {
-    const allocatedAmount = (parseMoney(allocations[dept.id]) / 100) * productionBudget;
-    const crewCost = crew
-      .filter((p) => p.department === dept.id)
-      .reduce((sum, p) => sum + computeCrewMemberCost(p), 0);
-    let state = "ok";
-    if (allocatedAmount > 0 && crewCost > allocatedAmount) state = "over";
-    else if (allocatedAmount > 0 && crewCost >= allocatedAmount * 0.9) state = "close";
-    return { ...dept, allocatedAmount, crewCost, state };
+// --- Department split -------------------------------------------------------
+// Stored allocations may not add up to 100 (older plans, hand edits). The
+// planner always works from a normalized copy, so the split can never be
+// "96% allocated" - it is 100% by construction.
+function normalizeAllocations(allocations) {
+  const raw = {};
+  let total = 0;
+  PLANNER_DEPARTMENTS.forEach((d) => {
+    const v = Math.max(0, parseMoney((allocations || {})[d.id]));
+    raw[d.id] = v;
+    total += v;
   });
+  const out = {};
+  PLANNER_DEPARTMENTS.forEach((d) => {
+    out[d.id] = total > 0 ? (raw[d.id] / total) * 100 : d.defaultPercent;
+  });
+  return out;
 }
 
-// 7/10. Production complexity score (transparent, additive)
-function computeComplexityScore(scope) {
-  let score = 1;
-  const factors = [];
-  const shotsPerSecond = scopeShotsPerSecond(scope);
-  if (shotsPerSecond !== null && shotsPerSecond > 3) {
-    score += 0.5;
-    factors.push("High shot density (>3 shots/sec)");
+// 2-decimal percentages that still add up to exactly 100.
+function roundAllocations(map, anchorId) {
+  const out = {};
+  let sum = 0;
+  PLANNER_DEPARTMENTS.forEach((d) => {
+    out[d.id] = Math.round(map[d.id] * 100) / 100;
+    sum += out[d.id];
+  });
+  const drift = Math.round((100 - sum) * 100) / 100;
+  if (drift !== 0) {
+    const target = PLANNER_DEPARTMENTS.filter((d) => d.id !== anchorId).sort((a, b) => out[b.id] - out[a.id])[0];
+    out[target.id] = Math.round((out[target.id] + drift) * 100) / 100;
   }
-  if (parseMoney(scope.characters) > 1) {
-    score += 0.5;
-    factors.push("Multiple main characters");
-  }
-  if (scope.complexMovement) {
-    score += 0.5;
-    factors.push("Complex character movement");
-  }
-  const bgPerSecond = scopeBackgroundsPerSecond(scope);
-  if (bgPerSecond !== null && bgPerSecond > 0.5) {
-    score += 0.5;
-    factors.push("High background count relative to duration");
-  }
-  if (scope.heavyEffects) {
-    score += 0.5;
-    factors.push("Heavy effects work");
-  }
-  if (scope.cameraMovement) {
-    score += 0.5;
-    factors.push("Significant camera movement");
-  }
-  if (scope.dialogueHeavy) {
-    score += 0.5;
-    factors.push("Dialogue-heavy");
-  }
-  let label = "Low";
-  if (score >= 4) label = "Very High";
-  else if (score >= 3) label = "High";
-  else if (score >= 2) label = "Medium";
-  return { score, label, factors };
+  return out;
 }
 
+// Give one department a new share; the others shrink or grow in proportion so
+// the total stays 100%. This is what makes "edit one row" safe.
+function rebalanceAllocations(allocations, deptId, newPercent) {
+  const norm = normalizeAllocations(allocations);
+  const pct = Math.min(100, Math.max(0, newPercent));
+  const others = PLANNER_DEPARTMENTS.filter((d) => d.id !== deptId);
+  const othersTotal = others.reduce((s, d) => s + norm[d.id], 0);
+  const remaining = 100 - pct;
+  const next = { [deptId]: pct };
+  others.forEach((d) => {
+    next[d.id] = othersTotal > 0 ? (norm[d.id] * remaining) / othersTotal : remaining / others.length;
+  });
+  return roundAllocations(next, deptId);
+}
+
+// Pays for one department's crew overspend using money that isn't committed
+// yet: unstaffed departments first, then unspent room in staffed ones. Returns
+// new allocation percentages, or null if there isn't enough room.
+function coverDepartmentOverspend(departments, spendable, deptId) {
+  const dept = departments.find((d) => d.id === deptId);
+  if (!dept || spendable <= 0) return null;
+  const shortfall = dept.crewCost - dept.amount;
+  const donors = departments
+    .filter((d) => d.id !== deptId)
+    .map((d) => ({ id: d.id, room: Math.max(0, d.amount - d.crewCost) }));
+  const totalRoom = donors.reduce((s, d) => s + d.room, 0);
+  if (shortfall <= 0 || totalRoom + PLANNER_OVER_TOLERANCE < shortfall) return null;
+  const amounts = {};
+  departments.forEach((d) => { amounts[d.id] = d.amount; });
+  amounts[deptId] = dept.crewCost;
+  donors.forEach((d) => { amounts[d.id] -= (d.room / totalRoom) * shortfall; });
+  const pct = {};
+  PLANNER_DEPARTMENTS.forEach((d) => { pct[d.id] = (amounts[d.id] / spendable) * 100; });
+  return roundAllocations(pct, deptId);
+}
+
+// --- Scope, complexity, timeline --------------------------------------------
 function scopeShotsPerSecond(scope) {
   const shots = parseMoney(scope.estimatedShots);
   const duration = parseMoney(scope.durationSeconds);
@@ -1261,207 +1183,242 @@ function scopeBackgroundsPerSecond(scope) {
   return backgrounds / duration;
 }
 
-// 11. Timeline intelligence — transparent phase-by-phase estimate, in
-// production days, driven only by shots/complexity/crew size the user
-// entered. Always labelled as a starting point, never a promise.
+// Starts from the complexity the user (or the template) picked, then nudges up
+// for specific factors. Transparent and additive, so it can always explain itself.
+const COMPLEXITY_BASE = { low: 1, medium: 2, high: 3, very_high: 4 };
+function computeComplexityScore(scope) {
+  const s = scope || {};
+  let score = COMPLEXITY_BASE[s.complexity] || 1;
+  const factors = [];
+  const shotsPerSecond = scopeShotsPerSecond(s);
+  if (shotsPerSecond !== null && shotsPerSecond > 3) { score += 0.5; factors.push("fast cutting (more than 3 shots per second)"); }
+  if (parseMoney(s.characters) > 1) { score += 0.5; factors.push("several main characters"); }
+  if (s.complexMovement) { score += 0.5; factors.push("complex movement"); }
+  const bgPerSecond = scopeBackgroundsPerSecond(s);
+  if (bgPerSecond !== null && bgPerSecond > 0.5) { score += 0.5; factors.push("many backgrounds"); }
+  if (s.heavyEffects) { score += 0.5; factors.push("heavy effects"); }
+  if (s.cameraMovement) { score += 0.5; factors.push("camera movement"); }
+  if (s.dialogueHeavy) { score += 0.5; factors.push("lots of dialogue"); }
+  let label = "Low";
+  if (score >= 4) label = "Very High";
+  else if (score >= 3) label = "High";
+  else if (score >= 2) label = "Medium";
+  return { score, label, factors };
+}
+
+// Share of the timeline each phase usually takes. Shown as percentages so the
+// breakdown always adds up to 100% instead of pretending to day-level precision.
 const TIMELINE_PHASES = [
-  { id: "preproduction", label: "Pre-production", baseShare: 0.08 },
-  { id: "storyboard", label: "Storyboard / Animatic", baseShare: 0.1 },
-  { id: "design", label: "Design", baseShare: 0.08 },
-  { id: "layout", label: "Layout", baseShare: 0.1 },
-  { id: "animation", label: "Animation", baseShare: 0.28 },
-  { id: "cleanup", label: "Cleanup", baseShare: 0.14 },
-  { id: "backgrounds", label: "Backgrounds", baseShare: 0.08 },
-  { id: "compositing", label: "Compositing", baseShare: 0.08 },
-  { id: "editing", label: "Editing", baseShare: 0.04 },
-  { id: "review", label: "Review / Revisions", baseShare: 0.02 },
+  { id: "preproduction", label: "Pre-production", percent: 8 },
+  { id: "storyboard", label: "Storyboard / Animatic", percent: 10 },
+  { id: "design", label: "Design", percent: 8 },
+  { id: "layout", label: "Layout", percent: 10 },
+  { id: "animation", label: "Animation", percent: 28 },
+  { id: "cleanup", label: "Cleanup", percent: 14 },
+  { id: "backgrounds", label: "Backgrounds", percent: 8 },
+  { id: "compositing", label: "Compositing", percent: 8 },
+  { id: "editing", label: "Editing", percent: 4 },
+  { id: "review", label: "Review / Revisions", percent: 2 },
 ];
 
-function computeTimelineEstimate(scope, crewCount) {
-  const shots = parseMoney(scope.estimatedShots) || 0;
+// A rough range in working days, not a promise. Needs a shot count to say anything.
+function computeTimelineEstimate(scope, staffedCount) {
+  const shots = parseMoney(scope.estimatedShots);
+  if (!shots) return null;
   const complexity = computeComplexityScore(scope).score;
-  const crew = Math.max(1, crewCount || 1);
-  // Base rule: ~0.6 production days per shot at complexity 1, scaled by
-  // complexity, then divided across available crew with diminishing
-  // returns (sqrt) since more people rarely means linear speedup.
-  const baseDaysPerShot = 0.6 * complexity;
-  const rawDays = shots > 0 ? shots * baseDaysPerShot : 10 * complexity;
-  const estimatedDays = Math.max(3, Math.round(rawDays / Math.sqrt(crew)));
-  const phases = TIMELINE_PHASES.map((phase) => ({
-    ...phase,
-    days: Math.max(1, Math.round(estimatedDays * phase.baseShare)),
-  }));
-  return { estimatedDays, phases };
+  const people = Math.max(1, staffedCount || 1);
+  const mid = Math.max(3, Math.round((shots * 0.6 * complexity) / Math.sqrt(people)));
+  const low = Math.max(2, Math.round(mid * 0.8));
+  const high = Math.max(low + 1, Math.round(mid * 1.3));
+  return { mid, low, high, phases: TIMELINE_PHASES };
 }
 
-// 12/13. Deadline risk
-function computeDeadlineRisk(estimatedDays, availableDays) {
-  if (availableDays === null || availableDays === undefined) return { state: "unknown" };
-  if (availableDays >= estimatedDays * 1.2) return { state: "healthy", estimatedDays, availableDays };
-  if (availableDays >= estimatedDays) return { state: "tight", estimatedDays, availableDays };
-  return { state: "risk", estimatedDays, availableDays };
-}
-
-function daysBetween(startDate, endDate) {
+// Weekdays from start to deadline, both included. Compared against an estimate
+// that is also in working days.
+function workingDaysBetween(startDate, endDate) {
   if (!startDate || !endDate) return null;
   const start = new Date(startDate);
   const end = new Date(endDate);
   if (isNaN(start) || isNaN(end)) return null;
-  return Math.round((end - start) / (1000 * 60 * 60 * 24));
+  if (end < start) return 0;
+  let count = 0;
+  const day = new Date(start);
+  for (let i = 0; i < 3650 && day <= end; i += 1) {
+    const dow = day.getUTCDay();
+    if (dow !== 0 && dow !== 6) count += 1;
+    day.setUTCDate(day.getUTCDate() + 1);
+  }
+  return count;
 }
 
-// 15. Minimum viable price
-function computeMinimumPrice(estimatedProductionCosts, targetMarginPercent) {
-  const margin = parseMoney(targetMarginPercent) / 100;
-  if (margin >= 1 || margin < 0) return null;
-  return estimatedProductionCosts / (1 - margin);
+function computeDeadlineRisk(timeline, availableDays) {
+  if (!timeline || availableDays === null || availableDays === undefined) return { state: "unknown" };
+  if (availableDays >= timeline.high) return { state: "healthy", availableDays };
+  if (availableDays >= timeline.mid) return { state: "tight", availableDays };
+  return { state: "risk", availableDays };
 }
 
-// 20. Overall deal score — deterministic, always explained.
-function computeDealScore(plan, derived) {
-  const reasons = [];
-  let score = 100;
-
-  if (derived.financial.actualMargin < derived.financial.targetProfitPercent) {
-    score -= 15;
-    reasons.push({ type: "warn", text: "Below target profit margin" });
-  } else {
-    reasons.push({ type: "ok", text: "Profit target met" });
-  }
-
-  if (derived.allocation.state === "over") {
-    score -= 20;
-    reasons.push({ type: "warn", text: `Department budget overallocated by ${derived.allocation.diffPercent.toFixed(1)}%` });
-  } else if (derived.allocation.state === "under") {
-    score -= 5;
-    reasons.push({ type: "warn", text: `${derived.allocation.diffPercent.toFixed(1)}% of production budget unallocated` });
-  } else {
-    reasons.push({ type: "ok", text: "Budget fully allocated" });
-  }
-
-  if (derived.crewCostRatio.state === "critical") {
-    score -= 20;
-    reasons.push({ type: "warn", text: `Crew costs are ${derived.crewCostRatio.ratio.toFixed(0)}% of production budget` });
-  } else if (derived.crewCostRatio.state === "watch") {
-    score -= 8;
-    reasons.push({ type: "warn", text: `Crew costs are ${derived.crewCostRatio.ratio.toFixed(0)}% of production budget` });
-  }
-
-  if (derived.deadlineRisk.state === "risk") {
-    score -= 20;
-    reasons.push({ type: "warn", text: "Deadline is at risk" });
-  } else if (derived.deadlineRisk.state === "tight") {
-    score -= 8;
-    reasons.push({ type: "warn", text: "Deadline is tight" });
-  }
-
-  if (derived.contingency.state === "none") {
-    score -= 10;
-    reasons.push({ type: "warn", text: "No contingency reserve" });
-  } else if (derived.contingency.state === "below") {
-    score -= 5;
-    reasons.push({ type: "warn", text: `Contingency is only ${derived.contingency.value}%` });
-  }
-
-  score = Math.max(0, Math.min(100, Math.round(score)));
-  let label = "Critical";
-  if (score >= 90) label = "Excellent";
-  else if (score >= 75) label = "Healthy";
-  else if (score >= 60) label = "Watch";
-  else if (score >= 40) label = "Risk";
-  return { score, label, reasons };
-}
-
-// Aggregates every rule above into one object the UI reads from. Nothing
-// here mutates the plan or makes a decision, it only calculates and
-// explains.
-function computePlannerIntelligence(plan) {
+// --- The summary the screen reads --------------------------------------------
+function computePlanSummary(plan, options = {}) {
+  const hasProAccess = options.hasProAccess !== false;
+  const cur = plan.currency || "$";
   const crew = plan.crew || [];
   const scope = plan.scope || {};
-  const totalCrewCost = computeTotalCrewCost(crew);
-  const financial = computePlannerFinancialHealth(plan, totalCrewCost);
-  const allocation = computeAllocationState(plan.departmentAllocations);
-  const crewCostRatio = computeCrewCostRatio(totalCrewCost, financial.productionBudget);
-  const departmentSpend = computeDepartmentSpend(plan, financial.productionBudget);
+  const { budget, profitPercent, profit, productionBudget } = computeBudgetPlan(plan);
+
   const complexity = computeComplexityScore(scope);
-  const contingency = computeContingencyState(plan.contingencyPercent, complexity.label.toLowerCase().replace(" ", "_"));
-  const timeline = computeTimelineEstimate(scope, crew.length);
-  const availableDays = daysBetween(plan.startDate, plan.deadline);
-  const deadlineRisk = computeDeadlineRisk(timeline.estimatedDays, availableDays);
-  const minimumPrice = computeMinimumPrice(financial.productionBudget, plan.targetProfitPercent);
-  const shotsPerSecond = scopeShotsPerSecond(scope);
+  const recommendedReservePercent = recommendedContingencyPercent(complexity.label.toLowerCase().replace(" ", "_"));
+  const reservePercent = Math.min(100, Math.max(0, parseMoney(plan.contingencyPercent)));
+  const reserve = productionBudget * (reservePercent / 100);
+  const spendable = Math.max(0, productionBudget - reserve);
 
-  // Crew fit scoring, weighted by how tight the deadline is (section 10/14),
-  // plus overload/capacity checks (section 16).
-  const crewFit = crew.map((person) => ({ person, fit: computeCrewMemberFit(person, deadlineRisk.state) }));
-  const overloadedCrew = crewFit.filter((c) => c.fit.capacity.state === "over");
+  const allocations = normalizeAllocations(plan.departmentAllocations);
+  const committed = computeTotalCrewCost(crew);
+  const knownIds = new Set(PLANNER_DEPARTMENTS.map((d) => d.id));
+  const unmappedPeople = crew.filter((p) => !knownIds.has(p.department));
+  const unmappedCost = computeTotalCrewCost(unmappedPeople);
 
-  // Critical crew (section 20): first department, in production order, that
-  // has an allocation but no crew assigned yet — a simple stand-in for
-  // "this is currently the schedule risk" without a full dependency graph.
-  const departmentsWithAllocation = PLANNER_DEPARTMENTS.filter((d) => parseMoney((plan.departmentAllocations || {})[d.id]) > 0 && d.id !== "contingency");
-  const criticalDepartment = departmentsWithAllocation.find((d) => !crew.some((p) => p.department === d.id)) || null;
-
-  const derived = { financial, allocation, crewCostRatio, departmentSpend, complexity, contingency, timeline, deadlineRisk, minimumPrice, shotsPerSecond, totalCrewCost, crewFit, criticalDepartment };
-  const dealScore = computeDealScore(plan, derived);
-
-  // Priority-ordered warnings (spec section 24: financial loss, deadline,
-  // over-allocation, crew-over-budget, scope mismatch, low contingency,
-  // then optimization opportunities).
-  const warnings = [];
-  if (financial.state === "red") {
-    warnings.push({ level: "red", text: `Critical margin: ${financial.actualMargin.toFixed(1)}% — very little financial buffer.` });
-  }
-  if (deadlineRisk.state === "risk") {
-    warnings.push({
-      level: "red",
-      text: `Deadline risk — estimated production is ${timeline.estimatedDays} days but only ${availableDays} days are available.`,
-    });
-  }
-  if (allocation.state === "over") {
-    warnings.push({ level: "red", text: `Department budget overallocated by ${allocation.diffPercent.toFixed(1)}%.` });
-  }
-  const overspendDept = departmentSpend.find((d) => d.state === "over");
-  if (overspendDept) {
-    warnings.push({
-      level: "red",
-      text: `Crew costs exceed the ${overspendDept.label} allocation by ${plan.currency || "$"}${formatMoney(overspendDept.crewCost - overspendDept.allocatedAmount)}.`,
-    });
-  }
-  if (crewCostRatio.state === "critical") {
-    warnings.push({ level: "red", text: `Crew costs consume ${crewCostRatio.ratio.toFixed(0)}% of the production budget.` });
-  }
-  if (financial.state === "yellow") {
-    warnings.push({ level: "yellow", text: `Tight margin (${financial.actualMargin.toFixed(1)}%) — limited room for revisions or surprises.` });
-  }
-  if (deadlineRisk.state === "tight") {
-    warnings.push({ level: "yellow", text: `Tight schedule — only ${availableDays - timeline.estimatedDays} day(s) of buffer.` });
-  }
-  if (contingency.state === "none") {
-    warnings.push({ level: "yellow", text: "No contingency reserve set aside." });
-  } else if (contingency.state === "below") {
-    warnings.push({ level: "yellow", text: `Contingency (${contingency.value}%) is below the ${contingency.recommended}% recommended for this project's complexity.` });
-  }
-  if (crewCostRatio.state === "watch") {
-    warnings.push({ level: "yellow", text: `Crew costs are ${crewCostRatio.ratio.toFixed(0)}% of the production budget — worth watching.` });
-  }
-  if (!financial.meetsTarget && financial.state === "green") {
-    warnings.push({ level: "yellow", text: `Below your ${financial.targetProfitPercent}% target margin (currently ${financial.actualMargin.toFixed(1)}%).` });
-  }
-  overloadedCrew.forEach(({ person, fit }) => {
-    warnings.push({
-      level: "red",
-      text: `${person.name || "This crew member"} is assigned ${fit.capacity.overBy} unit(s) beyond their declared capacity.`,
-    });
+  const departments = PLANNER_DEPARTMENTS.map((dept) => {
+    const people = crew.filter((p) => p.department === dept.id);
+    const amount = (allocations[dept.id] / 100) * spendable;
+    const crewCost = computeTotalCrewCost(people);
+    let state = "none";
+    if (people.length > 0) {
+      state = "ok";
+      if (crewCost > amount + PLANNER_OVER_TOLERANCE) state = "over";
+      else if (crewCost > 0 && crewCost >= amount * 0.9) state = "close";
+    }
+    return { ...dept, percent: allocations[dept.id], amount, crewCost, people: people.length, left: amount - crewCost, state };
   });
-  if (criticalDepartment && crew.length > 0) {
-    warnings.push({
-      level: "yellow",
-      text: `${criticalDepartment.label} has budget allocated but no crew assigned yet — currently the largest schedule risk.`,
-    });
+
+  // Staffed departments count at their real cost; the rest at their planned amount.
+  const projectedCost = departments.reduce((s, d) => s + (d.crewCost > 0 ? d.crewCost : d.amount), 0) + unmappedCost;
+  const projectedProfit = budget - projectedCost - reserve;
+  const overBy = Math.max(0, projectedCost - spendable);
+  // "Over budget" is reserved for when the people already added cost more than
+  // everything you can spend. One department running hot while the total still
+  // fits is a rebalance, not a problem.
+  const hardOver = committed > spendable + PLANNER_OVER_TOLERANCE;
+  const priceDenominator = (1 - profitPercent / 100) * (1 - reservePercent / 100);
+  const priceForTeam = priceDenominator > 0 ? projectedCost / priceDenominator : null;
+
+  const staffedCrewCount = crew.filter((p) => computeCrewMemberCost(p) > 0).length;
+  const timeline = hasProAccess ? computeTimelineEstimate(scope, staffedCrewCount) : null;
+  const availableDays = workingDaysBetween(plan.startDate, plan.deadline);
+  const deadlineRisk = computeDeadlineRisk(timeline, availableDays);
+
+  const overDepts = departments.filter((d) => d.state === "over");
+  const unstaffed = departments.filter((d) => d.people === 0 && d.amount > 0);
+  const staffedDeptCount = departments.filter((d) => d.people > 0).length;
+  const fmt = (n) => moneyWhole(cur, n);
+
+  // --- One verdict, one next action ---
+  let verdict;
+  if (budget <= 0) {
+    verdict = {
+      state: "empty", short: "Add budget",
+      headline: "Start with what the client is paying",
+      detail: "Enter the client's budget above and the planner works out everything else.",
+    };
+  } else if (hardOver) {
+    const worst = [...overDepts].sort((a, b) => (b.crewCost - b.amount) - (a.crewCost - a.amount))[0];
+    verdict = {
+      state: "over", short: "Over budget",
+      headline: `Over budget by ${fmt(overBy)}`,
+      detail: projectedProfit >= 0
+        ? `At these rates you'd keep about ${fmt(projectedProfit)} instead of ${fmt(profit)}.`
+        : `At these rates you'd lose about ${fmt(-projectedProfit)}.`,
+      action: `Bring crew costs down by ${fmt(overBy)}${worst ? ` (biggest overspend: ${worst.label}, ${fmt(worst.crewCost - worst.amount)} over)` : ""}, or charge at least ${priceForTeam ? fmt(priceForTeam) : "more"}.`,
+    };
+  } else if (unmappedPeople.length > 0) {
+    const who = unmappedPeople[0].name || "Someone on your team";
+    verdict = {
+      state: "watch", short: "Pick a department",
+      headline: `${who} needs a department`,
+      detail: "Their cost isn't counted toward any department yet, so the numbers below are incomplete.",
+      action: "Choose one in the Your team section.",
+    };
+  } else if (overDepts.length > 0) {
+    const d = overDepts[0];
+    const extra = d.crewCost - d.amount;
+    const fixAllocations = coverDepartmentOverspend(departments, spendable, d.id);
+    const unstaffedBefore = unstaffed.reduce((s, u) => s + u.amount, 0);
+    const unstaffedAfter = fixAllocations ? unstaffed.reduce((s, u) => s + (fixAllocations[u.id] / 100) * spendable, 0) : 0;
+    verdict = {
+      state: "watch", short: "Rebalance",
+      headline: `${d.label} is ${fmt(extra)} over its share`,
+      detail: unstaffed.length > 0 && fixAllocations
+        ? `Your total still fits. Moving the money leaves ${fmt(unstaffedAfter)} for departments nobody is assigned to yet, instead of ${fmt(unstaffedBefore)}.`
+        : "Your total still fits, the money just needs to move.",
+      action: fixAllocations ? "Move the difference from departments that have room." : `Raise ${d.label} in "Adjust split".`,
+      fix: fixAllocations ? { label: `Move ${fmt(extra)} to ${d.label}`, allocations: fixAllocations } : null,
+    };
+  } else if (profitPercent < 10) {
+    verdict = {
+      state: "watch", short: "Thin margin",
+      headline: `Only ${profitPercent}% profit`,
+      detail: "That leaves very little room for revisions or surprises.",
+      action: "Consider aiming for 20% or more.",
+    };
+  } else if (!hasProAccess) {
+    verdict = {
+      state: "good", short: "On track",
+      headline: `You can spend ${fmt(spendable)} and keep ${fmt(profit)}`,
+      detail: "Here's a suggested split. Adjust it if your project needs it.",
+      action: "Save the plan when you're happy with it.",
+    };
+  } else if (crew.length === 0) {
+    const top = [...unstaffed].sort((a, b) => b.amount - a.amount)[0];
+    verdict = {
+      state: "good", short: "On track",
+      headline: `You can spend ${fmt(spendable)} and keep ${fmt(profit)}`,
+      detail: "Here's a suggested split. Add the people you're hiring to see how the budget holds up.",
+      action: top ? `Start with ${top.label}: you have ${fmt(top.amount)} for it.` : undefined,
+    };
+  } else if (unstaffed.length > 0) {
+    const next = [...unstaffed].sort((a, b) => b.amount - a.amount)[0];
+    verdict = {
+      state: "good", short: "On track",
+      headline: `On track: you'd keep about ${fmt(projectedProfit)}`,
+      detail: `${staffedDeptCount} of ${departments.length} departments have someone assigned.`,
+      action: `Find someone for ${next.label}: you have ${fmt(next.amount)} for it.`,
+    };
+  } else {
+    verdict = {
+      state: "good", short: "Ready",
+      headline: `Looking good: you'd keep about ${fmt(projectedProfit)}`,
+      detail: "Everyone is assigned and it fits the budget.",
+      action: "Save the plan. When the client says yes, convert it to a project.",
+    };
   }
 
-  return { ...derived, dealScore, warnings };
+  // --- Secondary checks, shown only when the person expands them ---
+  const notes = [];
+  overDepts.forEach((d) => notes.push({ level: "red", text: `${d.label}: crew costs are ${fmt(d.crewCost - d.amount)} over its share.` }));
+  crew.forEach((p) => {
+    const who = p.name || "Someone on the team";
+    const capacity = computeCrewCapacityState(p);
+    if (capacity.state === "over") notes.push({ level: "red", text: `${who} is booked for ${capacity.overBy} more ${CREW_UNIT_LABELS[p.rateType] || "units"} than their limit.` });
+    if (!knownIds.has(p.department)) notes.push({ level: "yellow", text: `${who} has no department yet, so their cost isn't counted in any department.` });
+    if (p.rateType !== "fixed" && parseMoney(p.rate) > 0 && !parseMoney(p.units)) notes.push({ level: "yellow", text: `${who}: add how many ${CREW_UNIT_LABELS[p.rateType] || "units"} so their cost counts.` });
+  });
+  if (reservePercent <= 0) notes.push({ level: "yellow", text: "No safety reserve: any revision comes straight out of your profit." });
+  else if (reservePercent < recommendedReservePercent - 1.5) notes.push({ level: "yellow", text: `Safety reserve is ${reservePercent}%. We'd suggest ${recommendedReservePercent}% for a ${complexity.label} job.` });
+  if (deadlineRisk.state === "risk") notes.push({ level: "red", text: `Deadline: roughly ${timeline.low}-${timeline.high} working days needed, only ${availableDays} available.` });
+  else if (deadlineRisk.state === "tight") notes.push({ level: "yellow", text: `Deadline is tight: ${availableDays} working days available for roughly ${timeline.low}-${timeline.high}.` });
+  else if (deadlineRisk.state === "healthy") notes.push({ level: "info", text: `Schedule looks comfortable: ${availableDays} working days available.` });
+  if (hasProAccess && crew.length > 0 && unstaffed.length > 0) {
+    notes.push({ level: "info", text: `No one assigned yet: ${unstaffed.map((d) => d.label).join(", ")}.` });
+  }
+
+  return {
+    cur, budget, profitPercent, profit, productionBudget,
+    reservePercent, reserve, recommendedReservePercent, spendable,
+    departments, committed, left: spendable - committed,
+    projectedCost, projectedProfit, priceForTeam, overBy,
+    complexity, timeline, availableDays, deadlineRisk,
+    verdict, notes,
+  };
 }
 
 const AVAILABILITY_OPTIONS = ["available", "busy", "unavailable"];
@@ -7133,8 +7090,8 @@ function PlannerDashboard({ plans, settings, onOpen, onNew, atLimit, hasProAcces
 
       <div style={styles.dashboardGrid}>
         <PlannerStatCard label="Total planned" value={`${cur}${formatMoney(analytics.totalPlannedValue)}`} />
-        <PlannerStatCard label="Avg. production cost" value={`${cur}${formatMoney(analytics.averageProductionCost)}`} />
-        <PlannerStatCard label="Avg. margin" value={`${analytics.averageMargin.toFixed(1)}%`} />
+        <PlannerStatCard label="Avg. production budget" value={`${cur}${formatMoney(analytics.averageProductionCost)}`} />
+        <PlannerStatCard label="Avg. target profit" value={`${analytics.averageMargin.toFixed(1)}%`} />
         <PlannerStatCard label="Converted to project" value={`${analytics.convertedCount} / ${plans.length}`} />
         <PlannerStatCard label="Proposal win rate" value={analytics.winRate === null ? "—" : `${analytics.winRate.toFixed(0)}%`} />
       </div>
@@ -7213,27 +7170,22 @@ function PlannerDashboard({ plans, settings, onOpen, onNew, atLimit, hasProAcces
       ) : (
         <div style={styles.invoiceList}>
           {filtered.map((plan) => {
-            const intel = computePlannerIntelligence(plan);
+            const summary = computePlanSummary(plan, { hasProAccess });
             const cur2 = plan.currency || settings.currencySymbol || "$";
-            const healthColor =
-              intel.financial.state === "green" ? "#3DDC84" : intel.financial.state === "yellow" ? "#F2A65A" : "#FF4D4D";
+            const verdictColor = PLANNER_VERDICT_COLORS[summary.verdict.state];
             return (
               <div key={plan.id} className="kf-card" style={styles.invoiceCard} onClick={() => onOpen(plan)}>
                 <div style={styles.invoiceCardTop}>
                   <span style={styles.invoiceNumber}>{plan.name || "Untitled plan"}</span>
-                  <span style={{ ...styles.invoiceStatusTag, color: healthColor, borderColor: healthColor }}>
-                    {PLANNER_STATUS_LABELS[plan.status] || "Draft"}
+                  <span style={{ ...styles.invoiceStatusTag, color: verdictColor, borderColor: verdictColor }}>
+                    {summary.verdict.short}
                   </span>
                 </div>
                 {plan.clientName && <div style={styles.cardMeta}>{plan.clientName}</div>}
                 <div style={styles.invoiceAmountsRow}>
-                  <span style={styles.fieldHint}>
-                    Budget {cur2}{formatMoney(intel.financial.budget)}
-                  </span>
-                  <span style={styles.fieldHint}>{plan.targetProfitPercent}% target profit</span>
-                  <span style={{ ...styles.fieldHint, color: healthColor }}>
-                    {intel.dealScore.label} · {intel.dealScore.score}
-                  </span>
+                  <span style={styles.fieldHint}>Client pays {moneyWhole(cur2, summary.budget)}</span>
+                  <span style={styles.fieldHint}>You keep {moneyWhole(cur2, summary.profit)}</span>
+                  <span style={styles.fieldHint}>{PLANNER_STATUS_LABELS[plan.status] || "Draft"}</span>
                 </div>
               </div>
             );
@@ -11994,527 +11946,577 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
 // into visually distinct sections rather than one long form, per the
 // planner_ui.txt architecture spec. Financial summary stays visible near
 // the top while the rest of the sections are worked on below it.
+// ---------------------------------------------------------------------------
+// Planner screen. Built to be read top to bottom:
+//   1. what the client pays  ->  2. the answer + one next action
+//   3. where the money goes  ->  4. who's doing it  ->  5. rough scope/timeline
+// Anything detailed lives behind an expander and is closed by default.
+// Styles are local to the planner so no other screen is affected.
+// ---------------------------------------------------------------------------
+function plannerUI() {
+  const card = {
+    display: "flex", flexDirection: "column", gap: 14, padding: "20px 22px", borderRadius: 16,
+    border: "1px solid rgba(127,224,208,0.14)", background: "rgba(20,32,34,0.45)",
+  };
+  return {
+    page: { padding: "0 28px 40px", display: "flex", flexDirection: "column", gap: 16, maxWidth: 860, width: "100%", margin: "0 auto", boxSizing: "border-box" },
+    card,
+    cardTitle: { fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 600, color: paper, margin: 0 },
+    cardSub: { fontSize: 12.5, color: textMuted, margin: "-8px 0 0", lineHeight: 1.45 },
+    field: { display: "flex", flexDirection: "column", gap: 5, minWidth: 0 },
+    grid: (min) => ({ display: "grid", gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))`, gap: 10 }),
+    bigInput: { ...styles.input, fontSize: 30, fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600, padding: "12px 14px", width: "100%", boxSizing: "border-box" },
+    fullInput: { ...styles.input, width: "100%", boxSizing: "border-box" },
+    chips: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" },
+    tile: { background: inkSoft, border: `1px solid ${border}`, borderRadius: 14, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 4, minWidth: 0 },
+    tileValue: { fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 600, color: paper, lineHeight: 1.15 },
+    expander: { background: "none", border: "none", padding: "2px 0", color: tealLight, cursor: "pointer", fontSize: 13, fontWeight: 500, display: "inline-flex", alignItems: "center", gap: 6, alignSelf: "flex-start", fontFamily: "'Inter', sans-serif" },
+    expanderBody: { display: "flex", flexDirection: "column", gap: 12, padding: "12px 14px", borderRadius: 12, border: `1px dashed ${border}` },
+    stickyBar: { position: "sticky", top: 0, zIndex: 5, display: "flex", gap: 18, flexWrap: "wrap", alignItems: "baseline", padding: "10px 16px", borderRadius: 12, background: "rgba(16,24,26,0.94)", border: "1px solid rgba(127,224,208,0.18)", backdropFilter: "blur(8px)", fontSize: 13, color: textMuted },
+    verdict: (color) => ({ ...card, border: `1px solid ${color}66`, borderLeft: `4px solid ${color}`, background: "rgba(20,32,34,0.6)" }),
+    verdictHeadline: (color) => ({ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 600, color, margin: 0, lineHeight: 1.25 }),
+    nextAction: { background: "rgba(47,191,166,0.08)", border: "1px solid rgba(47,191,166,0.28)", borderRadius: 12, padding: "11px 14px", fontSize: 14, color: paper, lineHeight: 1.45 },
+    dept: { display: "flex", flexDirection: "column", gap: 5, padding: "9px 0", borderBottom: "1px solid rgba(127,224,208,0.08)" },
+    deptTop: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 },
+    barTrack: { height: 6, borderRadius: 999, background: "rgba(127,224,208,0.1)", overflow: "hidden" },
+    person: { display: "flex", flexDirection: "column", gap: 10, padding: "14px 16px", borderRadius: 14, border: `1px solid ${border}`, background: inkSoft },
+    footerRow: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" },
+    empty: { padding: "18px 16px", borderRadius: 12, border: `1px dashed ${border}`, color: textMuted, fontSize: 13.5, lineHeight: 1.5, textAlign: "center" },
+    note: (level) => ({ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, lineHeight: 1.45, color: level === "red" ? "#FF8A8A" : level === "yellow" ? "#F2A65A" : textMuted }),
+    dot: (level) => ({ flex: "0 0 8px", height: 8, borderRadius: 999, marginTop: 6, background: level === "red" ? "#FF4D4D" : level === "yellow" ? "#F2A65A" : "#8b9a98" }),
+  };
+}
+
+function PlannerExpander({ label, count, children, defaultOpen }) {
+  const [open, setOpen] = useState(!!defaultOpen);
+  const ui = plannerUI();
+  return (
+    <>
+      <button type="button" style={ui.expander} onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        <span aria-hidden="true" style={{ display: "inline-block", width: 10 }}>{open ? "\u25BE" : "\u25B8"}</span>
+        {label}{count ? ` (${count})` : ""}
+      </button>
+      {open && <div style={ui.expanderBody}>{children}</div>}
+    </>
+  );
+}
+
+function PlannerField({ label, hint, children }) {
+  const ui = plannerUI();
+  return (
+    <div style={ui.field}>
+      <label style={styles.label}>{label}</label>
+      {children}
+      {hint && <span style={styles.fieldHint}>{hint}</span>}
+    </div>
+  );
+}
+
+// Edits a dollar amount as plain text and only commits on blur/Enter, so typing
+// "350" doesn't re-split the whole budget on every keystroke.
+function PlannerMoneyInput({ value, onCommit, style }) {
+  const [draft, setDraft] = useState(null);
+  const rounded = Math.round(value || 0);
+  return (
+    <input
+      style={style}
+      inputMode="decimal"
+      value={draft !== null ? draft : String(rounded)}
+      onFocus={(e) => { setDraft(String(rounded)); e.target.select(); }}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        if (draft !== null && parseMoney(draft) !== rounded) onCommit(draft);
+        setDraft(null);
+      }}
+      onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+    />
+  );
+}
+
+function PlannerPersonCard({ person, cur, onChange, onRemove, teamMembers }) {
+  const ui = plannerUI();
+  const [showMore, setShowMore] = useState(false);
+  const [showStale, setShowStale] = useState(false);
+  const cost = computeCrewMemberCost(person);
+  const unitLabel = CREW_UNIT_LABELS[person.rateType] || "";
+  const unmapped = !PLANNER_DEPARTMENTS.some((d) => d.id === person.department);
+  const capacity = computeCrewCapacityState(person);
+  const staleness = computeCrewStaleness(person, teamMembers);
+  const needsQuantity = person.rateType !== "fixed" && parseMoney(person.rate) > 0 && !parseMoney(person.units);
+  const formula = person.rateType === "fixed"
+    ? "Fixed fee"
+    : `${parseMoney(person.units) || 0} ${unitLabel} \u00D7 ${moneyFlex(cur, parseMoney(person.rate))}`;
+
+  return (
+    <div style={ui.person}>
+      <div style={ui.grid(130)}>
+        <PlannerField label="Name">
+          <input style={ui.fullInput} value={person.name} onChange={(e) => onChange("name", e.target.value)} placeholder="Who is it?" />
+        </PlannerField>
+        <PlannerField label="Does what">
+          <select style={{ ...ui.fullInput, ...(unmapped ? { border: "1px solid #F2A65A" } : {}) }} value={unmapped ? "unmapped" : person.department} onChange={(e) => onChange("department", e.target.value)}>
+            {unmapped && <option value="unmapped">Choose department...</option>}
+            {PLANNER_DEPARTMENTS.map((d) => (<option key={d.id} value={d.id}>{d.label}</option>))}
+          </select>
+        </PlannerField>
+        <PlannerField label="Paid">
+          <select style={ui.fullInput} value={person.rateType} onChange={(e) => onChange("rateType", e.target.value)}>
+            {CREW_RATE_TYPES.map((r) => (<option key={r.id} value={r.id}>{r.label}</option>))}
+          </select>
+        </PlannerField>
+        <PlannerField label={person.rateType === "fixed" ? "Fee" : "Rate"}>
+          <input style={ui.fullInput} inputMode="decimal" value={person.rate} onChange={(e) => onChange("rate", e.target.value)} placeholder={cur} />
+        </PlannerField>
+        {person.rateType !== "fixed" && (
+          <PlannerField label={`How many ${unitLabel}`}>
+            <input style={{ ...ui.fullInput, ...(needsQuantity ? { border: "1px solid #F2A65A" } : {}) }} inputMode="decimal" value={person.units} onChange={(e) => onChange("units", e.target.value)} placeholder="0" />
+          </PlannerField>
+        )}
+      </div>
+
+      <div style={ui.footerRow}>
+        <span style={{ fontSize: 13, color: textMuted }}>{formula}</span>
+        <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 18, fontWeight: 600, color: paper }}>{`= ${moneyFlex(cur, cost)}`}</span>
+        <div style={{ flex: 1 }} />
+        <button type="button" style={{ ...ui.expander, alignSelf: "center" }} onClick={() => setShowMore((v) => !v)} aria-expanded={showMore}>
+          <span aria-hidden="true" style={{ display: "inline-block", width: 10 }}>{showMore ? "\u25BE" : "\u25B8"}</span>More details
+        </button>
+        <button type="button" style={styles.iconButton} onClick={onRemove} aria-label="Remove this person" title="Remove"><TrashIcon /></button>
+      </div>
+
+      {unmapped && <span style={{ ...styles.fieldHint, color: "#F2A65A" }}>Pick a department so this cost counts toward the right share of the budget.</span>}
+      {needsQuantity && <span style={{ ...styles.fieldHint, color: "#F2A65A" }}>{`Add how many ${unitLabel} so their cost is counted.`}</span>}
+
+      {showMore && (
+        <div style={ui.expanderBody}>
+          <div style={ui.grid(150)}>
+            <PlannerField label="Role">
+              <input style={ui.fullInput} value={person.role || ""} onChange={(e) => onChange("role", e.target.value)} placeholder="Optional" />
+            </PlannerField>
+            <PlannerField label="Skill level">
+              <select style={ui.fullInput} value={person.skillLevel ?? 3} onChange={(e) => onChange("skillLevel", e.target.value)}>
+                {SKILL_LEVELS.map((s) => (<option key={s.value} value={s.value}>{s.label}</option>))}
+              </select>
+            </PlannerField>
+            <PlannerField label="Availability">
+              <select style={ui.fullInput} value={person.availability || "available"} onChange={(e) => onChange("availability", e.target.value)}>
+                {CREW_AVAILABILITY_OPTIONS.map((a) => (<option key={a.id} value={a.id}>{a.label}</option>))}
+              </select>
+            </PlannerField>
+            <PlannerField label="Dependability (0-100)" hint={dependabilityLabel(person.dependability ?? 75)}>
+              <input style={ui.fullInput} inputMode="numeric" value={person.dependability ?? ""} onChange={(e) => onChange("dependability", e.target.value)} />
+            </PlannerField>
+            <PlannerField label={`Most ${unitLabel || "units"} they can take`} hint={capacity.state === "over" ? `Over their limit by ${capacity.overBy}` : "Optional"}>
+              <input style={{ ...ui.fullInput, ...(capacity.state === "over" ? { border: "1px solid #FF4D4D" } : {}) }} inputMode="decimal" value={person.capacityUnits ?? ""} onChange={(e) => onChange("capacityUnits", e.target.value)} />
+            </PlannerField>
+          </div>
+          {person.teamMemberId && <span style={styles.fieldHint}>Linked to your Team roster. Rates here are a copy and stay editable for this plan.</span>}
+          {staleness && staleness.archived && <span style={styles.fieldHint}>This person has since been archived on the roster. They stay on this plan as-is.</span>}
+          {staleness && staleness.diffs.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <button type="button" style={{ ...ui.expander, color: "#F2A65A" }} onClick={() => setShowStale((v) => !v)}>
+                {`Roster has changed since you added them (${staleness.diffs.length})`}
+              </button>
+              {showStale && staleness.diffs.map((d) => (
+                <div key={d.field} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <span style={styles.fieldHint}>{`${d.label}: plan has "${String(person[d.field] ?? "")}", roster now says "${String(d.newValue)}"`}</span>
+                  <button type="button" style={styles.tabButton} onClick={() => onChange(d.field, d.newValue)}>Use roster value</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PlannerWorkspace({
   plan, isNew, settings, hasProAccess, templates, projects, teamMembers,
   onSave, onDelete, onDuplicate, onSaveAsTemplate, onConvertToProject, onClose,
 }) {
   const [form, setForm] = useState(plan);
-  const [showWarnings, setShowWarnings] = useState(false);
-  const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
-  const setPreset = (percent) => setForm({ ...form, targetProfitPercent: percent });
+  const [editSplit, setEditSplit] = useState(false);
+  const ui = plannerUI();
   const duplicateMemberNames = findDuplicateMemberNames(teamMembers || []);
-  const [showStaleFor, setShowStaleFor] = useState(null); // crew row id currently showing its roster-diff panel
 
-  const setDept = (deptId) => (e) => {
-    setForm({
-      ...form,
-      departmentAllocations: { ...(form.departmentAllocations || {}), [deptId]: e.target.value },
-    });
-  };
+  const summary = computePlanSummary(form, { hasProAccess });
+  const cur = form.currency || "$";
+  const v = summary.verdict;
+  const vColor = PLANNER_VERDICT_COLORS[v.state];
+  const convertedProject = form.convertedProjectId ? projects.find((p) => p.id === form.convertedProjectId) : null;
+  const hasBudget = summary.budget > 0;
 
+  const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const setScope = (key) => (e) => {
     const value = e.target.type === "checkbox" ? e.target.checked : e.target.value;
     setForm({ ...form, scope: { ...(form.scope || {}), [key]: value } });
   };
+  const setComplexity = (value) => setForm({ ...form, scope: { ...(form.scope || {}), complexity: value } });
+
+  const setDeptAmount = (deptId, amount) => {
+    if (summary.spendable <= 0) return;
+    const pct = (parseMoney(amount) / summary.spendable) * 100;
+    setForm({ ...form, departmentAllocations: rebalanceAllocations(form.departmentAllocations, deptId, pct) });
+  };
+  const resetSplit = () => {
+    const match = BUILT_IN_PLANNER_TEMPLATES.find((t) => t.projectType && t.projectType === form.projectType && t.departmentAllocations);
+    setForm({ ...form, departmentAllocations: match ? { ...match.departmentAllocations } : defaultDepartmentAllocations() });
+  };
 
   const addCrewMember = () => {
+    const nextDept = summary.departments.find((d) => d.people === 0) || summary.departments[0];
     setForm({
       ...form,
-      crew: [
-        ...(form.crew || []),
-        {
-          id: `c${Date.now()}`,
-          name: "",
-          role: "",
-          department: PLANNER_DEPARTMENTS[0].id,
-          rateType: "per_shot",
-          rate: "",
-          units: "",
-          skillLevel: 3,
-          dependability: 75,
-          availability: "available",
-          capacityUnits: "",
-        },
-      ],
+      crew: [...(form.crew || []), {
+        id: `c${Date.now()}`, name: "", role: "", department: nextDept.id, rateType: "per_shot", rate: "", units: "",
+        skillLevel: 3, dependability: 75, availability: "available", capacityUnits: "",
+      }],
     });
-  };
-  const updateCrewMember = (idx, key, value) => {
-    const next = [...form.crew];
-    next[idx] = { ...next[idx], [key]: value };
-    setForm({ ...form, crew: next });
-  };
-  const removeCrewMember = (idx) => {
-    setForm({ ...form, crew: form.crew.filter((_, i) => i !== idx) });
   };
   const addCrewMemberFromRoster = (teamMemberId) => {
     const tm = (teamMembers || []).find((m) => m.id === teamMemberId);
     if (!tm) return;
     setForm({ ...form, crew: [...(form.crew || []), crewRowFromTeamMember(tm)] });
   };
+  const updateCrewMember = (idx, key, value) => {
+    const next = [...form.crew];
+    next[idx] = { ...next[idx], [key]: value };
+    setForm({ ...form, crew: next });
+  };
+  const removeCrewMember = (idx) => setForm({ ...form, crew: form.crew.filter((_, i) => i !== idx) });
 
-  const calc = computeBudgetPlan(form);
-  const cur = form.currency || "$";
-  const intel = computePlannerIntelligence(form);
-  const healthColor = intel.financial.state === "green" ? "#3DDC84" : intel.financial.state === "yellow" ? "#F2A65A" : "#FF4D4D";
-  const healthLabel = intel.financial.state === "green" ? "Healthy" : intel.financial.state === "yellow" ? "Tight" : "Critical";
-  const allocation = intel.allocation;
-  const convertedProject = form.convertedProjectId ? projects.find((p) => p.id === form.convertedProjectId) : null;
-
-  // Sort red before yellow so a genuinely critical warning can't get
-  // pushed past the top-3 cutoff just because it happens to be pushed
-  // later in computePlannerIntelligence's fixed sequence than several
-  // yellow ones - push-order isn't the same as priority-order.
-  const topWarnings = [...intel.warnings].sort((a, b) => (a.level === "red" ? 0 : 1) - (b.level === "red" ? 0 : 1)).slice(0, 3);
-  const restWarnings = intel.warnings.slice(3);
+  const maxPercent = Math.max(...summary.departments.map((d) => d.percent), 1);
+  const profitChips = [15, 20, 25, 30, 40];
 
   return (
-    <div style={styles.invoicesWrap}>
-      {/* Project Information */}
-      <div style={styles.plannerSection}>
-        <div style={styles.plannerSectionTitle}>Project</div>
-        <div style={styles.field}>
-          <label style={styles.label}>Plan name</label>
-          <input style={styles.input} value={form.name} onChange={set("name")} placeholder="e.g. 15s Anime Trailer" autoFocus />
+    <div style={ui.page}>
+      {/* Always-visible summary while scrolling */}
+      {hasBudget && (
+        <div style={ui.stickyBar}>
+          <span><strong style={{ color: paper }}>{moneyWhole(cur, summary.profit)}</strong> you keep</span>
+          <span><strong style={{ color: paper }}>{moneyWhole(cur, summary.spendable)}</strong> to spend</span>
+          {summary.committed > 0 && (
+            <span>
+              <strong style={{ color: summary.left < 0 ? "#FF4D4D" : "#3DDC84" }}>{moneyWhole(cur, summary.left)}</strong> left
+            </span>
+          )}
         </div>
-        <div style={styles.fieldRow}>
-          <div style={styles.field}>
-            <label style={styles.label}>Client name</label>
-            <input style={styles.input} value={form.clientName} onChange={set("clientName")} placeholder="Optional" />
-          </div>
-          <div style={styles.field}>
-            <label style={styles.label}>Project type</label>
-            <input style={styles.input} value={form.projectType} onChange={set("projectType")} placeholder="e.g. Trailer" />
-          </div>
-        </div>
-        <div style={styles.fieldRow}>
-          <div style={styles.field}>
-            <label style={styles.label}>Start date</label>
-            <input type="date" style={styles.input} value={form.startDate || ""} onChange={set("startDate")} />
-          </div>
-          <div style={styles.field}>
-            <label style={styles.label}>Deadline</label>
-            <input type="date" style={styles.input} value={form.deadline || ""} onChange={set("deadline")} />
-          </div>
-        </div>
-        <div style={styles.field}>
-          <label style={styles.label}>Status</label>
-          <div style={styles.reviewStatusRow}>
-            {PLANNER_STATUSES.filter((s) => s.id !== "converted" || form.status === "converted").map((s) => (
-              <button
-                key={s.id}
-                type="button"
-                style={{ ...styles.reviewStatusButton, ...(form.status === s.id ? { borderColor: teal, color: teal } : {}) }}
-                onClick={() => setForm({ ...form, status: s.id })}
-                disabled={s.id === "converted"}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
+      )}
 
-      {/* Intelligence panel */}
-      <div style={{ ...styles.plannerSection, borderColor: `${healthColor}55` }}>
-        <div style={styles.plannerSectionTitle}>Planner Intelligence</div>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
-          <span style={{ ...styles.budgetStatValue, color: healthColor }}>{intel.dealScore.score} — {intel.dealScore.label}</span>
-          <span style={{ ...styles.fieldHint, color: healthColor }}>{healthLabel} margin · {intel.financial.actualMargin.toFixed(1)}%</span>
-        </div>
-        {topWarnings.length === 0 ? (
-          <p style={styles.fieldHint}>No issues detected against your current inputs.</p>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {topWarnings.map((w, i) => (
-              <p key={i} style={{ ...styles.fieldHint, color: w.level === "red" ? "#FF4D4D" : "#F2A65A" }}>
-                {w.level === "red" ? "\u{1F534}" : "\u{1F7E1}"} {w.text}
-              </p>
-            ))}
-          </div>
-        )}
-        {restWarnings.length > 0 && (
-          <button type="button" style={{ ...styles.fieldHint, background: "none", border: "none", cursor: "pointer", color: teal, padding: 0, marginTop: 4 }} onClick={() => setShowWarnings((v) => !v)}>
-            {showWarnings ? "Show less" : `+${restWarnings.length} more`}
-          </button>
-        )}
-        {showWarnings && restWarnings.map((w, i) => (
-          <p key={i} style={{ ...styles.fieldHint, color: w.level === "red" ? "#FF4D4D" : "#F2A65A" }}>
-            {w.level === "red" ? "\u{1F534}" : "\u{1F7E1}"} {w.text}
-          </p>
-        ))}
-      </div>
+      {/* 1. The deal */}
+      <div style={ui.card}>
+        <PlannerField label="Plan name">
+          <input style={ui.fullInput} value={form.name} onChange={set("name")} placeholder="e.g. 15s Anime Trailer" autoFocus={isNew} />
+        </PlannerField>
 
-      {/* Financial Summary + Profit Target */}
-      <div style={styles.plannerSection}>
-        <div style={styles.plannerSectionTitle}>Financial Summary</div>
-        <div style={styles.fieldRow}>
-          <div style={styles.field}>
-            <label style={styles.label}>Budget</label>
-            <input style={styles.input} value={form.budget} onChange={set("budget")} placeholder="e.g. 5000" />
-          </div>
-          <div style={styles.field}>
-            <label style={styles.label}>Currency</label>
-            <select style={styles.input} value={form.currency || "$"} onChange={set("currency")}>
+        <PlannerField label="What is the client paying?">
+          <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+            <select style={{ ...styles.input, width: 128, flex: "0 0 auto" }} value={cur} onChange={set("currency")} aria-label="Currency">
               {CURRENCIES.map((c) => (<option key={c.code} value={c.symbol}>{c.label}</option>))}
             </select>
+            <input style={{ ...ui.bigInput, flex: 1 }} inputMode="decimal" value={form.budget} onChange={set("budget")} placeholder="3500" />
           </div>
-        </div>
-        <div style={styles.field}>
-          <label style={styles.label}>Target profit</label>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-            {PROFIT_PRESETS.map((p) => (
-              <button key={p} type="button" style={{ ...styles.tabButton, ...(Number(form.targetProfitPercent) === p ? styles.tabButtonActive : {}) }} onClick={() => setPreset(p)}>
-                {p}%{p === 25 ? " (recommended)" : ""}
+        </PlannerField>
+
+        <PlannerField label="How much do you want to keep?">
+          <div style={ui.chips}>
+            {profitChips.map((p) => (
+              <button key={p} type="button" style={{ ...styles.tabButton, ...(Number(form.targetProfitPercent) === p ? styles.tabButtonActive : {}) }} onClick={() => setForm({ ...form, targetProfitPercent: p })}>
+                {p}%
               </button>
             ))}
+            <input
+              style={{ ...styles.input, width: 78 }} inputMode="decimal" aria-label="Custom profit percent" placeholder="Other %"
+              value={profitChips.includes(Number(form.targetProfitPercent)) ? "" : form.targetProfitPercent}
+              onChange={set("targetProfitPercent")}
+            />
           </div>
-          <input style={styles.input} value={form.targetProfitPercent} onChange={set("targetProfitPercent")} placeholder="Custom %" />
-        </div>
-        <div style={styles.field}>
-          <label style={styles.label}>Contingency reserve %</label>
-          <input style={styles.input} value={form.contingencyPercent} onChange={set("contingencyPercent")} placeholder={`Recommended ${intel.contingency.recommended}%`} />
-          <p style={{ ...styles.fieldHint, color: intel.contingency.state === "none" ? "#FF4D4D" : intel.contingency.state === "below" ? "#F2A65A" : undefined }}>
-            {intel.contingency.state === "none" && "No contingency reserve — any revision or issue reduces profit directly."}
-            {intel.contingency.state === "below" && `Below the ${intel.contingency.recommended}% recommended for this project's complexity.`}
-            {intel.contingency.state === "ok" && `At or above the ${intel.contingency.recommended}% recommended level.`}
-          </p>
-        </div>
-        <div style={styles.budgetSummaryRow}>
-          <div style={styles.budgetStat}>
-            <span style={styles.label}>Production budget</span>
-            <span style={styles.budgetStatValue}>{cur}{formatMoney(calc.productionBudget)}</span>
-          </div>
-          <div style={styles.budgetStat}>
-            <span style={styles.label}>Expected profit</span>
-            <span style={{ ...styles.budgetStatValue, color: healthColor }}>{cur}{formatMoney(calc.profit)}</span>
-          </div>
-          <div style={styles.budgetStat}>
-            <span style={styles.label}>Crew cost so far</span>
-            <span style={styles.budgetStatValue}>{cur}{formatMoney(intel.totalCrewCost)}</span>
-          </div>
-          <div style={styles.budgetStat}>
-            <span style={styles.label}>Margin after crew costs</span>
-            <span style={{ ...styles.budgetStatValue, color: healthColor }}>{intel.financial.actualMargin.toFixed(1)}%</span>
-          </div>
-        </div>
-        {intel.minimumPrice !== null && (
-          <p style={styles.fieldHint}>
-            Estimated minimum project price at this margin: <strong>{cur}{formatMoney(intel.minimumPrice)}</strong> (estimate based on current assumptions).
-          </p>
-        )}
-        <p style={styles.fieldHint}>
-          "Margin after crew costs" only subtracts planned crew spend from
-          the budget - it doesn't yet account for backgrounds, software,
-          outsourcing, or other production expenses, so treat it as a
-          floor on your real margin, not the final number.
-        </p>
-      </div>
+        </PlannerField>
 
-      {/* Department Budget */}
-      <div style={styles.plannerSection}>
-        <div style={styles.plannerSectionTitle}>Department Budget</div>
-        <p style={styles.fieldHint}>Percent of the {cur}{formatMoney(calc.productionBudget)} production budget. Override any row.</p>
-        {PLANNER_DEPARTMENTS.map((dept) => {
-          const pct = parseMoney((form.departmentAllocations || {})[dept.id]);
-          const amount = (pct / 100) * calc.productionBudget;
-          return (
-            <div key={dept.id} style={styles.plannerDeptRow}>
-              <span style={{ flex: 1 }}>{dept.label}</span>
-              <input
-                style={{ ...styles.input, width: 70 }}
-                value={(form.departmentAllocations || {})[dept.id] ?? ""}
-                onChange={setDept(dept.id)}
-              />
-              <span style={{ ...styles.fieldHint, width: 90, textAlign: "right" }}>{cur}{formatMoney(amount)}</span>
+        {hasBudget && (
+          <>
+            <div style={ui.grid(150)}>
+              <div style={ui.tile}>
+                <span style={styles.label}>You keep</span>
+                <span style={{ ...ui.tileValue, color: tealLight }}>{moneyWhole(cur, summary.profit)}</span>
+              </div>
+              <div style={ui.tile}>
+                <span style={styles.label}>Safety reserve</span>
+                <span style={ui.tileValue}>{moneyWhole(cur, summary.reserve)}</span>
+              </div>
+              <div style={{ ...ui.tile, border: "1px solid rgba(47,191,166,0.45)" }}>
+                <span style={styles.label}>You can spend</span>
+                <span style={{ ...ui.tileValue, color: "#3DDC84" }}>{moneyWhole(cur, summary.spendable)}</span>
+              </div>
             </div>
-          );
-        })}
-        <div style={{ ...styles.plannerDeptRow, fontWeight: 600 }}>
-          <span style={{ flex: 1 }}>Allocated</span>
-          <span style={{ width: 70, textAlign: "center" }}>{allocation.totalPercent}%</span>
-          <span
-            style={{
-              ...styles.fieldHint, width: 90, textAlign: "right",
-              color: allocation.state === "over" ? "#FF4D4D" : allocation.state === "under" ? "#F2A65A" : "#3DDC84",
-            }}
-          >
-            {allocation.state === "over" && `Over by ${allocation.diffPercent.toFixed(1)}%`}
-            {allocation.state === "under" && `${allocation.diffPercent.toFixed(1)}% unallocated`}
-            {allocation.state === "exact" && "Fully allocated"}
-          </span>
-        </div>
-      </div>
 
-      {/* Crew */}
-      {!hasProAccess ? (
-        <div style={styles.plannerSection}>
-          <div style={styles.plannerSectionTitle}>Crew / Person Costs</div>
-          <ProUpgradePrompt feature="Crew cost planning" inline />
-        </div>
-      ) : (
-        <div style={styles.plannerSection}>
-          <div style={styles.plannerSectionTitle}>Crew / Person Costs</div>
-          {(form.crew || []).map((person, idx) => {
-            const cost = computeCrewMemberCost(person);
-            const fitEntry = intel.crewFit.find((c) => c.person === person) || { fit: computeCrewMemberFit(person, intel.deadlineRisk.state) };
-            const fit = fitEntry.fit;
-            const capacityBad = fit.capacity.state === "over";
-            return (
-              <div key={person.id || idx} style={{ borderBottom: "1px solid rgba(127,224,208,0.08)", padding: "8px 0" }}>
-                <div style={styles.plannerCrewRow}>
-                  <input style={{ ...styles.input, flex: 1 }} placeholder="Name" value={person.name} onChange={(e) => updateCrewMember(idx, "name", e.target.value)} />
-                  <input style={{ ...styles.input, flex: 1 }} placeholder="Role" value={person.role} onChange={(e) => updateCrewMember(idx, "role", e.target.value)} />
-                  <select style={{ ...styles.input, width: 150, ...(person.department === "unmapped" ? { borderColor: "#F2A65A" } : {}) }} value={person.department} onChange={(e) => updateCrewMember(idx, "department", e.target.value)}>
-                    {person.department === "unmapped" && (
-                      <option value="unmapped">{"Unmapped \u2014 pick a department"}</option>
-                    )}
-                    {PLANNER_DEPARTMENTS.map((d) => (<option key={d.id} value={d.id}>{d.label}</option>))}
-                  </select>
-                  <select style={{ ...styles.input, width: 120 }} value={person.rateType} onChange={(e) => updateCrewMember(idx, "rateType", e.target.value)}>
-                    {CREW_RATE_TYPES.map((r) => (<option key={r.id} value={r.id}>{r.label}</option>))}
-                  </select>
-                  <input style={{ ...styles.input, width: 80 }} placeholder="Rate" value={person.rate} onChange={(e) => updateCrewMember(idx, "rate", e.target.value)} />
-                  {person.rateType !== "fixed" && (
-                    <input style={{ ...styles.input, width: 70 }} placeholder="Units" value={person.units} onChange={(e) => updateCrewMember(idx, "units", e.target.value)} />
+            <PlannerExpander label="How this is calculated">
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "6px 16px", fontSize: 13.5, color: paper }}>
+                <span>Client pays</span><span style={{ textAlign: "right" }}>{moneyWhole(cur, summary.budget)}</span>
+                <span style={{ color: textMuted }}>{`minus your profit (${summary.profitPercent}%)`}</span><span style={{ textAlign: "right", color: textMuted }}>{`-${moneyWhole(cur, summary.profit)}`}</span>
+                <span>Production budget</span><span style={{ textAlign: "right" }}>{moneyWhole(cur, summary.productionBudget)}</span>
+                <span style={{ color: textMuted }}>{`minus safety reserve (${summary.reservePercent}%)`}</span><span style={{ textAlign: "right", color: textMuted }}>{`-${moneyWhole(cur, summary.reserve)}`}</span>
+                <strong>You can spend</strong><strong style={{ textAlign: "right" }}>{moneyWhole(cur, summary.spendable)}</strong>
+              </div>
+              <PlannerField label="Safety reserve %" hint={`A cushion for revisions and surprises, kept out of the spendable amount. We'd suggest ${summary.recommendedReservePercent}% for a ${summary.complexity.label} job.`}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <input style={{ ...styles.input, width: 90 }} inputMode="decimal" value={form.contingencyPercent} onChange={set("contingencyPercent")} />
+                  {Number(form.contingencyPercent) !== summary.recommendedReservePercent && (
+                    <button type="button" style={styles.tabButton} onClick={() => setForm({ ...form, contingencyPercent: summary.recommendedReservePercent })}>
+                      {`Use ${summary.recommendedReservePercent}%`}
+                    </button>
                   )}
-                  <span style={{ ...styles.fieldHint, width: 90, textAlign: "right" }}>{cur}{formatMoney(cost)}</span>
-                  <button type="button" style={styles.iconButton} onClick={() => removeCrewMember(idx)}><TrashIcon /></button>
                 </div>
-                <div style={styles.plannerCrewRow}>
-                  <select style={{ ...styles.input, width: 130 }} value={person.skillLevel ?? 3} onChange={(e) => updateCrewMember(idx, "skillLevel", e.target.value)}>
-                    {SKILL_LEVELS.map((s) => (<option key={s.value} value={s.value}>{s.label}</option>))}
-                  </select>
-                  <div style={styles.field}>
-                    <input
-                      style={{ ...styles.input, width: 90 }}
-                      placeholder="Dependability"
-                      value={person.dependability ?? ""}
-                      onChange={(e) => updateCrewMember(idx, "dependability", e.target.value)}
-                      title="Dependability score, 0-100"
-                    />
-                  </div>
-                  <select style={{ ...styles.input, width: 160 }} value={person.availability || "available"} onChange={(e) => updateCrewMember(idx, "availability", e.target.value)}>
-                    {CREW_AVAILABILITY_OPTIONS.map((a) => (<option key={a.id} value={a.id}>{a.label}</option>))}
-                  </select>
-                  <input
-                    style={{ ...styles.input, width: 100 }}
-                    placeholder="Max capacity"
-                    value={person.capacityUnits ?? ""}
-                    onChange={(e) => updateCrewMember(idx, "capacityUnits", e.target.value)}
-                    title="Maximum units this person can take on for this plan"
-                  />
-                  <span style={{ ...styles.fieldHint, color: capacityBad ? "#FF4D4D" : undefined }}>
-                    Fit score {fit.score} {"\u00b7"} {fit.dependabilityInfo.label}
-                    {capacityBad && ` \u00b7 \u{1F534} over capacity by ${fit.capacity.overBy}`}
-                    {person.teamMemberId && ` \u00b7 linked to roster`}
-                  </span>
-                </div>
-                {person.department === "unmapped" && (
-                  <div style={{ ...styles.fieldHint, color: "#F2A65A", marginTop: 2 }}>
-                    {"No matching Planner department for this person's Team department \u2014 pick one above so they show up correctly in department-level totals."}
-                  </div>
-                )}
-                {(() => {
-                  const staleness = computeCrewStaleness(person, teamMembers);
-                  if (!staleness) return null;
-                  return (
-                    <>
-                      {staleness.archived && (
-                        <div style={{ ...styles.fieldHint, marginTop: 2 }}>
-                          This person has since been archived on the roster &mdash; they stay on this plan as-is.
-                        </div>
-                      )}
-                      {staleness.diffs.length > 0 && (
-                        <div style={{ marginTop: 2 }}>
-                          <button
-                            type="button"
-                            style={{ ...styles.fieldHint, background: "none", border: "none", padding: 0, color: "#F2A65A", cursor: "pointer", textDecoration: "underline" }}
-                            onClick={() => setShowStaleFor(showStaleFor === person.id ? null : person.id)}
-                          >
-                            Roster data has changed since this plan was created ({staleness.diffs.length})
-                          </button>
-                          {showStaleFor === person.id && (
-                            <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 4 }}>
-                              {staleness.diffs.map((d) => (
-                                <div key={d.field} style={{ ...styles.invoiceAmountsRow }}>
-                                  <span style={styles.fieldHint}>
-                                    {d.label}: this plan has "{String(person[d.field] ?? "")}", roster now says "{String(d.newValue)}"
-                                  </span>
-                                  <button
-                                    type="button"
-                                    style={styles.tabButton}
-                                    onClick={() => updateCrewMember(idx, d.field, d.newValue)}
-                                  >
-                                    Use roster value
-                                  </button>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </>
-                  );
-                })()}
-              </div>
-            );
-          })}
-          <button type="button" style={styles.tabButton} onClick={addCrewMember}>
-            <PlusIcon /> Add crew member
-          </button>
-          {(teamMembers || []).length > 0 && (
-            <select
-              style={{ ...styles.input, width: 220, marginLeft: 8 }}
-              value=""
-              onChange={(e) => {
-                if (e.target.value) addCrewMemberFromRoster(e.target.value);
-                e.target.value = "";
-              }}
-            >
-              <option value="">+ Add from Team roster…</option>
-              {teamMembers
-                // Archived members must not be offered when adding new
-                // crew to a plan (they can still exist inside historical
-                // Planner snapshots already saved before archiving).
-                .filter((tm) => tm.status !== "archived")
-                .map((tm) => (
-                  <option key={tm.id} value={tm.id}>
-                    {disambiguatedMemberLabel(tm, duplicateMemberNames)}
-                    {!duplicateMemberNames.has((tm.name || "").trim().toLowerCase()) && tm.role ? ` · ${tm.role}` : ""}
-                  </option>
-                ))}
-            </select>
-          )}
-          <div style={styles.budgetSummaryRow}>
-            <div style={styles.budgetStat}>
-              <span style={styles.label}>Total crew cost</span>
-              <span style={styles.budgetStatValue}>{cur}{formatMoney(intel.totalCrewCost)}</span>
-            </div>
-            <div style={styles.budgetStat}>
-              <span style={styles.label}>Crew cost ratio</span>
-              <span style={{ ...styles.budgetStatValue, color: intel.crewCostRatio.state === "critical" ? "#FF4D4D" : intel.crewCostRatio.state === "watch" ? "#F2A65A" : "#3DDC84" }}>
-                {intel.crewCostRatio.ratio.toFixed(0)}% of production budget
-              </span>
-            </div>
-          </div>
-          {intel.departmentSpend.filter((d) => d.crewCost > 0 && d.state !== "ok").map((d) => (
-            <p key={d.id} style={{ ...styles.fieldHint, color: d.state === "over" ? "#FF4D4D" : "#F2A65A" }}>
-              {d.state === "over"
-                ? `Crew costs exceed the ${d.label} allocation by ${cur}${formatMoney(d.crewCost - d.allocatedAmount)}.`
-                : `${d.label} has very little budget remaining for other expenses.`}
-            </p>
-          ))}
-        </div>
-      )}
+              </PlannerField>
+              {summary.committed > 0 && summary.priceForTeam && (
+                <span style={styles.fieldHint}>{`With the team below, the price that keeps your ${summary.profitPercent}% is about ${moneyWhole(cur, summary.priceForTeam)}.`}</span>
+              )}
+            </PlannerExpander>
+          </>
+        )}
 
-      {/* Production Scope + Timeline */}
-      {!hasProAccess ? (
-        <div style={styles.plannerSection}>
-          <div style={styles.plannerSectionTitle}>Production Scope & Timeline</div>
-          <ProUpgradePrompt feature="Timeline estimation" inline />
-        </div>
-      ) : (
-        <div style={styles.plannerSection}>
-          <div style={styles.plannerSectionTitle}>Production Scope</div>
-          <div style={styles.fieldRow}>
-            <div style={styles.field}>
-              <label style={styles.label}>Duration (seconds)</label>
-              <input style={styles.input} value={form.scope?.durationSeconds || ""} onChange={setScope("durationSeconds")} />
-            </div>
-            <div style={styles.field}>
-              <label style={styles.label}>Estimated shots</label>
-              <input style={styles.input} value={form.scope?.estimatedShots || ""} onChange={setScope("estimatedShots")} />
-            </div>
+        <PlannerExpander label="Project details (client, dates, status)">
+          <div style={ui.grid(180)}>
+            <PlannerField label="Client">
+              <input style={ui.fullInput} value={form.clientName} onChange={set("clientName")} placeholder="Optional" />
+            </PlannerField>
+            <PlannerField label="Project type">
+              <input style={ui.fullInput} value={form.projectType} onChange={set("projectType")} placeholder="e.g. Trailer" />
+            </PlannerField>
+            <PlannerField label="Start date">
+              <input type="date" style={ui.fullInput} value={form.startDate || ""} onChange={set("startDate")} />
+            </PlannerField>
+            <PlannerField label="Deadline">
+              <input type="date" style={ui.fullInput} value={form.deadline || ""} onChange={set("deadline")} />
+            </PlannerField>
           </div>
-          <div style={styles.fieldRow}>
-            <div style={styles.field}>
-              <label style={styles.label}>Characters</label>
-              <input style={styles.input} value={form.scope?.characters || ""} onChange={setScope("characters")} />
+          <PlannerField label="Where is this deal?">
+            <div style={ui.chips}>
+              {PLANNER_STATUSES.filter((s) => s.id !== "converted" || form.status === "converted").map((s) => (
+                <button key={s.id} type="button" disabled={s.id === "converted"} style={{ ...styles.tabButton, ...(form.status === s.id ? styles.tabButtonActive : {}) }} onClick={() => setForm({ ...form, status: s.id })}>
+                  {s.label}
+                </button>
+              ))}
             </div>
-            <div style={styles.field}>
-              <label style={styles.label}>Backgrounds</label>
-              <input style={styles.input} value={form.scope?.backgrounds || ""} onChange={setScope("backgrounds")} />
-            </div>
-            <div style={styles.field}>
-              <label style={styles.label}>Target FPS</label>
-              <input style={styles.input} value={form.scope?.targetFps || ""} onChange={setScope("targetFps")} />
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 10 }}>
-            {[
-              ["complexMovement", "Complex character movement"],
-              ["heavyEffects", "Heavy effects"],
-              ["cameraMovement", "Significant camera movement"],
-              ["dialogueHeavy", "Dialogue-heavy"],
-            ].map(([key, label]) => (
-              <label key={key} style={{ ...styles.fieldHint, display: "flex", alignItems: "center", gap: 6 }}>
-                <input type="checkbox" checked={!!form.scope?.[key]} onChange={setScope(key)} />
-                {label}
-              </label>
-            ))}
-          </div>
-          <p style={styles.fieldHint}>
-            Complexity: <strong>{intel.complexity.label}</strong> ({intel.complexity.score.toFixed(1)}){intel.complexity.factors.length > 0 && ` — ${intel.complexity.factors.join(", ")}`}
-          </p>
-          {intel.shotsPerSecond !== null && (
-            <p style={styles.fieldHint}>Shot density: {intel.shotsPerSecond.toFixed(2)} shots/sec.</p>
-          )}
-
-          <div style={styles.fieldDivider}>Timeline (estimated starting point)</div>
-          <p style={styles.fieldHint}>Estimated production: {intel.timeline.estimatedDays} days.</p>
-          {intel.timeline.phases.map((phase) => (
-            <div key={phase.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-              <span style={{ ...styles.fieldHint, width: 150 }}>{phase.label}</span>
-              <div style={styles.plannerTimelineTrack}>
-                <div style={{ ...styles.plannerTimelineFill, width: `${Math.min(100, (phase.days / intel.timeline.estimatedDays) * 100)}%` }} />
-              </div>
-              <span style={{ ...styles.fieldHint, width: 46, textAlign: "right" }}>{phase.days}d</span>
-            </div>
-          ))}
-          {intel.deadlineRisk.state !== "unknown" && (
-            <p style={{ ...styles.fieldHint, marginTop: 8, color: intel.deadlineRisk.state === "risk" ? "#FF4D4D" : intel.deadlineRisk.state === "tight" ? "#F2A65A" : "#3DDC84" }}>
-              {intel.deadlineRisk.state === "healthy" && `\u{1F7E2} Healthy schedule — ${intel.deadlineRisk.availableDays - intel.timeline.estimatedDays} day buffer.`}
-              {intel.deadlineRisk.state === "tight" && `\u{1F7E1} Tight schedule — ${intel.deadlineRisk.availableDays - intel.timeline.estimatedDays} day(s) of buffer.`}
-              {intel.deadlineRisk.state === "risk" && `\u{1F534} Deadline risk — estimated ${intel.timeline.estimatedDays} production days vs ${intel.deadlineRisk.availableDays} available.`}
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* Notes */}
-      <div style={styles.plannerSection}>
-        <div style={styles.plannerSectionTitle}>Notes</div>
-        <textarea style={styles.textarea} rows={3} value={form.notes} onChange={set("notes")} placeholder="Anything worth remembering about this plan..." />
+          </PlannerField>
+        </PlannerExpander>
       </div>
 
-      {/* Actions */}
-      <div style={styles.plannerSection}>
-        <div style={styles.plannerSectionTitle}>Actions</div>
-        {convertedProject && (
-          <p style={styles.fieldHint}>
-            This plan has already been converted to project "{convertedProject.name}".
-          </p>
+      {/* 2. The answer */}
+      <div style={ui.verdict(vColor)}>
+        <h3 style={ui.verdictHeadline(vColor)}>{v.headline}</h3>
+        <p style={{ margin: 0, fontSize: 14, color: textMuted, lineHeight: 1.5 }}>{v.detail}</p>
+        {v.action && (
+          <div style={ui.nextAction}>
+            <strong style={{ color: tealLight }}>Next: </strong>{v.action}
+          </div>
         )}
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button style={styles.saveButton} onClick={() => onSave({ ...form, name: form.name || "Untitled plan" })}>
-            Save
+        {v.fix && (
+          <button type="button" style={{ ...styles.saveButton, alignSelf: "flex-start" }} onClick={() => setForm({ ...form, departmentAllocations: v.fix.allocations })}>
+            {v.fix.label}
           </button>
-          {!isNew && (
-            <button style={styles.tabButton} onClick={() => onDuplicate(form)}>
-              Duplicate
+        )}
+        {summary.notes.length > 0 && (
+          <PlannerExpander label="All checks" count={summary.notes.length}>
+            {summary.notes.map((n, i) => (
+              <div key={i} style={ui.note(n.level)}><span style={ui.dot(n.level)} /><span>{n.text}</span></div>
+            ))}
+          </PlannerExpander>
+        )}
+      </div>
+
+      {/* 3. Where the money goes */}
+      {hasBudget && (
+        <div style={ui.card}>
+          <h3 style={ui.cardTitle}>Where the money goes</h3>
+          <p style={ui.cardSub}>{`A suggested split of your ${moneyWhole(cur, summary.spendable)}. It always adds up, so change what you like.`}</p>
+          <div>
+            {summary.departments.map((d) => {
+              const used = d.amount > 0 ? Math.min(100, (d.crewCost / d.amount) * 100) : 0;
+              const barColor = d.state === "over" ? "#FF4D4D" : d.state === "close" ? "#F2A65A" : teal;
+              return (
+                <div key={d.id} style={ui.dept}>
+                  <div style={ui.deptTop}>
+                    <span style={{ fontSize: 14, color: paper }}>
+                      {d.label} <span style={{ color: textMuted, fontSize: 12 }}>{`${Math.round(d.percent * 10) / 10}%`}</span>
+                    </span>
+                    {editSplit ? (
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ color: textMuted }}>{cur}</span>
+                        <PlannerMoneyInput value={d.amount} onCommit={(val) => setDeptAmount(d.id, val)} style={{ ...styles.input, width: 96, textAlign: "right", padding: "6px 10px" }} />
+                      </span>
+                    ) : (
+                      <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 600, color: paper }}>{moneyWhole(cur, d.amount)}</span>
+                    )}
+                  </div>
+                  {d.people > 0 && (
+                    <>
+                      <div style={ui.barTrack}><div style={{ height: "100%", width: `${used}%`, background: barColor, borderRadius: 999 }} /></div>
+                      <span style={{ fontSize: 12, color: d.state === "over" ? "#FF8A8A" : textMuted }}>
+                        {d.state === "over" ? `${moneyWhole(cur, d.crewCost)} planned, ${moneyWhole(cur, d.crewCost - d.amount)} over` : `${moneyWhole(cur, d.crewCost)} planned, ${moneyWhole(cur, d.left)} left`}
+                      </span>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div style={ui.footerRow}>
+            <button type="button" style={ui.expander} onClick={() => setEditSplit((x) => !x)}>
+              <span aria-hidden="true" style={{ display: "inline-block", width: 10 }}>{editSplit ? "\u25BE" : "\u25B8"}</span>
+              {editSplit ? "Done adjusting" : "Adjust split"}
             </button>
+            {editSplit && <button type="button" style={styles.tabButton} onClick={resetSplit}>Reset to recommended</button>}
+          </div>
+        </div>
+      )}
+
+      {/* 4. Who's doing it */}
+      {hasBudget && (
+        <div style={ui.card}>
+          <h3 style={ui.cardTitle}>Your team</h3>
+          {!hasProAccess ? (
+            <ProUpgradePrompt feature="Crew cost planning" inline />
+          ) : (
+            <>
+              <p style={ui.cardSub}>Add the people you're hiring. The planner checks them against the budget as you go.</p>
+              {(form.crew || []).length === 0 && (
+                <div style={ui.empty}>No one added yet. Start with whoever you'll pay the most, usually animation.</div>
+              )}
+              {(form.crew || []).map((person, idx) => (
+                <PlannerPersonCard
+                  key={person.id || idx}
+                  person={person}
+                  cur={cur}
+                  teamMembers={teamMembers}
+                  onChange={(key, value) => updateCrewMember(idx, key, value)}
+                  onRemove={() => removeCrewMember(idx)}
+                />
+              ))}
+              <div style={ui.footerRow}>
+                <button type="button" style={styles.tabButton} onClick={addCrewMember}><PlusIcon /> Add person</button>
+                {(teamMembers || []).length > 0 && (
+                  <select
+                    style={{ ...styles.input, maxWidth: 240 }}
+                    value=""
+                    aria-label="Add from Team roster"
+                    onChange={(e) => {
+                      if (e.target.value) addCrewMemberFromRoster(e.target.value);
+                      e.target.value = "";
+                    }}
+                  >
+                    <option value="">+ From your Team roster...</option>
+                    {teamMembers
+                      .filter((tm) => tm.status !== "archived")
+                      .map((tm) => (
+                        <option key={tm.id} value={tm.id}>
+                          {disambiguatedMemberLabel(tm, duplicateMemberNames)}
+                          {!duplicateMemberNames.has((tm.name || "").trim().toLowerCase()) && tm.role ? ` \u00B7 ${tm.role}` : ""}
+                        </option>
+                      ))}
+                  </select>
+                )}
+              </div>
+              {summary.committed > 0 && (
+                <span style={{ fontSize: 13, color: textMuted }}>
+                  {`Committed ${moneyWhole(cur, summary.committed)} of ${moneyWhole(cur, summary.spendable)}`}
+                </span>
+              )}
+            </>
           )}
-          {!isNew && (
-            hasProAccess ? (
-              <button style={styles.tabButton} onClick={() => onSaveAsTemplate(form)}>
-                Save as Template
-              </button>
-            ) : (
-              <button style={styles.tabButton} disabled title="Pro feature">
-                Save as Template <span style={styles.proBadge}>PRO</span>
-              </button>
-            )
+        </div>
+      )}
+
+      {/* 5. Scope and timeline */}
+      {hasBudget && (
+        <div style={ui.card}>
+          <h3 style={ui.cardTitle}>How big is the job?</h3>
+          {!hasProAccess ? (
+            <ProUpgradePrompt feature="Timeline estimation" inline />
+          ) : (
+            <>
+              <div style={ui.grid(130)}>
+                <PlannerField label="Length (seconds)">
+                  <input style={ui.fullInput} inputMode="decimal" value={form.scope?.durationSeconds || ""} onChange={setScope("durationSeconds")} placeholder="15" />
+                </PlannerField>
+                <PlannerField label="Number of shots">
+                  <input style={ui.fullInput} inputMode="decimal" value={form.scope?.estimatedShots || ""} onChange={setScope("estimatedShots")} placeholder="10" />
+                </PlannerField>
+                <PlannerField label="Main characters">
+                  <input style={ui.fullInput} inputMode="decimal" value={form.scope?.characters || ""} onChange={setScope("characters")} placeholder="2" />
+                </PlannerField>
+              </div>
+              <PlannerField label="How demanding is the animation?">
+                <div style={ui.chips}>
+                  {[["low", "Simple"], ["medium", "Medium"], ["high", "Complex"]].map(([id, label]) => (
+                    <button key={id} type="button" style={{ ...styles.tabButton, ...((form.scope?.complexity || "low") === id ? styles.tabButtonActive : {}) }} onClick={() => setComplexity(id)}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </PlannerField>
+              <PlannerExpander label="More options">
+                <div style={ui.grid(130)}>
+                  <PlannerField label="Backgrounds">
+                    <input style={ui.fullInput} inputMode="decimal" value={form.scope?.backgrounds || ""} onChange={setScope("backgrounds")} />
+                  </PlannerField>
+                </div>
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                  {[["complexMovement", "Complex movement"], ["heavyEffects", "Heavy effects"], ["cameraMovement", "Camera movement"], ["dialogueHeavy", "Lots of dialogue"]].map(([key, label]) => (
+                    <label key={key} style={{ fontSize: 13, color: textMuted, display: "flex", alignItems: "center", gap: 6 }}>
+                      <input type="checkbox" checked={!!form.scope?.[key]} onChange={setScope(key)} />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+              </PlannerExpander>
+
+              <div style={ui.tile}>
+                {summary.timeline ? (
+                  <>
+                    <span style={styles.label}>Estimated production</span>
+                    <span style={ui.tileValue}>{`about ${summary.timeline.low}-${summary.timeline.high} working days`}</span>
+                    {summary.deadlineRisk.state !== "unknown" && (
+                      <span style={{ fontSize: 13, color: summary.deadlineRisk.state === "risk" ? "#FF8A8A" : summary.deadlineRisk.state === "tight" ? "#F2A65A" : "#3DDC84" }}>
+                        {summary.deadlineRisk.state === "risk" && `Your deadline gives you ${summary.deadlineRisk.availableDays} working days. That looks too short.`}
+                        {summary.deadlineRisk.state === "tight" && `Your deadline gives you ${summary.deadlineRisk.availableDays} working days. That's tight.`}
+                        {summary.deadlineRisk.state === "healthy" && `Your deadline gives you ${summary.deadlineRisk.availableDays} working days. That looks comfortable.`}
+                      </span>
+                    )}
+                    <span style={styles.fieldHint}>{`A rough guide from your shot count, ${summary.complexity.label.toLowerCase()} complexity${summary.complexity.factors.length ? ` (${summary.complexity.factors.join(", ")})` : ""} and team size. Not based on your past projects.`}</span>
+                  </>
+                ) : (
+                  <span style={{ fontSize: 13.5, color: textMuted }}>Enter the number of shots to get a rough timeline.</span>
+                )}
+              </div>
+
+              {summary.timeline && (
+                <PlannerExpander label="See how the time splits up">
+                  {summary.timeline.phases.map((phase) => (
+                    <div key={phase.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <span style={{ ...styles.fieldHint, width: 150, margin: 0 }}>{phase.label}</span>
+                      <div style={{ ...ui.barTrack, flex: 1 }}><div style={{ height: "100%", width: `${phase.percent * 3}%`, maxWidth: "100%", background: teal, borderRadius: 999 }} /></div>
+                      <span style={{ ...styles.fieldHint, width: 36, margin: 0, textAlign: "right" }}>{`${phase.percent}%`}</span>
+                    </div>
+                  ))}
+                </PlannerExpander>
+              )}
+            </>
           )}
+        </div>
+      )}
+
+      {/* Notes + actions */}
+      <div style={ui.card}>
+        <PlannerField label="Notes">
+          <textarea style={{ ...styles.textarea, width: "100%", boxSizing: "border-box" }} rows={3} value={form.notes} onChange={set("notes")} placeholder="Anything worth remembering about this plan..." />
+        </PlannerField>
+        {convertedProject && (
+          <p style={styles.fieldHint}>{`This plan has already been converted to project "${convertedProject.name}".`}</p>
+        )}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <button style={styles.saveButton} onClick={() => onSave({ ...form, name: form.name || "Untitled plan" })}>Save</button>
           {!isNew && (
             hasProAccess ? (
               <button
@@ -12541,15 +12543,22 @@ function PlannerWorkspace({
             )
           )}
           <div style={{ flex: 1 }} />
-          {!isNew && (
-            <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
-              Delete
-            </button>
-          )}
-          <button style={styles.cancelButton} onClick={onClose}>
-            Close
-          </button>
+          <button style={styles.cancelButton} onClick={onClose}>Close</button>
         </div>
+        {!isNew && (
+          <PlannerExpander label="More actions">
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <button style={styles.tabButton} onClick={() => onDuplicate(form)}>Duplicate</button>
+              {hasProAccess ? (
+                <button style={styles.tabButton} onClick={() => onSaveAsTemplate(form)}>Save as Template</button>
+              ) : (
+                <button style={styles.tabButton} disabled title="Pro feature">Save as Template <span style={styles.proBadge}>PRO</span></button>
+              )}
+              <div style={{ flex: 1 }} />
+              <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>Delete plan</button>
+            </div>
+          </PlannerExpander>
+        )}
       </div>
     </div>
   );
