@@ -3,6 +3,11 @@ import { createPortal } from "react-dom";
 import { supabase, functionUrl } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import { genShareToken } from "./SharedViews.jsx";
+import FinanceModule, { PrivacyToggle } from "./finance/FinanceModule.jsx";
+import { ProjectPicker } from "./finance/ProjectPicker.jsx";
+import { useFinanceSummary } from "./finance/useLedger.js";
+import { displayMoney, codeToSymbol } from "./finance/currency.js";
+import { saveFxSnapshot, listBankAccounts } from "./finance/api.js";
 import {
   DonutBreakdown,
   RevenueTrendChart,
@@ -655,6 +660,9 @@ function emptyExpense(projectId = null, overrides = {}) {
     amount: "",
     currency: "$",
     date: new Date().toISOString().slice(0, 10),
+    vendor: "",
+    bankAccountId: null,
+    reference: "",
     ...overrides,
   };
 }
@@ -668,6 +676,9 @@ function expenseFromRow(row) {
     amount: row.amount,
     currency: row.currency || "$",
     date: row.date,
+    vendor: row.vendor || "",
+    bankAccountId: row.bank_account_id || null,
+    reference: row.reference || "",
   };
 }
 
@@ -679,6 +690,9 @@ function expenseToRow(expense, userId) {
     amount: parseMoney(expense.amount),
     currency: expense.currency || "$",
     date: expense.date,
+    vendor: expense.vendor || "",
+    bank_account_id: expense.bankAccountId || null,
+    reference: expense.reference || "",
     user_id: userId,
   };
 }
@@ -1863,104 +1877,6 @@ function lastSixMonthKeys() {
   return keys;
 }
 
-function computeFinanceData(projects, allInvoices, expenses, fxRates = {}) {
-  const months = lastSixMonthKeys();
-  // See excludeSupersededInvoices: without this, a paid proforma that
-  // later gets a receipt (and then a final invoice) generated from it
-  // would have its amount counted again at every stage.
-  const invoices = excludeSupersededInvoices(allInvoices);
-
-  const revenueByMonth = months.map(({ key, label }) => {
-    const total = invoices
-      .filter((inv) => inv.status === "paid" && monthKey(inv.paidDate) === key)
-      .reduce((sum, inv) => sum + convertToUSD(inv.amountPaid, inv.currency, fxRates), 0);
-    return { label, value: total };
-  });
-
-  const expensesByMonth = months.map(({ key, label }) => {
-    const total = expenses
-      .filter((e) => monthKey(e.date) === key)
-      .reduce((sum, e) => sum + convertToUSD(e.amount, e.currency, fxRates), 0);
-    return { label, value: total };
-  });
-
-  const profitByMonth = months.map((m, i) => ({
-    label: m.label,
-    value: revenueByMonth[i].value - expensesByMonth[i].value,
-  }));
-
-  // Accounts receivable: every unpaid invoice, with client, due date, and days overdue
-  const now = new Date();
-  const receivables = invoices
-    .filter((inv) => inv.status !== "paid")
-    .map((inv) => {
-      const project = projects.find((p) => p.id === inv.projectId);
-      const due = new Date(inv.dueDate);
-      const daysOverdue = !isNaN(due.getTime()) ? Math.floor((now - due) / 86400000) : null;
-      return {
-        invoiceNumber: inv.invoiceNumber,
-        client: project?.client || "-",
-        projectName: project?.name || "-",
-        amountDue:
-          convertToUSD(inv.amount, inv.currency, fxRates) - convertToUSD(inv.amountPaid, inv.currency, fxRates),
-        dueDate: inv.dueDate,
-        daysOverdue,
-      };
-    })
-    .sort((a, b) => (b.daysOverdue ?? -999) - (a.daysOverdue ?? -999));
-
-  // Per-project profitability, converted to USD so projects in different
-  // currencies can be compared side by side.
-  const profitability = projects
-    .filter((p) => !p.archived)
-    .map((p) => {
-      const projectInvoices = invoices.filter((inv) => inv.projectId === p.id);
-      const revenue = projectInvoices.reduce(
-        (sum, inv) => sum + convertToUSD(inv.amountPaid, inv.currency, fxRates),
-        0
-      );
-      const projectExpenses = expenses
-        .filter((e) => e.projectId === p.id)
-        .reduce((sum, e) => sum + convertToUSD(e.amount, e.currency, fxRates), 0);
-      const profit = revenue - projectExpenses;
-      const margin = revenue > 0 ? Math.round((profit / revenue) * 100) : null;
-      return { project: p, revenue, expenses: projectExpenses, profit, margin };
-    });
-
-  // Client value: group by client name across all projects, converted to USD
-  const clientMap = {};
-  projects.forEach((p) => {
-    const key = (p.client || "Unknown").trim() || "Unknown";
-    if (!clientMap[key]) clientMap[key] = { client: key, revenue: 0, projectCount: 0, lastDate: null };
-    const projectInvoices = invoices.filter((inv) => inv.projectId === p.id);
-    const revenue = projectInvoices.reduce(
-      (sum, inv) => sum + convertToUSD(inv.amountPaid, inv.currency, fxRates),
-      0
-    );
-    clientMap[key].revenue += revenue;
-    clientMap[key].projectCount += 1;
-    const d = new Date(p.deadline);
-    if (!isNaN(d.getTime()) && (!clientMap[key].lastDate || d > clientMap[key].lastDate)) {
-      clientMap[key].lastDate = d;
-    }
-  });
-  const clientValue = Object.values(clientMap)
-    .map((c) => ({ ...c, avgProjectValue: c.projectCount ? c.revenue / c.projectCount : 0 }))
-    .sort((a, b) => b.revenue - a.revenue);
-
-  const revenueByClient = clientValue.map((c) => ({ label: c.client, value: c.revenue }));
-
-  return {
-    revenueByMonth,
-    expensesByMonth,
-    profitByMonth,
-    receivables,
-    profitability,
-    clientValue,
-    revenueByClient,
-  };
-}
-
 const DEFAULT_SETTINGS = {
   studioName: "Studio Kairegi",
   studioTagline: "Anime-style animation & production",
@@ -2068,11 +1984,7 @@ function settingsToRow(settings, userId) {
   };
 }
 
-function computeDashboardStats(projects, cards, leads, allInvoices, fxRates = {}) {
-  // See excludeSupersededInvoices: a proforma that's since had a receipt
-  // (and then a final invoice) generated from it must drop out here too,
-  // or its amount gets counted at every stage of its own document chain.
-  const invoices = excludeSupersededInvoices(allInvoices);
+function computeDashboardStats(projects, cards, leads) {
   const activeProjects = projects.filter((p) => !p.archived);
   // "Active leads" means outreach actually in progress: contacted but not
   // yet resolved. That excludes the untouched "New" pool (never contacted)
@@ -2113,50 +2025,10 @@ function computeDashboardStats(projects, cards, leads, allInvoices, fxRates = {}
   const lastMonth = lastMonthDate.getMonth();
   const lastMonthYear = lastMonthDate.getFullYear();
 
-  // BUG FIX: same UTC-midnight parsing issue as monthKey/nearDeadline above
-  // - paidDate is a bare "YYYY-MM-DD" string, so `new Date(inv.paidDate)`
-  // could land on the wrong local calendar month for anyone west of UTC,
-  // right at the edges of the month.
-  const revenueThisMonth = invoices.reduce((sum, inv) => {
-    if (inv.status !== "paid" || !inv.paidDate) return sum;
-    const d = /^\d{4}-\d{2}-\d{2}$/.test(inv.paidDate) ? parseLocalDateStr(inv.paidDate) : new Date(inv.paidDate);
-    if (d.getMonth() === thisMonth && d.getFullYear() === thisYear) {
-      return sum + convertToUSD(inv.amountPaid, inv.currency, fxRates);
-    }
-    return sum;
-  }, 0);
-
-  const revenueLastMonth = invoices.reduce((sum, inv) => {
-    if (inv.status !== "paid" || !inv.paidDate) return sum;
-    const d = /^\d{4}-\d{2}-\d{2}$/.test(inv.paidDate) ? parseLocalDateStr(inv.paidDate) : new Date(inv.paidDate);
-    if (d.getMonth() === lastMonth && d.getFullYear() === lastMonthYear) {
-      return sum + convertToUSD(inv.amountPaid, inv.currency, fxRates);
-    }
-    return sum;
-  }, 0);
-
-  const revenueDelta =
-    revenueLastMonth > 0
-      ? Math.round(((revenueThisMonth - revenueLastMonth) / revenueLastMonth) * 100)
-      : revenueThisMonth > 0
-      ? 100
-      : null;
-
-  const unpaidInvoices = invoices.filter((inv) => inv.status !== "paid");
-  const outstandingTotal = unpaidInvoices.reduce(
-    (sum, inv) =>
-      sum + (convertToUSD(inv.amount, inv.currency, fxRates) - convertToUSD(inv.amountPaid, inv.currency, fxRates)),
-    0
-  );
-
   return {
     activeLeadsCount: activeLeads.length,
     activeProjectsCount: activeProjects.length,
     nearDeadline,
-    revenueThisMonth,
-    revenueDelta,
-    outstandingCount: unpaidInvoices.length,
-    outstandingTotal,
     dealsWon,
     dealsLost,
     projectsCompleted,
@@ -2969,6 +2841,7 @@ export default function ShotTracker() {
   const [editingLead, setEditingLead] = useState(null);
   const [editingInvoice, setEditingInvoice] = useState(null);
   const [editingExpense, setEditingExpense] = useState(null);
+  const [pickInvoiceProject, setPickInvoiceProject] = useState(false);
   const [editingBudgetPlanner, setEditingBudgetPlanner] = useState(null);
   const [editingTeamMember, setEditingTeamMember] = useState(null);
   const [teamMemberSaveError, setTeamMemberSaveError] = useState("");
@@ -3068,6 +2941,11 @@ export default function ShotTracker() {
 
 
   const userId = session?.user?.id || null;
+  // Stores each day's live rates so entries posted that day carry a real
+  // transaction-date rate (see finance_fx_to_base). Never overwrites a stored day.
+  useEffect(() => {
+    if (userId && fxRates && Object.keys(fxRates).length) saveFxSnapshot(userId, fxRates, fxUpdatedAt).catch(() => {});
+  }, [userId, fxRates, fxUpdatedAt]);
 
   const refreshFxRates = useCallback(async () => {
     const result = await fetchExchangeRates();
@@ -4305,6 +4183,23 @@ export default function ShotTracker() {
     await handleSaveLead({ ...lead, stage: "lost", outcomeReason: reason });
   };
 
+  // The ledger rejects changes that would desync the books (e.g. editing a posted
+  // invoice's paid amount). Those come back as P0001 with a readable message.
+  const alertLedgerError = (e) => {
+    if (e?.code === "P0001" && e.message) window.alert(e.message);
+  };
+
+  // Finance records payments/voids server-side; pull invoices/expenses back so the
+  // rest of the app (project boards, editors) shows the same paid amounts.
+  const refreshFinanceSources = async () => {
+    const [inv, exp] = await Promise.all([
+      supabase.from("invoices").select("*").order("created_at"),
+      supabase.from("expenses").select("*").order("created_at"),
+    ]);
+    if (inv.error || exp.error) return;
+    setData((prev) => ({ ...prev, invoices: (inv.data || []).map(invoiceFromRow), expenses: (exp.data || []).map(expenseFromRow) }));
+  };
+
   const handleSaveInvoice = async (invoice) => {
     setSaveState("saving");
     try {
@@ -4331,6 +4226,7 @@ export default function ShotTracker() {
       setEditingInvoice(null);
     } catch (e) {
       console.error("Invoice save failed:", e);
+      alertLedgerError(e);
       flashSave(false);
       // Keep the editor open on failure so unsaved edits aren't lost.
     }
@@ -4346,6 +4242,7 @@ export default function ShotTracker() {
       setEditingInvoice(null);
     } catch (e) {
       console.error("Invoice delete failed:", e);
+      alertLedgerError(e);
       flashSave(false);
     }
   };
@@ -4457,6 +4354,7 @@ export default function ShotTracker() {
       return true;
     } catch (e) {
       console.error("Expense save failed:", e);
+      alertLedgerError(e);
       flashSave(false);
       return false;
     }
@@ -4615,6 +4513,7 @@ export default function ShotTracker() {
       flashSave(true);
     } catch (e) {
       console.error("Expense delete failed:", e);
+      alertLedgerError(e);
       flashSave(false);
     }
     setEditingExpense(null);
@@ -5849,17 +5748,34 @@ export default function ShotTracker() {
       )}
 
       {view === "projects" && workspace === "finance" && (
-        <FinancePanel
-          projects={projects}
-          invoices={invoices}
-          expenses={expenses}
-          settings={settings}
-          onEditExpense={setEditingExpense}
-          onNewExpense={() => setEditingExpense(emptyExpense(null, { category: "Rent" }))}
-          fxRates={fxRates}
-          fxUpdatedAt={fxUpdatedAt}
-          onRefreshRates={refreshFxRates}
-        />
+        <>
+          <FinanceModule
+            userId={userId}
+            projects={projects}
+            invoices={invoices}
+            expenses={expenses}
+            cards={cards}
+            teamMembers={teamMembers}
+            liveRates={fxRates}
+            onNewInvoice={() => setPickInvoiceProject(true)}
+            onEditInvoice={setEditingInvoice}
+            onNewExpense={() => setEditingExpense(emptyExpense(null, { category: "Rent" }))}
+            onEditExpense={setEditingExpense}
+            refreshApp={refreshFinanceSources}
+          />
+          {pickInvoiceProject && (
+            <ProjectPicker
+              projects={projects}
+              onClose={() => setPickInvoiceProject(false)}
+              onPick={(proj) => {
+                setPickInvoiceProject(false);
+                setEditingInvoice(
+                  emptyInvoice(proj.id, nextInvoiceNumber(invoices.filter((inv) => inv.projectId === proj.id)), proj.currency || settings.currencySymbol)
+                );
+              }}
+            />
+          )}
+        </>
       )}
 
       {view === "projects" && workspace === "teams" && !hasProAccess && (
@@ -6439,201 +6355,6 @@ function ProjectCard({
       <div style={styles.progressTrack}>
         <div style={{ ...styles.progressFill, width: `${percent ?? 0}%` }} />
       </div>
-    </div>
-  );
-}
-
-function FinancePanel({ projects, invoices, expenses, settings, onEditExpense, onNewExpense, fxRates, fxUpdatedAt, onRefreshRates }) {
-  const [tab, setTab] = useState("overview");
-  const cur = "$"; // Finance always reports in USD, the studio's base currency
-  const finance = computeFinanceData(projects, invoices, expenses, fxRates);
-
-  const subTabs = [
-    { id: "overview", label: "Overview" },
-    { id: "receivable", label: "Receivable" },
-    { id: "profitability", label: "Profitability" },
-    { id: "clients", label: "Client Value" },
-    { id: "expenses", label: "Expenses" },
-  ];
-
-  return (
-    <div style={styles.invoicesWrap}>
-      <div style={styles.tabRow2}>
-        {subTabs.map((t) => (
-          <button
-            key={t.id}
-            style={{ ...styles.tabButton, ...(tab === t.id ? styles.tabButtonActive : {}) }}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      <div style={styles.fxNoteRow}>
-        <span style={styles.fieldHint}>
-          All figures shown in USD, converted live from each project's currency.
-          {fxUpdatedAt ? ` Rates as of ${new Date(fxUpdatedAt).toLocaleString()}.` : ""}
-        </span>
-        <button type="button" style={styles.copyButton} onClick={onRefreshRates}>
-          Refresh rates
-        </button>
-      </div>
-
-      {tab === "overview" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-          <div>
-            <div style={styles.fieldDivider}>Revenue, expenses & profit (6 months)</div>
-            <MonthlyFinanceChart
-              revenueByMonth={finance.revenueByMonth}
-              expensesByMonth={finance.expensesByMonth}
-              profitByMonth={finance.profitByMonth}
-              currencySymbol={cur}
-            />
-          </div>
-          <div>
-            <div style={styles.fieldDivider}>Revenue by client</div>
-            <RevenueByClientBarChart data={finance.revenueByClient} currencySymbol={cur} />
-          </div>
-        </div>
-      )}
-
-      {tab === "receivable" && (
-        <div style={styles.invoiceList}>
-          {finance.receivables.length === 0 ? (
-            <p style={styles.fieldHint}>No outstanding invoices.</p>
-          ) : (
-            finance.receivables.map((r) => (
-              <div key={r.invoiceNumber} style={styles.invoiceCard}>
-                <div style={styles.invoiceCardTop}>
-                  <span style={styles.invoiceNumber}>{r.invoiceNumber}</span>
-                  <span
-                    style={{
-                      ...styles.invoiceStatusTag,
-                      color: r.daysOverdue > 0 ? "#FF4D4D" : "#F2A65A",
-                      borderColor: r.daysOverdue > 0 ? "#FF4D4D" : "#F2A65A",
-                    }}
-                  >
-                    {r.daysOverdue > 0 ? `${r.daysOverdue}d overdue` : "Not yet due"}
-                  </span>
-                </div>
-                <div style={styles.cardMeta}>{r.client} &middot; {r.projectName}</div>
-                <div style={styles.invoiceAmountsRow}>
-                  <span style={styles.fieldHint}>Amount due {cur}{formatMoney(r.amountDue)}</span>
-                  <span style={styles.fieldHint}>Due {r.dueDate || "-"}</span>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      )}
-
-      {tab === "profitability" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          <div>
-            <div style={styles.fieldDivider}>Revenue vs expenses vs profit, by project</div>
-            <ProjectComparisonChart
-              data={finance.profitability.map((p) => ({
-                label: p.project.name || "Untitled project",
-                revenue: p.revenue,
-                expenses: p.expenses,
-                profit: p.profit,
-              }))}
-              currencySymbol={cur}
-            />
-          </div>
-          <div style={styles.invoiceList}>
-            {finance.profitability.length === 0 ? (
-              <p style={styles.fieldHint}>No active projects yet.</p>
-            ) : (
-              finance.profitability.map((p) => (
-                <div key={p.project.id} style={styles.invoiceCard}>
-                  <div style={styles.invoiceCardTop}>
-                    <span style={styles.invoiceNumber}>{p.project.name}</span>
-                    <span style={styles.fieldHint}>
-                      {p.margin === null ? "No revenue yet" : `${p.margin}% margin`}
-                    </span>
-                  </div>
-                  {p.project.client && <div style={styles.cardMeta}>{p.project.client}</div>}
-                  <div style={styles.invoiceAmountsRow}>
-                    <span style={styles.fieldHint}>Revenue {cur}{formatMoney(p.revenue)}</span>
-                    <span style={styles.fieldHint}>Expenses {cur}{formatMoney(p.expenses)}</span>
-                    <span style={styles.fieldHint}>
-                      Profit {cur}
-                      {formatMoney(p.profit)}
-                    </span>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      )}
-
-      {tab === "clients" && (
-        <div style={styles.invoiceList}>
-          {finance.clientValue.length === 0 ? (
-            <p style={styles.fieldHint}>No clients yet.</p>
-          ) : (
-            finance.clientValue.map((c) => (
-              <div key={c.client} style={styles.invoiceCard}>
-                <div style={styles.invoiceCardTop}>
-                  <span style={styles.invoiceNumber}>{c.client}</span>
-                  <span style={styles.fieldHint}>{c.projectCount} project{c.projectCount === 1 ? "" : "s"}</span>
-                </div>
-                <div style={styles.invoiceAmountsRow}>
-                  <span style={styles.fieldHint}>Total revenue {cur}{formatMoney(c.revenue)}</span>
-                  <span style={styles.fieldHint}>Avg value {cur}{formatMoney(c.avgProjectValue)}</span>
-                  <span style={styles.fieldHint}>
-                    Last project {c.lastDate ? c.lastDate.toISOString().slice(0, 10) : "-"}
-                  </span>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      )}
-
-      {tab === "expenses" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <button
-            type="button"
-            style={{ ...styles.newButton, alignSelf: "flex-start" }}
-            onClick={onNewExpense}
-          >
-            <PlusIcon />
-            Operational costs
-          </button>
-          <div style={styles.invoiceList}>
-            {expenses.length === 0 ? (
-              <p style={styles.fieldHint}>No expenses logged yet.</p>
-            ) : (
-              expenses
-                .slice()
-                .reverse()
-                .map((e) => {
-                  const project = projects.find((p) => p.id === e.projectId);
-                  return (
-                    <div key={e.id} className="kf-card" style={styles.invoiceCard} onClick={() => onEditExpense(e)}>
-                      <div style={styles.invoiceCardTop}>
-                        <span style={styles.invoiceNumber}>{e.category}</span>
-                        <span style={styles.fieldHint}>{e.date || "-"}</span>
-                      </div>
-                      {e.description && <div style={styles.cardMeta}>{e.description}</div>}
-                      <div style={styles.invoiceAmountsRow}>
-                        <span style={styles.fieldHint}>
-                          {cur}
-                          {formatMoney(convertToUSD(e.amount, e.currency, fxRates))}
-                        </span>
-                        <span style={styles.fieldHint}>{project ? project.name : "General / operational"}</span>
-                      </div>
-                    </div>
-                  );
-                })
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -8567,8 +8288,19 @@ function computeNeedsAttentionCounts(leads, schedule) {
 }
 
 function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToLeads, user, userId }) {
-  const stats = computeDashboardStats(projects, cards, leads, invoices, fxRates);
-  const cur = "$"; // Dashboard totals are always USD-converted for cross-project consistency
+  const stats = computeDashboardStats(projects, cards, leads, invoices);
+  // Financial figures come from the accounting ledger (finance/reports.js), in the studio's
+  // base currency using each transaction's own stored FX rate. Nothing is converted here.
+  const fin = useFinanceSummary(userId, invoices, projects);
+  const finBase = fin.summary?.baseCurrency || "USD";
+  const cur = codeToSymbol(finBase);
+  const money = (n) => (fin.summary ? displayMoney(finBase, n, fin.privacy) : "...");
+  const finDelta = (() => {
+    const sr = fin.summary?.series;
+    if (!sr || sr.length < 2 || fin.privacy) return null;
+    const prev = sr[sr.length - 2].revenue, now = sr[sr.length - 1].revenue;
+    return prev > 0 ? Math.round(((now - prev) / prev) * 100) : now > 0 ? 100 : null;
+  })();
   const schedule = settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE;
   // Scopes the "Cold email success rate" card's funnel (Sent/Responded/
   // Qualified/Won/Lost/No response) and both rate figures. Defaults to
@@ -8583,14 +8315,15 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     { label: "Deals lost", value: stats.dealsLost, icon: <XCircleIcon />, color: "#FF4D4D", onClick: () => onGoToLeads({ status: "lost" }) },
     {
       label: "Revenue this month",
-      value: `${cur}${formatMoney(stats.revenueThisMonth)}`,
+      value: money(fin.summary?.revenueMonth ?? 0),
+      sub: fin.summary?.fxIssueCount ? "some excluded" : undefined,
       icon: <InvoiceIcon />,
       color: "#3DDC84",
-      delta: stats.revenueDelta,
+      delta: finDelta,
     },
     {
       label: "Outstanding invoices",
-      value: `${stats.outstandingCount} \u00b7 ${cur}${formatMoney(stats.outstandingTotal)}`,
+      value: fin.summary ? `${fin.summary.receivableCount} \u00b7 ${money(fin.summary.receivableBase)}` : "...",
       icon: <InvoiceIcon />,
       color: "#F2A65A",
     },
@@ -8733,9 +8466,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   const months = lastSixMonthKeys();
   const revenueTrend = months.map(({ key, label }) => ({
     label,
-    value: invoices
-      .filter((inv) => inv.status === "paid" && monthKey(inv.paidDate) === key)
-      .reduce((sum, inv) => sum + convertToUSD(inv.amountPaid, inv.currency, fxRates), 0),
+    value: fin.summary?.series.find((m) => m.month === key)?.revenue || 0,
   }));
 
   // Outreach-over-time uses each email's own sent date (not the lead's
@@ -8755,6 +8486,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     <div style={styles.dashboardShell}>
       <div style={styles.dashboardTopStrip}>
         <DashboardGreeting user={user} compact />
+        {fin.data && <PrivacyToggle privacy={fin.privacy} onChange={fin.setPrivacy} compact />}
       </div>
 
       <div style={styles.dashboardKpiStrip}>
@@ -8791,10 +8523,16 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
           <div className="kf-card" style={styles.dashboardCard}>
             <div style={styles.dashboardCardHeaderRow}>
               <span style={styles.dashboardCardHeader}>Revenue trend</span>
-              <span style={styles.dashboardCardHeaderHint}>6 months · USD</span>
+              <span style={styles.dashboardCardHeaderHint}>{`6 months · ${finBase}`}</span>
             </div>
             <div style={styles.dashboardChartFill}>
-              <RevenueTrendChart data={revenueTrend} currencySymbol={cur} height="100%" compact />
+              {fin.privacy ? (
+                <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: textMuted, fontSize: 13 }}>
+                  Finances hidden
+                </div>
+              ) : (
+                <RevenueTrendChart data={revenueTrend} currencySymbol={cur} height="100%" compact />
+              )}
             </div>
           </div>
           <div className="kf-card" style={styles.dashboardCard}>
@@ -11844,8 +11582,18 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
   );
 }
 
+function codeOfSymbol(symbol) {
+  return CURRENCY_CODE_BY_SYMBOL[symbol] || "USD";
+}
+
 function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew }) {
   const [form, setForm] = useState(expense);
+  const [bankAccounts, setBankAccounts] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    listBankAccounts().then((b) => alive && setBankAccounts(b)).catch(() => {});
+    return () => { alive = false; };
+  }, []);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
 
   return (
@@ -11921,6 +11669,27 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
           <label style={styles.label}>Date</label>
           <input style={styles.input} type="date" value={form.date || ""} onChange={set("date")} />
         </div>
+
+        <div style={styles.fieldRow}>
+          <div style={styles.field}>
+            <label style={styles.label}>Vendor (optional)</label>
+            <input style={styles.input} value={form.vendor || ""} onChange={set("vendor")} placeholder="Who was paid" />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Paid from</label>
+            <select style={styles.input} value={form.bankAccountId || ""} onChange={(e) => setForm({ ...form, bankAccountId: e.target.value || null })}>
+              <option value="">Not specified (unallocated)</option>
+              {bankAccounts
+                .filter((b) => b.currency === codeOfSymbol(form.currency))
+                .map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name} ({b.currency})
+                  </option>
+                ))}
+            </select>
+          </div>
+        </div>
+        <p style={styles.fieldHint}>An account only appears here if it holds the same currency as the expense.</p>
 
         <div style={styles.modalFooter}>
           {!isNew && (
@@ -13695,7 +13464,10 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
               value={form.amountPaid}
               onChange={set("amountPaid")}
               placeholder="e.g. 0"
+              disabled={!isNew}
+              title={!isNew ? "Record payments in Finance > Sales" : undefined}
             />
+            {!isNew && <p style={styles.fieldHint}>Payments are recorded in Finance &gt; Sales, so the books stay in step.</p>}
           </div>
         </div>
 
@@ -13735,6 +13507,13 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
               value={form.paidDate || ""}
               onChange={set("paidDate")}
             />
+          </div>
+        ) : !isNew ? (
+          <div style={styles.field}>
+            <label style={styles.label}>Status</label>
+            <p style={styles.fieldHint}>
+              {form.status === "paid" ? "Paid." : parseMoney(form.amountPaid) > 0 ? "Partially paid." : "Unpaid."} Status follows the payments recorded in Finance &gt; Sales.
+            </p>
           </div>
         ) : (
           <div style={styles.field}>
