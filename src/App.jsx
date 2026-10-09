@@ -2693,26 +2693,6 @@ export default function ShotTracker() {
     Object.assign(DOC_TYPE_PREFIX, settings.invoicePrefixes);
   }, [settings]);
 
-  // Timer changes made on the dashboard are saved to the account (debounced) so they
-  // follow the user to another device.
-  const settingsRef = useRef(settings);
-  settingsRef.current = settings;
-  useEffect(() => {
-    if (!userId) return undefined;
-    let timer = null;
-    runtime.persistFocusTimer = (cfg) => {
-      clearTimeout(timer);
-      timer = setTimeout(async () => {
-        const cur = settingsRef.current;
-        if (JSON.stringify(cur.userPrefs.focusTimer) === JSON.stringify(cfg)) return;
-        const prefs = { ...cur.userPrefs, focusTimer: cfg };
-        setSettings({ ...cur, userPrefs: prefs });
-        const { error } = await supabase.from("user_settings").update({ user_prefs: prefs }).eq("user_id", userId);
-        if (error) console.error("Saving focus timer failed:", error);
-      }, 800);
-    };
-    return () => { clearTimeout(timer); runtime.persistFocusTimer = null; };
-  }, [userId]);
   const [fxRates, setFxRates] = useState({});
   const [fxUpdatedAt, setFxUpdatedAt] = useState(null);
   const [driveEmail, setDriveEmail] = useState(null);
@@ -2836,6 +2816,26 @@ export default function ShotTracker() {
 
 
   const userId = session?.user?.id || null;
+  // Timer changes made on the dashboard are saved to the account (debounced) so they
+  // follow the user to another device.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  useEffect(() => {
+    if (!userId) return undefined;
+    let timer = null;
+    runtime.persistFocusTimer = (cfg) => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        const cur = settingsRef.current;
+        if (JSON.stringify(cur.userPrefs.focusTimer) === JSON.stringify(cfg)) return;
+        const prefs = { ...cur.userPrefs, focusTimer: cfg };
+        setSettings({ ...cur, userPrefs: prefs });
+        const { error } = await supabase.from("user_settings").update({ user_prefs: prefs }).eq("user_id", userId);
+        if (error) console.error("Saving focus timer failed:", error);
+      }, 800);
+    };
+    return () => { clearTimeout(timer); runtime.persistFocusTimer = null; };
+  }, [userId]);
   // Stores each day's live rates so entries posted that day carry a real
   // transaction-date rate (see finance_fx_to_base). Never overwrites a stored day.
   useEffect(() => {
