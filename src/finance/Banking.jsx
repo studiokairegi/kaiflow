@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { S, T, Btn, Pill, Banner, Field, Modal, Table, Money, Totals, useBusy } from "./ui.jsx";
+import { S, T, Btn, Pill, Banner, Field, Modal, Table, Money, Totals, useBusy, fmtDate } from "./ui.jsx";
 import { FINANCE_CURRENCIES, formatMoney, r2, todayLocal } from "./currency.js";
 import { rpc } from "./api.js";
 import { bankBalances, legacyCash } from "./reports.js";
@@ -132,7 +132,7 @@ export function Banking({ ctx }) {
         <div style={S.card}>
           <h3 style={S.h3}>{sel.name} transactions</h3>
           <Table rowKey={(p) => p.lineId} empty="No transactions." rows={txns} columns={[
-            { key: "d", label: "Date", render: (p) => p.date },
+            { key: "d", label: "Date", render: (p) => fmtDate(p.date) },
             { key: "m", label: "Description", render: (p) => <>{p.entryMemo || p.memo}<div style={{ fontSize: 12, color: T.muted }}>{p.sourceType}{p.reference ? ` \u00b7 ${p.reference}` : ""}</div></> },
             { key: "i", label: "Money in", num: true, render: (p) => p.debit ? <Money code={p.currency} amount={p.debit} privacy={privacy} /> : "" },
             { key: "o", label: "Money out", num: true, render: (p) => p.credit ? <Money code={p.currency} amount={p.credit} privacy={privacy} /> : "" },

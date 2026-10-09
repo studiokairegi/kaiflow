@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { S, T, Btn, Pill, Banner, Field, Modal, Table, Money, Totals, useBusy } from "./ui.jsx";
+import { S, T, Btn, Pill, Banner, Field, Modal, Table, Money, Totals, useBusy, fmtDate } from "./ui.jsx";
 import { symbolToCode, formatMoney, todayLocal } from "./currency.js";
 import { rpc } from "./api.js";
 import { aging, documentPositions, expensesByCategory } from "./reports.js";
@@ -92,8 +92,8 @@ export function Sales({ ctx }) {
         <Table rowKey={(r) => r.inv.id} empty="No invoices yet." rows={rows} columns={[
           { key: "n", label: "Number", render: (r) => <><strong style={{ whiteSpace: "nowrap" }}>{r.inv.invoiceNumber}</strong>{r.inv.docType && r.inv.docType !== "invoice" ? <span style={{ color: T.muted }}> {"\u00b7"} {r.inv.docType}</span> : null}</> },
           { key: "c", label: "Client / project", render: (r) => <>{projectBy.get(r.inv.projectId)?.client || "-"}<div style={{ fontSize: 12, color: T.muted }}>{projectBy.get(r.inv.projectId)?.name}</div></> },
-          { key: "d", label: "Issued", render: (r) => <span style={{ whiteSpace: "nowrap" }}>{r.inv.issueDate || "-"}</span> },
-          { key: "due", label: "Due", render: (r) => <span style={{ whiteSpace: "nowrap" }}>{r.inv.dueDate || "-"}</span> },
+          { key: "d", label: "Issued", render: (r) => <span style={{ whiteSpace: "nowrap" }}>{r.inv.issueDate ? fmtDate(r.inv.issueDate) : "-"}</span> },
+          { key: "due", label: "Due", render: (r) => <span style={{ whiteSpace: "nowrap" }}>{r.inv.dueDate ? fmtDate(r.inv.dueDate) : "-"}</span> },
           { key: "t", label: "Total", num: true, render: (r) => <Money code={r.code} amount={r.total} privacy={privacy} /> },
           { key: "p", label: "Paid", num: true, render: (r) => <Money code={r.code} amount={r.paid} privacy={privacy} /> },
           { key: "b", label: "Balance", num: true, render: (r) => <strong><Money code={r.code} amount={r.outstanding} privacy={privacy} /></strong> },
@@ -109,7 +109,7 @@ export function Sales({ ctx }) {
           <div style={{ ...S.card, background: T.raised }}>
             <h3 style={S.h3}>Payments</h3>
             <Table rowKey={(p) => p.id} empty="No payments recorded." rows={payments(expanded)} columns={[
-              { key: "date", label: "Date", render: (p) => p.paid_date },
+              { key: "date", label: "Date", render: (p) => fmtDate(p.paid_date) },
               { key: "amt", label: "Amount", num: true, render: (p) => <Money code={p.currency} amount={Number(p.amount)} privacy={privacy} /> },
               { key: "m", label: "Method", render: (p) => p.method || "-" },
               { key: "acc", label: "Account", render: (p) => data.bankAccounts.find((b) => b.id === p.bank_account_id)?.name || (p.is_legacy ? "Legacy (unallocated)" : "-") },

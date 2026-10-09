@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { S, T, Btn, Pill, Banner, Field, Modal, Table, Money, Totals, useBusy } from "./ui.jsx";
+import { S, T, Btn, Pill, Banner, Field, Modal, Table, Money, Totals, useBusy, fmtDate } from "./ui.jsx";
 import { AgingCard } from "./Sales.jsx";
 import { FINANCE_CURRENCIES, symbolToCode, formatMoney, todayLocal } from "./currency.js";
 import { rpc } from "./api.js";
@@ -153,7 +153,7 @@ export function Purchases({ ctx }) {
           { key: "n", label: "Bill", render: (b) => <><strong>{b.bill_number || b.id.slice(0, 8)}</strong><div style={{ fontSize: 12, color: T.muted }}>{b.description}</div></> },
           { key: "v", label: "Vendor", render: (b) => b.vendor_name },
           { key: "p", label: "Project", render: (b) => projectBy.get(b.project_id)?.name || "-" },
-          { key: "due", label: "Due", render: (b) => b.due_date || "-" },
+          { key: "due", label: "Due", render: (b) => (b.due_date ? fmtDate(b.due_date) : "-") },
           { key: "t", label: "Amount", num: true, render: (b) => <Money code={b.currency} amount={num(b.amount)} privacy={privacy} /> },
           { key: "pd", label: "Paid", num: true, render: (b) => <Money code={b.currency} amount={num(b.amount_paid)} privacy={privacy} /> },
           { key: "o", label: "Outstanding", num: true, render: (b) => <strong><Money code={b.currency} amount={b.status === "void" ? 0 : Math.max(0, num(b.amount) - num(b.amount_paid))} privacy={privacy} /></strong> },
@@ -170,7 +170,7 @@ export function Purchases({ ctx }) {
           <div style={{ ...S.card, background: T.raised }}>
             <h3 style={S.h3}>Payments on this bill</h3>
             <Table rowKey={(p) => p.id} empty="No payments yet." rows={paymentsOf(expanded)} columns={[
-              { key: "d", label: "Date", render: (p) => p.paid_date },
+              { key: "d", label: "Date", render: (p) => fmtDate(p.paid_date) },
               { key: "a", label: "Amount", num: true, render: (p) => <Money code={p.currency} amount={num(p.amount)} privacy={privacy} /> },
               { key: "acc", label: "Paid from", render: (p) => data.bankAccounts.find((b) => b.id === p.bank_account_id)?.name || (p.is_legacy ? "Legacy (unallocated)" : "Unallocated") },
               { key: "m", label: "Method", render: (p) => p.method || "-" },

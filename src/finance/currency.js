@@ -1,3 +1,4 @@
+import { todayInZone } from "../settings/runtime.js";
 // Currency helpers for Finance. Currencies are identified by ISO CODE everywhere
 // in this module - never by symbol ("$" is not a currency: it can be USD, CAD, AUD...).
 // The rest of the app stores symbols (legacy); symbolToCode/codeToSymbol bridge that.
@@ -72,8 +73,8 @@ export function displayMoney(code, amount, privacy) {
   return privacy ? MASK : formatMoney(code, amount);
 }
 
-// Today's date in the user's own timezone as YYYY-MM-DD (UTC would be a day off for part of every day).
+// Today's date (YYYY-MM-DD) in the studio's chosen timezone (Settings > General), or the
+// browser's timezone when none is set. UTC would be a day off for part of every day.
 export function todayLocal() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return todayInZone();
 }

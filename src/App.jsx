@@ -3,6 +3,13 @@ import { createPortal } from "react-dom";
 import { supabase, functionUrl } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import { genShareToken } from "./SharedViews.jsx";
+import SettingsPage from "./settings/SettingsPage.jsx";
+import {
+  DEFAULT_SETTINGS, DEFAULT_LEAD_CHANNELS, MILESTONE_DEFAULTS, DEFAULT_FOLLOWUP_SCHEDULE, DEFAULT_ARCHIVE_DAYS,
+  settingsFromRow, settingsToRow,
+} from "./settings/schema.js";
+import { runtime, applyRuntimeSettings, categoryAllowed, playNotificationSound, workdayTargetSeconds, isWorkday, reasonsFor, todayInZone } from "./settings/runtime.js";
+import { emptyEmailSlots, normalizeEmailSlots, nextScheduledIndex, lastScheduledIndex, followupCountLabel, sendingTriggersNoResponse } from "./settings/followups.js";
 import FinanceModule, { PrivacyToggle } from "./finance/FinanceModule.jsx";
 import { ProjectPicker } from "./finance/ProjectPicker.jsx";
 import { useFinanceSummary } from "./finance/useLedger.js";
@@ -162,27 +169,7 @@ const LEAD_PRIORITIES = [
   { id: "cold", label: "Cold", icon: "\u26AA" },
 ];
 
-// Default cadence for the 4 automatic follow-ups after the initial cold
-// email (day 0). Stored per-studio on settings.followupSchedule so the
-// timing can be changed without a code change.
-const DEFAULT_FOLLOWUP_SCHEDULE = [
-  { label: "Initial email", dayOffset: 0 },
-  { label: "Follow-up #1", dayOffset: 3 },
-  { label: "Follow-up #2", dayOffset: 7 },
-  { label: "Follow-up #3", dayOffset: 14 },
-  { label: "Follow-up #4", dayOffset: 21 },
-];
 
-// How long a terminal lead sits before it's auto-archived. Mirrors the
-// defaults enforced server-side in migration_crm_v2.sql; kept here too so
-// the UI can explain the policy without a round trip.
-const DEFAULT_ARCHIVE_DAYS = {
-  won: 30,
-  lost: 60,
-  no_response: 60,
-  disqualified: 30,
-  closed: 30,
-};
 
 // ---- Outcome reasons (NOT pipeline stages) ----
 //
@@ -251,15 +238,14 @@ function stageTakesOutcomeReason(stageId) {
 
 // Disqualified leads get the qualification vocabulary; everything else
 // terminal gets the didn't-convert vocabulary.
-function outcomeReasonsForStage(stageId) {
-  return stageId === "disqualified" ? DISQUALIFY_REASONS : LOST_REASONS;
+function outcomeReasonsForStage(stageId, current = "") {
+  // Studio-configured: system defaults can be hidden, custom ones added; a reason
+  // already saved on the lead is always kept so old data still displays.
+  return stageId === "disqualified"
+    ? reasonsFor("disqualified", DISQUALIFY_REASONS, current)
+    : reasonsFor("lost", LOST_REASONS, current);
 }
 
-// Starting set of lead channels, editable and extendable per-studio via
-// Settings (or inline from the lead editor's "+" button). Stored on
-// user_settings so the same list is shared across the CRM board and the
-// dashboard breakdown.
-const DEFAULT_LEAD_CHANNELS = ["Referral", "Cold Email", "Instagram", "Website"];
 
 // Progress math lives in src/pipeline.js (design report v2 §6, §15) — this
 // is the only file allowed to duplicate it, and only as the thin adapter
@@ -382,8 +368,8 @@ function emptyProject(overrides = {}) {
     // v2 §4, §10.1 step 5). pipelineStageKeys only matters when
     // pipelinePreset is "custom" - it's the picker's working selection
     // before the project (and its project_stages rows) exist yet.
-    pipelinePreset: "full",
-    pipelineStageKeys: [],
+    pipelinePreset: runtime.pipelinePreset === "custom" && runtime.pipelineStageKeys.length ? "custom" : "full",
+    pipelineStageKeys: runtime.pipelinePreset === "custom" ? [...runtime.pipelineStageKeys] : [],
     pipelineStages: [],
     ...overrides,
   };
@@ -474,7 +460,13 @@ function numberForDocType(existingNumber, docType) {
   return series ? `${prefix}-${series}` : "";
 }
 
+function addDaysIso(iso, days) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
 function emptyInvoice(projectId, suggestedNumber, currency = "$", docType = "invoice") {
+  const issueDate = todayInZone();
   return {
     projectId,
     invoiceNumber: suggestedNumber,
@@ -485,8 +477,9 @@ function emptyInvoice(projectId, suggestedNumber, currency = "$", docType = "inv
     amount: "",
     amountPaid: "",
     currency,
-    issueDate: new Date().toISOString().slice(0, 10),
-    dueDate: "",
+    issueDate,
+    // Pre-filled from Settings > Finance > payment terms (0 = leave blank).
+    dueDate: runtime.paymentTermsDays > 0 ? addDaysIso(issueDate, runtime.paymentTermsDays) : "",
     status: "unpaid",
     paidDate: "",
     convertedFromId: null,
@@ -637,7 +630,6 @@ function convertAmount(amount, fromSymbol, toSymbol, fxRates) {
 }
 
 const MILESTONE_LABELS = ["Upfront payment", "Mid-project payment", "Delivery payment"];
-const MILESTONE_DEFAULTS = [50, 25, 25];
 
 const EXPENSE_CATEGORIES = [
   "Animator Payments",
@@ -942,12 +934,12 @@ function emptyBudgetPlanner(overrides = {}) {
     projectType: "",
     budget: "",
     currency: "$",
-    targetProfitPercent: 25,
+    targetProfitPercent: runtime.plannerDefaults.profitPercent,
     notes: "",
     status: "draft",
     deadline: "",
     startDate: "",
-    contingencyPercent: 7,
+    contingencyPercent: runtime.plannerDefaults.contingencyPercent,
     departmentAllocations: defaultDepartmentAllocations(),
     crew: [],
     scope: {
@@ -956,7 +948,7 @@ function emptyBudgetPlanner(overrides = {}) {
       estimatedShots: "",
       characters: "",
       backgrounds: "",
-      targetFps: 24,
+      targetFps: runtime.plannerDefaults.fps,
     },
     templateId: null,
     convertedProjectId: null,
@@ -1877,112 +1869,6 @@ function lastSixMonthKeys() {
   return keys;
 }
 
-const DEFAULT_SETTINGS = {
-  studioName: "Studio Kairegi",
-  studioTagline: "Anime-style animation & production",
-  // Billing/registration details for invoice headers - separate from the
-  // studioName brand above because a sole proprietor's registered legal
-  // name (what an accountant needs on the document) can differ from the
-  // studio's public-facing name. Left blank, invoices fall back to
-  // studioName so nothing breaks for studios that don't need the distinction.
-  studioLegalName: "",
-  studioAddress: "",
-  studioTaxId: "",
-  studioVatStatus: "",
-  studioEtimsNumber: "",
-  currencySymbol: "$",
-  milestoneDefaults: MILESTONE_DEFAULTS,
-  defaultLandingTab: "dashboard",
-  defaultShotPriority: "normal",
-  logoUrl: "",
-  hasSeenTutorial: false,
-  plan: "free",
-  isAdmin: false,
-  leadChannels: DEFAULT_LEAD_CHANNELS,
-  followupSchedule: DEFAULT_FOLLOWUP_SCHEDULE,
-  // Channels toggled off from the dashboard's "Leads by channel" breakdown.
-  // Purely a display filter - hidden channels still exist, are still
-  // selectable on leads, and still show up everywhere else (CRM board
-  // filter chips, lead editor).
-  dashboardHiddenChannels: [],
-  // App-level kill switch for desktop notifications, independent of the
-  // browser permission. Notification.permission only ever goes from
-  // "default" to "granted"/"denied" and back to "default" via the
-  // browser's own site settings - there was no in-app way to just turn
-  // notifications off without digging into browser chrome. This is that
-  // toggle; notifyBrowser() checks it before ever calling Notification().
-  notificationsEnabled: true,
-  // Configurable per-studio payment-method list for Teams (brief §13),
-  // rather than hardcoding the options everywhere they're offered.
-  paymentMethodOptions: ["Bank transfer", "PayPal", "Payoneer", "M-Pesa", "Wise", "Cash", "Other"],
-};
-
-function settingsFromRow(row) {
-  if (!row) return DEFAULT_SETTINGS;
-  return {
-    studioName: row.studio_name || DEFAULT_SETTINGS.studioName,
-    studioTagline: row.studio_tagline || DEFAULT_SETTINGS.studioTagline,
-    studioLegalName: row.studio_legal_name || "",
-    studioAddress: row.studio_address || "",
-    studioTaxId: row.studio_tax_id || "",
-    studioVatStatus: row.studio_vat_status || "",
-    studioEtimsNumber: row.studio_etims_number || "",
-    currencySymbol: row.currency_symbol || DEFAULT_SETTINGS.currencySymbol,
-    milestoneDefaults:
-      Array.isArray(row.milestone_defaults) && row.milestone_defaults.length === 3
-        ? row.milestone_defaults
-        : MILESTONE_DEFAULTS,
-    defaultLandingTab: row.default_landing_tab || DEFAULT_SETTINGS.defaultLandingTab,
-    defaultShotPriority: row.default_shot_priority || DEFAULT_SETTINGS.defaultShotPriority,
-    logoUrl: row.logo_url || "",
-    hasSeenTutorial: row.has_seen_tutorial || false,
-    plan: row.plan || "free",
-    isAdmin: row.is_admin || false,
-    leadChannels:
-      Array.isArray(row.lead_channels) && row.lead_channels.length > 0
-        ? row.lead_channels
-        : DEFAULT_LEAD_CHANNELS,
-    followupSchedule:
-      Array.isArray(row.followup_schedule) && row.followup_schedule.length === 5
-        ? row.followup_schedule
-        : DEFAULT_FOLLOWUP_SCHEDULE,
-    dashboardHiddenChannels: Array.isArray(row.dashboard_hidden_channels) ? row.dashboard_hidden_channels : [],
-    notificationsEnabled: row.notifications_enabled !== false,
-    paymentMethodOptions:
-      Array.isArray(row.payment_method_options) && row.payment_method_options.length > 0
-        ? row.payment_method_options
-        : DEFAULT_SETTINGS.paymentMethodOptions,
-  };
-}
-
-function settingsToRow(settings, userId) {
-  return {
-    user_id: userId,
-    studio_name: settings.studioName,
-    studio_tagline: settings.studioTagline,
-    studio_legal_name: settings.studioLegalName || "",
-    studio_address: settings.studioAddress || "",
-    studio_tax_id: settings.studioTaxId || "",
-    studio_vat_status: settings.studioVatStatus || "",
-    studio_etims_number: settings.studioEtimsNumber || "",
-    currency_symbol: settings.currencySymbol,
-    milestone_defaults: settings.milestoneDefaults,
-    default_landing_tab: settings.defaultLandingTab,
-    default_shot_priority: settings.defaultShotPriority,
-    logo_url: settings.logoUrl,
-    has_seen_tutorial: settings.hasSeenTutorial,
-    plan: settings.plan,
-    is_admin: settings.isAdmin,
-    lead_channels: settings.leadChannels || DEFAULT_LEAD_CHANNELS,
-    followup_schedule: settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE,
-    dashboard_hidden_channels: settings.dashboardHiddenChannels || [],
-    notifications_enabled: settings.notificationsEnabled !== false,
-    payment_method_options:
-      Array.isArray(settings.paymentMethodOptions) && settings.paymentMethodOptions.length > 0
-        ? settings.paymentMethodOptions
-        : DEFAULT_SETTINGS.paymentMethodOptions,
-  };
-}
 
 function computeDashboardStats(projects, cards, leads) {
   const activeProjects = projects.filter((p) => !p.archived);
@@ -2264,25 +2150,13 @@ function generateShotChecklist(count, projectId, client) {
 }
 
 function emptyEmails() {
-  return [
-    { label: "Initial Email", message: "", sent: false, dateSent: null },
-    { label: "Follow-up 1", message: "", sent: false, dateSent: null },
-    { label: "Follow-up 2", message: "", sent: false, dateSent: null },
-    { label: "Follow-up 3", message: "", sent: false, dateSent: null },
-    { label: "Follow-up 4", message: "", sent: false, dateSent: null },
-  ];
+  return emptyEmailSlots(runtime.followupSchedule.length);
 }
 
-// Older leads only have 4 slots (Initial + 3 follow-ups). Pad them with the
-// new Follow-up 4 slot so the schedule/automation code can always assume 5.
-function normalizeEmails(emails) {
-  const base = emails && emails.length ? emails : emptyEmails();
-  if (base.length >= 5) return base;
-  const padded = [...base];
-  while (padded.length < 5) {
-    padded.push({ label: `Follow-up ${padded.length}`, message: "", sent: false, dateSent: null });
-  }
-  return padded;
+// A lead keeps its OWN email slots; they are padded up (never down) to the studio's
+// schedule length, so changing the cadence never destroys a lead's emails.
+function normalizeEmails(emails, scheduleLength = runtime.followupSchedule.length) {
+  return normalizeEmailSlots(emails, scheduleLength);
 }
 
 function emptyLead(stage = "pool", channel = "") {
@@ -2474,7 +2348,7 @@ function parseLocalDateStr(dateStr) {
 // it. Returns null once outreach is over (terminal stage, or all 5 emails
 // already sent).
 function computeFollowupStatus(lead, schedule = DEFAULT_FOLLOWUP_SCHEDULE) {
-  const emails = normalizeEmails(lead.emails);
+  const emails = normalizeEmails(lead.emails, schedule.length);
   const isTerminal = isLeadStageTerminal(lead.stage);
   const anchorStr = emails[0]?.dateSent;
   const lastSent = emails.filter((e) => e.sent && e.dateSent).map((e) => e.dateSent).sort().pop() || null;
@@ -2489,10 +2363,11 @@ function computeFollowupStatus(lead, schedule = DEFAULT_FOLLOWUP_SCHEDULE) {
     };
   }
 
-  const nextIndex = emails.findIndex((e) => !e.sent);
+  // Only slots inside the studio's schedule can be due; extra slots on older leads never are.
+  const nextIndex = nextScheduledIndex(emails, schedule);
   if (isTerminal || nextIndex === -1) {
     return {
-      nextActionLabel: nextIndex === -1 ? "No response after 4 follow-ups" : null,
+      nextActionLabel: nextIndex === -1 ? `No response after ${followupCountLabel(emails, schedule)}` : null,
       dueLabel: null,
       lastContactedLabel: lastSent ? formatShortDate(lastSent) : null,
       isDue: false,
@@ -2811,13 +2686,33 @@ export default function ShotTracker() {
   });
   const { projects, cards, leads, invoices, expenses, teamMembers, activity, budgetPlanners, plannerTemplates, pipelineLibrary } = data;
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
-  // Keeps the module-level flag notifyBrowser() checks in sync with the
-  // account setting. Runs on every settings load/change, including the
-  // initial DEFAULT_SETTINGS render, so nothing can notify before this has
-  // had a chance to turn it off.
+  // Pushes the account's settings into the runtime config that module-level helpers read
+  // (notification switches and sound, workweek, invoice prefixes, defaults for new records).
   useEffect(() => {
-    setNotificationsEnabledFlag(settings.notificationsEnabled);
-  }, [settings.notificationsEnabled]);
+    applyRuntimeSettings(settings);
+    Object.assign(DOC_TYPE_PREFIX, settings.invoicePrefixes);
+  }, [settings]);
+
+  // Timer changes made on the dashboard are saved to the account (debounced) so they
+  // follow the user to another device.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  useEffect(() => {
+    if (!userId) return undefined;
+    let timer = null;
+    runtime.persistFocusTimer = (cfg) => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        const cur = settingsRef.current;
+        if (JSON.stringify(cur.userPrefs.focusTimer) === JSON.stringify(cfg)) return;
+        const prefs = { ...cur.userPrefs, focusTimer: cfg };
+        setSettings({ ...cur, userPrefs: prefs });
+        const { error } = await supabase.from("user_settings").update({ user_prefs: prefs }).eq("user_id", userId);
+        if (error) console.error("Saving focus timer failed:", error);
+      }, 800);
+    };
+    return () => { clearTimeout(timer); runtime.persistFocusTimer = null; };
+  }, [userId]);
   const [fxRates, setFxRates] = useState({});
   const [fxUpdatedAt, setFxUpdatedAt] = useState(null);
   const [driveEmail, setDriveEmail] = useState(null);
@@ -3207,6 +3102,11 @@ export default function ShotTracker() {
     const checkNeedsAttention = () => {
       const schedule = settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE;
       const counts = computeNeedsAttentionCounts(leads, schedule);
+      // Each digest line honours its own switch in Settings > Alerts & display.
+      if (!categoryAllowed("followups")) counts.followupsDueToday = 0;
+      if (!categoryAllowed("hotLeads")) counts.hotAwaitingResponse = 0;
+      if (!categoryAllowed("proposals")) counts.proposalsAwaitingResponse = 0;
+      if (!categoryAllowed("deadlines")) counts.approachingDeadline = 0;
       const total = counts.followupsDueToday + counts.hotAwaitingResponse + counts.proposalsAwaitingResponse + counts.approachingDeadline;
       if (total === 0) return;
       const todayStr = new Date().toDateString();
@@ -3235,11 +3135,36 @@ export default function ShotTracker() {
       if (error) throw error;
       setSettings(nextSettings);
       flashSave(true);
+      return true;
     } catch (e) {
       console.error("Settings save failed:", e);
       flashSave(false);
+      return false; // the Settings page keeps the user's edits and shows "Couldn't save"
     }
-    setView(settingsReturnView);
+  };
+
+  const handleCloseSettings = () => setView(settingsReturnView);
+
+  // Disconnect Drive / Patreon and delete the account run server-side (they need the
+  // service role); identity comes from the session token, never from the request body.
+  const handleAccountAction = async (action, payload = {}) => {
+    try {
+      const { data: out, error } = await supabase.functions.invoke("account-manage", { body: { action, ...payload } });
+      if (error) throw error;
+      if (out?.error) throw new Error(out.error);
+      if (action === "disconnect_drive") setDriveEmail(null);
+      if (action === "disconnect_patreon") {
+        setPatreonConnected(false);
+        setPatreonEmail(null);
+        setPatreonIsPro(false);
+        await loadSettings();
+      }
+      if (action === "delete_account") await handleSignOut();
+      return { ok: true };
+    } catch (e) {
+      console.error("Account action failed:", e);
+      return { ok: false, error: e?.message || "That didn't work. Please try again." };
+    }
   };
 
   // Adds a new channel to the shared, per-studio channel list (used by the
@@ -3270,9 +3195,8 @@ export default function ShotTracker() {
     const next = { ...settings, hasSeenTutorial: true };
     setSettings(next);
     try {
-      const { error } = await supabase
-        .from("user_settings")
-        .upsert(settingsToRow(next, userId), { onConflict: "user_id" });
+      // Its own narrow write: the settings form no longer carries this flag.
+      const { error } = await supabase.from("user_settings").update({ has_seen_tutorial: true }).eq("user_id", userId);
       if (error) throw error;
     } catch (e) {
       console.error("Couldn't save tutorial status:", e);
@@ -3466,7 +3390,7 @@ export default function ShotTracker() {
         });
 
         if (String(row.event_type || "").trim().toLowerCase() === "freelancer_upload") {
-          notifyBrowser("New freelancer upload", row.description || "A freelancer uploaded a file.", "freelancer-upload-" + (row.shot_id || row.id));
+          notifyBrowser("New freelancer upload", row.description || "A freelancer uploaded a file.", "freelancer-upload-" + (row.shot_id || row.id), "freelancerUploads");
         }
       })
       .subscribe();
@@ -4227,6 +4151,7 @@ export default function ShotTracker() {
     } catch (e) {
       console.error("Invoice save failed:", e);
       alertLedgerError(e);
+      if (e?.code === "23505") window.alert("That invoice number is already used. Close the editor and reopen it to get the next free number.");
       flashSave(false);
       // Keep the editor open on failure so unsaved edits aren't lost.
     }
@@ -5226,9 +5151,6 @@ export default function ShotTracker() {
             {saveState === "saved" && "Saved"}
             {saveState === "error" && "Save failed"}
           </span>
-          <button style={styles.iconButtonGhost} onClick={handleExport} title="Export backup">
-            <DownloadIcon />
-          </button>
           <button
             className={tutorialHighlightTarget === "settings" ? "kf-tutorial-highlight" : undefined}
             style={styles.iconButtonGhost}
@@ -5239,9 +5161,6 @@ export default function ShotTracker() {
             title="Settings"
           >
             <GearIcon />
-          </button>
-          <button style={styles.iconButtonGhost} onClick={handleSignOut} title="Sign out">
-            <SignOutIcon />
           </button>
           {view === "settings" ? null : view === "board" && boardTab === "invoices" ? (
             <button
@@ -5370,7 +5289,7 @@ export default function ShotTracker() {
           to live inside it; navigating to Leads/Finance/etc. tore it down
           and, with it, any open pop-out. `visible` keeps its own on-page
           tile showing only on the Dashboard, matching the old layout. */}
-      <StudioTimeCard userId={userId} visible={view === "projects" && workspace === "dashboard"} />
+      <StudioTimeCard userId={userId} visible={view === "projects" && workspace === "dashboard"} accountConfig={settings.userPrefs?.focusTimer} />
 
       {showTabs && (
         <div style={styles.tabRow}>
@@ -5485,20 +5404,27 @@ export default function ShotTracker() {
 
       {view === "settings" && (
         <SettingsPage
+          key={userId}
           settings={settings}
+          userId={userId}
           email={session.user.email}
-          driveEmail={driveEmail}
-          onConnectDrive={handleConnectDrive}
-          patreonEmail={patreonEmail}
-          patreonConnected={patreonConnected}
-          patreonIsPro={patreonIsPro}
-          onConnectPatreon={handleConnectPatreon}
+          pipelineLibrary={pipelineLibrary}
+          reasonDefaults={{ lost: LOST_REASONS, disqualified: DISQUALIFY_REASONS }}
+          periodOptions={[{ id: "all", label: "All time" }, ...DASHBOARD_PERIOD_OPTIONS.map(({ id, label }) => ({ id, label }))]}
+          drive={{ email: driveEmail, onConnect: handleConnectDrive }}
+          patreon={{ email: patreonEmail, connected: patreonConnected, isPro: patreonIsPro, onConnect: handleConnectPatreon }}
+          links={{ manage: PATREON_MANAGE_URL, checkout: PATREON_CHECKOUT_URL, freeLimit: FREE_PROJECT_LIMIT }}
+          onEnableNotifications={async () => (notificationsSupported() ? Notification.requestPermission() : "unsupported")}
           onReplayTutorial={handleReplayTutorial}
           onOpenSupport={() => {
             setView(settingsReturnView);
             setShowSupportModal(true);
           }}
+          onExport={handleExport}
+          onSignOut={handleSignOut}
+          onAccountAction={handleAccountAction}
           onSave={handleSaveSettings}
+          onClose={handleCloseSettings}
         />
       )}
 
@@ -6085,6 +6011,7 @@ export default function ShotTracker() {
           onAddChannel={handleAddLeadChannel}
           leads={leads}
           followupSchedule={settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE}
+          autoNoResponse={settings.autoNoResponse !== false}
         />
       )}
 
@@ -7020,18 +6947,15 @@ function dayKey(d) {
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
-// The studio's normal schedule: Monday-Friday, 09:00-17:00, i.e. an 8h
-// target per weekday. Anything clocked beyond a day's target is overtime;
-// weekends carry a 0h target, so time worked on them is overtime in full.
-const WORKDAY_TARGET_SECONDS = 8 * 3600;
-
+// The studio's working week comes from Settings (days + hours per day, default
+// Mon-Fri 8h). Anything clocked beyond a day's target is overtime; non-working days
+// carry a 0h target, so time worked on them is overtime in full.
 function isScheduledWorkday(date) {
-  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
-  return day >= 1 && day <= 5;
+  return isWorkday(date);
 }
 
 function scheduledSecondsForDay(date) {
-  return isScheduledWorkday(date) ? WORKDAY_TARGET_SECONDS : 0;
+  return workdayTargetSeconds(date);
 }
 
 // "9h 30m", "6h", "45m", "0h" - drops a trailing "0m" so the daily
@@ -7054,23 +6978,28 @@ const POMODORO_STORAGE_KEY = "kairil_pomodoro_config";
 // it's kept in localStorage rather than added to work_sessions - it's read
 // once on mount and re-saved whenever the user changes it in the setup form.
 function loadPomodoroConfig() {
-  if (typeof window === "undefined" || !window.localStorage) return POMODORO_DEFAULTS;
+  // The account's saved timer (Settings > Production) is the source of truth;
+  // localStorage is only a cache so the timer is right before settings finish loading.
+  const account = runtime.focusTimer && { ...POMODORO_DEFAULTS, ...runtime.focusTimer };
+  if (typeof window === "undefined" || !window.localStorage) return account || POMODORO_DEFAULTS;
   try {
     const saved = JSON.parse(window.localStorage.getItem(POMODORO_STORAGE_KEY));
     if (saved && typeof saved === "object") return { ...POMODORO_DEFAULTS, ...saved };
   } catch {
-    // malformed or missing - fall through to defaults
+    // malformed or missing - fall through
   }
-  return POMODORO_DEFAULTS;
+  return account || POMODORO_DEFAULTS;
 }
 
 function savePomodoroConfig(config) {
-  if (typeof window === "undefined" || !window.localStorage) return;
-  try {
-    window.localStorage.setItem(POMODORO_STORAGE_KEY, JSON.stringify(config));
-  } catch {
-    // storage unavailable/full - the in-memory config still works for this session
+  if (typeof window !== "undefined" && window.localStorage) {
+    try {
+      window.localStorage.setItem(POMODORO_STORAGE_KEY, JSON.stringify(config));
+    } catch {
+      // storage unavailable/full - the in-memory config still works for this session
+    }
   }
+  if (runtime.persistFocusTimer) runtime.persistFocusTimer(config); // save to the account too
 }
 
 // Unlike pomodoroConfig (a standing preference), this is the live in-progress
@@ -7127,16 +7056,13 @@ function notificationsSupported() {
 // that don't all have the settings object threaded through them. Synced
 // once, on the main app component, whenever settings load or change - see
 // setNotificationsEnabledFlag below.
-let notificationsEnabledFlag = true;
-function setNotificationsEnabledFlag(enabled) {
-  notificationsEnabledFlag = enabled !== false;
-}
-
-function notifyBrowser(title, body, tag) {
-  if (!notificationsEnabledFlag) return;
+function notifyBrowser(title, body, tag, category) {
   if (!notificationsSupported() || Notification.permission !== "granted") return;
+  // Master switch AND the per-category switch from Settings > Alerts & display.
+  if (!categoryAllowed(category)) return;
   try {
     const n = new Notification(title, { body, tag, icon: "/icon-512.png" });
+    playNotificationSound();
     // Auto-close after a while so these don't pile up in the OS
     // notification center if the studio steps away for hours.
     setTimeout(() => n.close(), 20000);
@@ -7600,7 +7526,7 @@ function StudioTimeSummaryModal({ userId, onClose }) {
     </div>
   );
 }
-function StudioTimeCard({ userId, visible = true }) {
+function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   const [activeSession, setActiveSession] = useState(null); // { id, clockIn, sessionType } | null
   const [todaySeconds, setTodaySeconds] = useState(0); // completed sessions today, in seconds
   const [now, setNow] = useState(() => new Date());
@@ -7615,6 +7541,13 @@ function StudioTimeCard({ userId, visible = true }) {
   // not a separate tracking system.
   const [pomodoroConfig, setPomodoroConfig] = useState(loadPomodoroConfig);
   const [showPomodoroSetup, setShowPomodoroSetup] = useState(false);
+  // Pull in the account's timer settings once they load or are changed in Settings.
+  const accountConfigKey = JSON.stringify(accountConfig);
+  useEffect(() => {
+    if (!accountConfig) return;
+    const next = { ...POMODORO_DEFAULTS, ...accountConfig };
+    setPomodoroConfig((cur) => (JSON.stringify(next) === JSON.stringify(cur) ? cur : next));
+  }, [accountConfigKey]);
   // Initialized from localStorage (not just null) so a remount - navigating
   // away from the Dashboard and back, or a page refresh - can resume an
   // in-progress focus session instead of silently dropping the countdown.
@@ -7889,14 +7822,15 @@ function StudioTimeCard({ userId, visible = true }) {
         notifyBrowser(
           completingLongBreak ? "Long break time" : "Break time",
           `Focus session done - ${minutes} minute${minutes === 1 ? "" : "s"} to recharge.`,
-          "kairil-pomodoro"
+          "kairil-pomodoro",
+          "focus"
         );
       } else {
         const finishedLabel = pomodoroPhase === "longBreak" ? "Long break" : "Break";
         setPomodoroCycle(pomodoroPhase === "longBreak" ? 1 : (c) => c + 1);
         const started = await beginPomodoroWork();
         if (started) {
-          notifyBrowser("Back to focus", `${finishedLabel} over - starting the next focus session.`, "kairil-pomodoro");
+          notifyBrowser("Back to focus", `${finishedLabel} over - starting the next focus session.`, "kairil-pomodoro", "focus");
         }
       }
     } finally {
@@ -8305,7 +8239,11 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   // Scopes the "Cold email success rate" card's funnel (Sent/Responded/
   // Qualified/Won/Lost/No response) and both rate figures. Defaults to
   // "All time" so the card doesn't silently shrink on first load.
-  const [dashboardPeriod, setDashboardPeriod] = useState("all");
+  const [dashboardPeriod, setDashboardPeriod] = useState(settings.userPrefs?.dashboardPeriod || "all");
+  // Follow the saved default when it loads or changes (a manual pick in between is kept until then).
+  useEffect(() => {
+    setDashboardPeriod(settings.userPrefs?.dashboardPeriod || "all");
+  }, [settings.userPrefs?.dashboardPeriod]);
 
   const statItems = [
     { label: "Active projects", value: stats.activeProjectsCount, sub: `${stats.projectsCompleted} completed`, icon: <FolderIcon />, color: teal, onClick: onGoToProjects },
@@ -8862,498 +8800,6 @@ function TutorialModal({ onComplete, onStepChange }) {
   );
 }
 
-function SettingsPage({ settings, email, driveEmail, onConnectDrive, patreonEmail, patreonIsPro, patreonConnected, onConnectPatreon, onReplayTutorial, onOpenSupport, onSave }) {
-  const [form, setForm] = useState(settings);
-  const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
-  const [notificationPermission, setNotificationPermission] = useState(
-    notificationsSupported() ? Notification.permission : "unsupported"
-  );
-  const handleEnableNotifications = async () => {
-    if (!notificationsSupported()) return;
-    const result = await Notification.requestPermission();
-    setNotificationPermission(result);
-    if (result === "granted") {
-      notifyBrowser("Notifications enabled", "Kairil will let you know about Pomodoro breaks and CRM follow-ups.", "kairil-test");
-    }
-  };
-  const setMilestone = (i) => (e) => {
-    const next = [...form.milestoneDefaults];
-    next[i] = e.target.value;
-    setForm({ ...form, milestoneDefaults: next });
-  };
-
-  const [newChannel, setNewChannel] = useState("");
-  const channels = form.leadChannels || DEFAULT_LEAD_CHANNELS;
-  const addChannel = () => {
-    const trimmed = newChannel.trim();
-    if (!trimmed) return;
-    if (channels.some((c) => c.toLowerCase() === trimmed.toLowerCase())) {
-      setNewChannel("");
-      return;
-    }
-    setForm({ ...form, leadChannels: [...channels, trimmed] });
-    setNewChannel("");
-  };
-  const removeChannel = (channel) => {
-    setForm({ ...form, leadChannels: channels.filter((c) => c !== channel) });
-  };
-  // Dashboard visibility per channel. Stores the *hidden* set rather than the
-  // visible one, so a newly added channel shows up on the dashboard by
-  // default instead of silently disappearing until it's opted back in.
-  const hiddenChannels = form.dashboardHiddenChannels || [];
-  const toggleChannelDashboardVisibility = (channel) => {
-    const next = hiddenChannels.includes(channel)
-      ? hiddenChannels.filter((c) => c !== channel)
-      : [...hiddenChannels, channel];
-    setForm({ ...form, dashboardHiddenChannels: next });
-  };
-
-  const [supportMessages, setSupportMessages] = useState(null);
-  const [loadingInbox, setLoadingInbox] = useState(false);
-  const loadSupportInbox = async () => {
-    setLoadingInbox(true);
-    const { data } = await supabase
-      .from("support_messages")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(30);
-    setSupportMessages(data || []);
-    setLoadingInbox(false);
-  };
-
-  return (
-    <div style={styles.settingsPageWrap}>
-      <div style={styles.settingsGrid}>
-        <div style={styles.settingsSection}>
-          <h2 style={styles.settingsSectionTitle}>Account</h2>
-          <div style={styles.field}>
-            <label style={styles.label}>Account email</label>
-            <p style={styles.fieldHint}>{email}</p>
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>Plan</label>
-            {settings.isAdmin ? (
-              <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>{"\ud83d\udc51"} Admin {"\u2014"} full access</p>
-            ) : settings.plan === "pro" ? (
-              <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>Pro</p>
-            ) : (
-              <>
-                <p style={styles.fieldHint}>Free</p>
-                <p style={styles.fieldHint}>
-                  Teams, Client Portal, Freelancer links, milestones, and multiple currencies are Pro features.
-                  Free accounts are also limited to {FREE_PROJECT_LIMIT} active projects.
-                </p>
-              </>
-            )}
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>Patreon</label>
-            {settings.isAdmin ? (
-              <p style={styles.fieldHint}>
-                {patreonConnected ? `Connected${patreonEmail ? ` as ${patreonEmail}` : ""}` : "Not connected"}, admin
-                override enabled so this doesn't affect your access either way.
-              </p>
-            ) : !patreonConnected ? (
-              <>
-                <p style={styles.fieldHint}>
-                  Connect your Patreon account to unlock Pro automatically if you're subscribed to the Pro tier.
-                </p>
-                <button type="button" style={styles.addRevisionButton} onClick={onConnectPatreon}>
-                  Connect Patreon
-                </button>
-              </>
-            ) : patreonIsPro ? (
-              <>
-                <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>
-                  {"\u2713"} Connected{patreonEmail ? ` as ${patreonEmail}` : ""} {"\u00b7"} Pro member
-                </p>
-                <a
-                  href={PATREON_MANAGE_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ ...styles.fieldHint, color: teal }}
-                >
-                  Manage membership on Patreon
-                </a>
-              </>
-            ) : (
-              <>
-                <p style={styles.fieldHint}>
-                  Connected{patreonEmail ? ` as ${patreonEmail}` : ""}, not currently subscribed to Pro.
-                </p>
-                <div style={styles.fieldRow}>
-                  <a href={PATREON_CHECKOUT_URL} target="_blank" rel="noreferrer" style={styles.newButton}>
-                    Become a Patron
-                  </a>
-                  <button type="button" style={styles.addRevisionButton} onClick={onConnectPatreon}>
-                    Refresh status
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-
-        <div style={styles.settingsSection}>
-          <h2 style={styles.settingsSectionTitle}>Studio branding</h2>
-          <div style={styles.field}>
-            <label style={styles.label}>Studio name</label>
-            <input style={styles.input} value={form.studioName} onChange={set("studioName")} />
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>Studio tagline</label>
-            <input style={styles.input} value={form.studioTagline} onChange={set("studioTagline")} />
-            <p style={styles.fieldHint}>Shown on generated invoice PDFs.</p>
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>Legal name (optional)</label>
-            <input
-              style={styles.input}
-              value={form.studioLegalName || ""}
-              onChange={set("studioLegalName")}
-              placeholder="e.g. registered business name"
-            />
-            <p style={styles.fieldHint}>
-              Used on invoice headers instead of the studio name above, if set.
-            </p>
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>Studio address (optional)</label>
-            <textarea
-              style={{ ...styles.input, minHeight: 60, resize: "vertical" }}
-              value={form.studioAddress || ""}
-              onChange={set("studioAddress")}
-            />
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>Tax ID / VAT number (optional)</label>
-            <input
-              style={styles.input}
-              value={form.studioTaxId || ""}
-              onChange={set("studioTaxId")}
-            />
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>VAT status (optional)</label>
-            <input
-              style={styles.input}
-              value={form.studioVatStatus || ""}
-              onChange={set("studioVatStatus")}
-              placeholder="e.g. VAT registered / exempt"
-            />
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>eTIMS number (optional)</label>
-            <input
-              style={styles.input}
-              value={form.studioEtimsNumber || ""}
-              onChange={set("studioEtimsNumber")}
-            />
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>Currency symbol</label>
-            <input
-              style={{ ...styles.input, maxWidth: 80 }}
-              value={form.currencySymbol}
-              onChange={set("currencySymbol")}
-            />
-            <p style={styles.fieldHint}>
-              Used as the studio default. Projects and invoices can pick their own currency too.
-            </p>
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>Studio logo URL (optional)</label>
-            <input
-              style={styles.input}
-              value={form.logoUrl || ""}
-              onChange={set("logoUrl")}
-              placeholder="https://..."
-            />
-            <p style={styles.fieldHint}>
-              A direct link to your logo image. Shown on the client portal.
-            </p>
-          </div>
-        </div>
-
-        <div style={styles.settingsSection}>
-          <h2 style={styles.settingsSectionTitle}>Defaults</h2>
-          <div style={styles.fieldRow}>
-            <div style={styles.field}>
-              <label style={styles.label}>Default landing tab</label>
-              <select style={styles.input} value={form.defaultLandingTab} onChange={set("defaultLandingTab")}>
-                <option value="dashboard">Dashboard</option>
-                <option value="projects">Projects</option>
-                <option value="leads">Leads</option>
-                <option value="finance">Finance</option>
-              </select>
-            </div>
-            <div style={styles.field}>
-              <label style={styles.label}>Default shot priority</label>
-              <select
-                style={styles.input}
-                value={form.defaultShotPriority}
-                onChange={set("defaultShotPriority")}
-              >
-                <option value="low">Low</option>
-                <option value="normal">Normal</option>
-                <option value="rush">Rush</option>
-              </select>
-            </div>
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>Default milestone split (%)</label>
-            <div style={styles.fieldRow}>
-              {form.milestoneDefaults.map((val, i) => (
-                <input
-                  key={i}
-                  style={styles.input}
-                  type="number"
-                  min="0"
-                  max="100"
-                  value={val}
-                  onChange={setMilestone(i)}
-                />
-              ))}
-            </div>
-            <p style={styles.fieldHint}>
-              Upfront / Mid-project / Delivery. Used as the starting point on "Set up milestones."
-            </p>
-          </div>
-        </div>
-
-        <div style={styles.settingsSection}>
-          <h2 style={styles.settingsSectionTitle}>Lead channels</h2>
-          <div style={styles.field}>
-            <div style={styles.lostReasonGrid}>
-              {channels.map((channel) => {
-                const isHidden = hiddenChannels.includes(channel);
-                return (
-                  <span key={channel} style={{ ...styles.fileNameRow, ...styles.cardTag, gap: 6, padding: "5px 6px 5px 12px" }}>
-                    {channel}
-                    <button
-                      type="button"
-                      title={isHidden ? "Hidden from the Dashboard breakdown — click to show" : "Shown on the Dashboard breakdown — click to hide"}
-                      style={{
-                        ...styles.copyButton,
-                        padding: "2px 8px",
-                        fontSize: 10,
-                        color: isHidden ? textMuted : teal,
-                        borderColor: isHidden ? border : teal,
-                      }}
-                      onClick={() => toggleChannelDashboardVisibility(channel)}
-                    >
-                      {isHidden ? "Hidden" : "Shown"}
-                    </button>
-                    <button
-                      type="button"
-                      style={{ ...styles.iconButton, width: 18, height: 18 }}
-                      onClick={() => removeChannel(channel)}
-                    >
-                      <CloseIcon />
-                    </button>
-                  </span>
-                );
-              })}
-            </div>
-            <div style={{ ...styles.fieldRow, marginTop: 8 }}>
-              <input
-                style={styles.input}
-                value={newChannel}
-                onChange={(e) => setNewChannel(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") addChannel();
-                }}
-                placeholder="e.g. TikTok"
-              />
-              <button type="button" style={styles.addRevisionButton} onClick={addChannel}>
-                <PlusIcon />
-                Add channel
-              </button>
-            </div>
-            <p style={styles.fieldHint}>
-              Track where leads come from. These show up as filters on the Leads board.
-              "Shown"/"Hidden" controls only whether a channel appears in the Dashboard's
-              "Leads by channel" breakdown — a hidden channel is still selectable on leads
-              and still works as a filter everywhere else.
-            </p>
-          </div>
-        </div>
-
-        <div style={styles.settingsSection}>
-          <h2 style={styles.settingsSectionTitle}>Follow-up cadence</h2>
-          <div style={styles.field}>
-            <label style={styles.label}>Days after initial email</label>
-            <div style={styles.fieldRow}>
-              {(form.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE).map((step, i) => (
-                <input
-                  key={step.label}
-                  style={styles.input}
-                  type="number"
-                  min="0"
-                  disabled={i === 0}
-                  value={step.dayOffset}
-                  title={step.label}
-                  onChange={(e) => {
-                    const next = (form.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE).map((s, j) =>
-                      j === i ? { ...s, dayOffset: Number(e.target.value) } : s
-                    );
-                    setForm({ ...form, followupSchedule: next });
-                  }}
-                />
-              ))}
-            </div>
-            <p style={styles.fieldHint}>
-              Initial / Follow-up 1 / 2 / 3 / 4. After the 4th follow-up goes unanswered, a lead
-              automatically moves to No Response.
-            </p>
-          </div>
-        </div>
-
-        <div style={styles.settingsSection}>
-          <h2 style={styles.settingsSectionTitle}>Notifications</h2>
-          <div style={styles.field}>
-            <label style={styles.label}>Notifications</label>
-            <div style={styles.lostReasonGrid}>
-              <button
-                type="button"
-                style={{
-                  ...styles.reviewStatusButton,
-                  borderColor: form.notificationsEnabled !== false ? teal : border,
-                  color: form.notificationsEnabled !== false ? tealLight : textMuted,
-                  background: form.notificationsEnabled !== false ? "rgba(47,191,166,0.1)" : "transparent",
-                }}
-                onClick={() => setForm({ ...form, notificationsEnabled: true })}
-              >
-                On
-              </button>
-              <button
-                type="button"
-                style={{
-                  ...styles.reviewStatusButton,
-                  borderColor: form.notificationsEnabled === false ? teal : border,
-                  color: form.notificationsEnabled === false ? tealLight : textMuted,
-                  background: form.notificationsEnabled === false ? "rgba(47,191,166,0.1)" : "transparent",
-                }}
-                onClick={() => setForm({ ...form, notificationsEnabled: false })}
-              >
-                Off
-              </button>
-            </div>
-            <p style={styles.fieldHint}>
-              {form.notificationsEnabled === false
-                ? "Off - Kairil won't send desktop notifications, even if your browser allows them."
-                : "On - controls Pomodoro-break and CRM follow-up alerts. Your browser's own permission below still has to be granted too."}
-            </p>
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>Desktop notification permission</label>
-            {notificationPermission === "unsupported" ? (
-              <p style={styles.fieldHint}>Your browser doesn't support desktop notifications.</p>
-            ) : notificationPermission === "granted" ? (
-              <p style={{ ...styles.fieldHint, color: "#3DDC86" }}>
-                Granted - you'll get a notification for Pomodoro breaks and when leads need attention
-                {form.notificationsEnabled === false ? " once you turn notifications back on above." : "."}
-              </p>
-            ) : notificationPermission === "denied" ? (
-              <p style={styles.fieldHint}>
-                Blocked in your browser's site settings. Allow notifications for this site to turn these back on.
-              </p>
-            ) : (
-              <>
-                <p style={styles.fieldHint}>
-                  Get notified when a focus session's break starts, and when leads need follow-up -
-                  even if Kairil isn't the tab you're looking at.
-                </p>
-                <button type="button" style={styles.addRevisionButton} onClick={handleEnableNotifications}>
-                  Enable notifications
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-
-        <div style={styles.settingsSection}>
-          <h2 style={styles.settingsSectionTitle}>Integrations</h2>
-          <div style={styles.field}>
-            <label style={styles.label}>Google Drive</label>
-            {driveEmail ? (
-              <p style={{ ...styles.fieldHint, color: "#3DDC84" }}>Connected as {driveEmail}</p>
-            ) : (
-              <>
-                <p style={styles.fieldHint}>
-                  Connect to auto-create project folders and let freelancer uploads land straight in
-                  Drive.
-                </p>
-                <button type="button" style={styles.addRevisionButton} onClick={onConnectDrive}>
-                  Connect Google Drive
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-
-        <div style={styles.settingsSection}>
-          <h2 style={styles.settingsSectionTitle}>Help & support</h2>
-          <div style={styles.field}>
-            <label style={styles.label}>Help</label>
-            <div style={styles.fieldRow}>
-              <button type="button" style={styles.addRevisionButton} onClick={onReplayTutorial}>
-                Replay tutorial
-              </button>
-              <button type="button" style={styles.addRevisionButton} onClick={onOpenSupport}>
-                Report a problem
-              </button>
-            </div>
-          </div>
-
-          {settings.isAdmin && (
-            <div style={styles.field}>
-              <label style={styles.label}>Support inbox</label>
-              {supportMessages === null ? (
-                <button type="button" style={styles.addRevisionButton} onClick={loadSupportInbox} disabled={loadingInbox}>
-                  {loadingInbox ? "Loading..." : "Load recent messages"}
-                </button>
-              ) : supportMessages.length === 0 ? (
-                <p style={styles.fieldHint}>Nothing's come in yet.</p>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 220, overflowY: "auto" }}>
-                  {supportMessages.map((m) => (
-                    <div key={m.id} style={{ ...styles.fileNameRow, flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
-                        <span style={{ ...styles.fieldHint, color: paper }}>{m.email}</span>
-                        <span style={styles.fieldHint}>{new Date(m.created_at).toLocaleDateString()}</span>
-                      </div>
-                      <p style={{ fontSize: 13, color: paper, margin: 0 }}>{m.message}</p>
-                      {m.page_context && <span style={styles.fieldHint}>from: {m.page_context}</span>}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div style={styles.settingsFooterBar}>
-        <button style={styles.saveButton} onClick={() => onSave(form)}>
-          Save settings
-        </button>
-      </div>
-    </div>
-  );
-}
 
 const ACTIVITY_ICONS = {
   freelancer_upload: "\u2191",
@@ -10461,8 +9907,9 @@ function LeadEditor({
   onAddChannel,
   leads = [],
   followupSchedule = DEFAULT_FOLLOWUP_SCHEDULE,
+  autoNoResponse = true,
 }) {
-  const [form, setForm] = useState(lead);
+  const [form, setForm] = useState(() => ({ ...lead, emails: normalizeEmails(lead.emails, followupSchedule.length) }));
   const [isEditing, setIsEditing] = useState(isNew);
   // Quick-pick reason list shown by the "Mark lost" button specifically.
   // Separate from the inline "Outcome reason" picker below (which handles
@@ -10548,7 +9995,7 @@ function LeadEditor({
     if (index === 0 && patch.sent === true && form.stage === "pool") {
       nextStage = "cold_email";
     }
-    if (index === 4 && patch.sent === true && form.stage === "cold_email") {
+    if (sendingTriggersNoResponse({ index, sent: patch.sent === true, stage: form.stage, emails: nextEmails, schedule: followupSchedule, autoNoResponse })) {
       nextStage = "no_response";
     }
     setForm({
@@ -10881,7 +10328,7 @@ function LeadEditor({
               <div style={styles.field}>
                 <label style={styles.label}>Reason</label>
                 <div style={styles.lostReasonGrid}>
-                  {outcomeReasonsForStage(form.stage).map((reason) => (
+                  {outcomeReasonsForStage(form.stage, form.outcomeReason).map((reason) => (
                     <button
                       key={reason}
                       type="button"
@@ -11036,7 +10483,7 @@ function LeadEditor({
               <div style={styles.field}>
                 <label style={styles.label}>Reason lost</label>
                 <div style={styles.lostReasonGrid}>
-                  {LOST_REASONS.map((reason) => (
+                  {reasonsFor("lost", LOST_REASONS, "").map((reason) => (
                     <button
                       key={reason}
                       style={styles.lostReasonButton}

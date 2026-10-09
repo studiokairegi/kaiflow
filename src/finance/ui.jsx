@@ -1,5 +1,9 @@
 import React, { useState } from "react";
 import { displayMoney, formatTotalsByCurrency, MASK } from "./currency.js";
+import { formatIsoDate } from "../settings/runtime.js";
+
+// Dates are stored as YYYY-MM-DD; shown in the format chosen in Settings > General.
+export const fmtDate = (iso) => (iso ? formatIsoDate(iso) : iso);
 
 // Finance has its own small, restrained design language: tables, clear status, no decoration.
 export const T = {
