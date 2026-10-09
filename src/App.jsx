@@ -73,6 +73,12 @@ const REVIEW_STATUS_ORDER = ["in_progress", "waiting", "approved", "revisions"];
 const FREE_PROJECT_LIMIT = 3;
 const FREE_BUDGET_PLANNER_LIMIT = 3;
 
+// TEMPORARY: while true, every Pro feature is usable by free accounts and free
+// accounts get unlimited projects and budget plans. The PRO badges stay visible
+// so people can see which features are Pro. To bring gating back, set this to
+// false AND run the revert line at the bottom of migration_temp_open_pro.sql.
+const PRO_GATING_TEMPORARILY_DISABLED = true;
+
 const PROFIT_PRESETS = [10, 15, 20, 25, 30, 40, 50, 60];
 
 // Direct checkout link for the Pro tier, built from the values pulled out
@@ -5061,7 +5067,9 @@ export default function ShotTracker() {
   const boardPipeline = getProjectPipeline(selectedProject);
   const boardRecognizedKeys = new Set(boardPipeline.rows.map((r) => r.stageKey));
   const showTabs = view === "projects";
-  const hasProAccess = settings.isAdmin || settings.plan === "pro";
+  const isProMember = settings.isAdmin || settings.plan === "pro";
+  const hasProAccess = PRO_GATING_TEMPORARILY_DISABLED || isProMember;
+  const showProBadge = !isProMember;
   const activeProjectCount = projects.filter((p) => !p.archived).length;
   const atProjectLimit = !hasProAccess && activeProjectCount >= FREE_PROJECT_LIMIT;
   const atBudgetPlannerLimit = !hasProAccess && budgetPlanners.length >= FREE_BUDGET_PLANNER_LIMIT;
@@ -5325,7 +5333,7 @@ export default function ShotTracker() {
             style={{ ...styles.tabButton, ...(workspace === "teams" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("teams")}
           >
-            Teams
+            Teams{showProBadge && <> <span style={styles.proBadge}>PRO</span></>}
           </button>
           <button
             className={tutorialHighlightTarget === "finance" ? "kf-tutorial-highlight" : undefined}
@@ -5413,7 +5421,7 @@ export default function ShotTracker() {
           periodOptions={[{ id: "all", label: "All time" }, ...DASHBOARD_PERIOD_OPTIONS.map(({ id, label }) => ({ id, label }))]}
           drive={{ email: driveEmail, onConnect: handleConnectDrive }}
           patreon={{ email: patreonEmail, connected: patreonConnected, isPro: patreonIsPro, onConnect: handleConnectPatreon }}
-          links={{ manage: PATREON_MANAGE_URL, checkout: PATREON_CHECKOUT_URL, freeLimit: FREE_PROJECT_LIMIT }}
+          links={{ manage: PATREON_MANAGE_URL, checkout: PATREON_CHECKOUT_URL, freeLimit: FREE_PROJECT_LIMIT, gatingDisabled: PRO_GATING_TEMPORARILY_DISABLED }}
           onEnableNotifications={async () => (notificationsSupported() ? Notification.requestPermission() : "unsupported")}
           onReplayTutorial={handleReplayTutorial}
           onOpenSupport={() => {
@@ -5740,6 +5748,7 @@ export default function ShotTracker() {
           isNew={!editingBudgetPlanner.id}
           settings={settings}
           hasProAccess={hasProAccess}
+          showProBadge={showProBadge}
           templates={plannerTemplates}
           projects={projects}
           onSave={handleSaveBudgetPlanner}
@@ -5984,6 +5993,7 @@ export default function ShotTracker() {
           driveEmail={driveEmail}
           onCreateDriveFolders={handleCreateDriveFolders}
           hasProAccess={hasProAccess}
+          showProBadge={showProBadge}
           atProjectLimit={atProjectLimit}
           shotCount={cards.filter((c) => c.projectId === editingProject.id).length}
           projectCards={cards.filter((c) => c.projectId === editingProject.id)}
@@ -6024,6 +6034,7 @@ export default function ShotTracker() {
           isNew={!editingInvoice.id}
           currencySymbol={settings.currencySymbol}
           hasProAccess={hasProAccess}
+          showProBadge={showProBadge}
         />
       )}
     </div>
@@ -8984,7 +8995,7 @@ function InvoicesPanel({
   );
 }
 
-function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders, hasProAccess, atProjectLimit, shotCount, invoiceCount, pipelineLibrary, onApplyPipeline, onApplyPipelinePreset, projectCards, onMigratePipeline, onUndoMigratePipeline }) {
+function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders, hasProAccess, showProBadge = !hasProAccess, atProjectLimit, shotCount, invoiceCount, pipelineLibrary, onApplyPipeline, onApplyPipelinePreset, projectCards, onMigratePipeline, onUndoMigratePipeline }) {
   const [form, setForm] = useState(project);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const [linkCopied, setLinkCopied] = useState(false);
@@ -9449,7 +9460,7 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
           </div>
           <div style={styles.field}>
             <label style={styles.label}>
-              Currency {!hasProAccess && <span style={styles.proBadge}>PRO</span>}
+              Currency {showProBadge && <span style={styles.proBadge}>PRO</span>}
             </label>
             {hasProAccess ? (
               <select style={styles.input} value={form.currency || "$"} onChange={set("currency")}>
@@ -11315,7 +11326,7 @@ function PlannerPersonCard({ person, cur, onChange, onRemove, teamMembers }) {
 }
 
 function PlannerWorkspace({
-  plan, isNew, settings, hasProAccess, templates, projects, teamMembers,
+  plan, isNew, settings, hasProAccess, showProBadge = !hasProAccess, templates, projects, teamMembers,
   onSave, onDelete, onDuplicate, onSaveAsTemplate, onConvertToProject, onClose,
 }) {
   const [form, setForm] = useState(plan);
@@ -11558,7 +11569,7 @@ function PlannerWorkspace({
       {/* 4. Who's doing it */}
       {hasBudget && (
         <div style={ui.card}>
-          <h3 style={ui.cardTitle}>Your team</h3>
+          <h3 style={ui.cardTitle}>Your team{showProBadge && <> <span style={styles.proBadge}>PRO</span></>}</h3>
           {!hasProAccess ? (
             <ProUpgradePrompt feature="Crew cost planning" inline />
           ) : (
@@ -11614,7 +11625,7 @@ function PlannerWorkspace({
       {/* 5. Scope and timeline */}
       {hasBudget && (
         <div style={ui.card}>
-          <h3 style={ui.cardTitle}>How big is the job?</h3>
+          <h3 style={ui.cardTitle}>How big is the job?{showProBadge && <> <span style={styles.proBadge}>PRO</span></>}</h3>
           {!hasProAccess ? (
             <ProUpgradePrompt feature="Timeline estimation" inline />
           ) : (
@@ -11718,6 +11729,7 @@ function PlannerWorkspace({
                 }}
               >
                 {form.convertedProjectId ? "Already converted" : "Convert to Project"}
+                {showProBadge && <> <span style={styles.proBadge}>PRO</span></>}
               </button>
             ) : (
               <button style={styles.tabButton} disabled title="Pro feature">
@@ -11733,7 +11745,7 @@ function PlannerWorkspace({
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <button style={styles.tabButton} onClick={() => onDuplicate(form)}>Duplicate</button>
               {hasProAccess ? (
-                <button style={styles.tabButton} onClick={() => onSaveAsTemplate(form)}>Save as Template</button>
+                <button style={styles.tabButton} onClick={() => onSaveAsTemplate(form)}>Save as Template{showProBadge && <> <span style={styles.proBadge}>PRO</span></>}</button>
               ) : (
                 <button style={styles.tabButton} disabled title="Pro feature">Save as Template <span style={styles.proBadge}>PRO</span></button>
               )}
@@ -12652,7 +12664,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
   );
 }
 
-function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySymbol, hasProAccess }) {
+function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySymbol, hasProAccess, showProBadge = !hasProAccess }) {
   const [form, setForm] = useState({ currency: currencySymbol || "$", amountMode: "manual", ...invoice });
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const docType = form.docType || "invoice";
@@ -12746,7 +12758,7 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
           </div>
           <div style={styles.field}>
             <label style={styles.label}>
-              Currency {!hasProAccess && <span style={styles.proBadge}>PRO</span>}
+              Currency {showProBadge && <span style={styles.proBadge}>PRO</span>}
             </label>
             {hasProAccess ? (
               <select style={styles.input} value={form.currency || "$"} onChange={set("currency")}>

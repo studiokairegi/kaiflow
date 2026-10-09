@@ -371,7 +371,7 @@ function AccountTab({ settings, email, drive, patreon, onReplayTutorial, onOpenS
       <Section title="Account">
         <div style={S.grid(240)}>
           <Field label="Email"><span style={{ fontSize: 14 }}>{email}</span></Field>
-          <Field label="Plan"><span style={{ fontSize: 14 }}>{settings.isAdmin ? "Admin (full access)" : settings.plan === "pro" ? "Pro" : "Free"}</span>{!settings.isAdmin && settings.plan !== "pro" && <span style={{ fontSize: 12.5, color: T.muted }}>Teams, Client Portal, freelancer links, milestones and multiple currencies are Pro. Free accounts are limited to {links.freeLimit} active projects.</span>}</Field>
+          <Field label="Plan"><span style={{ fontSize: 14 }}>{settings.isAdmin ? "Admin (full access)" : settings.plan === "pro" ? "Pro" : "Free"}</span>{!settings.isAdmin && settings.plan !== "pro" && <span style={{ fontSize: 12.5, color: T.muted }}>{links.gatingDisabled ? "Pro features (Teams, Client Portal, freelancer links, milestones, multiple currencies) are temporarily open to everyone, and projects are unlimited. Features marked PRO will return to Pro members later." : `Teams, Client Portal, freelancer links, milestones and multiple currencies are Pro. Free accounts are limited to ${links.freeLimit} active projects.`}</span>}</Field>
         </div>
         <div style={S.row}>
           <Btn onClick={onExport}>Export backup</Btn>
