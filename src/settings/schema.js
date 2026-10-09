@@ -71,8 +71,8 @@ export const DATE_FORMATS = [
 ];
 
 export const LANDING_TABS = [
-  { id: "dashboard", label: "Dashboard" }, { id: "projects", label: "Projects" }, { id: "leads", label: "Leads" },
-  { id: "teams", label: "Teams" }, { id: "finance", label: "Finance" },
+  { id: "dashboard", label: "Dashboard" }, { id: "leads", label: "Leads" }, { id: "planner", label: "Planner" },
+  { id: "projects", label: "Projects" }, { id: "teams", label: "Teams" }, { id: "finance", label: "Finance" },
 ];
 
 export const DEFAULT_SETTINGS = {

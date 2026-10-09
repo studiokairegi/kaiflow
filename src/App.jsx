@@ -5301,13 +5301,6 @@ export default function ShotTracker() {
             Dashboard
           </button>
           <button
-            className={tutorialHighlightTarget === "projects" ? "kf-tutorial-highlight" : undefined}
-            style={{ ...styles.tabButton, ...(workspace === "projects" ? styles.tabButtonActive : {}) }}
-            onClick={() => setWorkspace("projects")}
-          >
-            Projects
-          </button>
-          <button
             className={tutorialHighlightTarget === "leads" ? "kf-tutorial-highlight" : undefined}
             style={{ ...styles.tabButton, ...(workspace === "leads" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("leads")}
@@ -5315,11 +5308,17 @@ export default function ShotTracker() {
             Leads
           </button>
           <button
-            className={tutorialHighlightTarget === "finance" ? "kf-tutorial-highlight" : undefined}
-            style={{ ...styles.tabButton, ...(workspace === "finance" ? styles.tabButtonActive : {}) }}
-            onClick={() => setWorkspace("finance")}
+            style={{ ...styles.tabButton, ...(workspace === "planner" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("planner")}
           >
-            Finance
+            Planner
+          </button>
+          <button
+            className={tutorialHighlightTarget === "projects" ? "kf-tutorial-highlight" : undefined}
+            style={{ ...styles.tabButton, ...(workspace === "projects" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("projects")}
+          >
+            Projects
           </button>
           <button
             className={tutorialHighlightTarget === "teams" ? "kf-tutorial-highlight" : undefined}
@@ -5329,10 +5328,11 @@ export default function ShotTracker() {
             Teams
           </button>
           <button
-            style={{ ...styles.tabButton, ...(workspace === "planner" ? styles.tabButtonActive : {}) }}
-            onClick={() => setWorkspace("planner")}
+            className={tutorialHighlightTarget === "finance" ? "kf-tutorial-highlight" : undefined}
+            style={{ ...styles.tabButton, ...(workspace === "finance" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("finance")}
           >
-            Planner
+            Finance
           </button>
         </div>
       )}
@@ -6341,7 +6341,7 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
   // department (with a stable name tiebreaker) and inserting a header
   // whenever the department changes avoids restructuring the existing
   // per-member card list into a nested map.
-  const [groupBy, setGroupBy] = useState("none");
+  const [groupBy, setGroupBy] = useState("department"); // grouped by default every time Teams opens
   const orderedMembers =
     groupBy === "department"
       ? [...visibleMembers].sort((a, b) => {
@@ -6463,25 +6463,27 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
           )}
         </div>
       )}
-      <div style={styles.invoiceList}>
-        {orderedMembers.map((member, idx) => {
+      {(() => {
+        const groups = groupBy === "department"
+          ? orderedMembers.reduce((acc, m) => {
+              const key = m.department || "No department";
+              const last = acc[acc.length - 1];
+              if (last && last.key === key) last.members.push(m); else acc.push({ key, members: [m] });
+              return acc;
+            }, [])
+          : [{ key: null, members: orderedMembers }];
+        const tileGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: 10 };
+        const renderTile = (member) => {
           const { shots, pendingByCurrency, paidByCurrency } = computeMemberShots(member, cards, projects, teamMembers);
           const dependability = dependabilityTier(member.dependabilityScore ?? 80);
-          const formattedRate = formatMemberRate(member, cur);
           const isArchived = member.status === "archived";
-          const groupKey = groupBy === "department" ? member.department || "No department" : null;
-          const prevGroupKey = idx === 0 ? undefined : orderedMembers[idx - 1].department || "No department";
-          const showGroupHeader = groupKey !== null && groupKey !== prevGroupKey;
+          const availColor = AVAILABILITY_COLORS[member.availability] || "#8b9a98";
+          const ellipsis = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 };
           return (
-            <React.Fragment key={member.id}>
-              {showGroupHeader && (
-                <div style={{ ...styles.fieldDivider, marginTop: idx === 0 ? 0 : 12 }}>
-                  {groupKey} ({orderedMembers.filter((m) => (m.department || "No department") === groupKey).length})
-                </div>
-              )}
-              <div
+            <div
+              key={member.id}
               className="kf-card"
-              style={{ ...styles.invoiceCard, opacity: isArchived ? 0.6 : 1 }}
+              style={{ ...styles.invoiceCard, borderRadius: 10, padding: "10px 12px", gap: 4, opacity: isArchived ? 0.6 : 1 }}
               onClick={() => onEdit(member)}
               role="button"
               tabIndex={0}
@@ -6493,89 +6495,54 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
                 }
               }}
             >
-              <div style={styles.invoiceCardTop}>
-                <span style={styles.invoiceNumber}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <span style={{ ...styles.invoiceNumber, ...ellipsis }} title={disambiguatedMemberLabel(member, duplicateNames)}>
                   {disambiguatedMemberLabel(member, duplicateNames)}
-                  {isArchived && <span style={{ ...styles.fieldHint, marginLeft: 6 }}>(archived)</span>}
                 </span>
                 <span
-                  style={{
-                    ...styles.invoiceStatusTag,
-                    color: AVAILABILITY_COLORS[member.availability] || "#8b9a98",
-                    borderColor: AVAILABILITY_COLORS[member.availability] || "#8b9a98",
-                  }}
+                  title={AVAILABILITY_LABELS[member.availability] || member.availability}
+                  style={{ ...styles.invoiceStatusTag, flexShrink: 0, fontSize: 10, padding: "1px 7px", color: availColor, borderColor: availColor }}
                 >
                   {AVAILABILITY_LABELS[member.availability] || member.availability}
                 </span>
               </div>
-              {(member.role || member.department) && (
-                <div style={styles.cardMeta}>
-                  {member.role}
-                  {member.role && member.department ? " · " : ""}
-                  {member.department}
-                </div>
-              )}
-              {member.memberType === "freelancer" && member.upworkRating != null && (
-                <div style={styles.fieldHint}>
-                  {starRating(member.upworkRating)} {member.upworkRating.toFixed?.(1) ?? member.upworkRating}
-                  {member.upworkReviewCount != null ? ` (${member.upworkReviewCount})` : ""} {"\u00b7 Upwork"}
-                </div>
-              )}
-              {member.skills?.length > 0 && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
-                  {member.skills.slice(0, 5).map((skill) => (
-                    <span key={skill} style={styles.skillChip}>
-                      {skill}
-                    </span>
-                  ))}
-                  {member.skills.length > 5 && (
-                    <span style={styles.skillChip}>+{member.skills.length - 5}</span>
-                  )}
-                </div>
-              )}
-              <div style={styles.invoiceAmountsRow}>
-                <span style={styles.fieldHint}>Skill: {skillLevelLabel(member.skillLevel)}</span>
-                <span style={{ ...styles.fieldHint, color: dependability.color }}>
-                  {dependability.label} ({member.dependabilityScore ?? 80})
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <span style={{ ...styles.cardMeta, ...ellipsis }}>
+                  {member.role || "No role"}{isArchived ? " · archived" : ""}
                 </span>
+                {member.memberType === "freelancer" && member.upworkRating != null && (
+                  <span
+                    style={{ ...styles.fieldHint, flexShrink: 0, color: "#F2C14E", whiteSpace: "nowrap" }}
+                    title={`Upwork rating ${Number(member.upworkRating).toFixed(1)}${member.upworkReviewCount != null ? ` (${member.upworkReviewCount} reviews)` : ""}`}
+                  >
+                    {starRating(member.upworkRating)} {Number(member.upworkRating).toFixed(1)}
+                  </span>
+                )}
               </div>
-              <div style={styles.invoiceAmountsRow}>
-                <span style={styles.fieldHint}>
-                  {shots.length} shot{shots.length === 1 ? "" : "s"} assigned
-                </span>
-                {formattedRate && <span style={styles.fieldHint}>Rate {formattedRate}</span>}
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <span style={styles.fieldHint}>{shots.length} shot{shots.length === 1 ? "" : "s"}</span>
+                <span style={{ ...styles.fieldHint, color: dependability.color }}>{dependability.label} ({member.dependabilityScore ?? 80})</span>
               </div>
-              {member.capacityValue > 0 && (
-                <div style={styles.fieldHint}>
-                  Capacity {member.capacityValue} {member.capacityUnit}
-                </div>
-              )}
-              <div style={styles.invoiceAmountsRow}>
-                <span style={{ ...styles.fieldHint, color: "#F2A65A" }}>
-                  Pending {formatCurrencyTotals(pendingByCurrency) || `${cur}0.00`}
-                </span>
-                <span style={{ ...styles.fieldHint, color: "#3DDC84" }}>
-                  Paid {formatCurrencyTotals(paidByCurrency) || `${cur}0.00`}
-                </span>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <span style={{ ...styles.fieldHint, color: "#F2A65A", ...ellipsis }}>Pending {formatCurrencyTotals(pendingByCurrency) || `${cur}0.00`}</span>
+                <span style={{ ...styles.fieldHint, color: "#3DDC84", ...ellipsis }}>Paid {formatCurrencyTotals(paidByCurrency) || `${cur}0.00`}</span>
               </div>
-              {shots.length > 0 && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
-                  {shots.slice(0, 4).map((s) => (
-                    <span key={s.id} style={styles.fieldHint}>
-                      {s.title} &middot; {s.projectName} &middot;{" "}
-                      {s.assignedPaid ? "paid" : "pending"}
-                    </span>
-                  ))}
-                  {shots.length > 4 && (
-                    <span style={styles.fieldHint}>+{shots.length - 4} more</span>
-                  )}
-                </div>
-              )}
             </div>
-            </React.Fragment>
           );
-        })}
-      </div>
+        };
+        return (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {groups.map((g, gi) => (
+              <div key={g.key ?? "all"} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {g.key !== null && (
+                  <div style={{ ...styles.fieldDivider, marginTop: gi === 0 ? 0 : 4 }}>{g.key} ({g.members.length})</div>
+                )}
+                <div style={tileGrid}>{g.members.map(renderTile)}</div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
       {visibleMembers.length === 0 && (search || activeFilterCount > 0) && (
         <p style={styles.fieldHint}>No team members match your search/filters.</p>
       )}
