@@ -128,3 +128,32 @@ test("outcome reasons: hide defaults, add custom, never lose a reason already on
 test("sound choices are the two supplied files", () => {
   assert.deepEqual(S.SOUNDS.map((s) => s.src), ["/sounds/glass-tap.mp3", "/sounds/water-drop.mp3"]);
 });
+test("lead card count follows the studio schedule, not a fixed 5", () => {
+  const sched = (n) => Array.from({ length: n }, (_, i) => ({ dayOffset: i * 3 }));
+  const emails = F.emptyEmailSlots(5); // an old lead with 5 slots
+  emails[0].sent = true;
+  assert.deepEqual(F.emailsSentSummary(emails, sched(3)), { sent: 1, total: 3 });   // initial + 2 follow-ups
+  assert.deepEqual(F.emailsSentSummary(emails, sched(6)), { sent: 1, total: 5 });   // capped by the lead's own slots
+  assert.equal(F.visibleSlotCount(emails, sched(2)), 2);
+});
+test("shrinking the cadence never hides a slot that already has work in it", () => {
+  const sched = [{ dayOffset: 0 }, { dayOffset: 3 }];
+  const emails = F.emptyEmailSlots(5);
+  emails[0].sent = true; emails[3].sent = true;            // 4th email was already sent
+  assert.equal(F.visibleSlotCount(emails, sched), 4);
+  assert.deepEqual(F.emailsSentSummary(emails, sched), { sent: 2, total: 4 });
+  emails[4].message = "draft";                              // a drafted message also counts
+  assert.equal(F.visibleSlotCount(emails, sched), 5);
+});
+test("a dated 'needs follow-up' flag is due on or after its date, and never without a date", () => {
+  const lead = (o) => ({ needsFollowup: true, followupDate: "2026-10-12", ...o });
+  assert.equal(F.isManualFollowupDue(lead(), "2026-10-11"), false);
+  assert.equal(F.isManualFollowupDue(lead(), "2026-10-12"), true);
+  assert.equal(F.isManualFollowupDue(lead(), "2026-10-20"), true);
+  assert.equal(F.isManualFollowupDue(lead({ followupDate: "" }), "2026-10-20"), false);
+  assert.equal(F.isManualFollowupDue(lead({ needsFollowup: false }), "2026-10-20"), false);
+  assert.equal(F.manualFollowupState(lead(), "2026-10-11"), "upcoming");
+  assert.equal(F.manualFollowupState(lead(), "2026-10-12"), "today");
+  assert.equal(F.manualFollowupState(lead(), "2026-10-13"), "overdue");
+  assert.equal(F.manualFollowupState(lead({ needsFollowup: false }), "2026-10-13"), null);
+});

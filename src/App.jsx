@@ -9,7 +9,7 @@ import {
   settingsFromRow, settingsToRow,
 } from "./settings/schema.js";
 import { runtime, applyRuntimeSettings, categoryAllowed, playNotificationSound, workdayTargetSeconds, isWorkday, reasonsFor, todayInZone } from "./settings/runtime.js";
-import { emptyEmailSlots, normalizeEmailSlots, nextScheduledIndex, lastScheduledIndex, followupCountLabel, sendingTriggersNoResponse } from "./settings/followups.js";
+import { emptyEmailSlots, normalizeEmailSlots, nextScheduledIndex, lastScheduledIndex, followupCountLabel, sendingTriggersNoResponse, visibleSlotCount, emailsSentSummary, isManualFollowupDue, manualFollowupState } from "./settings/followups.js";
 import FinanceModule, { PrivacyToggle } from "./finance/FinanceModule.jsx";
 import { ProjectPicker } from "./finance/ProjectPicker.jsx";
 import { useFinanceSummary } from "./finance/useLedger.js";
@@ -2179,6 +2179,7 @@ function emptyLead(stage = "pool", channel = "") {
     channel,
     priority: "warm",
     needsFollowup: false,
+    followupDate: "",
     lastContactedAt: null,
     activityLog: [],
     archivedAt: null,
@@ -2209,6 +2210,7 @@ function leadFromRow(row) {
     channel: row.channel || "",
     priority: row.priority || "warm",
     needsFollowup: row.needs_followup || false,
+    followupDate: row.followup_date || "",
     lastContactedAt: row.last_contacted_at || null,
     activityLog: Array.isArray(row.activity_log) ? row.activity_log : [],
     archivedAt: row.archived_at || null,
@@ -2241,6 +2243,7 @@ function leadToRow(lead, userId) {
     channel: lead.channel || "",
     priority: lead.priority || "warm",
     needs_followup: !!lead.needsFollowup,
+    followup_date: lead.needsFollowup ? (lead.followupDate || null) : null,
     last_contacted_at: lead.lastContactedAt || null,
     activity_log: lead.activityLog || [],
     archived_at: lead.archivedAt || null,
@@ -2323,7 +2326,9 @@ function buildActivityEntries(oldLead, newLead) {
       });
     }
     if (!oldLead.needsFollowup && newLead.needsFollowup) {
-      entries.push({ ts: now, type: "followup_flag", note: "Marked as needing follow-up" });
+      entries.push({ ts: now, type: "followup_flag", note: newLead.followupDate ? `Marked as needing follow-up on ${formatShortDate(newLead.followupDate)}` : "Marked as needing follow-up" });
+    } else if (oldLead.needsFollowup && newLead.needsFollowup && (oldLead.followupDate || "") !== (newLead.followupDate || "") && newLead.followupDate) {
+      entries.push({ ts: now, type: "followup_flag", note: `Follow-up date set to ${formatShortDate(newLead.followupDate)}` });
     }
     if (oldLead.priority !== newLead.priority) {
       const p = LEAD_PRIORITIES.find((x) => x.id === newLead.priority);
@@ -2400,6 +2405,12 @@ function computeFollowupStatus(lead, schedule = DEFAULT_FOLLOWUP_SCHEDULE) {
     isDue: daysUntilDue <= 0,
     daysUntilDue,
   };
+}
+
+// Colour for the "Needs follow-up" tag: red once its date has passed, amber otherwise.
+function followupTagColor(lead) {
+  const state = manualFollowupState(lead, todayInZone());
+  return state === "overdue" || state === "today" ? "#FF4D4D" : "#F2A65A";
 }
 
 function formatShortDate(dateStr) {
@@ -2759,7 +2770,7 @@ export default function ShotTracker() {
     if (leadFollowupFilter !== "all") {
       const status = computeFollowupStatus(l, settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE);
       const notStarted = status.nextActionLabel === "Send initial email";
-      if (leadFollowupFilter === "due" && !status.isDue) return false;
+      if (leadFollowupFilter === "due" && !status.isDue && !(!isLeadStageTerminal(l.stage) && isManualFollowupDue(l, todayInZone()))) return false;
       if (leadFollowupFilter === "upcoming" && (status.isDue || status.daysUntilDue == null)) return false;
       if (leadFollowupFilter === "completed" && (notStarted || status.daysUntilDue !== null)) return false;
       if (leadFollowupFilter === "none" && !notStarted) return false;
@@ -5633,7 +5644,7 @@ export default function ShotTracker() {
                         </button>
                       )}
                       {stageLeads.map((lead) => {
-                        const sentCount = lead.emails.filter((e) => e.sent).length;
+                        const { sent: sentCount, total: emailTotal } = emailsSentSummary(lead.emails, settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE);
                         const priorityMeta = LEAD_PRIORITIES.find((p) => p.id === lead.priority);
                         return (
                           <div
@@ -5660,10 +5671,12 @@ export default function ShotTracker() {
                                 <span style={styles.cardTag}>{lead.channel}</span>
                               )}
                               {sentCount > 0 && (
-                                <span style={styles.cardTag}>{sentCount}/5 emails sent</span>
+                                <span style={styles.cardTag}>{sentCount}/{emailTotal} emails sent</span>
                               )}
                               {lead.needsFollowup && (
-                                <span style={{ ...styles.cardTag, color: "#F2A65A" }}>Needs follow-up</span>
+                                <span style={{ ...styles.cardTag, color: followupTagColor(lead) }}>
+                                  Needs follow-up{lead.followupDate ? ` \u00b7 ${formatShortDate(lead.followupDate)}` : ""}
+                                </span>
                               )}
                               {stageTakesOutcomeReason(lead.stage) && lead.outcomeReason && (
                                 <span style={styles.cardTag}>{lead.outcomeReason}</span>
@@ -8187,7 +8200,10 @@ function computePlannerPortfolioAnalytics(plans) {
 // different definitions of what counts as needing attention.
 function computeNeedsAttentionCounts(leads, schedule) {
   const activeNonArchived = leads.filter((l) => !l.archivedAt);
-  const followupsDueToday = activeNonArchived.filter((l) => computeFollowupStatus(l, schedule).isDue).length;
+  const todayStr = todayInZone();
+  const followupsDueToday = activeNonArchived.filter(
+    (l) => computeFollowupStatus(l, schedule).isDue || (!isLeadStageTerminal(l.stage) && isManualFollowupDue(l, todayStr))
+  ).length;
   const hotAwaitingResponse = activeNonArchived.filter(
     (l) => l.priority === "hot" && l.stage === "cold_email"
   ).length;
@@ -9897,6 +9913,7 @@ function LeadEditor({
   const [addingChannel, setAddingChannel] = useState(false);
   const [newChannelName, setNewChannelName] = useState("");
   const [copiedEmail, setCopiedEmail] = useState(false);
+  const [quickFollowupDate, setQuickFollowupDate] = useState(() => todayInZone());
   const [confirmingDuplicate, setConfirmingDuplicate] = useState(false);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
 
@@ -10025,7 +10042,7 @@ function LeadEditor({
               </span>
               <span style={styles.cardTag}>{stageMeta ? stageMeta.label : form.stage}</span>
               {form.channel && <span style={styles.cardTag}>{form.channel}</span>}
-              {form.needsFollowup && <span style={{ ...styles.cardTag, color: "#F2A65A" }}>Needs follow-up</span>}
+              {form.needsFollowup && <span style={{ ...styles.cardTag, color: followupTagColor(form) }}>Needs follow-up{form.followupDate ? ` \u00b7 ${formatShortDate(form.followupDate)}` : ""}</span>}
             </div>
 
             <div style={styles.fieldRow}>
@@ -10084,13 +10101,29 @@ function LeadEditor({
               {followupStatus.lastContactedLabel && ` \u00b7 Last contacted: ${followupStatus.lastContactedLabel}`}
             </p>
             {!isTerminal && !form.needsFollowup && (
-              <button
-                type="button"
-                style={{ ...styles.copyButton, marginTop: 4 }}
-                onClick={() => onSave({ ...form, needsFollowup: true })}
-              >
-                Needs follow-up
-              </button>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 4 }}>
+                <input
+                  type="date"
+                  style={{ ...styles.input, width: 160 }}
+                  value={quickFollowupDate}
+                  min={todayInZone()}
+                  onChange={(e) => setQuickFollowupDate(e.target.value)}
+                  aria-label="Follow-up date"
+                />
+                <button
+                  type="button"
+                  style={styles.copyButton}
+                  disabled={!quickFollowupDate}
+                  onClick={() => onSave({ ...form, needsFollowup: true, followupDate: quickFollowupDate })}
+                >
+                  Needs follow-up
+                </button>
+              </div>
+            )}
+            {form.needsFollowup && (
+              <p style={{ ...styles.fieldHint, color: followupTagColor(form) }}>
+                {form.followupDate ? `Follow up on ${formatShortDate(form.followupDate)}. Use Edit to change the date.` : "Follow-up flagged. Use Edit to set a date."}
+              </p>
             )}
 
             {stageTakesOutcomeReason(form.stage) && form.outcomeReason && (
@@ -10271,10 +10304,26 @@ function LeadEditor({
                     color: form.needsFollowup ? tealLight : textMuted,
                     background: form.needsFollowup ? "rgba(47,191,166,0.1)" : "transparent",
                   }}
-                  onClick={() => setForm({ ...form, needsFollowup: !form.needsFollowup })}
+                  onClick={() =>
+                    setForm(form.needsFollowup
+                      ? { ...form, needsFollowup: false, followupDate: "" }
+                      : { ...form, needsFollowup: true, followupDate: form.followupDate || todayInZone() })
+                  }
                 >
                   Needs follow-up
                 </button>
+                {form.needsFollowup && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+                    <span style={styles.fieldHint}>Follow up on</span>
+                    <input
+                      type="date"
+                      style={{ ...styles.input, width: 160 }}
+                      value={form.followupDate || ""}
+                      onChange={(e) => setForm({ ...form, followupDate: e.target.value })}
+                      aria-label="Follow-up date"
+                    />
+                  </div>
+                )}
               </div>
             </div>
 
@@ -10389,7 +10438,7 @@ function LeadEditor({
               {followupStatus.lastContactedLabel && ` \u00b7 Last contacted: ${followupStatus.lastContactedLabel}`}
             </p>
 
-            {form.emails.map((em, i) => (
+            {form.emails.slice(0, visibleSlotCount(form.emails, followupSchedule)).map((em, i) => (
               <div key={i} style={styles.emailRow}>
                 <div style={styles.emailRowHeader}>
                   <label style={styles.checkboxLabel}>

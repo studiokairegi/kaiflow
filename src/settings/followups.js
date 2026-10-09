@@ -42,3 +42,34 @@ export function sendingTriggersNoResponse({ index, sent, stage, emails, schedule
   if (!autoNoResponse || !sent || stage !== "cold_email") return false;
   return index > 0 && index === lastScheduledIndex(emails, schedule);
 }
+
+// How many email slots to SHOW for a lead: the studio's schedule length, but never
+// hide a slot that already has something in it (sent, or a drafted message), so
+// shrinking the cadence can't make a lead's existing work disappear.
+export function visibleSlotCount(emails, schedule) {
+  const list = emails || [];
+  let lastUsed = -1;
+  list.forEach((e, i) => { if (e && (e.sent || (e.message || "").trim())) lastUsed = i; });
+  return Math.min(list.length, Math.max(schedule.length, lastUsed + 1));
+}
+
+// "2/3 emails sent" - sent count out of the slots that are shown.
+export function emailsSentSummary(emails, schedule) {
+  const list = emails || [];
+  const total = visibleSlotCount(list, schedule);
+  const sent = list.slice(0, total).filter((e) => e.sent).length;
+  return { sent, total };
+}
+
+// "Needs follow-up" flag with its own date. Due once that date is today or earlier.
+// `today` is a YYYY-MM-DD string in the user's timezone (see todayInZone).
+export function isManualFollowupDue(lead, today) {
+  return !!lead && !!lead.needsFollowup && !!lead.followupDate && lead.followupDate <= today;
+}
+
+// null when there is no dated flag; otherwise "overdue" | "today" | "upcoming".
+export function manualFollowupState(lead, today) {
+  if (!lead || !lead.needsFollowup || !lead.followupDate) return null;
+  if (lead.followupDate < today) return "overdue";
+  return lead.followupDate === today ? "today" : "upcoming";
+}
