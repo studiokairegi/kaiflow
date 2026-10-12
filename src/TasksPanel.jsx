@@ -165,27 +165,27 @@ export default function TasksPanel({ getToday, leads = [], projects = [], shots 
   ctx.openTask = openTask;
 
   const Chip = ({ label, tone, onClick }) => (
-    <button type="button" onClick={onClick} style={{ ...btn(tone || C.muted), padding: "3px 9px", fontSize: 11.5 }}>{label}</button>
+    <button type="button" onClick={onClick} style={{ ...btn(tone || C.muted), padding: "2px 8px", fontSize: 11 }}>{label}</button>
   );
 
   return (
-    <div className="kf-card" style={{ background: C.inkSoft, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 14px", flexShrink: 0, display: "flex", flexDirection: "column", gap: 8, color: C.paper }} aria-label="Tasks">
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+    <div className="kf-card kf-tasks-card" style={{ background: C.inkSoft, border: `1px solid ${C.border}`, borderRadius: 14, padding: "10px 12px", flexShrink: 0, display: "flex", flexDirection: "column", gap: 6, color: C.paper, minWidth: 0, overflow: "hidden" }} aria-label="Tasks">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>Tasks</span>
-        {phase === "ready" && (
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1 }}>
-            {summary.overdue > 0 && <Chip tone={C.red} label={`${summary.overdue} overdue`} onClick={() => chooseView("today")} />}
-            <Chip tone={C.teal} label={`Today: ${summary.today.remaining} left${summary.today.completed ? ` · ${summary.today.completed} done` : ""}${summary.today.hasEstimates ? ` · ${formatMinutes(summary.today.estimatedMinutes)}` : ""}`} onClick={() => chooseView("today")} />
-            <Chip label={`Tomorrow: ${plural(summary.tomorrow.remaining, "task")}${summary.tomorrow.hasEstimates ? ` · ${formatMinutes(summary.tomorrow.estimatedMinutes)}` : ""}`} onClick={() => chooseView("tomorrow")} />
-          </div>
-        )}
-        <button type="button" style={btn(C.teal)} onClick={() => openNew()}>+ New task</button>
+        <button type="button" style={{ ...btn(C.teal), padding: "4px 10px", fontSize: 12 }} onClick={() => openNew()}>+ New task</button>
       </div>
+      {phase === "ready" && (
+        <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+          {summary.overdue > 0 && <Chip tone={C.red} label={`${summary.overdue} overdue`} onClick={() => chooseView("today")} />}
+          <Chip tone={C.teal} label={`Today: ${summary.today.remaining} left${summary.today.completed ? ` · ${summary.today.completed} done` : ""}${summary.today.hasEstimates ? ` · ${formatMinutes(summary.today.estimatedMinutes)}` : ""}`} onClick={() => chooseView("today")} />
+          <Chip label={`Tomorrow: ${plural(summary.tomorrow.remaining, "task")}${summary.tomorrow.hasEstimates ? ` · ${formatMinutes(summary.tomorrow.estimatedMinutes)}` : ""}`} onClick={() => chooseView("tomorrow")} />
+        </div>
+      )}
 
-      <div role="tablist" aria-label="Task views" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      <div role="tablist" aria-label="Task views" style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
         {VIEWS.map(([id, label]) => (
           <button key={id} type="button" role="tab" aria-selected={view === id} onClick={() => chooseView(id)}
-            style={{ ...btn(view === id ? C.teal : C.muted), background: view === id ? "rgba(47,191,166,0.14)" : "transparent", padding: "4px 10px", fontSize: 12 }}>
+            style={{ ...btn(view === id ? C.teal : C.muted), background: view === id ? "rgba(47,191,166,0.14)" : "transparent", padding: "3px 8px", fontSize: 11.5 }}>
             {label}
           </button>
         ))}
@@ -198,7 +198,7 @@ export default function TasksPanel({ getToday, leads = [], projects = [], shots 
         </div>
       )}
 
-      <div style={{ maxHeight: "clamp(220px, 36vh, 400px)", overflowY: "auto", paddingRight: 2 }}>
+      <div className="kf-tasks-list" style={{ overflowY: "auto", overflowX: "hidden", paddingRight: 2, minWidth: 0 }}>
         {phase === "loading" && <p style={{ color: C.muted, fontSize: 13, margin: "8px 0" }}>Loading tasks...</p>}
         {phase === "error" && (
           <div style={{ fontSize: 13 }}>
@@ -239,11 +239,11 @@ function TaskRow({ t, ctx, reorderList, showDate, compact }) {
   const done = t.status === "completed" || t.status === "cancelled";
   const overdue = isOpen(t) && t.dueDate && t.dueDate < today;
   return (
-    <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: compact ? "5px 0" : "6px 0", borderBottom: `1px solid ${C.border}`, opacity: isBusy ? 0.55 : 1 }}>
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 8px", alignItems: "flex-start", padding: compact ? "4px 0" : "5px 0", borderBottom: `1px solid ${C.border}`, opacity: isBusy ? 0.55 : 1 }}>
       <input type="checkbox" checked={t.status === "completed"} disabled={isBusy || t.status === "cancelled"} onChange={() => actions.toggle(t)} aria-label={`${t.status === "completed" ? "Reopen" : "Complete"} ${t.title}`} style={{ marginTop: 3, accentColor: C.teal }} />
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ flex: "1 1 0", minWidth: 0 }}>
         <div style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
-          <button type="button" onClick={() => openTask(t)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: done ? C.muted : C.paper, textDecoration: done ? "line-through" : "none", fontSize: 13.5, textAlign: "left", fontFamily: "inherit" }}>
+          <button type="button" onClick={() => openTask(t)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: done ? C.muted : C.paper, textDecoration: done ? "line-through" : "none", fontSize: 13, textAlign: "left", fontFamily: "inherit", overflowWrap: "anywhere", minWidth: 0 }}>
             {t.title}
           </button>
           {t.seriesId && <span title="Recurring" style={{ color: C.muted, fontSize: 11 }}>↻</span>}
@@ -257,12 +257,12 @@ function TaskRow({ t, ctx, reorderList, showDate, compact }) {
           {t.estMinutes && <span>{formatMinutes(t.estMinutes)}</span>}
           {t.category !== "general" && <span>{CATEGORIES.find((c) => c.id === t.category)?.label}</span>}
           {link && (link.exists
-            ? <button type="button" onClick={() => openLink(link)} title={`Open ${link.type}`} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: C.tealLight, fontSize: 11, fontFamily: "inherit" }}>↗ {link.label}</button>
+            ? <button type="button" onClick={() => openLink(link)} title={`Open ${link.type}`} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: C.tealLight, fontSize: 11, fontFamily: "inherit", overflowWrap: "anywhere", textAlign: "left" }}>↗ {link.label}</button>
             : <span title="This record no longer exists">{link.label} (unavailable)</span>)}
         </div>
       </div>
       {isOpen(t) && (
-        <div style={{ display: "flex", gap: 2, alignItems: "center", flexShrink: 0, flexWrap: "wrap", justifyContent: "flex-end", maxWidth: 230 }}>
+        <div style={{ display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", flexBasis: "100%", paddingLeft: 22 }}>
           <button type="button" style={iconBtn(t.isPriority)} title={t.isPriority ? "Remove from top priorities" : "Make a top priority"} aria-label={t.isPriority ? "Unstar" : "Star as priority"} aria-pressed={t.isPriority} disabled={isBusy} onClick={() => actions.star(t)}>{t.isPriority ? "★" : "☆"}</button>
           {reorderList && <>
             <button type="button" style={iconBtn(false)} aria-label="Move up" disabled={isBusy} onClick={() => actions.reorder(reorderList, t.id, "up")}>▲</button>
@@ -285,7 +285,7 @@ function TaskRow({ t, ctx, reorderList, showDate, compact }) {
 
 function SectionTitle({ children, right, tone }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "8px 0 2px", fontSize: 11.5, color: tone || C.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 4, margin: "6px 0 2px", fontSize: 11.5, color: tone || C.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>
       <span>{children}</span>{right}
     </div>
   );
@@ -367,7 +367,7 @@ function TodayView({ ctx, suggestions }) {
         <div style={{ fontSize: 11, color: C.muted, marginBottom: 2 }}>Leads that are due for follow-up and have no task yet. Nothing is added until you click.</div>
         {suggestions.slice(0, 5).map((s) => (
           <div key={s.key} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0", borderBottom: `1px solid ${C.border}`, fontSize: 13 }}>
-            <span style={{ flex: 1 }}>{s.title}</span>
+            <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{s.title}</span>
             <button type="button" style={btn(C.teal, ctx.busy.has("sg:" + s.key))} disabled={ctx.busy.has("sg:" + s.key)} onClick={() => actions.addSuggestion(s)}>Add task</button>
           </div>
         ))}
@@ -385,7 +385,7 @@ function TomorrowView({ ctx }) {
     <div>
       <Stats stats={v.stats} label="tomorrow" />
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <div style={{ flex: 1, minWidth: 200 }}><QuickAdd date={v.date} ctx={ctx} placeholder="Plan something for tomorrow and press Enter" /></div>
+        <div style={{ flex: 1, minWidth: "min(200px, 100%)" }}><QuickAdd date={v.date} ctx={ctx} placeholder="Plan something for tomorrow and press Enter" /></div>
         {carryable > 0 && <button type="button" style={btn(C.muted)} onClick={() => actions.carry(today, v.date)}>Carry {carryable} unfinished from today</button>}
       </div>
       <DayList v={v} ctx={ctx} emptyTitle="Tomorrow's plan is empty." emptyHint="Add tasks above, star the top priorities and give them estimates so the day is ready before you start it." />
@@ -464,7 +464,7 @@ function RecurringView({ ctx, onNew }) {
   const { actions, busy, setEditor, today } = ctx;
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "4px 0" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6, margin: "4px 0" }}>
         <span style={{ fontSize: 12, color: C.muted }}>Each occurrence is its own task; completing one never completes the series.</span>
         <button type="button" style={btn(C.teal)} onClick={onNew}>+ New recurring task</button>
       </div>
@@ -473,7 +473,7 @@ function RecurringView({ ctx, onNew }) {
         const b = busy.has("series:" + s.id);
         return (
           <div key={s.id} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "7px 0", borderBottom: `1px solid ${C.border}`, opacity: s.status === "ended" ? 0.6 : 1 }}>
-            <div style={{ flex: 1, minWidth: 180 }}>
+            <div style={{ flex: 1, minWidth: "min(180px, 100%)", overflowWrap: "anywhere" }}>
               <button type="button" onClick={() => setEditor({ mode: "series", series: s })} style={{ background: "none", border: "none", padding: 0, color: C.paper, fontSize: 13.5, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>{s.title}</button>
               <div style={{ fontSize: 11, color: C.muted }}>
                 {description} · {s.status === "active" ? (next ? `next ${fmtDay(next, today)}` : "no upcoming occurrence") : s.status}

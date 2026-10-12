@@ -8598,17 +8598,21 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         ))}
       </div>
 
-      <TasksPanel
-        getToday={todayInZone}
-        leads={leads}
-        projects={projects}
-        shots={cards}
-        suggestions={taskSuggestions}
-        onOpenLead={onOpenLead}
-        onOpenProject={onOpenProject}
-        onOpenShot={onOpenShot}
-        onOpenContact={onOpenContact}
-      />
+      {/* Tasks sits in a compact column on the left; the overview grid keeps the rest. Stacks below 1180px (see .kf-dash-body in fontImport). */}
+      <div className="kf-dash-body" style={styles.dashboardBody}>
+      <div className="kf-dash-tasks">
+        <TasksPanel
+          getToday={todayInZone}
+          leads={leads}
+          projects={projects}
+          shots={cards}
+          suggestions={taskSuggestions}
+          onOpenLead={onOpenLead}
+          onOpenProject={onOpenProject}
+          onOpenShot={onOpenShot}
+          onOpenContact={onOpenContact}
+        />
+      </div>
 
       <div style={styles.dashboardMainGrid}>
         {/* Column A — trends */}
@@ -8758,6 +8762,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
             </div>
           </div>
         </div>
+      </div>
       </div>
 
       <p style={styles.dashboardFooterHint}>
@@ -13367,6 +13372,46 @@ a:hover {
   box-shadow: 0 16px 40px rgba(0,0,0,0.45), 0 4px 12px rgba(0,0,0,0.3);
 }
 
+/* Dashboard: compact Tasks column on the left. The card is absolutely filled into
+   its column so it can never make the row taller; its list scrolls inside it. */
+.kf-dash-body {
+  display: flex;
+  gap: 12px;
+  flex: 1;
+}
+.kf-dash-tasks {
+  position: relative;
+  flex: 0 0 clamp(290px, 24vw, 350px);
+  min-width: 0;
+}
+.kf-tasks-card {
+  position: absolute;
+  inset: 0;
+}
+.kf-tasks-card:hover {
+  transform: none;
+}
+.kf-tasks-list {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+@media (max-width: 1180px) {
+  .kf-dash-body {
+    flex-direction: column;
+  }
+  .kf-dash-tasks {
+    flex: none;
+    position: static;
+  }
+  .kf-tasks-card {
+    position: static;
+  }
+  .kf-tasks-list {
+    flex: none;
+    max-height: clamp(200px, 38vh, 340px);
+  }
+}
+
 @keyframes kf-spin {
   to { transform: rotate(360deg); }
 }
@@ -14103,12 +14148,17 @@ const styles = {
     fontSize: 10.5,
     color: textMuted,
   },
+  dashboardBody: {
+    // Row holding the Tasks column and the overview grid (layout classes: .kf-dash-body).
+    minHeight: 380, // keeps the business overview readable
+  },
   dashboardMainGrid: {
     display: "grid",
     gridTemplateColumns: "1.15fr 1fr 0.9fr",
     gap: 12,
     flex: 1,
-    minHeight: 380, // keeps the business overview readable now that the Tasks row sits above it
+    minWidth: 0,
+    minHeight: 380, // keeps the business overview readable next to the Tasks column
   },
   dashboardCol: {
     display: "flex",
