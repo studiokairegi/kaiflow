@@ -3,6 +3,13 @@ import { createPortal } from "react-dom";
 import { supabase, functionUrl } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import { genShareToken } from "./SharedViews.jsx";
+import CutWorkflowPanel from "./CutWorkflowPanel.jsx";
+import ContactsPage from "./ContactsPage.jsx";
+import ContactPicker from "./ContactPicker.jsx";
+import TasksPanel from "./TasksPanel.jsx";
+import { contactsApi } from "./contactsInstance.js";
+import { applyContactSelection, projectContactUpdateFields } from "./contacts.js";
+import { workflowLabel } from "./cutWorkflow.js";
 import SettingsPage from "./settings/SettingsPage.jsx";
 import {
   DEFAULT_SETTINGS, DEFAULT_LEAD_CHANNELS, MILESTONE_DEFAULTS, DEFAULT_FOLLOWUP_SCHEDULE, DEFAULT_ARCHIVE_DAYS,
@@ -370,6 +377,7 @@ function emptyProject(overrides = {}) {
     driveFolderUrl: null,
     driveDeliverablesFolderId: null,
     driveReferencesFolderId: null,
+    contactId: null, // stable link to a saved contact (Contacts & Clients)
     // New projects default to the canonical Full pipeline (design report
     // v2 §4, §10.1 step 5). pipelineStageKeys only matters when
     // pipelinePreset is "custom" - it's the picker's working selection
@@ -2089,6 +2097,9 @@ function cardFromRow(row) {
     notes: row.notes,
     stage: row.stage,
     reviewStatus: row.review_status || "in_progress",
+    // Server-controlled internal QC/delivery state (cut review workflow). Read-only here:
+    // cardToRow deliberately never writes it.
+    workflowState: row.workflow_state || "in_progress",
     revisions: Array.isArray(row.revisions) ? row.revisions : [],
     revisionVersion: row.revision_version || 1,
     assignedTo: row.assigned_to || "",
@@ -2225,6 +2236,7 @@ function leadFromRow(row) {
     // written on every save (see leadToRow), so they can't drift.
     outcomeReason: row.outcome_reason || row.lost_reason || "",
     linkedProjectId: row.linked_project_id,
+    contactId: row.contact_id, // undefined until the contacts migration runs; leadToRow never writes it
     createdAt: row.created_at || null,
   };
 }
@@ -2748,6 +2760,7 @@ export default function ShotTracker() {
   const [dragOverStage, setDragOverStage] = useState(null);
   const [leadChannelFilter, setLeadChannelFilter] = useState("all");
   const [leadSearch, setLeadSearch] = useState("");
+  const [crmTab, setCrmTab] = useState("pipeline"); // "pipeline" | "contacts"
   const [leadStatusFilter, setLeadStatusFilter] = useState("all");
   const [leadPriorityFilter, setLeadPriorityFilter] = useState("all");
   const [leadFollowupFilter, setLeadFollowupFilter] = useState("all");
@@ -3312,6 +3325,8 @@ export default function ShotTracker() {
         client: p.client,
         clientAddress: p.client_address || "",
         clientTaxId: p.client_tax_id || "",
+        // Left undefined when the contacts migration has not run, so saves never touch a missing column.
+        contactId: p.contact_id,
         notes: p.notes,
         budget: p.budget,
         budgetMode: p.budget_mode || "manual",
@@ -3409,6 +3424,18 @@ export default function ShotTracker() {
         if (String(row.event_type || "").trim().toLowerCase() === "freelancer_upload") {
           notifyBrowser("New freelancer upload", row.description || "A freelancer uploaded a file.", "freelancer-upload-" + (row.shot_id || row.id), "freelancerUploads");
         }
+
+        // Client activity on released cuts (cut review workflow). Retried actions are
+        // idempotent server-side and log nothing the second time, so no duplicate alerts.
+        const eventType = String(row.event_type || "").trim().toLowerCase();
+        const clientAlerts = {
+          client_revisions_requested: "Client requested revisions",
+          client_approved: "Client approved a cut",
+          client_comment: "New client comment",
+        };
+        if (clientAlerts[eventType]) {
+          notifyBrowser(clientAlerts[eventType], row.description || "", eventType + "-" + row.id, "cutReview");
+        }
       })
       .subscribe();
 
@@ -3436,6 +3463,7 @@ export default function ShotTracker() {
           .update({
             name: project.name,
             client: project.client,
+            ...projectContactUpdateFields(project),
             client_address: project.clientAddress || "",
             client_tax_id: project.clientTaxId || "",
             notes: project.notes,
@@ -3489,6 +3517,18 @@ export default function ShotTracker() {
         });
         if (error) throw error;
         const inserted = result.project;
+        // Contacts & Clients: link the new project to its saved contact. Kept out of the
+        // create RPC on purpose (it has overloads other code depends on). A failure here
+        // leaves a normal project with its legacy client text, never a broken one.
+        let linkedContactId = null;
+        if (project.contactId) {
+          try {
+            await contactsApi.linkProject(inserted.id, project.contactId);
+            linkedContactId = project.contactId;
+          } catch (linkErr) {
+            console.error("Linking the project to its contact failed:", linkErr);
+          }
+        }
         const newCards = (result.shots || []).map(cardFromRow);
 
         // Fetch the pipeline this project actually ended up with (the
@@ -3528,6 +3568,7 @@ export default function ShotTracker() {
               client: inserted.client,
               clientAddress: inserted.client_address || "",
               clientTaxId: inserted.client_tax_id || "",
+              contactId: linkedContactId,
               notes: inserted.notes,
               budget: inserted.budget,
               budgetMode: inserted.budget_mode || "manual",
@@ -4022,10 +4063,34 @@ export default function ShotTracker() {
       }
       flashSave(true);
       setEditingLead(null);
+      if (savedLead.stage === "won" && (!oldLead || oldLead.stage !== "won") && savedLead.id) {
+        await refreshLeadContact(savedLead.id);
+      }
       return savedLead;
     } catch (e) {
       console.error("Lead save failed:", e);
       flashSave(false);
+      return null;
+    }
+  };
+
+  // The database links/creates the client contact when a lead transitions to Won (trigger).
+  // Read the result back so the app state and any prefilled project use it. Returns
+  // { contactId, contactName } or null (e.g. the contacts migration has not run).
+  const refreshLeadContact = async (leadId) => {
+    try {
+      const { data: row, error } = await supabase
+        .from("leads")
+        .select("contact_id, contacts(name)")
+        .eq("id", leadId)
+        .maybeSingle();
+      if (error || !row) return null;
+      setData((prev) => ({
+        ...prev,
+        leads: prev.leads.map((l) => (l.id === leadId ? { ...l, contactId: row.contact_id } : l)),
+      }));
+      return { contactId: row.contact_id || null, contactName: row.contacts?.name || "" };
+    } catch {
       return null;
     }
   };
@@ -4072,6 +4137,7 @@ export default function ShotTracker() {
         .eq("id", id);
       if (error) throw error;
       flashSave(true);
+      if (stage === "won") await refreshLeadContact(id);
     } catch (e) {
       console.error("Lead stage move failed:", e);
       flashSave(false);
@@ -4104,12 +4170,14 @@ export default function ShotTracker() {
     // is undefined until the insert returns one, so falling back to
     // lead.id here silently dropped the link.
     setPendingLeadLinkId(saved.id || null);
+    const wonContact = saved.id ? await refreshLeadContact(saved.id) : null;
     setWorkspace("projects");
     setView("projects");
     setEditingProject(
       emptyProject({
         name: lead.companyName,
-        client: lead.contactPerson || lead.companyName,
+        client: wonContact?.contactName || lead.contactPerson || lead.companyName,
+        contactId: wonContact?.contactId || null,
         clientAddress: lead.billingAddress || "",
         clientTaxId: lead.taxId || "",
         notes: lead.projectNotes || lead.notes,
@@ -4868,6 +4936,17 @@ export default function ShotTracker() {
     setEditingCard(card);
   };
 
+  const handleWorkflowChanged = useCallback((shotId, workflowState, reviewStatus) => {
+    setData((prev) => ({
+      ...prev,
+      cards: prev.cards.map((c) =>
+        c.id === shotId
+          ? { ...c, workflowState: workflowState || c.workflowState, reviewStatus: reviewStatus || c.reviewStatus }
+          : c
+      ),
+    }));
+  }, []);
+
   const handleCardClick = (card) => {
     if (suppressClickRef.current) {
       suppressClickRef.current = false;
@@ -5457,6 +5536,9 @@ export default function ShotTracker() {
           fxRates={fxRates}
           onOpenProject={openProject}
           onGoToProjects={() => setWorkspace("projects")}
+          onOpenLead={(lead) => setEditingLead(lead)}
+          onOpenShot={(card) => { openProject(card.projectId); setEditingCard(card); }}
+          onOpenContact={() => { setWorkspace("leads"); setCrmTab("contacts"); }}
           onGoToLeads={(filters = {}) => {
             setLeadStatusFilter(filters.status || "all");
             setLeadPriorityFilter(filters.priority || "all");
@@ -5486,6 +5568,27 @@ export default function ShotTracker() {
       )}
 
       {view === "projects" && workspace === "leads" && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }} role="tablist" aria-label="CRM sections">
+          {[["pipeline", "Pipeline"], ["contacts", "Contacts"]].map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={crmTab === id}
+              style={{ ...styles.tabButton, ...(crmTab === id ? styles.tabButtonActive : {}) }}
+              onClick={() => setCrmTab(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {view === "projects" && workspace === "leads" && crmTab === "contacts" && (
+        <ContactsPage stageLabels={Object.fromEntries(ALL_LEAD_STAGES.map((s) => [s.id, s.label]))} />
+      )}
+
+      {view === "projects" && workspace === "leads" && crmTab === "pipeline" && (
         <>
           <div style={styles.fieldRow}>
             <input
@@ -5852,6 +5955,28 @@ export default function ShotTracker() {
                             background: REVIEW_COLORS[card.reviewStatus] || REVIEW_COLORS.waiting,
                           }}
                         />
+                        {card.workflowState && card.workflowState !== "in_progress" && (
+                          <button
+                            type="button"
+                            aria-label={`${workflowLabel(card.workflowState)} — open review workspace for ${card.title || "this cut"}`}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingCard(card);
+                            }}
+                            style={{
+                              fontSize: 10.5,
+                              padding: "2px 8px",
+                              borderRadius: 999,
+                              border: `1px solid ${card.workflowState === "pending_review" ? "#4A90D9" : "#2FBFA6"}`,
+                              background: "transparent",
+                              color: card.workflowState === "pending_review" ? "#4A90D9" : "#2FBFA6",
+                              cursor: "pointer",
+                            }}
+                          >
+                            {workflowLabel(card.workflowState)}
+                          </button>
+                        )}
                       </div>
                       {card.client && <div style={styles.cardMeta}>{card.client}</div>}
                       <div style={styles.cardFooter}>
@@ -5986,6 +6111,10 @@ export default function ShotTracker() {
           onLogExpense={handleLogShotExpense}
           hasProAccess={hasProAccess}
           teamMembers={teamMembers}
+          projectName={projects.find((p) => p.id === editingCard.projectId)?.name || ""}
+          clientName={projects.find((p) => p.id === editingCard.projectId)?.client || editingCard.client || ""}
+          shareEnabled={!!projects.find((p) => p.id === editingCard.projectId)?.shareEnabled}
+          onWorkflowChanged={handleWorkflowChanged}
         />
       )}
 
@@ -8215,7 +8344,7 @@ function computeNeedsAttentionCounts(leads, schedule) {
   return { followupsDueToday, hotAwaitingResponse, proposalsAwaitingResponse, approachingDeadline };
 }
 
-function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToLeads, user, userId }) {
+function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToLeads, onOpenLead, onOpenShot, onOpenContact, user, userId }) {
   const stats = computeDashboardStats(projects, cards, leads, invoices);
   // Financial figures come from the accounting ledger (finance/reports.js), in the studio's
   // base currency using each transaction's own stored FX rate. Nothing is converted here.
@@ -8395,6 +8524,26 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     },
   ].filter(Boolean);
 
+  // Task suggestions: only leads that are genuinely due for follow-up (the same two
+  // conditions as the Needs Attention counts above). Each carries a stable key, so a
+  // lead/slot that already has a task - open, done or skipped - is never suggested
+  // again, and nothing is created until the user clicks "Add task".
+  const taskSuggestions = useMemo(() => {
+    const todayStr = todayInZone();
+    const out = [];
+    for (const l of leads) {
+      if (l.archivedAt || isLeadStageTerminal(l.stage)) continue;
+      const fu = computeFollowupStatus(l, schedule);
+      const sent = (l.emails || []).filter((e) => e.sent).length;
+      if (fu.isDue) {
+        out.push({ key: `lead-followup:${l.id}:${sent}`, title: `${fu.nextActionLabel || "Follow up"} - ${l.companyName || "lead"}`, linkType: "lead", linkId: l.id, linkLabel: l.companyName || null, category: "outreach" });
+      } else if (isManualFollowupDue(l, todayStr)) {
+        out.push({ key: `lead-manual-followup:${l.id}:${l.followupDate || ""}`, title: `Follow up with ${l.companyName || "lead"}`, linkType: "lead", linkId: l.id, linkLabel: l.companyName || null, category: "outreach" });
+      }
+    }
+    return out;
+  }, [leads, schedule]);
+
   const months = lastSixMonthKeys();
   const revenueTrend = months.map(({ key, label }) => ({
     label,
@@ -8448,6 +8597,18 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
           </div>
         ))}
       </div>
+
+      <TasksPanel
+        getToday={todayInZone}
+        leads={leads}
+        projects={projects}
+        shots={cards}
+        suggestions={taskSuggestions}
+        onOpenLead={onOpenLead}
+        onOpenProject={onOpenProject}
+        onOpenShot={onOpenShot}
+        onOpenContact={onOpenContact}
+      />
 
       <div style={styles.dashboardMainGrid}>
         {/* Column A — trends */}
@@ -9172,12 +9333,11 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
         </div>
 
         <div style={styles.field}>
-          <label style={styles.label}>Client</label>
-          <input
-            style={styles.input}
-            value={form.client}
-            onChange={set("client")}
-            placeholder="e.g. Vicente Carro"
+          <ContactPicker
+            label="Client"
+            inputId="project-client"
+            value={{ contactId: form.contactId || null, name: form.client || "" }}
+            onChange={(selection) => setForm(applyContactSelection(form, selection))}
           />
         </div>
 
@@ -10579,8 +10739,16 @@ function LeadEditor({
   );
 }
 
-function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess, teamMembers = [], highlightActivityId = null, activityEntries = [] }) {
+function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareToken, onLogExpense, hasProAccess, teamMembers = [], highlightActivityId = null, activityEntries = [], projectName = "", clientName = "", shareEnabled = false, onWorkflowChanged = null }) {
   const [form, setForm] = useState(card);
+  // Opening a Pending Review cut lands on its QC workspace instead of the top of the form.
+  const workflowRef = useRef(null);
+  useEffect(() => {
+    if (card.workflowState === "pending_review" && workflowRef.current) {
+      workflowRef.current.scrollIntoView({ block: "start" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const duplicateMemberNames = findDuplicateMemberNames(teamMembers);
 
@@ -10960,6 +11128,19 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
               <CopyIcon />
               {linkCopied ? "Copied" : "Copy"}
             </button>
+          </div>
+        )}
+
+        {form.id && (
+          <div ref={workflowRef}>
+            <div style={styles.fieldDivider}>Review &amp; delivery</div>
+            <CutWorkflowPanel
+              shotId={form.id}
+              projectName={projectName}
+              clientName={clientName}
+              shareEnabled={shareEnabled}
+              onChanged={onWorkflowChanged}
+            />
           </div>
         )}
 
@@ -13804,7 +13985,8 @@ const styles = {
     padding: "14px 24px 16px",
     height: "calc(100vh - 130px)",
     minHeight: 520,
-    overflow: "hidden",
+    overflowX: "hidden",
+    overflowY: "auto",
   },
   dashboardTopStrip: {
     display: "flex",
@@ -13926,7 +14108,7 @@ const styles = {
     gridTemplateColumns: "1.15fr 1fr 0.9fr",
     gap: 12,
     flex: 1,
-    minHeight: 0,
+    minHeight: 380, // keeps the business overview readable now that the Tasks row sits above it
   },
   dashboardCol: {
     display: "flex",

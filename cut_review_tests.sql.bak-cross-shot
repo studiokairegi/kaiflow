@@ -1,0 +1,175 @@
+-- =============================================================================
+-- Cut review / Final QC / client delivery database tests.
+-- Run AFTER supabase/migrations/20261012090000_cut_review_final_delivery.sql,
+-- in the Supabase SQL editor (as postgres). Runs in a transaction that is
+-- rolled back, with a throwaway user, so it leaves no data behind.
+--
+-- NOT EXECUTED BY THE AUTHOR: written without access to a Postgres instance.
+-- A failing step raises an exception naming the scenario. Fix forward, don't skip.
+-- =============================================================================
+begin;
+
+do $$
+declare
+  u1 uuid := gen_random_uuid();
+  proj uuid; shot uuid; sub1 uuid; sub2 uuid; v1 uuid; v2 uuid; r jsonb; n int; ok boolean; s text;
+  ptoken text := 'tok-proj-' || gen_random_uuid();
+  stoken text := 'tok-shot-' || gen_random_uuid();
+begin
+  insert into auth.users (id, email, aud, role) values (u1, 'cut-test@example.invalid', 'authenticated', 'authenticated');
+  perform set_config('request.jwt.claims', json_build_object('sub', u1, 'role', 'authenticated')::text, true);
+  perform set_config('request.jwt.claim.sub', u1::text, true);
+
+  insert into projects (user_id, name, client, share_enabled, share_token) values (u1, 'T proj', 'T client', true, ptoken) returning id into proj;
+  insert into shots (user_id, project_id, title, share_token, assigned_to) values (u1, proj, 'Cut 01', stoken, 'Free Lancer') returning id into shot;
+  select workflow_state into s from shots where id = shot;
+  if s <> 'in_progress' then raise exception 'T1: new cut should start in_progress, got %', s; end if;
+
+  -- 1/26: freelancer submission -> pending_review, version 1, one pending row
+  r := register_freelancer_submission(stoken, 'drive-A', 'a.mov', 'video/quicktime', 100);
+  sub1 := (r->>'submissionId')::uuid;
+  select workflow_state into s from shots where id = shot;
+  if s <> 'pending_review' then raise exception 'T2: expected pending_review, got %', s; end if;
+  r := register_freelancer_submission(stoken, 'drive-A', 'a.mov', 'video/quicktime', 100);
+  if not (r->>'duplicate')::boolean then raise exception 'T3: same drive file must be idempotent'; end if;
+  select count(*) into n from cut_submissions where shot_id = shot;
+  if n <> 1 then raise exception 'T3: duplicate submission rows: %', n; end if;
+
+  -- invalid token cannot submit
+  ok := false; begin perform register_freelancer_submission('nope', 'drive-X', 'x', null, 1); exception when sqlstate 'P0002' then ok := true; end;
+  if not ok then raise exception 'T4: bad token must be rejected'; end if;
+
+  -- 5: corrections require notes, return to in_progress, notes visible only to freelancer audience
+  ok := false; begin perform qc_review_submission(sub1, 'corrections', 'internal only', ''); exception when sqlstate 'P0001' then ok := true; end;
+  if not ok then raise exception 'T5: corrections without notes must be rejected'; end if;
+  perform qc_review_submission(sub1, 'corrections', 'internal secret', 'fix the timing');
+  select workflow_state into s from shots where id = shot;
+  if s <> 'in_progress' then raise exception 'T5: expected in_progress, got %', s; end if;
+  r := get_shared_shot_review(stoken);
+  if jsonb_array_length(r->'feedback') <> 1 then raise exception 'T5: freelancer should see exactly the shared correction'; end if;
+  if r::text like '%internal secret%' then raise exception 'T25: internal note leaked to freelancer'; end if;
+
+  -- 6: resubmission -> new version, pending_review
+  r := register_freelancer_submission(stoken, 'drive-B', 'b.mov', 'video/quicktime', 200);
+  sub2 := (r->>'submissionId')::uuid;
+  if (r->>'version')::int <> 2 then raise exception 'T6: expected version 2'; end if;
+
+  -- final upload locked before approval (T7/T9)
+  ok := false; begin perform register_final_version(u1, shot, 'key00001', 'final-1', 'fold', 'f.mov', null, 1, true, null); exception when sqlstate 'P0001' then ok := true; end;
+  if not ok then raise exception 'T7: final upload must be locked before QC approval'; end if;
+
+  -- 4: approve unlocks final upload; double-approve idempotent
+  perform qc_review_submission(sub2, 'approve', null, null);
+  r := qc_review_submission(sub2, 'approve', null, null);
+  if not (r->>'duplicate')::boolean then raise exception 'T4b: second approve must be a no-op'; end if;
+  select workflow_state into s from shots where id = shot;
+  if s <> 'qc_adjustments' then raise exception 'T4: expected qc_adjustments, got %', s; end if;
+
+  -- 7/15: approval does not expose anything to a client
+  r := get_client_cuts(ptoken);
+  if (r->0->>'downloadEnabled')::boolean then raise exception 'T15: download must be disabled before release'; end if;
+  if r::text like '%drive-%' then raise exception 'T16: drive ids leaked to client'; end if;
+
+  -- 8/10: final upload, idempotent by upload key
+  r := register_final_version(u1, shot, 'key00001', 'final-1', 'fold', 'f.mov', 'video/quicktime', 500, true, null);
+  v1 := (r->>'versionId')::uuid;
+  r := register_final_version(u1, shot, 'key00001', 'final-1', 'fold', 'f.mov', 'video/quicktime', 500, true, null);
+  if not (r->>'duplicate')::boolean then raise exception 'T10: repeated upload key must return existing record'; end if;
+  select count(*) into n from cut_final_versions where shot_id = shot and validation_status = 'valid';
+  if n <> 1 then raise exception 'T10: duplicate final rows: %', n; end if;
+
+  -- 9: invalid upload is recorded but never releasable
+  r := register_final_version(u1, shot, 'key00002', null, 'fold', 'bad.mov', null, 1, false, 'not in Drive');
+  ok := false; begin perform release_final_version((r->>'versionId')::uuid, null); exception when sqlstate 'P0001' then ok := true; end;
+  if not ok then raise exception 'T9: invalid final must not be releasable'; end if;
+
+  -- another user cannot release (T11)
+  perform set_config('request.jwt.claim.sub', gen_random_uuid()::text, true);
+  perform set_config('request.jwt.claims', json_build_object('sub', gen_random_uuid(), 'role', 'authenticated')::text, true);
+  ok := false; begin perform release_final_version(v1, null); exception when sqlstate 'P0002' then ok := true; end;
+  if not ok then raise exception 'T11: non-owner must not release'; end if;
+  perform set_config('request.jwt.claims', json_build_object('sub', u1, 'role', 'authenticated')::text, true);
+  perform set_config('request.jwt.claim.sub', u1::text, true);
+
+  -- 12: release enables download for exactly that version; double release idempotent
+  perform release_final_version(v1, 'first cut');
+  r := release_final_version(v1, null);
+  if not (r->>'duplicate')::boolean then raise exception 'T12: double release must be a no-op'; end if;
+  r := get_client_cuts(ptoken);
+  if not (r->0->>'downloadEnabled')::boolean then raise exception 'T17: released version should be downloadable'; end if;
+  perform authorize_client_download(ptoken, shot, v1);
+  ok := false; begin perform authorize_client_download('wrong-token', shot, v1); exception when sqlstate 'P0002' then ok := true; end;
+  if not ok then raise exception 'T16/18: wrong token must not authorize download'; end if;
+
+  -- 19/22/23: client comment, approval recorded against exact version
+  perform client_add_comment(ptoken, shot, v1, 'Client Name', 'nice', 12);
+  perform client_approve_cut(ptoken, shot, v1, 'Client Name');
+  select review_status into s from shots where id = shot;
+  if s <> 'approved' then raise exception 'T22: expected review_status approved, got %', s; end if;
+  select count(*) into n from cut_client_reviews where final_version_id = v1 and decision = 'approved';
+  if n <> 1 then raise exception 'T23: approval not recorded on version'; end if;
+  ok := false; begin perform client_request_revisions(ptoken, shot, v1, 'Client Name', 'please change things now'); exception when sqlstate 'P0001' then ok := true; end;
+  if not ok then raise exception 'T22b: cannot request revisions after approving the same version'; end if;
+
+  -- routing with no pending client revision is rejected
+  ok := false; begin perform route_client_revision(shot, 'internal', null); exception when sqlstate 'P0001' then ok := true; end;
+  if not ok then raise exception 'T21c: routing without a pending client revision must be rejected'; end if;
+end $$;
+
+-- Second block: replacement release, revisions, withdrawal, isolation.
+do $$
+declare
+  u1 uuid; proj uuid; shot uuid; v1 uuid; v2 uuid; r jsonb; n int; ok boolean; s text; ptoken text; stoken text;
+begin
+  select user_id, id, share_token into u1, proj, ptoken from projects where name = 'T proj' limit 1;
+  select id, share_token into shot, stoken from shots where project_id = proj limit 1;
+  perform set_config('request.jwt.claims', json_build_object('sub', u1, 'role', 'authenticated')::text, true);
+  perform set_config('request.jwt.claim.sub', u1::text, true);
+  select id into v1 from cut_final_versions where shot_id = shot and version = 1;
+
+  -- 14/24: replacement does not overwrite history; old approval does not carry to new release
+  r := register_final_version(u1, shot, 'key00003', 'final-2', 'fold', 'f2.mov', 'video/quicktime', 600, true, null);
+  v2 := (r->>'versionId')::uuid;
+  select count(*) into n from cut_final_versions where shot_id = shot and validation_status = 'valid';
+  if n <> 2 then raise exception 'T14: previous version must be kept'; end if;
+  ok := false; begin perform authorize_client_download(ptoken, shot, v2); exception when sqlstate 'P0001' then ok := true; end;
+  if not ok then raise exception 'T14: unreleased replacement must not be downloadable'; end if;
+  perform authorize_client_download(ptoken, shot, v1);  -- old release still live until replaced
+  perform release_final_version(v2, null);
+  ok := false; begin perform authorize_client_download(ptoken, shot, v1); exception when sqlstate 'P0001' then ok := true; end;
+  if not ok then raise exception 'T12b: superseded version must no longer download'; end if;
+  select review_status into s from shots where id = shot;
+  if s <> 'waiting' then raise exception 'T24: new release must reset client status to waiting, got %', s; end if;
+  ok := false; begin perform client_approve_cut(ptoken, shot, v1, 'Client Name'); exception when sqlstate 'P0001' then ok := true; end;
+  if not ok then raise exception 'T22c: client cannot approve a non-current version'; end if;
+
+  -- 20/21: revision request visible internally, assigns nobody
+  perform client_request_revisions(ptoken, shot, v2, 'Client Name', 'the transition at 00:12 is too abrupt');
+  select workflow_state into s from shots where id = shot;
+  if s <> 'released' then raise exception 'T21: revision request must not change internal workflow state, got %', s; end if;
+  if (select assigned_to from shots where id = shot) <> 'Free Lancer' then raise exception 'T21: assignment changed'; end if;
+  perform route_client_revision(shot, 'freelancer', 'tighten the transition');
+  select workflow_state into s from shots where id = shot;
+  if s <> 'in_progress' then raise exception 'T21b: expected in_progress after routing, got %', s; end if;
+  -- previously released version stays downloadable until withdrawn
+  perform authorize_client_download(ptoken, shot, v2);
+
+  -- 13: withdrawal disables access immediately
+  perform withdraw_release(v2, 'wrong file');
+  ok := false; begin perform authorize_released_file(v2, shot); exception when sqlstate 'P0001' then ok := true; end;
+  if not ok then raise exception 'T13: withdrawn version must not download'; end if;
+
+  -- 25: client RPCs never expose internal notes
+  if get_client_cuts(ptoken)::text like '%internal secret%' then raise exception 'T25: internal note leaked to client'; end if;
+
+  -- 18: a different project's token cannot reach this cut
+  ok := false; begin perform client_add_comment('other-token', shot, v2, 'X', 'hi', null); exception when sqlstate 'P0002' then ok := true; end;
+  if not ok then raise exception 'T18: foreign token must not comment'; end if;
+
+  -- guard: review_status of a released cut can't be overwritten by a stale studio save
+  update shots set review_status = 'approved', workflow_state = 'released' where id = shot;
+  if (select workflow_state from shots where id = shot) = 'released' then raise exception 'GUARD: workflow_state must be server-controlled'; end if;
+end $$;
+
+rollback;
+select 'cut_review_tests.sql finished (rolled back)' as result;

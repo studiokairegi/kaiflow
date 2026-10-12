@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { supabase, functionUrl } from "./supabaseClient";
 import { buildPipeline, projectProgress as pipelineProjectProgress } from "./pipeline.js";
+import ClientCutReview from "./ClientCutReview.jsx";
+import { getFreelancerReview } from "./cutWorkflowApi.js";
+import { workflowLabel } from "./cutWorkflow.js";
 
 const ink = "#14191c";
 const inkSoft = "#1c2327";
@@ -214,6 +217,8 @@ export function ClientPortalView({ token }) {
             </div>
           ))
         )}
+
+        <ClientCutReview token={token} />
       </div>
     </div>
   );
@@ -222,6 +227,7 @@ export function ClientPortalView({ token }) {
 export function FreelancerView({ token }) {
   const [shot, setShot] = useState(null);
   const [stageInfo, setStageInfo] = useState(null);
+  const [review, setReview] = useState(null); // cut review workflow state; null = feature unavailable
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
@@ -235,6 +241,10 @@ export function FreelancerView({ token }) {
       return;
     }
     setShot(data[0]);
+
+    // Additive: internal review status + feedback the studio chose to share with the
+    // freelancer. Null on any failure, so the portal behaves exactly as before.
+    setReview(await getFreelancerReview(token));
 
     // Additive RPC (design report v2 §12) — this cut's real stage name
     // (e.g. "Shiage" instead of the raw "shiage" key). Swallowed on
@@ -335,6 +345,37 @@ export function FreelancerView({ token }) {
           </span>
         </div>
 
+        {review && (
+          <div style={cardStyle} aria-live="polite">
+            <p style={{ fontSize: 12.5, color: textMuted, marginBottom: 6 }}>Review status</p>
+            <p style={{ fontSize: 14, margin: 0 }}>
+              {review.workflowState === "pending_review"
+                ? "● Submitted. Waiting for the studio's review."
+                : review.workflowState === "in_progress" && review.latestSubmission?.status === "corrections_requested"
+                ? "↺ Corrections requested. Please upload a new version."
+                : review.acceptingSubmissions
+                ? "Ready for your submission."
+                : `✓ Your work is with the studio (${workflowLabel(review.workflowState)}).`}
+            </p>
+            {review.latestSubmission && (
+              <p style={{ fontSize: 12, color: textMuted, margin: "6px 0 0" }}>
+                Latest upload: v{review.latestSubmission.version} · {review.latestSubmission.fileName}
+              </p>
+            )}
+            {review.feedback.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <p style={{ fontSize: 12.5, color: textMuted, marginBottom: 4 }}>Feedback from the studio</p>
+                {review.feedback.map((f) => (
+                  <div key={f.id} style={{ borderTop: `1px solid ${border}`, padding: "6px 0", fontSize: 13.5, whiteSpace: "pre-wrap" }}>
+                    {f.body}
+                    <div style={{ fontSize: 11, color: textMuted }}>{new Date(f.createdAt).toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         <div style={cardStyle}>
           <p style={{ fontSize: 12.5, color: textMuted, marginBottom: shot.assigned_to ? 6 : 0 }}>
             Stage: {stageInfo?.name || String(shot.stage || "").replace(/_/g, " ")}
@@ -414,7 +455,7 @@ export function FreelancerView({ token }) {
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
+          disabled={uploading || (review && !review.acceptingSubmissions)}
           style={{
             width: "100%",
             marginTop: 8,
@@ -427,7 +468,13 @@ export function FreelancerView({ token }) {
             cursor: uploading ? "default" : "pointer",
           }}
         >
-          {uploading ? "Uploading..." : "Upload finished work"}
+          {uploading
+            ? "Uploading..."
+            : review && !review.acceptingSubmissions
+            ? "Uploads are closed for this cut"
+            : review?.latestSubmission?.status === "corrections_requested"
+            ? "Upload corrected version"
+            : "Upload finished work"}
         </button>
         {uploadOk && (
           <p style={{ fontSize: 12.5, color: "#3DDC84", marginTop: 8 }}>Uploaded, thanks!</p>

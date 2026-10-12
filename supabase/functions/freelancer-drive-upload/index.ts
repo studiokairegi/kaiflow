@@ -88,6 +88,35 @@ Deno.serve(async (req) => {
     }
 
     // -----------------------------------------------------------------------
+    // 1b. Cut review workflow gate (additive). Tolerant of the review-workflow
+    // migration not being applied yet: if the column doesn't exist the upload
+    // behaves exactly as it did before and no submission is registered.
+    // -----------------------------------------------------------------------
+    let reviewWorkflowEnabled = false;
+    {
+      const { data: wf, error: wfError } = await supabase
+        .from("shots")
+        .select("workflow_state")
+        .eq("id", shot.id)
+        .maybeSingle();
+      if (!wfError && wf) {
+        reviewWorkflowEnabled = true;
+        if (!["in_progress", "pending_review"].includes(wf.workflow_state)) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "This cut isn't accepting new submissions right now. Please check with the studio.",
+            }),
+            {
+              status: 409,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            }
+          );
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
     // 2. Resolve the upload destination.
     //
     // Preferred:
@@ -236,6 +265,41 @@ Deno.serve(async (req) => {
           },
         }
       );
+    }
+
+    // -----------------------------------------------------------------------
+    // 5b. Register this as a submission for internal QC (-> Pending Review).
+    // Only reached after the Drive upload AND the deliverable record both
+    // succeeded, so a failed upload can never move the cut. Idempotent per
+    // Drive file id, and a newer submission supersedes an older pending one.
+    // -----------------------------------------------------------------------
+    if (reviewWorkflowEnabled) {
+      const { error: submissionError } = await supabase.rpc(
+        "register_freelancer_submission",
+        {
+          p_token: token,
+          p_drive_file_id: uploaded.id,
+          p_name: file.name,
+          p_mime: file.type || null,
+          p_size: file.size,
+        }
+      );
+      if (submissionError) {
+        console.error(
+          "register_freelancer_submission failed:",
+          submissionError.message
+        );
+        return new Response(
+          JSON.stringify({
+            error:
+              "The file uploaded but couldn't be submitted for review. Please tell the studio directly.",
+          }),
+          {
+            status: 500,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          }
+        );
+      }
     }
 
     // -----------------------------------------------------------------------

@@ -47,6 +47,7 @@ export const NOTIFICATION_CATEGORIES = [
   { id: "deadlines", label: "Approaching deadlines", hint: "Leads close to their follow-up deadline." },
   { id: "focus", label: "Focus timer breaks", hint: "Start and end of focus and break sessions." },
   { id: "freelancerUploads", label: "Freelancer uploads", hint: "A freelancer uploads a file to a project." },
+  { id: "cutReview", label: "Client feedback on cuts", hint: "A client comments on, requests revisions to, or approves a released cut." },
 ];
 
 // Short chimes supplied with the app. Browsers cannot control the OS notification
@@ -58,7 +59,7 @@ export const SOUNDS = [
 
 export const DEFAULT_USER_PREFS = {
   dashboardPeriod: "all",
-  notifyCategories: { followups: true, hotLeads: true, proposals: true, deadlines: true, focus: true, freelancerUploads: true },
+  notifyCategories: { followups: true, hotLeads: true, proposals: true, deadlines: true, focus: true, freelancerUploads: true, cutReview: true },
   sound: { enabled: false, id: "glass", volume: 0.6 },
   focusTimer: DEFAULT_FOCUS_TIMER,
 };

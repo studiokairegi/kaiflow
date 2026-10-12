@@ -57,7 +57,12 @@ export async function uploadFileToDrive(
   folderId: string,
   fileName: string,
   fileData: Uint8Array | Blob,
-  mimeType: string
+  mimeType: string,
+  // Defaults to true so every existing caller (studio attachments, freelancer
+  // deliverables) behaves exactly as before. Final QC files pass false: they
+  // must stay private to the studio's Drive and only ever reach a client
+  // through the authorized client-final-download function.
+  shareWithAnyoneLink = true
 ): Promise<{ id: string; url: string }> {
   // Randomized per upload rather than a fixed constant: a hardcoded
   // boundary that happens to appear inside the uploaded file's own bytes
@@ -115,7 +120,9 @@ export async function uploadFileToDrive(
   // including the freelancer who just uploaded it. Applied here rather than
   // in each caller so both the studio attachment path and the freelancer
   // deliverable path get it automatically.
-  await shareFileWithAnyone(accessToken, json.id);
+  if (shareWithAnyoneLink) {
+    await shareFileWithAnyone(accessToken, json.id);
+  }
   return { id: json.id, url: `https://drive.google.com/file/d/${json.id}/view` };
 }
 
@@ -162,4 +169,55 @@ export async function trashDriveFile(accessToken: string, fileId: string): Promi
   } catch {
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Final QC helpers
+// ---------------------------------------------------------------------------
+
+export type DriveFileMeta = {
+  id: string;
+  name?: string;
+  mimeType?: string;
+  size?: string;
+  trashed?: boolean;
+  parents?: string[];
+};
+
+// Returns null when the file doesn't exist / isn't accessible (404), throws on
+// other failures so callers can tell "gone" from "Drive is having a bad day".
+export async function getDriveFileMeta(accessToken: string, fileId: string): Promise<DriveFileMeta | null> {
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size,trashed,parents`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Drive metadata lookup failed: ${res.status} ${await res.text()}`);
+  return (await res.json()) as DriveFileMeta;
+}
+
+// Finds an existing, non-trashed folder by exact name under a parent so
+// retries / concurrent requests reuse it instead of creating duplicates.
+export async function findChildFolder(
+  accessToken: string,
+  parentId: string,
+  name: string
+): Promise<{ id: string; url: string } | null> {
+  const escaped = name.split("\\").join("\\\\").split("'").join("\\'");
+  const q = `name = '${escaped}' and '${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)&orderBy=createdTime&pageSize=1`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) throw new Error(`Drive folder lookup failed: ${res.status} ${await res.text()}`);
+  const json = await res.json();
+  const hit = json.files?.[0];
+  return hit ? { id: hit.id, url: `https://drive.google.com/drive/folders/${hit.id}` } : null;
+}
+
+// Streams the file bytes (alt=media) without buffering them in memory.
+export async function fetchDriveFileStream(accessToken: string, fileId: string): Promise<Response> {
+  return await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
 }
