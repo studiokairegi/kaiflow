@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { contactsApi } from "./contactsInstance.js";
+import ContractsPanel from "./ContractsPanel.jsx";
 import {
   filterContacts,
   contactSubtitle,
@@ -103,7 +104,7 @@ function ContactForm({ initial, isNew, onSaved, onCancel }) {
   );
 }
 
-function ContactDetail({ contact, stageLabels, onEdit, onChanged }) {
+function ContactDetail({ contact, stageLabels, onEdit, onChanged, projects, cards, studio }) {
   const [links, setLinks] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -153,11 +154,17 @@ function ContactDetail({ contact, stageLabels, onEdit, onChanged }) {
           : links.projects.length === 0 ? <p style={{ fontSize: 13, color: C.muted, margin: 0 }}>No linked projects.</p>
           : links.projects.map((p) => (<div key={p.id} style={{ fontSize: 13.5 }}>{p.name}{p.archived ? <span style={{ color: C.muted }}> · archived</span> : null}</div>))}
       </div>
+
+      {contact.relationship === "client" ? (
+        <ContractsPanel key={contact.id} contact={contact} projects={projects} cards={cards} studio={studio} ui={{ C, card, field, btn }} />
+      ) : (
+        <p style={{ fontSize: 12.5, color: C.muted, marginTop: 14, borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>Contracts are available once this contact is a client.</p>
+      )}
     </div>
   );
 }
 
-export default function ContactsPage({ stageLabels = {}, onContactsChanged }) {
+export default function ContactsPage({ stageLabels = {}, onContactsChanged, projects = [], cards = [], studio = {} }) {
   const [contacts, setContacts] = useState(null);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -249,7 +256,7 @@ export default function ContactsPage({ stageLabels = {}, onContactsChanged }) {
             ) : mode === "edit" && selected ? (
               <ContactForm initial={selected} onSaved={saved} onCancel={() => setMode("view")} />
             ) : selected ? (
-              <ContactDetail contact={selected} stageLabels={stageLabels} onEdit={() => setMode("edit")} onChanged={saved} />
+              <ContactDetail contact={selected} stageLabels={stageLabels} onEdit={() => setMode("edit")} onChanged={saved} projects={projects} cards={cards} studio={studio} />
             ) : (
               <p style={{ color: C.muted, fontSize: 13.5 }}>Select a contact to see details.</p>
             )}

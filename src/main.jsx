@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App.jsx";
 import { ClientPortalView, FreelancerView } from "./SharedViews.jsx";
 import NdaSignPage from "./NdaSignPage.jsx";
+import ContractSignPage from "./ContractSignPage.jsx";
 
 const params = new URLSearchParams(window.location.search);
 const shareType = params.get("share");
@@ -15,6 +16,8 @@ if (shareType === "project" && shareToken) {
   content = <FreelancerView token={shareToken} />;
 } else if ((shareType === "nda" || params.get("sign") === "nda") && shareToken) {
   content = <NdaSignPage token={shareToken} />;
+} else if (shareType === "contract" && shareToken) {
+  content = <ContractSignPage token={shareToken} />;
 } else {
   content = <App />;
 }

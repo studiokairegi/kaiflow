@@ -131,6 +131,12 @@ export async function publicDeclineNda(token, reason) {
 // ---- signed PDF with certificate page -------------------------------------
 // Accepts a row from nda_requests (snake_case) or the public RPC json (same keys).
 export function buildNdaPdf(r) {
+  return buildSignedDocPdf(r, { defaultTitle: "Non-Disclosure Agreement" });
+}
+
+// Shared with client contracts (contractsApi.js). `extraRows` are [label, value] pairs
+// added to the certificate page right after the document title.
+export function buildSignedDocPdf(r, { defaultTitle = "Document", extraRows = [] } = {}) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const W = doc.internal.pageSize.getWidth();
   const H = doc.internal.pageSize.getHeight();
@@ -168,7 +174,8 @@ export function buildNdaPdf(r) {
   doc.setFont("helvetica", "normal"); doc.setFontSize(10);
   const when = (iso) => (iso ? new Date(iso).toUTCString() : "-");
   const rows = [
-    ["Document", r.title || "Non-Disclosure Agreement"],
+    ["Document", r.title || defaultTitle],
+    ...extraRows,
     ["Requested by", r.studio_name || "-"],
     ["Signer", `${r.typed_name || r.signer_name}${r.signer_email ? ` <${r.signer_email}>` : ""}`],
     ["Status", (r.status || "").toUpperCase()],

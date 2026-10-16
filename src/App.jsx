@@ -5588,7 +5588,18 @@ export default function ShotTracker() {
       )}
 
       {view === "projects" && workspace === "leads" && crmTab === "contacts" && (
-        <ContactsPage stageLabels={Object.fromEntries(ALL_LEAD_STAGES.map((s) => [s.id, s.label]))} />
+        <ContactsPage
+          stageLabels={Object.fromEntries(ALL_LEAD_STAGES.map((s) => [s.id, s.label]))}
+          projects={projects}
+          cards={cards}
+          studio={{
+            name: settings.studioName,
+            legalName: settings.studioLegalName,
+            paymentTermsDays: settings.defaultPaymentTermsDays,
+            milestoneDefaults: settings.milestoneDefaults,
+            currency: settings.currencySymbol,
+          }}
+        />
       )}
 
       {view === "projects" && workspace === "leads" && crmTab === "pipeline" && (
