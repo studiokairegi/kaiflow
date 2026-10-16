@@ -7,6 +7,8 @@ import CutWorkflowPanel from "./CutWorkflowPanel.jsx";
 import ContactsPage from "./ContactsPage.jsx";
 import ContactPicker from "./ContactPicker.jsx";
 import TasksPanel from "./TasksPanel.jsx";
+import NdaTab from "./NdaTab.jsx";
+import { listNdaStatusByMember, NDA_STATUS } from "./ndaApi.js";
 import { contactsApi } from "./contactsInstance.js";
 import { applyContactSelection, projectContactUpdateFields } from "./contacts.js";
 import { workflowLabel } from "./cutWorkflow.js";
@@ -830,6 +832,7 @@ const TEAM_MEMBER_EDITOR_TABS = [
   { id: "skills", label: "Skills & Experience" },
   { id: "rates", label: "Rates" },
   { id: "freelancer", label: "Freelancer" },
+  { id: "nda", label: "NDA", requiresExisting: true },
   { id: "payments", label: "Payments" },
   { id: "availability", label: "Availability" },
   { id: "portfolio", label: "Portfolio", requiresExisting: true },
@@ -6086,6 +6089,7 @@ export default function ShotTracker() {
           teamMembers={teamMembers}
           cards={cards}
           projects={projects}
+          studioName={settings.studioLegalName || settings.studioName || "Studio Kairegi"}
         />
       )}
 
@@ -6450,6 +6454,14 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
   const legacyMatches = computeLegacyAssignmentMatches(cards, teamMembers);
   const legacyReviewCount = legacyMatches.unique.length + legacyMatches.ambiguous.length + legacyMatches.unmatched.length;
   const [showLegacyReview, setShowLegacyReview] = useState(false);
+  // NDA status per member for the roster badge. Soft-fails if the NDA
+  // migration hasn't been run yet, so Teams still loads.
+  const [ndaStatus, setNdaStatus] = useState({});
+  useEffect(() => {
+    let off = false;
+    listNdaStatusByMember().then((m) => { if (!off) setNdaStatus(m); }).catch(() => {});
+    return () => { off = true; };
+  }, [teamMembers]);
 
   // Search (brief §17): name, email, role, department, skills, Upwork
   // profile - all fields already present on every already-loaded member,
@@ -6663,6 +6675,14 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
                 <span style={{ ...styles.cardMeta, ...ellipsis }}>
                   {member.role || "No role"}{isArchived ? " · archived" : ""}
                 </span>
+                {member.memberType === "freelancer" && !isArchived && (
+                  <span
+                    title={ndaStatus[member.id] ? `NDA: ${NDA_STATUS[ndaStatus[member.id]].label}` : "No NDA requested"}
+                    style={{ ...styles.fieldHint, flexShrink: 0, whiteSpace: "nowrap", color: ndaStatus[member.id] ? NDA_STATUS[ndaStatus[member.id]].color : "#8b9a98" }}
+                  >
+                    NDA: {{ signed: "signed", sent: "awaiting", viewed: "awaiting", declined: "declined", expired: "expired" }[ndaStatus[member.id]] || "none"}
+                  </span>
+                )}
                 {member.memberType === "freelancer" && member.upworkRating != null && (
                   <span
                     style={{ ...styles.fieldHint, flexShrink: 0, color: "#F2C14E", whiteSpace: "nowrap" }}
@@ -11994,7 +12014,7 @@ function PlannerWorkspace({
   );
 }
 
-function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currencySymbol, saveError, paymentMethodOptions, teamMembers, cards, projects }) {
+function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currencySymbol, saveError, paymentMethodOptions, teamMembers, cards, projects, studioName }) {
   const [form, setForm] = useState({ ...emptyTeamMember(), ...member });
   const [customSkill, setCustomSkill] = useState("");
   const [confirmingArchive, setConfirmingArchive] = useState(false);
@@ -12428,6 +12448,10 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
           </>
         )}
           </>
+        )}
+
+        {activeTab === "nda" && !isNew && (
+          <NdaTab member={form} studioName={studioName} styles={styles} />
         )}
 
         {activeTab === "payments" && (
