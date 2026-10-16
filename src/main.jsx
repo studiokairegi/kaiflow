@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App.jsx";
 import { ClientPortalView, FreelancerView } from "./SharedViews.jsx";
+import NdaSignPage from "./NdaSignPage.jsx";
 
 const params = new URLSearchParams(window.location.search);
 const shareType = params.get("share");
@@ -12,6 +13,8 @@ if (shareType === "project" && shareToken) {
   content = <ClientPortalView token={shareToken} />;
 } else if (shareType === "shot" && shareToken) {
   content = <FreelancerView token={shareToken} />;
+} else if ((shareType === "nda" || params.get("sign") === "nda") && shareToken) {
+  content = <NdaSignPage token={shareToken} />;
 } else {
   content = <App />;
 }

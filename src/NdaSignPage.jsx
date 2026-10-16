@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { publicGetNda, publicSignNda, publicDeclineNda, downloadNdaPdf, NDA_CONSENT_TEXT } from "./ndaApi";
 
-// Public signing page, rendered when the URL is ?sign=nda&token=...
+// Public signing page, rendered when the URL is ?share=nda&token=...
 // No account needed: it talks to the nda_public_* RPCs only.
 
 const ink = "#14191c", panel = "#1c2327", line = "#2a3338", muted = "#8b9a98";

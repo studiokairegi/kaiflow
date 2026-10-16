@@ -50,7 +50,7 @@ export function renderNdaBody(template, vars) {
 }
 
 export const ndaSignLink = (token) =>
-  `${window.location.origin}${window.location.pathname}?sign=nda&token=${token}`;
+  `${window.location.origin}${window.location.pathname}?share=nda&token=${token}`;
 
 // ---- owner side -----------------------------------------------------------
 export async function loadNdaTemplate() {
