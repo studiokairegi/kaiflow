@@ -42,6 +42,10 @@ export const CLIENT_STATUS_ICONS = {
   client_approved: "✓",
 };
 
+// Submissions the studio records itself for in-house cuts (see migration_inhouse_qc.sql).
+export const IN_HOUSE_PREFIX = "inhouse:";
+export const isInHouseSubmission = (s) => String(s?.drive_file_id ?? s?.driveFileId ?? "").startsWith(IN_HOUSE_PREFIX);
+
 export function workflowLabel(state) {
   return WORKFLOW_LABELS[state] || WORKFLOW_LABELS.in_progress;
 }
@@ -93,6 +97,8 @@ export function studioActions({ workflowState, reviewStatus, submissions = [], v
     canRequestCorrections: reviewable,
     canUploadFinal: finalUploadUnlocked,
     canRelease,
+    // Studio can pass its own work through QC when nothing is waiting on a freelancer.
+    canMarkInHouse: workflowState === "in_progress" && !pendingSubmission,
     canWithdraw: !!releasedVersion,
     // Studio decides how a client revision is handled; neither option is automatic.
     canRouteClientRevision:
@@ -107,8 +113,16 @@ export function unavailableReason(action, ctx) {
   switch (action) {
     case "review":
       return a.canApprove ? null : "There is no submission waiting for review.";
-    case "final_upload":
-      return a.canUploadFinal ? null : "Final upload unlocks after the freelancer's submission passes internal QC.";
+    case "final_upload": {
+      if (a.canUploadFinal) return null;
+      if (ctx.workflowState === "pending_review") return "Approve the freelancer's submission (internal QC) in step 1 to unlock the final upload.";
+      if (ctx.workflowState === "in_progress") {
+        return (ctx.submissions || []).length === 0
+          ? "No freelancer submission yet. Wait for the freelancer to upload, or mark this cut as in-house work in step 1."
+          : "Waiting for the freelancer's corrected upload. Or mark this cut as in-house work in step 1.";
+      }
+      return "Final upload unlocks after the freelancer's submission passes internal QC.";
+    }
     case "release":
       if (a.canRelease) return null;
       if (!a.approvedSubmission) return "Release requires an internally approved submission.";
@@ -175,6 +189,7 @@ const ERROR_TEXT = {
   revisions_already_requested: "Revisions were already requested on this version.",
   no_released_version: "Nothing is released to the client yet.",
   cut_not_accepting_submissions: "This cut isn't accepting new submissions right now.",
+  in_house_not_available: "This cut already has a submission in review or past QC, so it can't be marked as in-house work.",
 };
 
 /** Map a Supabase/RPC/Edge error to a short human sentence. */

@@ -3,6 +3,7 @@ import {
   loadCutWorkspace,
   qcApprove,
   qcRequestCorrections,
+  qcMarkInHouse,
   releaseFinalVersion,
   withdrawRelease,
   routeClientRevision,
@@ -13,6 +14,7 @@ import {
   workflowLabel,
   studioActions,
   unavailableReason,
+  isInHouseSubmission,
   formatTimestamp,
   newUploadKey,
 } from "./cutWorkflow.js";
@@ -85,6 +87,8 @@ export default function CutWorkflowPanel({ shotId, projectName, clientName, shar
   const [releaseNotes, setReleaseNotes] = useState("");
   const [withdrawReason, setWithdrawReason] = useState("");
   const [routeNote, setRouteNote] = useState("");
+  const [inHouseOpen, setInHouseOpen] = useState(false);
+  const [inHouseNote, setInHouseNote] = useState("");
   const [internalNote, setInternalNote] = useState("");
   const [progress, setProgress] = useState(null);
   const [upload, setUpload] = useState({ error: "", pending: null }); // pending keeps file + key for retry
@@ -198,11 +202,16 @@ export default function CutWorkflowPanel({ shotId, projectName, clientName, shar
                 </span>
               </div>
               <div style={{ fontSize: 11.5, color: C.muted }}>
-                Submitted {fmt(s.submitted_at)} by {s.submitted_by || "freelancer"}
-                {s.reviewed_at ? ` · Reviewed ${fmt(s.reviewed_at)}` : ""} ·{" "}
-                <a href={`https://drive.google.com/file/d/${s.drive_file_id}/view`} target="_blank" rel="noreferrer" style={{ color: C.teal }}>
-                  Open in Drive (internal only)
-                </a>
+                {isInHouseSubmission(s) ? "Recorded" : "Submitted"} {fmt(s.submitted_at)} by {s.submitted_by || "freelancer"}
+                {s.reviewed_at ? ` · Reviewed ${fmt(s.reviewed_at)}` : ""}
+                {!isInHouseSubmission(s) && (
+                  <>
+                    {" "}·{" "}
+                    <a href={`https://drive.google.com/file/d/${s.drive_file_id}/view`} target="_blank" rel="noreferrer" style={{ color: C.teal }}>
+                      Open in Drive (internal only)
+                    </a>
+                  </>
+                )}
               </div>
             </div>
           ))
@@ -240,6 +249,38 @@ export default function CutWorkflowPanel({ shotId, projectName, clientName, shar
           </div>
         ) : (
           <p style={{ fontSize: 12, color: C.muted, margin: "8px 0 0" }}>{unavailableReason("review", { workflowState: shot.workflow_state, submissions, versions })}</p>
+        )}
+
+        {a.canMarkInHouse && (
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+            {!inHouseOpen ? (
+              <>
+                <p style={{ fontSize: 12.5, color: C.muted, margin: "0 0 6px" }}>
+                  Done in-house, or delivered outside the freelancer portal? You can skip the freelancer step.
+                </p>
+                <button type="button" style={btn(C.blue, !!busy)} disabled={!!busy} onClick={() => setInHouseOpen(true)}>
+                  Mark as in-house work…
+                </button>
+              </>
+            ) : (
+              <div role="dialog" aria-label="Confirm in-house work">
+                <p style={{ margin: "0 0 6px", fontSize: 13 }}><strong>Pass this cut through internal QC as in-house work?</strong></p>
+                <p style={{ margin: "0 0 8px", fontSize: 12.5, color: C.muted }}>
+                  This records that the studio itself approved the work and unlocks the final upload. Nothing is released to the client yet:
+                  you still upload the final file and release it explicitly.
+                </p>
+                <label style={{ fontSize: 12, color: C.muted }} htmlFor="inhouse-note">Internal note (optional)</label>
+                <textarea id="inhouse-note" value={inHouseNote} onChange={(e) => setInHouseNote(e.target.value)} rows={2} style={input} />
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <button type="button" style={btn(C.blue, !!busy)} disabled={!!busy}
+                    onClick={() => run("inhouse", async () => { await qcMarkInHouse(shotId, inHouseNote); setInHouseOpen(false); setInHouseNote(""); })}>
+                    {busy === "inhouse" ? "Saving…" : "Confirm in-house"}
+                  </button>
+                  <button type="button" style={btn(C.muted, !!busy)} disabled={!!busy} onClick={() => setInHouseOpen(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </div>
 

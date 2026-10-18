@@ -56,6 +56,9 @@ export const qcRequestCorrections = (submissionId, correctionNotes, internalNote
     p_correction_notes: correctionNotes,
   });
 
+export const qcMarkInHouse = (shotId, note) =>
+  call("qc_mark_in_house", { p_shot_id: shotId, p_note: note || null });
+
 export const releaseFinalVersion = (versionId, notes) =>
   call("release_final_version", { p_version_id: versionId, p_notes: notes || null });
 
