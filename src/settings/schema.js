@@ -73,7 +73,7 @@ export const DATE_FORMATS = [
 
 export const LANDING_TABS = [
   { id: "dashboard", label: "Dashboard" }, { id: "leads", label: "Leads" }, { id: "planner", label: "Planner" },
-  { id: "projects", label: "Projects" }, { id: "teams", label: "Teams" }, { id: "finance", label: "Finance" },
+  { id: "projects", label: "Projects" }, { id: "teams", label: "Teams" }, { id: "finance", label: "Finance" }, { id: "payments", label: "Payments" },
 ];
 
 export const DEFAULT_SETTINGS = {

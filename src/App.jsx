@@ -20,9 +20,13 @@ import {
 import { runtime, applyRuntimeSettings, categoryAllowed, playNotificationSound, desktopNotificationSilent, workdayTargetSeconds, isWorkday, reasonsFor, todayInZone } from "./settings/runtime.js";
 import { emptyEmailSlots, normalizeEmailSlots, nextScheduledIndex, lastScheduledIndex, followupCountLabel, sendingTriggersNoResponse, visibleSlotCount, emailsSentSummary, isManualFollowupDue, manualFollowupState } from "./settings/followups.js";
 import FinanceModule, { PrivacyToggle } from "./finance/FinanceModule.jsx";
+import PaymentsModule from "./payments/PaymentsModule.jsx";
+import PayNowDialog from "./payments/PayNowDialog.jsx";
+import { usePayments } from "./payments/usePayments.js";
+import { summarizePayments, checkoutBlocker } from "./payments/logic.js";
 import { ProjectPicker } from "./finance/ProjectPicker.jsx";
 import { useFinanceSummary } from "./finance/useLedger.js";
-import { displayMoney, codeToSymbol } from "./finance/currency.js";
+import { displayMoney, codeToSymbol, formatTotalsByCurrency } from "./finance/currency.js";
 import { saveFxSnapshot, listBankAccounts } from "./finance/api.js";
 import {
   DonutBreakdown,
@@ -2738,7 +2742,8 @@ export default function ShotTracker() {
   const [patreonConnected, setPatreonConnected] = useState(false);
   const [patreonNotice, setPatreonNotice] = useState("");
   const [loading, setLoading] = useState(true);
-  const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "teams"
+  const [payNowInvoice, setPayNowInvoice] = useState(null);
+  const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "payments" | "teams"
   const [view, setView] = useState("projects");
   const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices" | "activity"
   const [selectedProjectId, setSelectedProjectId] = useState(null);
@@ -3094,7 +3099,7 @@ export default function ShotTracker() {
         const loaded = settingsFromRow(row);
         setSettings(loaded);
         if (!hasAppliedLandingTab.current) {
-          setWorkspace(loaded.defaultLandingTab || "dashboard");
+          setWorkspace(new URLSearchParams(window.location.search).get("payments_return") ? "payments" : loaded.defaultLandingTab || "dashboard");
           hasAppliedLandingTab.current = true;
         }
         if (!hasCheckedTutorial.current) {
@@ -5233,6 +5238,8 @@ export default function ShotTracker() {
                 ? "Dashboard"
                 : workspace === "finance"
                 ? "Finance"
+                : workspace === "payments"
+                ? "Payments"
                 : workspace === "teams"
                 ? "Teams"
                 : "Kairil"}
@@ -5369,7 +5376,7 @@ export default function ShotTracker() {
               <BackIcon />
               All plans
             </button>
-          ) : workspace === "dashboard" ? null : (
+          ) : workspace === "dashboard" || workspace === "payments" ? null : (
             <button
               style={styles.newButton}
               onClick={() => setEditingProject(emptyProject({ currency: settings.currencySymbol }))}
@@ -5434,6 +5441,13 @@ export default function ShotTracker() {
             onClick={() => setWorkspace("finance")}
           >
             Finance
+          </button>
+          <button
+            className={tutorialHighlightTarget === "payments" ? "kf-tutorial-highlight" : undefined}
+            style={{ ...styles.tabButton, ...(workspace === "payments" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("payments")}
+          >
+            Payments
           </button>
         </div>
       )}
@@ -5539,6 +5553,7 @@ export default function ShotTracker() {
           fxRates={fxRates}
           onOpenProject={openProject}
           onGoToProjects={() => setWorkspace("projects")}
+          onGoToPayments={() => setWorkspace("payments")}
           onOpenLead={(lead) => setEditingLead(lead)}
           onOpenShot={(card) => { openProject(card.projectId); setEditingCard(card); }}
           onOpenContact={() => { setWorkspace("leads"); setCrmTab("contacts"); }}
@@ -5842,6 +5857,21 @@ export default function ShotTracker() {
         </>
       )}
 
+      {view === "projects" && workspace === "payments" && (
+        <PaymentsModule
+          userId={userId}
+          projects={projects}
+          invoices={invoices}
+          teamMembers={teamMembers}
+          cards={cards}
+          defaultPeriod={settings.userPrefs?.dashboardPeriod || "all"}
+          onOpenProject={openProject}
+          onGoFinance={() => setWorkspace("finance")}
+          onGoTeams={() => setWorkspace("teams")}
+          refreshApp={refreshFinanceSources}
+        />
+      )}
+
       {view === "projects" && workspace === "teams" && !hasProAccess && (
         <ProUpgradePrompt feature="Teams" />
       )}
@@ -6030,6 +6060,7 @@ export default function ShotTracker() {
           }
           onEdit={setEditingInvoice}
           onMarkPaid={handleMarkInvoicePaid}
+          onPayNow={setPayNowInvoice}
           onGenerateFollowup={handleGenerateFollowupDoc}
           onDownload={(inv) => downloadInvoicePDF(inv, selectedProject, settings)}
           onOpenMilestones={() => setShowMilestoneModal(true)}
@@ -6179,6 +6210,14 @@ export default function ShotTracker() {
           leads={leads}
           followupSchedule={settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE}
           autoNoResponse={settings.autoNoResponse !== false}
+        />
+      )}
+
+      {payNowInvoice && (
+        <PayNowDialog
+          invoice={payNowInvoice}
+          onClose={() => { setPayNowInvoice(null); refreshFinanceSources(); }}
+          onChanged={() => refreshFinanceSources()}
         />
       )}
 
@@ -8377,7 +8416,7 @@ function computeNeedsAttentionCounts(leads, schedule) {
   return { followupsDueToday, hotAwaitingResponse, proposalsAwaitingResponse, approachingDeadline };
 }
 
-function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToLeads, onOpenLead, onOpenShot, onOpenContact, user, userId }) {
+function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToPayments, onGoToLeads, onOpenLead, onOpenShot, onOpenContact, user, userId }) {
   const stats = computeDashboardStats(projects, cards, leads, invoices);
   // Financial figures come from the accounting ledger (finance/reports.js), in the studio's
   // base currency using each transaction's own stored FX rate. Nothing is converted here.
@@ -8400,6 +8439,29 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   useEffect(() => {
     setDashboardPeriod(settings.userPrefs?.dashboardPeriod || "all");
   }, [settings.userPrefs?.dashboardPeriod]);
+
+  // Payments (Paystack sandbox). Same definitions and period filter as the Payments module; shown as
+  // TEST data and kept separate from the ledger-based revenue above.
+  const payData = usePayments(userId);
+  const periodForPayments = dashboardPeriod;
+  const paySummary = useMemo(
+    () => (payData.data ? summarizePayments({ ...payData.data, invoices, period: periodForPayments }) : null),
+    [payData.data, invoices, periodForPayments]
+  );
+  const payMoney = (m) => (!paySummary ? "..." : fin.privacy ? "\u2022\u2022\u2022\u2022" : formatTotalsByCurrency(m));
+  const payCard = (label, value, color) => ({ label, value, sub: "sandbox", icon: <InvoiceIcon />, color, onClick: onGoToPayments });
+  const paymentItems = [
+    payCard("Payments received today", payMoney(paySummary?.receivedToday), "#3DDC84"),
+    payCard("Payment receipts (period)", payMoney(paySummary?.receivedGross), "#3DDC84"),
+    payCard("Actual transaction fees", payMoney(paySummary?.fees), "#F2A65A"),
+    payCard("Net receipts after fees", payMoney(paySummary?.net), "#3DDC84"),
+    payCard("Pending incoming payments", payMoney(paySummary?.pendingIncoming), "#F2A65A"),
+    payCard("Refunds", payMoney(paySummary?.refunds), "#FF4D4D"),
+    payCard("Owed to freelancers", payMoney(paySummary?.freelancerOwed), "#F2A65A"),
+    payCard("Approved payouts awaiting", payMoney(paySummary?.approvedPayoutsAwaiting), "#4A90D9"),
+    payCard("Freelancer payouts (simulated)", payMoney(paySummary?.simulatedPaid), "#9B8AD8"),
+    payCard("Unreconciled payments", paySummary ? paySummary.unreconciledCount + paySummary.unreconciledPayoutCount : "...", "#FF4D4D"),
+  ];
 
   const statItems = [
     { label: "Active projects", value: stats.activeProjectsCount, sub: `${stats.projectsCompleted} completed`, icon: <FolderIcon />, color: teal, onClick: onGoToProjects },
@@ -8604,7 +8666,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       </div>
 
       <div style={styles.dashboardKpiStrip}>
-        {statItems.map((item) => (
+        {[...statItems, ...paymentItems].map((item) => (
           <div
             key={item.label}
             className="kf-card"
@@ -9055,6 +9117,7 @@ function InvoicesPanel({
   onNew,
   onEdit,
   onMarkPaid,
+  onPayNow,
   onGenerateFollowup,
   onDownload,
   onOpenMilestones,
@@ -9166,6 +9229,19 @@ function InvoicesPanel({
                       }}
                     >
                       Mark as paid
+                    </button>
+                  )}
+                  {onPayNow && inv.status !== "paid" && (inv.docType || "invoice") !== "receipt" && (
+                    <button
+                      style={styles.cancelButton}
+                      disabled={!!checkoutBlocker(inv)}
+                      title={checkoutBlocker(inv) || "Pay with Paystack (sandbox / test mode only)"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onPayNow(inv);
+                      }}
+                    >
+                      Pay now (sandbox)
                     </button>
                   )}
                   {docType === "proforma" && !hasFollowup(inv.id, "receipt") && (
