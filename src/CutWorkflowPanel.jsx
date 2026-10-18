@@ -194,7 +194,7 @@ export default function CutWorkflowPanel({ shotId, projectName, clientName, shar
             <div key={s.id} style={{ borderTop: `1px solid ${C.border}`, padding: "8px 0", fontSize: 13 }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                 <span>
-                  v{s.version} · {s.file_name} <span style={{ color: C.muted }}>{size(s.size_bytes)}</span>
+                  v{s.version} · {isInHouseSubmission(s) ? "Internal QC check passed (marked by studio)" : s.file_name} <span style={{ color: C.muted }}>{size(s.size_bytes)}</span>
                 </span>
                 <span style={{ color: s.status === "approved" ? C.green : s.status === "corrections_requested" ? C.red : C.blue }}>
                   {s.status === "approved" ? "✓ " : s.status === "corrections_requested" ? "↺ " : "● "}
@@ -202,7 +202,7 @@ export default function CutWorkflowPanel({ shotId, projectName, clientName, shar
                 </span>
               </div>
               <div style={{ fontSize: 11.5, color: C.muted }}>
-                {isInHouseSubmission(s) ? "Recorded" : "Submitted"} {fmt(s.submitted_at)} by {s.submitted_by || "freelancer"}
+                {isInHouseSubmission(s) ? "Marked" : "Submitted"} {fmt(s.submitted_at)} by {s.submitted_by || "freelancer"}
                 {s.reviewed_at ? ` · Reviewed ${fmt(s.reviewed_at)}` : ""}
                 {!isInHouseSubmission(s) && (
                   <>
@@ -256,17 +256,17 @@ export default function CutWorkflowPanel({ shotId, projectName, clientName, shar
             {!inHouseOpen ? (
               <>
                 <p style={{ fontSize: 12.5, color: C.muted, margin: "0 0 6px" }}>
-                  Done in-house, or delivered outside the freelancer portal? You can skip the freelancer step.
+                  Work was done in-house, or the freelancer's file didn't arrive through the portal? If you've checked it yourself, you can mark the internal QC check as passed.
                 </p>
                 <button type="button" style={btn(C.blue, !!busy)} disabled={!!busy} onClick={() => setInHouseOpen(true)}>
-                  Mark as in-house work…
+                  Mark as in-house QC check passed…
                 </button>
               </>
             ) : (
-              <div role="dialog" aria-label="Confirm in-house work">
-                <p style={{ margin: "0 0 6px", fontSize: 13 }}><strong>Pass this cut through internal QC as in-house work?</strong></p>
+              <div role="dialog" aria-label="Confirm in-house QC check passed">
+                <p style={{ margin: "0 0 6px", fontSize: 13 }}><strong>Mark the internal QC check as passed?</strong></p>
                 <p style={{ margin: "0 0 8px", fontSize: 12.5, color: C.muted }}>
-                  This records that the studio itself approved the work and unlocks the final upload. Nothing is released to the client yet:
+                  This records that the studio checked the work and it passed internal QC, and unlocks the final upload. Nothing is released to the client yet:
                   you still upload the final file and release it explicitly.
                 </p>
                 <label style={{ fontSize: 12, color: C.muted }} htmlFor="inhouse-note">Internal note (optional)</label>
@@ -274,7 +274,7 @@ export default function CutWorkflowPanel({ shotId, projectName, clientName, shar
                 <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                   <button type="button" style={btn(C.blue, !!busy)} disabled={!!busy}
                     onClick={() => run("inhouse", async () => { await qcMarkInHouse(shotId, inHouseNote); setInHouseOpen(false); setInHouseNote(""); })}>
-                    {busy === "inhouse" ? "Saving…" : "Confirm in-house"}
+                    {busy === "inhouse" ? "Saving…" : "Confirm QC check passed"}
                   </button>
                   <button type="button" style={btn(C.muted, !!busy)} disabled={!!busy} onClick={() => setInHouseOpen(false)}>Cancel</button>
                 </div>

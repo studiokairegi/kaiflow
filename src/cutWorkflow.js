@@ -118,8 +118,8 @@ export function unavailableReason(action, ctx) {
       if (ctx.workflowState === "pending_review") return "Approve the freelancer's submission (internal QC) in step 1 to unlock the final upload.";
       if (ctx.workflowState === "in_progress") {
         return (ctx.submissions || []).length === 0
-          ? "No freelancer submission yet. Wait for the freelancer to upload, or mark this cut as in-house work in step 1."
-          : "Waiting for the freelancer's corrected upload. Or mark this cut as in-house work in step 1.";
+          ? "No freelancer submission yet. Wait for the freelancer to upload, or mark the in-house QC check as passed in step 1."
+          : "Waiting for the freelancer's corrected upload. Or mark the in-house QC check as passed in step 1.";
       }
       return "Final upload unlocks after the freelancer's submission passes internal QC.";
     }
@@ -189,7 +189,7 @@ const ERROR_TEXT = {
   revisions_already_requested: "Revisions were already requested on this version.",
   no_released_version: "Nothing is released to the client yet.",
   cut_not_accepting_submissions: "This cut isn't accepting new submissions right now.",
-  in_house_not_available: "This cut already has a submission in review or past QC, so it can't be marked as in-house work.",
+  in_house_not_available: "This cut already has a submission in review or past QC, so the in-house QC check can't be marked here.",
 };
 
 /** Map a Supabase/RPC/Edge error to a short human sentence. */

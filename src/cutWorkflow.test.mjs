@@ -134,7 +134,8 @@ test("upload keys are unique per attempt", () => {
 test("final upload input validation", () => {
   assert.equal(validateFinalUploadInput({ name: "cut01.mov", size: 1000 }).ok, true);
   assert.equal(validateFinalUploadInput({ name: "cut01.mov", size: 0 }).ok, false);
-  assert.equal(validateFinalUploadInput({ name: "cut01.mov", size: MAX_FINAL_BYTES + 1 }).status, 413);
+  assert.equal(validateFinalUploadInput({ name: "cut01.mov", size: 5 * 1024 ** 3 }).ok, true); // no app-level size cap
+  assert.equal(MAX_FINAL_BYTES, Number.POSITIVE_INFINITY);
   assert.equal(validateFinalUploadInput({ name: "setup.exe", size: 10 }).ok, false);
   assert.equal(validateFinalUploadInput({ name: "", size: 10 }).ok, false);
 });

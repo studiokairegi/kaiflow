@@ -28,7 +28,7 @@ test("an in-house record unlocks final upload and (with a valid final) release",
 
 test("upload-locked messages say what to do for each state", () => {
   const msg = (workflowState, submissions) => W.unavailableReason("final_upload", { workflowState, submissions, versions: [] });
-  assert.match(msg("in_progress", []), /No freelancer submission yet.*in-house/);
+  assert.match(msg("in_progress", []), /No freelancer submission yet.*in-house QC check as passed/);
   assert.match(msg("in_progress", [sub({ status: "corrections_requested" })]), /corrected upload/);
   assert.match(msg("pending_review", [sub()]), /Approve .*internal QC/);
   assert.match(msg("qc_adjustments", [sub()]), /internal QC/);
@@ -36,5 +36,5 @@ test("upload-locked messages say what to do for each state", () => {
 });
 
 test("server error code is translated", () => {
-  assert.match(W.describeWorkflowError("in_house_not_available"), /in-house/);
+  assert.match(W.describeWorkflowError("in_house_not_available"), /in-house QC check/);
 });

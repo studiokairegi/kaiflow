@@ -1,7 +1,10 @@
 // Pure validation rules for QC-adjusted final files. No imports, so it runs
 // in Deno (Edge Functions) and in plain Node tests.
 
-export const MAX_FINAL_BYTES = 50 * 1024 * 1024; // matches the existing 50MB Edge Function upload ceiling
+// No app-level size cap on final files. Kept as an exported constant so existing imports
+// keep working; Infinity means the check below never rejects on size. Supabase's own
+// Edge Function limits (request size, memory, run time) still apply and are not set here.
+export const MAX_FINAL_BYTES = Number.POSITIVE_INFINITY;
 
 const BLOCKED_EXTENSIONS = new Set([
   "exe", "bat", "cmd", "com", "scr", "msi", "ps1", "sh", "js", "jar", "vbs", "dll", "apk",
@@ -15,13 +18,6 @@ export function validateFinalUploadInput(file: { name: string; size: number }): 
   }
   if (!Number.isFinite(file.size) || file.size <= 0) {
     return { ok: false, status: 400, error: "The file is empty." };
-  }
-  if (file.size > MAX_FINAL_BYTES) {
-    return {
-      ok: false,
-      status: 413,
-      error: `File is too large. The limit is ${MAX_FINAL_BYTES / (1024 * 1024)}MB.`,
-    };
   }
   const ext = file.name.includes(".") ? file.name.split(".").pop()!.toLowerCase() : "";
   if (BLOCKED_EXTENSIONS.has(ext)) {
