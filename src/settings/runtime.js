@@ -70,17 +70,29 @@ export function workdayTargetSeconds(date, ww = state.workweek) {
 
 // --- notifications ----------------------------------------------------------
 const audioCache = {};
+// Resolves (never rejects) to what happened:
+//   "played"   the app's own chime started
+//   "off"      the user turned the sound off in Settings
+//   "blocked"  the browser refused to play it (e.g. the page hasn't been clicked since it loaded)
 export function playNotificationSound(prefs = state.notifications.sound) {
-  if (!prefs || !prefs.enabled || typeof Audio === "undefined") return;
+  if (!prefs || !prefs.enabled) return Promise.resolve("off");
+  if (typeof Audio === "undefined") return Promise.resolve("blocked");
   const def = SOUNDS.find((s) => s.id === prefs.id) || SOUNDS[0];
   try {
     const a = audioCache[def.id] || (audioCache[def.id] = new Audio(def.src));
     a.volume = Math.min(1, Math.max(0, Number(prefs.volume) || 0.6));
     a.currentTime = 0;
     const p = a.play();
-    if (p && p.catch) p.catch(() => {}); // autoplay can be blocked until the user interacts; never throw
-  } catch { /* a missed chime is not worth an error */ }
+    // autoplay can be blocked until the user interacts; never throw
+    return p && p.then ? p.then(() => "played", () => "blocked") : Promise.resolve("played");
+  } catch {
+    return Promise.resolve("blocked"); // a missed chime is not worth an error
+  }
 }
+
+// The app's chime is the only sound, so the desktop notification is made silent, with one
+// exception: if the browser blocked the chime, let the OS sound ring so the alert isn't missed.
+export const desktopNotificationSilent = (soundOutcome) => soundOutcome !== "blocked";
 
 // Is a category allowed to notify right now? (Master switch AND category switch.)
 export function categoryAllowed(category) {

@@ -17,7 +17,7 @@ import {
   DEFAULT_SETTINGS, DEFAULT_LEAD_CHANNELS, MILESTONE_DEFAULTS, DEFAULT_FOLLOWUP_SCHEDULE, DEFAULT_ARCHIVE_DAYS,
   settingsFromRow, settingsToRow,
 } from "./settings/schema.js";
-import { runtime, applyRuntimeSettings, categoryAllowed, playNotificationSound, workdayTargetSeconds, isWorkday, reasonsFor, todayInZone } from "./settings/runtime.js";
+import { runtime, applyRuntimeSettings, categoryAllowed, playNotificationSound, desktopNotificationSilent, workdayTargetSeconds, isWorkday, reasonsFor, todayInZone } from "./settings/runtime.js";
 import { emptyEmailSlots, normalizeEmailSlots, nextScheduledIndex, lastScheduledIndex, followupCountLabel, sendingTriggersNoResponse, visibleSlotCount, emailsSentSummary, isManualFollowupDue, manualFollowupState } from "./settings/followups.js";
 import FinanceModule, { PrivacyToggle } from "./finance/FinanceModule.jsx";
 import { ProjectPicker } from "./finance/ProjectPicker.jsx";
@@ -7207,13 +7207,15 @@ function notificationsSupported() {
 // that don't all have the settings object threaded through them. Synced
 // once, on the main app component, whenever settings load or change - see
 // setNotificationsEnabledFlag below.
-function notifyBrowser(title, body, tag, category) {
+async function notifyBrowser(title, body, tag, category) {
   if (!notificationsSupported() || Notification.permission !== "granted") return;
   // Master switch AND the per-category switch from Settings > Alerts & display.
   if (!categoryAllowed(category)) return;
   try {
-    const n = new Notification(title, { body, tag, icon: "/icon-512.png" });
-    playNotificationSound();
+    // One sound only: the app's chime (Settings > Alerts & display > Sound). The desktop
+    // notification is created silent so the OS doesn't play its own sound on top of it.
+    const soundOutcome = await playNotificationSound();
+    const n = new Notification(title, { body, tag, icon: "/icon-512.png", silent: desktopNotificationSilent(soundOutcome) });
     // Auto-close after a while so these don't pile up in the OS
     // notification center if the studio steps away for hours.
     setTimeout(() => n.close(), 20000);
