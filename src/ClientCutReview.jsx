@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { startAutoRefresh } from "./autoRefresh.js";
 import {
   getClientCuts,
   clientAddComment,
@@ -271,19 +272,31 @@ export default function ClientCutReview({ token }) {
   const [cuts, setCuts] = useState(null); // null = loading, [] = none, false = unavailable (feature not deployed)
   const [author, setAuthor] = useState("");
 
-  const load = useCallback(async () => {
+  const lastSig = useRef("");
+
+  // background = true is the silent auto-refresh: it never hides the section on a network blip,
+  // and it only touches state when the data actually changed (so open comment boxes stay put).
+  const load = useCallback(async (background = false) => {
     try {
       const data = await getClientCuts(token);
-      setCuts(Array.isArray(data) ? data : false);
+      const next = Array.isArray(data) ? data : false;
+      const sig = JSON.stringify(next);
+      if (sig !== lastSig.current) {
+        lastSig.current = sig;
+        setCuts(next);
+      }
     } catch {
       // Migration not applied yet (or transient error): the portal keeps working exactly as before.
-      setCuts(false);
+      if (!background) setCuts(false);
     }
   }, [token]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Pick up a release, a withdrawal or the studio's reply without the client reloading the page.
+  useEffect(() => startAutoRefresh(() => load(true)), [load]);
 
   if (cuts === null || cuts === false) return null;
   // Every cut is listed, released or not: unreleased ones show a greyed-out

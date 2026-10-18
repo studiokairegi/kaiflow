@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { supabase, functionUrl } from "./supabaseClient";
 import { buildPipeline, projectProgress as pipelineProjectProgress } from "./pipeline.js";
 import ClientCutReview from "./ClientCutReview.jsx";
+import { startAutoRefresh } from "./autoRefresh.js";
 import { getFreelancerReview } from "./cutWorkflowApi.js";
 import { workflowLabel } from "./cutWorkflow.js";
 
@@ -109,11 +110,13 @@ export function ClientPortalView({ token }) {
   const [pipeline, setPipeline] = useState(null);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    (async () => {
+  // background = true is the silent auto-refresh: a network blip keeps the current view
+  // instead of replacing the page with an error.
+  const loadProject = React.useCallback(async (background = false) => {
+    {
       const { data, error } = await supabase.rpc("get_shared_project", { p_token: token });
       if (error || !data || data.length === 0) {
-        setError("This link isn't valid, or sharing has been turned off for this project.");
+        if (!background) setError("This link isn't valid, or sharing has been turned off for this project.");
         return;
       }
       setRows(data);
@@ -144,8 +147,13 @@ export function ClientPortalView({ token }) {
       } catch (pipelineFetchErr) {
         console.error("Fetching the shared project's pipeline failed:", pipelineFetchErr);
       }
-    })();
+    }
   }, [token]);
+
+  useEffect(() => {
+    loadProject();
+    return startAutoRefresh(() => loadProject(true));
+  }, [loadProject]);
 
   if (error) return <ErrorState message={error} />;
   if (!rows) return <LoadingState />;
@@ -233,11 +241,13 @@ export function FreelancerView({ token }) {
   const [uploadError, setUploadError] = useState("");
   const [uploadOk, setUploadOk] = useState(false);
   const fileInputRef = React.useRef(null);
+  const uploadingRef = React.useRef(false);
+  uploadingRef.current = uploading;
 
-  const loadShot = React.useCallback(async () => {
+  const loadShot = React.useCallback(async (background = false) => {
     const { data, error } = await supabase.rpc("get_shared_shot", { p_token: token });
     if (error || !data || data.length === 0) {
-      setError("This link isn't valid or has expired.");
+      if (!background) setError("This link isn't valid or has expired.");
       return;
     }
     setShot(data[0]);
@@ -262,6 +272,9 @@ export function FreelancerView({ token }) {
 
   useEffect(() => {
     loadShot();
+    // Corrections requested / review status changes show up without a manual refresh.
+    // Paused while a file is uploading so the page never reshuffles mid-upload.
+    return startAutoRefresh(() => (uploadingRef.current ? undefined : loadShot(true)));
   }, [loadShot]);
 
   const handleFileSelected = async (e) => {
