@@ -23,6 +23,7 @@ import FinanceModule, { PrivacyToggle } from "./finance/FinanceModule.jsx";
 import PaymentsModule from "./payments/PaymentsModule.jsx";
 import PayNowDialog from "./payments/PayNowDialog.jsx";
 import { usePayments } from "./payments/usePayments.js";
+import { StatGroup } from "./DashboardKit.jsx";
 import { summarizePayments, checkoutBlocker } from "./payments/logic.js";
 import { ProjectPicker } from "./finance/ProjectPicker.jsx";
 import { useFinanceSummary } from "./finance/useLedger.js";
@@ -30,7 +31,6 @@ import { displayMoney, codeToSymbol, formatTotalsByCurrency } from "./finance/cu
 import { saveFxSnapshot, listBankAccounts } from "./finance/api.js";
 import {
   DonutBreakdown,
-  RevenueTrendChart,
   MonthlyFinanceChart,
   RevenueByClientBarChart,
   ProjectComparisonChart,
@@ -5554,6 +5554,7 @@ export default function ShotTracker() {
           onOpenProject={openProject}
           onGoToProjects={() => setWorkspace("projects")}
           onGoToPayments={() => setWorkspace("payments")}
+          onGoToFinance={() => setWorkspace("finance")}
           onOpenLead={(lead) => setEditingLead(lead)}
           onOpenShot={(card) => { openProject(card.projectId); setEditingCard(card); }}
           onOpenContact={() => { setWorkspace("leads"); setCrmTab("contacts"); }}
@@ -8416,7 +8417,7 @@ function computeNeedsAttentionCounts(leads, schedule) {
   return { followupsDueToday, hotAwaitingResponse, proposalsAwaitingResponse, approachingDeadline };
 }
 
-function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToPayments, onGoToLeads, onOpenLead, onOpenShot, onOpenContact, user, userId }) {
+function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToPayments, onGoToFinance, onGoToLeads, onOpenLead, onOpenShot, onOpenContact, user, userId }) {
   const stats = computeDashboardStats(projects, cards, leads, invoices);
   // Financial figures come from the accounting ledger (finance/reports.js), in the studio's
   // base currency using each transaction's own stored FX rate. Nothing is converted here.
@@ -8440,48 +8441,59 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     setDashboardPeriod(settings.userPrefs?.dashboardPeriod || "all");
   }, [settings.userPrefs?.dashboardPeriod]);
 
-  // Payments (Paystack sandbox). Same definitions and period filter as the Payments module; shown as
-  // TEST data and kept separate from the ledger-based revenue above.
+  // Payments (Paystack sandbox): same definitions and period filter as the Payments module, shown as
+  // TEST data and kept separate from the ledger-based revenue.
   const payData = usePayments(userId);
-  const periodForPayments = dashboardPeriod;
   const paySummary = useMemo(
-    () => (payData.data ? summarizePayments({ ...payData.data, invoices, period: periodForPayments }) : null),
-    [payData.data, invoices, periodForPayments]
+    () => (payData.data ? summarizePayments({ ...payData.data, invoices, period: dashboardPeriod }) : null),
+    [payData.data, invoices, dashboardPeriod]
   );
-  const payMoney = (m) => (!paySummary ? "..." : fin.privacy ? "\u2022\u2022\u2022\u2022" : formatTotalsByCurrency(m));
-  const payCard = (label, value, color) => ({ label, value, sub: "sandbox", icon: <InvoiceIcon />, color, onClick: onGoToPayments });
-  const paymentItems = [
-    payCard("Payments received today", payMoney(paySummary?.receivedToday), "#3DDC84"),
-    payCard("Payment receipts (period)", payMoney(paySummary?.receivedGross), "#3DDC84"),
-    payCard("Actual transaction fees", payMoney(paySummary?.fees), "#F2A65A"),
-    payCard("Net receipts after fees", payMoney(paySummary?.net), "#3DDC84"),
-    payCard("Pending incoming payments", payMoney(paySummary?.pendingIncoming), "#F2A65A"),
-    payCard("Refunds", payMoney(paySummary?.refunds), "#FF4D4D"),
-    payCard("Owed to freelancers", payMoney(paySummary?.freelancerOwed), "#F2A65A"),
-    payCard("Approved payouts awaiting", payMoney(paySummary?.approvedPayoutsAwaiting), "#4A90D9"),
-    payCard("Freelancer payouts (simulated)", payMoney(paySummary?.simulatedPaid), "#9B8AD8"),
-    payCard("Unreconciled payments", paySummary ? paySummary.unreconciledCount + paySummary.unreconciledPayoutCount : "...", "#FF4D4D"),
-  ];
+  const hide = fin.privacy;
+  const payMoney = (m) => {
+    if (!paySummary) return "...";
+    const t = formatTotalsByCurrency(m);
+    return hide && t !== "-" ? "\u2022\u2022\u2022\u2022" : t === "-" ? "\u2013" : t;
+  };
+  const isEmpty = (m) => !m || Object.keys(m).length === 0;
+  const unrec = paySummary ? paySummary.unreconciledCount + paySummary.unreconciledPayoutCount : 0;
 
-  const statItems = [
-    { label: "Active projects", value: stats.activeProjectsCount, sub: `${stats.projectsCompleted} completed`, icon: <FolderIcon />, color: teal, onClick: onGoToProjects },
-    { label: "Active leads", value: stats.activeLeadsCount, icon: <TargetIcon />, color: "#4A90D9", onClick: () => onGoToLeads() },
-    { label: "Total shots", value: stats.totalShots, icon: <ClapperIcon />, color: "#9B8AD8" },
-    { label: "Deals won", value: stats.dealsWon, icon: <CheckCircleIcon />, color: "#3DDC84", onClick: () => onGoToLeads({ status: "won" }) },
-    { label: "Deals lost", value: stats.dealsLost, icon: <XCircleIcon />, color: "#FF4D4D", onClick: () => onGoToLeads({ status: "lost" }) },
+  // Four grouped cards replace the old 17 separate tiles. Related figures are small icon chips.
+  const statGroups = [
     {
-      label: "Revenue this month",
-      value: money(fin.summary?.revenueMonth ?? 0),
-      sub: fin.summary?.fxIssueCount ? "some excluded" : undefined,
-      icon: <InvoiceIcon />,
-      color: "#3DDC84",
-      delta: finDelta,
+      title: "Projects", icon: "folder", value: stats.activeProjectsCount, label: "active", onClick: onGoToProjects,
+      chips: [
+        { icon: "check", label: "completed", value: stats.projectsCompleted },
+        { icon: "film", label: "shots", value: stats.totalShots },
+        { icon: "calendar", label: "due in 7d", value: stats.nearDeadline.length, tone: stats.nearDeadline.length ? "warn" : undefined, dim: !stats.nearDeadline.length },
+      ],
     },
     {
-      label: "Outstanding invoices",
-      value: fin.summary ? `${fin.summary.receivableCount} \u00b7 ${money(fin.summary.receivableBase)}` : "...",
-      icon: <InvoiceIcon />,
-      color: "#F2A65A",
+      title: "Leads", icon: "target", value: stats.activeLeadsCount, label: "active", onClick: () => onGoToLeads(),
+      chips: [
+        { icon: "check", label: "won", value: stats.dealsWon, tone: "good", onClick: () => onGoToLeads({ status: "won" }) },
+        { icon: "x", label: "lost", value: stats.dealsLost, tone: "bad", onClick: () => onGoToLeads({ status: "lost" }) },
+      ],
+    },
+    {
+      title: "Finance", icon: "trend", value: money(fin.summary?.revenueMonth ?? 0), label: "revenue this month", delta: finDelta,
+      onClick: onGoToFinance,
+      chips: [
+        { icon: "invoice", label: `outstanding${fin.summary ? ` (${fin.summary.receivableCount})` : ""}`, value: fin.summary ? money(fin.summary.receivableBase) : "...", tone: "warn" },
+        { icon: "users", label: "owed to freelancers", value: payMoney(paySummary?.freelancerOwed), dim: isEmpty(paySummary?.freelancerOwed) },
+      ],
+    },
+    {
+      title: "Payments", icon: "card", badge: "SANDBOX", value: payMoney(paySummary?.receivedGross), label: "received", onClick: onGoToPayments,
+      chips: [
+        { icon: "inbox", label: "today", value: payMoney(paySummary?.receivedToday), dim: isEmpty(paySummary?.receivedToday) },
+        { icon: "percent", label: "fees", value: payMoney(paySummary?.fees), dim: isEmpty(paySummary?.fees) },
+        { icon: "wallet", label: "net", value: payMoney(paySummary?.net), dim: isEmpty(paySummary?.net) },
+        { icon: "clock", label: "pending", value: payMoney(paySummary?.pendingIncoming), dim: isEmpty(paySummary?.pendingIncoming) },
+        { icon: "undo", label: "refunds", value: payMoney(paySummary?.refunds), dim: isEmpty(paySummary?.refunds) },
+        { icon: "send", label: "payouts due", value: payMoney(paySummary?.approvedPayoutsAwaiting), dim: isEmpty(paySummary?.approvedPayoutsAwaiting) },
+        { icon: "zap", label: "simulated", value: payMoney(paySummary?.simulatedPaid), dim: isEmpty(paySummary?.simulatedPaid) },
+        { icon: "alert", label: "unreconciled", value: paySummary ? unrec : "...", tone: unrec ? "bad" : undefined, dim: !unrec },
+      ],
     },
   ];
 
@@ -8640,11 +8652,6 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   }, [leads, schedule]);
 
   const months = lastSixMonthKeys();
-  const revenueTrend = months.map(({ key, label }) => ({
-    label,
-    value: fin.summary?.series.find((m) => m.month === key)?.revenue || 0,
-  }));
-
   // Outreach-over-time uses each email's own sent date (not the lead's
   // current stage) so a lead that later moved to Lost still counts toward
   // the month it was actually emailed, responded to, etc.
@@ -8665,32 +8672,8 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         {fin.data && <PrivacyToggle privacy={fin.privacy} onChange={fin.setPrivacy} compact />}
       </div>
 
-      <div style={styles.dashboardKpiStrip}>
-        {[...statItems, ...paymentItems].map((item) => (
-          <div
-            key={item.label}
-            className="kf-card"
-            style={{ ...styles.dashboardKpiTile, cursor: item.onClick ? "pointer" : "default" }}
-            onClick={item.onClick}
-          >
-            <div style={styles.dashboardKpiTop}>
-              <div style={{ ...styles.dashboardKpiIcon, color: item.color, background: `${item.color}1f` }}>
-                {item.icon}
-              </div>
-              {item.delta !== undefined && item.delta !== null && (
-                <span style={{ ...styles.dashboardDelta, color: item.delta >= 0 ? "#3DDC84" : "#FF4D4D" }}>
-                  <TrendIcon direction={item.delta >= 0 ? "up" : "down"} />
-                  {Math.abs(item.delta)}%
-                </span>
-              )}
-            </div>
-            <span style={styles.dashboardKpiValue}>{item.value}</span>
-            <span style={styles.dashboardKpiLabel}>
-              {item.label}
-              {item.sub && <span style={styles.dashboardKpiSub}> · {item.sub}</span>}
-            </span>
-          </div>
-        ))}
+      <div style={styles.dashboardGroupGrid}>
+        {statGroups.map((g) => <StatGroup key={g.title} {...g} />)}
       </div>
 
       {/* Tasks sits in a compact column on the left; the overview grid keeps the rest. Stacks below 1180px (see .kf-dash-body in fontImport). */}
@@ -8710,23 +8693,8 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       </div>
 
       <div style={styles.dashboardMainGrid}>
-        {/* Column A — trends */}
+        {/* Column A — trends + pipeline */}
         <div style={styles.dashboardCol}>
-          <div className="kf-card" style={styles.dashboardCard}>
-            <div style={styles.dashboardCardHeaderRow}>
-              <span style={styles.dashboardCardHeader}>Revenue trend</span>
-              <span style={styles.dashboardCardHeaderHint}>{`6 months · ${finBase}`}</span>
-            </div>
-            <div style={styles.dashboardChartFill}>
-              {fin.privacy ? (
-                <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: textMuted, fontSize: 13 }}>
-                  Finances hidden
-                </div>
-              ) : (
-                <RevenueTrendChart data={revenueTrend} currencySymbol={cur} height="100%" compact />
-              )}
-            </div>
-          </div>
           <div className="kf-card" style={styles.dashboardCard}>
             <div style={styles.dashboardCardHeaderRow}>
               <span style={styles.dashboardCardHeader}>Outreach performance</span>
@@ -8734,6 +8702,29 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
             </div>
             <div style={styles.dashboardChartFill}>
               <LeadOutreachTrendChart data={outreachTrend} height="100%" compact />
+            </div>
+          </div>
+          <div className="kf-card" style={{ ...styles.dashboardCard, flex: "0 0 auto" }}>
+            <div style={styles.dashboardCardHeaderRow}>
+              <span style={styles.dashboardCardHeader}>Pipeline</span>
+              <span style={styles.dashboardCardHeaderHint}>
+                {hiddenChannels.length > 0 ? `${hiddenChannels.length} channel${hiddenChannels.length === 1 ? "" : "s"} hidden` : "hover for detail"}
+              </span>
+            </div>
+            <div style={styles.dashboardDonutRow}>
+              <DonutBreakdown data={shotsByStage} emptyLabel="No shots" centerLabel="Shots" size={46} compact tiny />
+              {legacyShotsByStage.length > 0 && (
+                <DonutBreakdown data={legacyShotsByStage} emptyLabel="No legacy" centerLabel="Legacy" size={46} compact tiny />
+              )}
+              <DonutBreakdown data={leadsByActiveStage} emptyLabel="No outreach" centerLabel="Outreach" size={46} compact tiny />
+              <DonutBreakdown
+                data={leadsByChannel}
+                emptyLabel={allChannelsHidden ? "Channels hidden" : "No channels"}
+                centerLabel="Channels"
+                size={46}
+                compact
+                tiny
+              />
             </div>
           </div>
         </div>
@@ -8764,10 +8755,6 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
               <span style={styles.dashboardKpiSub}>response rate</span>
               <span style={styles.dashboardWinRateBadge}>{winRate.toFixed(1)}% win rate</span>
             </div>
-            <p style={styles.dashboardCardHeaderHint}>
-              {respondedTotal} response{respondedTotal === 1 ? "" : "s"} and {wonTotal} win{wonTotal === 1 ? "" : "s"} from{" "}
-              {coldEmailsSentTotal} cold email{coldEmailsSentTotal === 1 ? "" : "s"}
-            </p>
             <div style={styles.dashboardMiniFunnelGrid}>
               <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Sent</span><strong>{coldEmailsSentTotal}</strong></div>
               <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Responded</span><strong>{respondedTotal}</strong></div>
@@ -8784,36 +8771,6 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
               <span style={styles.dashboardKpiSub}>
                 {successRateToday === null ? "\u2014" : `${successRateToday.toFixed(0)}%`} success
               </span>
-            </div>
-          </div>
-          <div className="kf-card" style={styles.dashboardCard}>
-            <div style={styles.dashboardCardHeaderRow}>
-              <span style={styles.dashboardCardHeader}>Pipeline breakdown</span>
-              {hiddenChannels.length > 0 && (
-                <span style={styles.dashboardCardHeaderHint}>
-                  {hiddenChannels.length} channel{hiddenChannels.length === 1 ? "" : "s"} hidden
-                </span>
-              )}
-            </div>
-            <div style={styles.dashboardDonutRow}>
-              <DonutBreakdown data={shotsByStage} emptyLabel="No shots yet." centerLabel="Shots" size={88} compact />
-              {legacyShotsByStage.length > 0 && (
-                <DonutBreakdown
-                  data={legacyShotsByStage}
-                  emptyLabel="No legacy shots."
-                  centerLabel="Legacy"
-                  size={88}
-                  compact
-                />
-              )}
-              <DonutBreakdown data={leadsByActiveStage} emptyLabel="No active outreach." centerLabel="Leads" size={88} compact />
-              <DonutBreakdown
-                data={leadsByChannel}
-                emptyLabel={allChannelsHidden ? "All channels hidden (Settings)." : "No channels tagged."}
-                centerLabel="Leads"
-                size={88}
-                compact
-              />
             </div>
           </div>
         </div>
@@ -8860,9 +8817,6 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       </div>
       </div>
 
-      <p style={styles.dashboardFooterHint}>
-        Dollar figures are converted live to USD. For accounts receivable, per-project profitability, and client value, see Finance.
-      </p>
     </div>
   );
 }
@@ -13426,7 +13380,7 @@ function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, c
 }
 
 const fontImport = `
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
 * {
   box-sizing: border-box;
@@ -14217,6 +14171,13 @@ const styles = {
     background: teal,
     color: "#08211c",
     cursor: "pointer",
+  },
+  dashboardGroupGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
+    gap: 10,
+    flexShrink: 0,
+    alignItems: "stretch",
   },
   dashboardKpiStrip: {
     display: "grid",

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Table, Money, Totals, Tabs, useBusy } from "./ui.jsx";
 import { FINANCE_CURRENCIES, formatMoney, r2, todayLocal } from "./currency.js";
 import { rpc, saveManualFxRate, saveDefaultBank, saveFxSnapshot } from "./api.js";
+import { RevenueTrendChart } from "../DashboardCharts.jsx";
 import { useLedger } from "./useLedger.js";
 import { dashboardSummary, fxIssues } from "./reports.js";
 import { Sales, Expenses } from "./Sales.jsx";
@@ -56,7 +57,6 @@ function Overview({ ctx, go }) {
   const docsAR = invoices.map((i) => ({ id: i.id, number: i.invoiceNumber, dueDate: i.dueDate, party: projectBy.get(i.projectId)?.client || "", projectId: i.projectId }));
   const docsAP = data.bills.map((b) => ({ id: b.id, number: b.bill_number, dueDate: b.due_date || b.issue_date, party: b.vendor_name, projectId: b.project_id }));
   const s = useMemo(() => dashboardSummary(data, { today: today(), docsAR, docsAP }), [data, invoices]);
-  const maxBar = Math.max(1, ...s.series.map((m) => Math.max(m.revenue, m.expenses)));
   const attention = [];
   if (s.fxIssueCount) attention.push({ tone: "warn", text: `${s.fxIssueCount} transaction(s) need an exchange rate and are excluded from base-currency totals.`, label: "Resolve", to: "settings" });
   if (s.overdueCount) attention.push({ tone: "bad", text: `${s.overdueCount} overdue invoice(s).`, label: "View", to: "sales" });
@@ -106,20 +106,14 @@ function Overview({ ctx, go }) {
         </div>
       </div>
       <div style={S.card}>
-        <h3 style={S.h3}>Last six months ({base})</h3>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 12, alignItems: "end" }}>
-          {s.series.map((m) => (
-            <div key={m.month} style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "stretch" }}>
-              <div style={{ height: 80, display: "flex", alignItems: "flex-end", gap: 4 }} aria-hidden="true">
-                <div style={{ flex: 1, height: privacy ? 4 : `${(m.revenue / maxBar) * 100}%`, minHeight: 2, background: T.accent, borderRadius: 2 }} />
-                <div style={{ flex: 1, height: privacy ? 4 : `${(m.expenses / maxBar) * 100}%`, minHeight: 2, background: T.warn, borderRadius: 2 }} />
-              </div>
-              <span style={{ fontSize: 11.5, color: T.muted }}>{m.month}</span>
-              <span style={{ fontSize: 12 }}><Money code={base} amount={m.profit} privacy={privacy} /></span>
-            </div>
-          ))}
-        </div>
-        <span style={{ fontSize: 12, color: T.muted }}>Teal: revenue {"\u00b7"} Amber: expenses {"\u00b7"} Number: net profit</span>
+        <h3 style={S.h3}>Revenue trend ({base})</h3>
+        {privacy ? <p style={S.sub}>Hidden while privacy mode is on.</p> : (
+          <RevenueTrendChart
+            data={s.series.map((m) => ({ label: m.month, value: m.revenue }))}
+            currencySymbol=""
+            height={220}
+          />
+        )}
       </div>
     </>
   );

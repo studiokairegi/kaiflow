@@ -61,7 +61,7 @@ function ChartTooltip({ active, payload, label, currencySymbol }) {
   );
 }
 
-export function DonutBreakdown({ data, emptyLabel = "Nothing here yet", centerLabel = "Total", size = 160, compact = false }) {
+export function DonutBreakdown({ data, emptyLabel = "Nothing here yet", centerLabel = "Total", size = 160, compact = false, tiny = false }) {
   const filtered = data.filter((d) => d.value > 0);
   if (filtered.length === 0) {
     return <p style={{ color: textMuted, fontSize: compact ? 11.5 : 13, margin: 0 }}>{emptyLabel}</p>;
@@ -85,10 +85,10 @@ export function DonutBreakdown({ data, emptyLabel = "Nothing here yet", centerLa
             </PieChart>
           </ResponsiveContainer>
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
-            <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 700, color: paper }}>{total}</span>
+            <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: tiny ? 10 : 14, fontWeight: 700, color: paper }}>{total}</span>
           </div>
         </div>
-        <span style={{ fontSize: 10.5, color: textMuted, textTransform: "uppercase", letterSpacing: "0.04em", textAlign: "center" }}>{centerLabel}</span>
+        <span style={{ fontSize: tiny ? 9 : 10.5, color: textMuted, textTransform: "uppercase", letterSpacing: "0.04em", textAlign: "center" }}>{centerLabel}</span>
       </div>
     );
   }
