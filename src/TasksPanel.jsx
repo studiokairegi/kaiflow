@@ -18,8 +18,12 @@ import {
 
 const C = { ink: "#14191c", inkSoft: "#1c2327", paper: "#EDEAE3", teal: "#38B6FF", tealLight: "#9ADCFF", border: "#2a3338", muted: "#8b9a98", red: "#FF4D4D", green: "#3DDC84", amber: "#F2A65A" };
 const PRIORITY_COLOR = { low: C.muted, normal: C.teal, high: C.amber, urgent: C.red };
-const field = { width: "100%", boxSizing: "border-box", background: C.ink, color: C.paper, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 10px", fontSize: 13, fontFamily: "inherit" };
-const small = { background: C.ink, color: C.paper, border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 6px", fontSize: 11.5, fontFamily: "inherit" };
+const GRAD = { sky: "linear-gradient(135deg, #38B6FF 0%, #9ADCFF 100%)", mint: "linear-gradient(135deg, #34D8A0 0%, #6FE8C2 100%)", violet: "linear-gradient(135deg, #6A47F2 0%, #9174FB 100%)", royal: "linear-gradient(135deg, #3B74F4 0%, #77A1FF 100%)" };
+const CARD = { background: "rgba(255,255,255,0.035)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 16 };
+const HEAD = "'Nunito', 'Space Grotesk', sans-serif";
+const field = { width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.04)", color: C.paper, border: `1px solid ${C.border}`, borderRadius: 12, padding: "8px 12px", fontSize: 13, fontFamily: "inherit", outline: "none" };
+const small = { background: "rgba(255,255,255,0.05)", color: C.paper, border: `1px solid ${C.border}`, borderRadius: 999, padding: "3px 8px", fontSize: 11.5, fontFamily: "inherit" };
+const primary = (disabled) => ({ border: "none", cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.55 : 1, fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: "#fff", background: GRAD.sky, borderRadius: 999, padding: "7px 16px", whiteSpace: "nowrap", boxShadow: disabled ? "none" : "0 4px 12px rgba(56,182,255,0.3)" });
 const btn = (color, disabled) => ({ padding: "6px 11px", borderRadius: 999, border: `1px solid ${disabled ? C.border : color}`, background: disabled ? "transparent" : `${color}22`, color: disabled ? C.muted : color, fontSize: 12.5, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.6 : 1, fontFamily: "inherit" });
 const iconBtn = (active, color = C.amber) => ({ background: "transparent", border: "none", cursor: "pointer", color: active ? color : C.muted, fontSize: 15, lineHeight: 1, padding: "2px 4px", fontFamily: "inherit" });
 const VIEWS = [["today", "Today"], ["tomorrow", "Tomorrow"], ["week", "This week"], ["upcoming", "Upcoming"], ["completed", "Completed"], ["recurring", "Recurring"]];
@@ -165,7 +169,7 @@ export default function TasksPanel({ getToday, leads = [], projects = [], shots 
   ctx.openTask = openTask;
 
   const Chip = ({ label, tone, onClick }) => (
-    <button type="button" onClick={onClick} style={{ ...btn(tone || C.muted), padding: "2px 8px", fontSize: 11 }}>{label}</button>
+    <button type="button" onClick={onClick} style={{ border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 700, color: tone || C.muted, background: `${tone || "#8b9a98"}22`, borderRadius: 999, padding: "3px 10px" }}>{label}</button>
   );
 
   return (
@@ -182,10 +186,10 @@ export default function TasksPanel({ getToday, leads = [], projects = [], shots 
         </div>
       )}
 
-      <div role="tablist" aria-label="Task views" style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+      <div role="tablist" aria-label="Task views" style={{ display: "flex", gap: 2, flexWrap: "wrap", background: "rgba(255,255,255,0.04)", borderRadius: 18, padding: 3 }}>
         {VIEWS.map(([id, label]) => (
           <button key={id} type="button" role="tab" aria-selected={view === id} onClick={() => chooseView(id)}
-            style={{ ...btn(view === id ? C.teal : C.muted), background: view === id ? "rgba(56,182,255,0.16)" : "transparent", padding: "3px 8px", fontSize: 11.5 }}>
+            style={{ border: "none", cursor: "pointer", fontFamily: "inherit", fontWeight: view === id ? 800 : 600, color: view === id ? "#fff" : C.muted, background: view === id ? GRAD.sky : "transparent", boxShadow: view === id ? "0 4px 10px rgba(56,182,255,0.3)" : "none", borderRadius: 999, padding: "4px 9px", fontSize: 11.5 }}>
             {label}
           </button>
         ))}
@@ -239,8 +243,8 @@ function TaskRow({ t, ctx, reorderList, showDate, compact }) {
   const done = t.status === "completed" || t.status === "cancelled";
   const overdue = isOpen(t) && t.dueDate && t.dueDate < today;
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 8px", alignItems: "flex-start", padding: compact ? "4px 0" : "5px 0", borderBottom: `1px solid ${C.border}`, opacity: isBusy ? 0.55 : 1 }}>
-      <input type="checkbox" checked={t.status === "completed"} disabled={isBusy || t.status === "cancelled"} onChange={() => actions.toggle(t)} aria-label={`${t.status === "completed" ? "Reopen" : "Complete"} ${t.title}`} style={{ marginTop: 3, accentColor: C.teal }} />
+    <div style={{ ...CARD, display: "flex", flexWrap: "wrap", gap: "2px 10px", alignItems: "flex-start", padding: compact ? "6px 10px" : "9px 12px", margin: "0 0 6px", borderLeft: `3px solid ${overdue ? C.red : PRIORITY_COLOR[t.priority] || C.teal}`, opacity: isBusy ? 0.55 : done ? 0.7 : 1 }}>
+      <input type="checkbox" checked={t.status === "completed"} disabled={isBusy || t.status === "cancelled"} onChange={() => actions.toggle(t)} aria-label={`${t.status === "completed" ? "Reopen" : "Complete"} ${t.title}`} style={{ marginTop: 3, accentColor: C.teal, width: 15, height: 15 }} />
       <div style={{ flex: "1 1 0", minWidth: 0 }}>
         <div style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
           <button type="button" onClick={() => openTask(t)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: done ? C.muted : C.paper, textDecoration: done ? "line-through" : "none", fontSize: 13, textAlign: "left", fontFamily: "inherit", overflowWrap: "anywhere", minWidth: 0 }}>
@@ -262,7 +266,7 @@ function TaskRow({ t, ctx, reorderList, showDate, compact }) {
         </div>
       </div>
       {isOpen(t) && (
-        <div style={{ display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", flexBasis: "100%", paddingLeft: 22 }}>
+        <div style={{ display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", flexBasis: "100%", paddingLeft: 25, marginTop: 4 }}>
           <button type="button" style={iconBtn(t.isPriority)} title={t.isPriority ? "Remove from top priorities" : "Make a top priority"} aria-label={t.isPriority ? "Unstar" : "Star as priority"} aria-pressed={t.isPriority} disabled={isBusy} onClick={() => actions.star(t)}>{t.isPriority ? "★" : "☆"}</button>
           {reorderList && <>
             <button type="button" style={iconBtn(false)} aria-label="Move up" disabled={isBusy} onClick={() => actions.reorder(reorderList, t.id, "up")}>▲</button>
@@ -285,8 +289,8 @@ function TaskRow({ t, ctx, reorderList, showDate, compact }) {
 
 function SectionTitle({ children, right, tone }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 4, margin: "6px 0 2px", fontSize: 11.5, color: tone || C.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>
-      <span>{children}</span>{right}
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 4, margin: "12px 0 6px", fontFamily: HEAD, fontSize: 12.5, fontWeight: 800, color: tone || C.paper, letterSpacing: 0.2 }}>
+      <span style={{ display: "flex", alignItems: "center", gap: 7 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: tone || C.teal }} />{children}</span>{right}
     </div>
   );
 }
@@ -299,21 +303,35 @@ function QuickAdd({ date, ctx, placeholder }) {
     if (await ctx.actions.quickAdd(title.trim(), date)) setTitle("");
   };
   return (
-    <form onSubmit={submit} style={{ display: "flex", gap: 6, margin: "6px 0" }}>
-      <input style={{ ...field, padding: "6px 9px" }} value={title} onChange={(e) => setTitle(e.target.value)} placeholder={placeholder} aria-label={placeholder} maxLength={200} />
-      <button type="submit" style={btn(C.teal, !title.trim())} disabled={!title.trim()}>Add</button>
+    <form onSubmit={submit} style={{ display: "flex", gap: 6, margin: "6px 0 10px" }}>
+      <input style={{ ...field, padding: "8px 14px", borderRadius: 999 }} value={title} onChange={(e) => setTitle(e.target.value)} placeholder={placeholder} aria-label={placeholder} maxLength={200} />
+      <button type="submit" style={primary(!title.trim())} disabled={!title.trim()}>Add</button>
     </form>
   );
 }
 
 function Stats({ stats, label }) {
+  const tile = (gradient, value, text) => (
+    <div style={{ flex: "1 1 0", minWidth: 0, borderRadius: 16, padding: "8px 11px", background: gradient, color: "#fff", boxShadow: "0 6px 14px rgba(0,0,0,0.22)" }}>
+      <div style={{ fontFamily: HEAD, fontWeight: 800, fontSize: 19, lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: 10.5, opacity: 0.92, marginTop: 1 }}>{text}</div>
+    </div>
+  );
+  const pill = (color, text) => <span style={{ fontSize: 11, fontWeight: 700, color, background: `${color}22`, borderRadius: 999, padding: "2px 9px" }}>{text}</span>;
   return (
-    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 12, color: C.muted, margin: "2px 0 4px" }}>
-      <span><strong style={{ color: C.paper }}>{stats.remaining}</strong> remaining</span>
-      <span><strong style={{ color: C.green }}>{stats.completed}</strong> of {stats.total} done</span>
-      <span>{stats.hasEstimates ? <>~<strong style={{ color: stats.heavy ? C.amber : C.paper }}>{formatMinutes(stats.estimatedMinutes)}</strong> planned{stats.unestimated ? ` (${stats.unestimated} without an estimate)` : ""}</> : "no estimates yet"}</span>
-      {stats.overdue > 0 && label === "today" && <span style={{ color: C.red }}>{plural(stats.overdue, "overdue task")}</span>}
-      {stats.heavy && <span style={{ color: C.amber }}>Heavy day</span>}
+    <div style={{ margin: "2px 0 8px" }}>
+      <div style={{ display: "flex", gap: 8 }}>
+        {tile(GRAD.sky, stats.remaining, "remaining")}
+        {tile(GRAD.mint, `${stats.completed}/${stats.total}`, "done")}
+        {tile(GRAD.violet, stats.hasEstimates ? formatMinutes(stats.estimatedMinutes) : "\u2013", stats.hasEstimates ? "planned" : "no estimates")}
+      </div>
+      {(stats.unestimated > 0 && stats.hasEstimates || stats.heavy || (stats.overdue > 0 && label === "today")) && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+          {stats.hasEstimates && stats.unestimated > 0 && pill(C.muted, `${stats.unestimated} without an estimate`)}
+          {stats.overdue > 0 && label === "today" && pill(C.red, plural(stats.overdue, "overdue task"))}
+          {stats.heavy && pill(C.amber, "Heavy day")}
+        </div>
+      )}
     </div>
   );
 }
@@ -323,8 +341,8 @@ function DayList({ v, ctx, emptyTitle, emptyHint }) {
   return (
     <>
       {empty && (
-        <div style={{ color: C.muted, fontSize: 13, padding: "10px 0" }}>
-          <div style={{ color: C.paper }}>{emptyTitle}</div>
+        <div style={{ ...CARD, color: C.muted, fontSize: 13, padding: "14px 16px", textAlign: "center" }}>
+          <div style={{ color: C.paper, fontFamily: HEAD, fontWeight: 800 }}>{emptyTitle}</div>
           <div style={{ fontSize: 12 }}>{emptyHint}</div>
         </div>
       )}
@@ -366,9 +384,9 @@ function TodayView({ ctx, suggestions }) {
         <SectionTitle>Suggested follow-ups</SectionTitle>
         <div style={{ fontSize: 11, color: C.muted, marginBottom: 2 }}>Leads that are due for follow-up and have no task yet. Nothing is added until you click.</div>
         {suggestions.slice(0, 5).map((s) => (
-          <div key={s.key} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0", borderBottom: `1px solid ${C.border}`, fontSize: 13 }}>
+          <div key={s.key} style={{ ...CARD, display: "flex", gap: 8, alignItems: "center", padding: "7px 10px 7px 12px", margin: "0 0 6px", fontSize: 13 }}>
             <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{s.title}</span>
-            <button type="button" style={btn(C.teal, ctx.busy.has("sg:" + s.key))} disabled={ctx.busy.has("sg:" + s.key)} onClick={() => actions.addSuggestion(s)}>Add task</button>
+            <button type="button" style={primary(ctx.busy.has("sg:" + s.key))} disabled={ctx.busy.has("sg:" + s.key)} onClick={() => actions.addSuggestion(s)}>Add task</button>
           </div>
         ))}
         {suggestions.length > 5 && <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>+{suggestions.length - 5} more once these are handled</div>}
@@ -410,9 +428,9 @@ function WeekView({ ctx }) {
       </>}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 8, marginTop: 8 }}>
         {w.days.map((d) => (
-          <div key={d.date} style={{ border: `1px solid ${d.isToday ? C.teal : C.border}`, borderRadius: 10, padding: "6px 8px", opacity: d.isPast && !d.tasks.length ? 0.6 : 1 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 2 }}>
-              <strong>{fmtDay(d.date, today)}</strong>
+          <div key={d.date} style={{ ...CARD, borderRadius: 20, padding: "10px 11px", background: d.isToday ? "linear-gradient(160deg, rgba(56,182,255,0.18), rgba(255,255,255,0.03))" : CARD.background, border: d.isToday ? "1px solid rgba(56,182,255,0.5)" : CARD.border, opacity: d.isPast && !d.tasks.length ? 0.6 : 1 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 6 }}>
+              <strong style={{ fontFamily: HEAD, fontSize: 13 }}>{fmtDay(d.date, today)}</strong>
               <span style={{ color: d.stats.heavy ? C.amber : C.muted }}>
                 {d.stats.heavy ? "Heavy · " : ""}{d.stats.remaining} left{d.stats.hasEstimates ? ` · ${formatMinutes(d.stats.estimatedMinutes)}` : ""}
               </span>
@@ -466,15 +484,15 @@ function RecurringView({ ctx, onNew }) {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6, margin: "4px 0" }}>
         <span style={{ fontSize: 12, color: C.muted }}>Each occurrence is its own task; completing one never completes the series.</span>
-        <button type="button" style={btn(C.teal)} onClick={onNew}>+ New recurring task</button>
+        <button type="button" style={primary(false)} onClick={onNew}>+ New recurring task</button>
       </div>
       {!rows.length && <p style={{ color: C.muted, fontSize: 13, margin: "10px 0" }}>No recurring tasks yet. Use them for routines like daily outreach, a weekly pipeline review or monthly invoicing.</p>}
       {rows.map(({ series: s, next, description }) => {
         const b = busy.has("series:" + s.id);
         return (
-          <div key={s.id} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "7px 0", borderBottom: `1px solid ${C.border}`, opacity: s.status === "ended" ? 0.6 : 1 }}>
+          <div key={s.id} style={{ ...CARD, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "10px 12px", margin: "0 0 6px", borderLeft: `3px solid ${s.status === "active" ? C.teal : s.status === "paused" ? C.amber : C.muted}`, opacity: s.status === "ended" ? 0.6 : 1 }}>
             <div style={{ flex: 1, minWidth: "min(180px, 100%)", overflowWrap: "anywhere" }}>
-              <button type="button" onClick={() => setEditor({ mode: "series", series: s })} style={{ background: "none", border: "none", padding: 0, color: C.paper, fontSize: 13.5, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>{s.title}</button>
+              <button type="button" onClick={() => setEditor({ mode: "series", series: s })} style={{ background: "none", border: "none", padding: 0, color: C.paper, fontSize: 13.5, fontWeight: 700, cursor: "pointer", textAlign: "left", fontFamily: HEAD }}>{s.title}</button>
               <div style={{ fontSize: 11, color: C.muted }}>
                 {description} · {s.status === "active" ? (next ? `next ${fmtDay(next, today)}` : "no upcoming occurrence") : s.status}
                 {s.endDate ? ` · until ${fmtDay(s.endDate, today)}` : ""}
@@ -580,22 +598,22 @@ function TaskEditor({ editor, today, leads, projects, shots, onClose, onSwitchTo
   };
 
   const err = (k) => errors[k] && <div style={{ color: C.red, fontSize: 11.5, marginTop: 2 }}>{errors[k]}</div>;
-  const label = (t) => <label style={{ display: "block", fontSize: 11.5, color: C.muted, margin: "8px 0 3px" }}>{t}</label>;
+  const label = (t) => <label style={{ display: "block", fontSize: 11.5, color: C.muted, margin: "10px 0 4px", fontWeight: 700 }}>{t}</label>;
   const toggleDay = (d) => setSched({ ...sched, weekdays: sched.weekdays.includes(d) ? sched.weekdays.filter((x) => x !== d) : [...sched.weekdays, d] });
 
   return (
     <div role="dialog" aria-modal="true" aria-label={title} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 12 }} onMouseDown={(e) => e.target === e.currentTarget && !saving && onClose()}>
-      <div style={{ background: C.inkSoft, border: `1px solid ${C.border}`, borderRadius: 14, padding: 16, width: "min(560px, 100%)", maxHeight: "92vh", overflowY: "auto", color: C.paper }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 16 }}>{title}</h3>
+      <div style={{ background: C.inkSoft, border: `1px solid ${C.border}`, borderRadius: 26, padding: 22, width: "min(560px, 100%)", boxShadow: "0 24px 60px rgba(0,0,0,0.5)", maxHeight: "92vh", overflowY: "auto", color: C.paper }}>
+        <h3 style={{ margin: "0 0 6px", fontFamily: HEAD, fontSize: 20, fontWeight: 800, letterSpacing: "-0.01em" }}>{title}</h3>
 
         {mode === "occurrence" && (
-          <div style={{ background: "rgba(47,191,166,0.1)", border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 10px", fontSize: 12.5, margin: "6px 0" }}>
+          <div style={{ background: "rgba(56,182,255,0.1)", border: "1px solid rgba(56,182,255,0.25)", borderRadius: 16, padding: "10px 12px", fontSize: 12.5, margin: "6px 0" }}>
             This task repeats{editor.series ? ` (${describeRecurrence(editor.series)})` : ""}. Changes here affect <strong>only this occurrence</strong>.
             {editor.series && <> <button type="button" onClick={onSwitchToSeries} style={{ ...btn(C.teal), padding: "2px 8px", marginLeft: 6 }}>Edit the whole series</button></>}
           </div>
         )}
         {isSeriesEdit && (
-          <div style={{ background: "rgba(242,166,90,0.1)", border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 10px", fontSize: 12.5, margin: "6px 0" }}>
+          <div style={{ background: "rgba(242,166,90,0.1)", border: "1px solid rgba(242,166,90,0.25)", borderRadius: 16, padding: "10px 12px", fontSize: 12.5, margin: "6px 0" }}>
             Edits the recurring task. Future occurrences you haven't touched follow it; occurrences you edited, moved, started, starred or completed are left alone.
           </div>
         )}
@@ -638,7 +656,7 @@ function TaskEditor({ editor, today, leads, projects, shots, onClose, onSwitchTo
           </>
         )}
         {(isSeriesEdit || (mode === "new" && repeat === "yes")) && (
-          <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "4px 10px 10px", marginTop: 8 }}>
+          <div style={{ ...CARD, borderRadius: 18, padding: "4px 12px 12px", marginTop: 10 }}>
             {label("Schedule")}
             <select style={field} value={sched.recurrence} onChange={setS("recurrence")} aria-label="Schedule">{RECURRENCES.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}</select>{err("recurrence")}
             {sched.recurrence === "weekly" && (
@@ -660,7 +678,7 @@ function TaskEditor({ editor, today, leads, projects, shots, onClose, onSwitchTo
 
         {error && <div role="alert" style={{ color: C.red, fontSize: 12.5, marginTop: 10 }}>{error}</div>}
         <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
-          <button type="button" style={btn(C.teal, saving)} disabled={saving} onClick={save}>{saving ? "Saving..." : mode === "new" ? (repeat === "yes" ? "Create recurring task" : "Create task") : isSeriesEdit ? "Save series" : mode === "occurrence" ? "Save this occurrence" : "Save"}</button>
+          <button type="button" style={primary(saving)} disabled={saving} onClick={save}>{saving ? "Saving..." : mode === "new" ? (repeat === "yes" ? "Create recurring task" : "Create task") : isSeriesEdit ? "Save series" : mode === "occurrence" ? "Save this occurrence" : "Save"}</button>
           <button type="button" style={btn(C.muted, saving)} disabled={saving} onClick={onClose}>Cancel</button>
           {(mode === "task" || mode === "occurrence") && <button type="button" style={{ ...btn(C.red, saving), marginLeft: "auto" }} disabled={saving} onClick={remove}>{mode === "occurrence" ? "Skip this occurrence" : "Delete"}</button>}
         </div>
