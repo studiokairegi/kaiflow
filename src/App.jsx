@@ -7162,8 +7162,67 @@ function formatWorkDuration(totalSeconds) {
   return `${h}h ${m}m`;
 }
 
-const POMODORO_DEFAULTS = { workMinutes: 25, breakMinutes: 5, longBreakMinutes: 15, cyclesBeforeLongBreak: 4 };
+const POMODORO_DEFAULTS = { workMinutes: 25, breakMinutes: 5, longBreakMinutes: 15, cyclesBeforeLongBreak: 4, mode: "rounds", totalMinutes: 45 };
 const POMODORO_STORAGE_KEY = "kairil_pomodoro_config";
+
+// Longest stretch of focus we'll let run before a long break is due. A session
+// whose total focus time fits inside this only ever gets short breaks.
+const POMODORO_MAX_FOCUS_STRETCH = 90;
+
+// Decides every gap in a session up front, from its total focus time, so the
+// breaks fit the session instead of repeating on a fixed count:
+//  - Under ~90 min of total focus (e.g. 2-3 rounds of 25): short breaks only.
+//  - Over that, one long break per extra ~90 min of focus, spread evenly by
+//    focus time. A single long break lands in the middle; when the middle falls
+//    between two rounds it goes in the later gap, i.e. just before the final
+//    round. Nothing ever follows the last round.
+// Returns one entry per gap (rounds - 1): "break" or "longBreak". Entry i is the
+// break after round i + 1.
+function planPomodoroBreaks(config) {
+  const rounds = Math.max(1, Math.floor(config.cyclesBeforeLongBreak) || 1);
+  const gaps = rounds - 1;
+  const plan = Array(gaps).fill("break");
+  if (gaps === 0) return plan;
+  const work = Math.max(1, config.workMinutes || 1);
+  const longCount = Math.min(gaps, Math.max(0, Math.ceil((rounds * work) / POMODORO_MAX_FOCUS_STRETCH) - 1));
+  const used = new Set();
+  for (let i = 1; i <= longCount; i++) {
+    const ideal = (rounds * i) / (longCount + 1); // target, in rounds of focus
+    let best = -1;
+    for (let g = 1; g <= gaps; g++) {
+      if (used.has(g)) continue;
+      // "<=" lets a tie go to the later gap (just before the final round)
+      if (best === -1 || Math.abs(g - ideal) <= Math.abs(best - ideal)) best = g;
+    }
+    used.add(best);
+    plan[best - 1] = "longBreak";
+  }
+  return plan;
+}
+
+// Turns the saved setup into the session that actually runs. In "rounds" mode that
+// is the config as-is. In "total" mode the person gives one overall length (breaks
+// included) and the timer works out the rest: how many rounds, and how long each
+// is, aiming for the preferred focus length and splitting the time so a 45 minute
+// session becomes 2 x 20 with a short break between, not 45 straight through.
+// Deterministic from the config, so a refresh mid-session rebuilds the same plan.
+function resolvePomodoroSession(config) {
+  if (config.mode !== "total") return config;
+  const total = Math.max(1, Math.floor(config.totalMinutes) || 1);
+  const target = Math.max(1, config.workMinutes);
+  const shortMin = config.breakMinutes;
+  const longMin = config.longBreakMinutes;
+  const rounds = Math.max(1, Math.round((total + shortMin) / (target + shortMin)));
+  let work = Math.max(1, Math.floor((total - (rounds - 1) * shortMin) / rounds));
+  // Long breaks (only for long totals) take time too, so re-fit the round length.
+  for (let pass = 0; pass < 3 && rounds > 1; pass++) {
+    const plan = planPomodoroBreaks({ ...config, cyclesBeforeLongBreak: rounds, workMinutes: work });
+    const longs = plan.filter((x) => x === "longBreak").length;
+    const shorts = plan.length - longs;
+    work = Math.max(1, Math.floor((total - shorts * shortMin - longs * longMin) / rounds));
+  }
+  return { ...config, cyclesBeforeLongBreak: rounds, workMinutes: work };
+}
 
 // Pomodoro setup is a lightweight personal preference, not account data, so
 // it's kept in localStorage rather than added to work_sessions - it's read
@@ -7213,6 +7272,7 @@ function loadPomodoroState() {
         phase: saved.phase,
         phaseEndsAt: saved.phaseEndsAt,
         cycle: Number.isFinite(saved.cycle) && saved.cycle >= 1 ? saved.cycle : 1,
+        pausedRemaining: Number.isFinite(saved.pausedRemaining) && saved.pausedRemaining > 0 ? saved.pausedRemaining : null,
       };
     }
   } catch {
@@ -7338,21 +7398,55 @@ function DashboardGreeting({ user, compact = false }) {
 // nothing to "restore" client-side, it just re-asks the database what's
 // true every time.
 
+// One-line preview of the planned session for the setup form.
+function describePomodoroPlan(rawConfig) {
+  const config = resolvePomodoroSession(rawConfig);
+  const rounds = Math.max(1, Math.floor(config.cyclesBeforeLongBreak) || 1);
+  const plan = planPomodoroBreaks(config);
+  const longs = plan.reduce((a, b, i) => (b === "longBreak" ? [...a, i + 1] : a), []);
+  const shorts = plan.length - longs.length;
+  const total = rounds * config.workMinutes + shorts * config.breakMinutes + longs.length * config.longBreakMinutes;
+  const parts = [rounds === 1 ? `1 round of ${config.workMinutes} min` : `${rounds} rounds of ${config.workMinutes} min`];
+  if (shorts) parts.push(`${shorts} short break${shorts === 1 ? "" : "s"}`);
+  if (longs.length) parts.push(`long break after round ${longs.join(" and ")}`);
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  parts.push(`about ${h ? `${h}h ` : ""}${m ? `${m}m` : ""}`.trim());
+  return parts.join(" \u00b7 ");
+}
+
 function PomodoroSetupForm({ config, onChange, onStart, busy }) {
   const setField = (field, max) => (e) => {
     const value = Math.max(1, Math.min(max, Number(e.target.value) || 1));
     onChange({ ...config, [field]: value });
   };
   // Each setting is its own small gradient card (same system as the dashboard cards).
+  const totalMode = config.mode === "total";
   const tiles = [
-    { field: "workMinutes", max: 180, label: "Focus", unit: "min", gradient: "linear-gradient(135deg, #38B6FF 0%, #9ADCFF 100%)" },
+    totalMode
+      ? { field: "totalMinutes", max: 600, label: "Total", unit: "min", gradient: "linear-gradient(135deg, #3B74F4 0%, #77A1FF 100%)" }
+      : { field: "cyclesBeforeLongBreak", max: 12, label: "Rounds", unit: "total", gradient: "linear-gradient(135deg, #3B74F4 0%, #77A1FF 100%)" },
+    { field: "workMinutes", max: 180, label: totalMode ? "Round target" : "Focus", unit: "min", gradient: "linear-gradient(135deg, #38B6FF 0%, #9ADCFF 100%)" },
     { field: "breakMinutes", max: 180, label: "Break", unit: "min", gradient: "linear-gradient(135deg, #34D8A0 0%, #6FE8C2 100%)" },
     { field: "longBreakMinutes", max: 180, label: "Long break", unit: "min", gradient: "linear-gradient(135deg, #6A47F2 0%, #9174FB 100%)" },
-    { field: "cyclesBeforeLongBreak", max: 12, label: "Cycles", unit: "rounds", gradient: "linear-gradient(135deg, #3B74F4 0%, #77A1FF 100%)" },
   ];
+  const modeButton = (mode, label) => (
+    <button
+      key={mode}
+      type="button"
+      style={{ ...styles.pomodoroSecondaryButton, ...(config.mode === mode || (!config.mode && mode === "rounds") ? { opacity: 1, fontWeight: 600 } : { opacity: 0.55 }) }}
+      onClick={() => onChange({ ...config, mode })}
+    >
+      {label}
+    </button>
+  );
   return (
     <div style={styles.pomodoroSetup}>
       <div style={styles.pomodoroSetupTitle}>Focus session</div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        {modeButton("rounds", "By rounds")}
+        {modeButton("total", "By total time")}
+      </div>
       <div style={styles.pomodoroSetupGrid}>
         {tiles.map((t) => (
           <label key={t.field} style={{ ...styles.pomodoroField, background: t.gradient }}>
@@ -7364,6 +7458,7 @@ function PomodoroSetupForm({ config, onChange, onStart, busy }) {
           </label>
         ))}
       </div>
+      <div style={styles.fieldHint}>{describePomodoroPlan(config)}</div>
       <button type="button" style={styles.pomodoroStartButton} onClick={onStart} disabled={busy}>
         {busy ? <SpinnerIcon size={16} /> : <ClockIcon />}
         Start focus session
@@ -7734,6 +7829,8 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   // not a separate tracking system.
   const [pomodoroConfig, setPomodoroConfig] = useState(loadPomodoroConfig);
   const [showPomodoroSetup, setShowPomodoroSetup] = useState(false);
+  // What actually runs: in "total" mode the round count and length are derived.
+  const pomodoroSession = resolvePomodoroSession(pomodoroConfig);
   // Pull in the account's timer settings once they load or are changed in Settings.
   const accountConfigKey = JSON.stringify(accountConfig);
   useEffect(() => {
@@ -7748,6 +7845,8 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   const [pomodoroPhase, setPomodoroPhase] = useState(() => loadPomodoroState()?.phase ?? null); // null | "work" | "break" | "longBreak"
   const [pomodoroCycle, setPomodoroCycle] = useState(() => loadPomodoroState()?.cycle ?? 1);
   const [phaseEndsAt, setPhaseEndsAt] = useState(() => loadPomodoroState()?.phaseEndsAt ?? null); // ms epoch
+  // Seconds left on the current phase while it's paused, or null when running.
+  const [pausedRemaining, setPausedRemaining] = useState(() => loadPomodoroState()?.pausedRemaining ?? null);
   const transitioningRef = useRef(false);
 
   // Always-on-top popup (Document Picture-in-Picture). Chrome/Edge and
@@ -7817,11 +7916,11 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   // flow through setPomodoroPhase(null), which lands here).
   useEffect(() => {
     if (pomodoroPhase && phaseEndsAt) {
-      savePomodoroState({ phase: pomodoroPhase, phaseEndsAt, cycle: pomodoroCycle });
+      savePomodoroState({ phase: pomodoroPhase, phaseEndsAt, cycle: pomodoroCycle, pausedRemaining });
     } else {
       savePomodoroState(null);
     }
-  }, [pomodoroPhase, phaseEndsAt, pomodoroCycle]);
+  }, [pomodoroPhase, phaseEndsAt, pomodoroCycle, pausedRemaining]);
 
   const refetchSessions = useCallback(async () => {
     if (!userId) return;
@@ -7888,7 +7987,8 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   // break has no corresponding DB row by design, so it's trusted as-is.
   useEffect(() => {
     if (initializing) return;
-    if (pomodoroPhase === "work" && (!activeSession || activeSession.sessionType !== "pomodoro")) {
+    // (A paused work phase is clocked out on purpose, so it's trusted as-is too.)
+    if (pomodoroPhase === "work" && pausedRemaining == null && (!activeSession || activeSession.sessionType !== "pomodoro")) {
       setPomodoroPhase(null);
       setPhaseEndsAt(null);
     }
@@ -7992,7 +8092,7 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
       return false;
     }
     setPomodoroPhase("work");
-    setPhaseEndsAt(Date.now() + pomodoroConfig.workMinutes * 60000);
+    setPhaseEndsAt(Date.now() + pomodoroSession.workMinutes * 60000);
     return true;
   };
 
@@ -8007,20 +8107,36 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
           // Already surfaced via clockError; still move on to the break so
           // one failed request doesn't get the whole rhythm stuck.
         }
-        const completingLongBreak = pomodoroCycle >= pomodoroConfig.cyclesBeforeLongBreak;
-        const nextPhase = completingLongBreak ? "longBreak" : "break";
-        const minutes = completingLongBreak ? pomodoroConfig.longBreakMinutes : pomodoroConfig.breakMinutes;
-        setPomodoroPhase(nextPhase);
-        setPhaseEndsAt(Date.now() + minutes * 60000);
-        notifyBrowser(
-          completingLongBreak ? "Long break time" : "Break time",
-          `Focus session done - ${minutes} minute${minutes === 1 ? "" : "s"} to recharge.`,
-          "kairil-pomodoro",
-          "focus"
-        );
+        const rounds = pomodoroSession.cyclesBeforeLongBreak;
+        if (pomodoroCycle >= rounds) {
+          // Final focus round done: the session ends here, with no trailing break.
+          setPomodoroPhase(null);
+          setPhaseEndsAt(null);
+          setPomodoroCycle(1);
+          notifyBrowser(
+            "Focus session complete",
+            `${rounds} focus round${rounds === 1 ? "" : "s"} finished. Nice work.`,
+            "kairil-pomodoro",
+            "focus"
+          );
+        } else {
+          // Which gaps get a long break is planned from the session's total focus
+          // time (see planPomodoroBreaks); every other gap is a short break.
+          const useLongBreak = planPomodoroBreaks(pomodoroSession)[pomodoroCycle - 1] === "longBreak";
+          const nextPhase = useLongBreak ? "longBreak" : "break";
+          const minutes = useLongBreak ? pomodoroSession.longBreakMinutes : pomodoroSession.breakMinutes;
+          setPomodoroPhase(nextPhase);
+          setPhaseEndsAt(Date.now() + minutes * 60000);
+          notifyBrowser(
+            useLongBreak ? "Long break time" : "Break time",
+            `Round ${pomodoroCycle} of ${rounds} done - ${minutes} minute${minutes === 1 ? "" : "s"} to recharge.`,
+            "kairil-pomodoro",
+            "focus"
+          );
+        }
       } else {
         const finishedLabel = pomodoroPhase === "longBreak" ? "Long break" : "Break";
-        setPomodoroCycle(pomodoroPhase === "longBreak" ? 1 : (c) => c + 1);
+        setPomodoroCycle((c) => c + 1);
         const started = await beginPomodoroWork();
         if (started) {
           notifyBrowser("Back to focus", `${finishedLabel} over - starting the next focus session.`, "kairil-pomodoro", "focus");
@@ -8049,10 +8165,11 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   useEffect(() => {
     if (initializing) return;
     if (!pomodoroPhase || !phaseEndsAt) return;
+    if (pausedRemaining != null) return; // paused: the countdown is frozen
     if (now.getTime() < phaseEndsAt) return;
     advancePomodoroPhase();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [now, pomodoroPhase, phaseEndsAt, initializing]);
+  }, [now, pomodoroPhase, phaseEndsAt, initializing, pausedRemaining]);
 
   const startPomodoro = () => {
     if (activeSession || pomodoroPhase || clockingIn) return;
@@ -8061,9 +8178,50 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
     beginPomodoroWork();
   };
 
-  const skipPomodoroPhase = () => {
-    advancePomodoroPhase();
+  // A phase is either running, paused, or stopped - never skipped, so the
+  // rhythm of focus and rest stays intact. Pausing a focus round clocks the
+  // work session out (paused time isn't studio time); pausing a break just
+  // freezes its countdown. Resuming clocks back in for a focus round.
+  const pausePomodoro = async () => {
+    if (!pomodoroPhase || pausedRemaining != null || transitioningRef.current) return;
+    transitioningRef.current = true;
+    try {
+      const remaining = Math.max(1, Math.round((phaseEndsAt - Date.now()) / 1000));
+      if (pomodoroPhase === "work") {
+        if (!activeSession) return;
+        try {
+          await handleClockOut();
+        } catch {
+          return; // couldn't close the session (error shown) - keep running rather than half-pause
+        }
+      }
+      setPausedRemaining(remaining);
+    } finally {
+      transitioningRef.current = false;
+    }
   };
+
+  const resumePomodoro = async () => {
+    if (pausedRemaining == null || transitioningRef.current) return;
+    transitioningRef.current = true;
+    try {
+      if (pomodoroPhase === "work") {
+        let session;
+        try {
+          session = await handleClockIn("pomodoro");
+        } catch {
+          return; // error shown; stay paused
+        }
+        if (!session) return; // blocked - stay paused
+      }
+      setPhaseEndsAt(Date.now() + pausedRemaining * 1000);
+      setPausedRemaining(null);
+    } finally {
+      transitioningRef.current = false;
+    }
+  };
+
+  const togglePomodoroPause = () => (pausedRemaining != null ? resumePomodoro() : pausePomodoro());
 
   const stopPomodoro = async () => {
     if (pomodoroPhase === "work" && activeSession) {
@@ -8075,6 +8233,7 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
     }
     setPomodoroPhase(null);
     setPhaseEndsAt(null);
+    setPausedRemaining(null);
     setPomodoroCycle(1);
   };
 
@@ -8146,21 +8305,22 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   let trackingContent;
   if (pomodoroPhase) {
     const phaseLabel = pomodoroPhase === "work" ? "Focus" : pomodoroPhase === "longBreak" ? "Long break" : "Break";
-    const phaseRemaining = Math.max(0, Math.round((phaseEndsAt - now.getTime()) / 1000));
-    const dotColor = pomodoroPhase === "work" ? "#3DDC84" : "#F2A65A";
+    const paused = pausedRemaining != null;
+    const phaseRemaining = paused ? pausedRemaining : Math.max(0, Math.round((phaseEndsAt - now.getTime()) / 1000));
+    const dotColor = paused ? "#9AA0B4" : pomodoroPhase === "work" ? "#3DDC84" : "#F2A65A";
     trackingContent = (
       <div>
         <div style={{ ...styles.studioTimeStatus, color: dotColor }}>
           <span style={{ ...styles.studioTimeStatusDot, background: dotColor, boxShadow: `0 0 6px ${dotColor}` }} />
-          {phaseLabel} {"\u00b7"} Cycle {pomodoroCycle} of {pomodoroConfig.cyclesBeforeLongBreak}
+          {paused ? `${phaseLabel} paused` : phaseLabel} {"\u00b7"} Cycle {pomodoroCycle} of {pomodoroSession.cyclesBeforeLongBreak}
         </div>
         <div style={styles.studioTimeValue}>{formatClockDuration(phaseRemaining)}</div>
         {clockError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{clockError}</p>}
         <div style={styles.pomodoroControls}>
-          <button type="button" style={styles.pomodoroSecondaryButton} onClick={skipPomodoroPhase}>
-            Skip
+          <button type="button" style={styles.themedPauseButton} onClick={togglePomodoroPause}>
+            {paused ? "Resume" : "Pause"}
           </button>
-          <button type="button" style={styles.pomodoroSecondaryButton} onClick={() => stopPomodoro()}>
+          <button type="button" style={styles.themedStopButton} onClick={() => stopPomodoro()}>
             Stop
           </button>
         </div>
@@ -8228,7 +8388,8 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
       </div>
     );
   }
-  const phaseRemaining = pomodoroPhase ? Math.max(0, Math.round((phaseEndsAt - now.getTime()) / 1000)) : 0;
+  const pomodoroPaused = pausedRemaining != null;
+  const phaseRemaining = pomodoroPhase ? (pomodoroPaused ? pausedRemaining : Math.max(0, Math.round((phaseEndsAt - now.getTime()) / 1000))) : 0;
 
   // The pop-out window gets its own minimal content - just the number and
   // one action - rather than reusing `trackingContent` above. Portaling the
@@ -8241,10 +8402,15 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   if (pomodoroPhase) {
     pipTrackingContent = (
       <div style={styles.pipInner}>
-        <span style={styles.pipValue}>{formatClockDuration(phaseRemaining)}</span>
-        <button type="button" style={styles.pipButton} onClick={() => stopPomodoro()}>
-          Stop
-        </button>
+        <span style={{ ...styles.pipValue, ...(pomodoroPaused ? { opacity: 0.55 } : {}) }}>{formatClockDuration(phaseRemaining)}</span>
+        <div style={styles.pipButtonRow}>
+          <button type="button" style={styles.themedPauseButton} onClick={togglePomodoroPause}>
+            {pomodoroPaused ? "Resume" : "Pause"}
+          </button>
+          <button type="button" style={styles.themedStopButton} onClick={() => stopPomodoro()}>
+            Stop
+          </button>
+        </div>
       </div>
     );
   } else if (activeSession) {
@@ -8282,11 +8448,7 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
     ? formatDayDuration(todaySeconds)
     : "00:00:00";
   const compactLabel = pomodoroPhase
-    ? pomodoroPhase === "work"
-      ? "Focus"
-      : pomodoroPhase === "longBreak"
-      ? "Long break"
-      : "Break"
+    ? `${pomodoroPhase === "work" ? "Focus" : pomodoroPhase === "longBreak" ? "Long break" : "Break"}${pomodoroPaused ? " paused" : ""}`
     : activeSession || todaySeconds === 0
     ? "Studio Time"
     : "Today's studio time";
@@ -8312,8 +8474,8 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
         <span style={styles.studioTimeCompactValue}>{displayValue}</span>
         {pomodoroPhase ? (
           <>
-            <button type="button" className="kf-clock-btn kf-clock-skip" style={styles.dashboardCompactButton} onClick={skipPomodoroPhase}>
-              Skip
+            <button type="button" className="kf-clock-btn kf-clock-pause" style={styles.dashboardCompactButton} onClick={togglePomodoroPause}>
+              {pomodoroPaused ? "Resume" : "Pause"}
             </button>
             <button
               type="button"
@@ -13454,7 +13616,7 @@ a:hover {
 .kf-clock-btn { border: none !important; font-weight: 800 !important; letter-spacing: 0.01em; box-shadow: 0 3px 10px rgba(0,0,0,0.25); }
 .kf-clock-in { background: linear-gradient(135deg, #16A34A 0%, #4ADE80 100%) !important; color: #fff !important; }
 .kf-clock-out { background: linear-gradient(135deg, #DC2626 0%, #F87171 100%) !important; color: #fff !important; }
-.kf-clock-skip { background: #fff !important; color: #5b3de0 !important; }
+.kf-clock-pause { background: #fff !important; color: #5b3de0 !important; }
 .kf-focus-link { background: linear-gradient(135deg, #38B6FF 0%, #9ADCFF 100%) !important; color: #06324d !important; border: none !important; border-radius: 10px !important; padding: 5px 11px !important; font-weight: 800 !important; box-shadow: 0 3px 10px rgba(56,182,255,0.4); cursor: pointer; }
 .kf-focus-link:hover { filter: brightness(1.08); }
 .kf-focus-input { background: rgba(255,255,255,0.05); border: 1px solid #2a3338; border-radius: 12px; color: #EDEAE3; font-family: 'Nunito', 'Space Grotesk', sans-serif; font-weight: 800; font-size: 20px; width: 100%; box-sizing: border-box; padding: 4px 0; text-align: left; background: transparent; border: none; outline: none; }
@@ -14043,6 +14205,36 @@ const styles = {
     fontWeight: 600,
     color: paper,
     letterSpacing: 0.5,
+  },
+  pipButtonRow: {
+    display: "flex",
+    gap: 6,
+  },
+  // Pause/Stop for a running focus session - same look as the dashboard clock pill
+  // (white Pause, red-gradient Stop). Inline so they also render in the pop-out window.
+  themedPauseButton: {
+    border: "none",
+    borderRadius: 999,
+    background: "#fff",
+    color: "#5b3de0",
+    padding: "4px 11px",
+    fontSize: 11.5,
+    fontWeight: 800,
+    fontFamily: "'Nunito', 'Inter', sans-serif",
+    boxShadow: "0 3px 10px rgba(0,0,0,0.25)",
+    cursor: "pointer",
+  },
+  themedStopButton: {
+    border: "none",
+    borderRadius: 999,
+    background: "linear-gradient(135deg, #DC2626 0%, #F87171 100%)",
+    color: "#fff",
+    padding: "4px 11px",
+    fontSize: 11.5,
+    fontWeight: 800,
+    fontFamily: "'Nunito', 'Inter', sans-serif",
+    boxShadow: "0 3px 10px rgba(0,0,0,0.25)",
+    cursor: "pointer",
   },
   pipButton: {
     background: "transparent",
