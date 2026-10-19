@@ -8291,22 +8291,34 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
     ? "Studio Time"
     : "Today's studio time";
   const compactBusy = clockingIn || clockingOut;
-  return (
-    <>
-      {visible && (
-      <div style={styles.studioTimeCompactWrap}>
-      <div className="kf-clock-pill" style={{ ...styles.studioTimeCompact, ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
+  // On the dashboard the clock card is placed directly above the Calendar (#kf-clock-slot).
+  const [slot, setSlot] = useState(null);
+  useEffect(() => {
+    if (!visible) { setSlot(null); return undefined; }
+    let tries = 0, raf = 0;
+    const find = () => {
+      const el = document.getElementById("kf-clock-slot");
+      if (el) setSlot(el);
+      else if (tries++ < 60) raf = requestAnimationFrame(find);
+    };
+    find();
+    return () => cancelAnimationFrame(raf);
+  }, [visible]);
+  const clockPill = (
+      <div style={slot ? styles.studioTimeCompactWrapInline : styles.studioTimeCompactWrap}>
+      <div className="kf-clock-pill" style={{ ...styles.studioTimeCompact, ...(slot ? styles.studioTimeCompactCard : {}), ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
         {(activeSession || pomodoroPhase) && <span style={styles.studioTimeStatusDot} />}
         <span style={styles.dashboardGreetingCompactDate}>{compactLabel}</span>
         <span style={styles.studioTimeCompactValue}>{displayValue}</span>
         {pomodoroPhase ? (
           <>
-            <button type="button" style={styles.dashboardCompactButton} onClick={skipPomodoroPhase}>
+            <button type="button" className="kf-clock-btn kf-clock-skip" style={styles.dashboardCompactButton} onClick={skipPomodoroPhase}>
               Skip
             </button>
             <button
               type="button"
-              style={{ ...styles.dashboardCompactButton, background: "transparent", border: `1px solid ${border}`, color: textMuted }}
+              className="kf-clock-btn kf-clock-out"
+              style={styles.dashboardCompactButton}
               onClick={() => stopPomodoro()}
             >
               Stop
@@ -8315,6 +8327,7 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
         ) : (
           <button
             type="button"
+            className={`kf-clock-btn ${activeSession ? "kf-clock-out" : "kf-clock-in"}`}
             style={styles.dashboardCompactButton}
             onClick={activeSession ? () => handleClockOut().catch(() => {}) : () => handleClockIn("manual").catch(() => {})}
             disabled={initializing || compactBusy}
@@ -8347,7 +8360,8 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
         {idle && (
           <button
             type="button"
-            style={{ ...styles.pomodoroLinkButton, fontSize: 11, padding: 0, whiteSpace: "nowrap" }}
+            className="kf-focus-link"
+            style={{ ...styles.pomodoroLinkButton, fontSize: 11, whiteSpace: "nowrap" }}
             onClick={() => setShowPomodoroSetup((v) => !v)}
           >
             {showPomodoroSetup ? "Hide focus session setup" : "Start a focus session"}
@@ -8357,10 +8371,18 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
       {clockError && <span style={{ ...styles.fieldHint, color: "#FF4D4D", fontSize: 11 }}>{clockError}</span>}
       {pipNotice && <span style={{ ...styles.fieldHint, color: "#F2A65A", fontSize: 11 }}>{pipNotice}</span>}
       {idle && showPomodoroSetup && (
-        <PomodoroSetupForm config={pomodoroConfig} onChange={setPomodoroConfig} onStart={startPomodoro} busy={initializing || clockingIn} />
+        <>
+          <div style={{ position: "fixed", inset: 0, zIndex: 59 }} onClick={() => setShowPomodoroSetup(false)} aria-hidden="true" />
+          <div role="dialog" aria-label="Focus session setup" style={{ position: "absolute", right: slot ? 0 : 28, top: "100%", marginTop: 6, zIndex: 60 }}>
+            <PomodoroSetupForm config={pomodoroConfig} onChange={setPomodoroConfig} onStart={startPomodoro} busy={initializing || clockingIn} />
+          </div>
+        </>
       )}
       </div>
-      )}
+  );
+  return (
+    <>
+      {visible && (slot ? createPortal(clockPill, slot) : clockPill)}
       {pipWindow && createPortal(<div style={styles.pipContent}>{pipTrackingContent}</div>, pipWindow.document.body)}
       {showSummary && <StudioTimeSummaryModal userId={userId} onClose={() => setShowSummary(false)} />}
     </>
@@ -8752,6 +8774,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
 
         {/* Right: Calendar, Outreach trend, Needs attention */}
         <div style={styles.dashboardCol}>
+          <div id="kf-clock-slot" />
           <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>{weekDays[0].key.slice(0, 7)} {"\u00b7"} next 7 days</span>}>Calendar</PanelTitle>
           <Panel>
             <WeekStrip days={weekDays} marks={deadlineMarks} />
@@ -13426,7 +13449,14 @@ a:hover {
 }
 .kf-clock-pill, .kf-clock-pill span { color: #fff; }
 .kf-clock-pill button { color: #fff; }
-.kf-clock-pill > button:not([title]) { background: #fff !important; color: #5b3de0 !important; border: none !important; }
+#kf-clock-slot:empty { display: none; }
+.kf-clock-pill .kf-clock-btn:first-of-type { margin-left: auto; }
+.kf-clock-btn { border: none !important; font-weight: 800 !important; letter-spacing: 0.01em; box-shadow: 0 3px 10px rgba(0,0,0,0.25); }
+.kf-clock-in { background: linear-gradient(135deg, #16A34A 0%, #4ADE80 100%) !important; color: #fff !important; }
+.kf-clock-out { background: linear-gradient(135deg, #DC2626 0%, #F87171 100%) !important; color: #fff !important; }
+.kf-clock-skip { background: #fff !important; color: #5b3de0 !important; }
+.kf-focus-link { background: linear-gradient(135deg, #38B6FF 0%, #9ADCFF 100%) !important; color: #06324d !important; border: none !important; border-radius: 10px !important; padding: 5px 11px !important; font-weight: 800 !important; box-shadow: 0 3px 10px rgba(56,182,255,0.4); cursor: pointer; }
+.kf-focus-link:hover { filter: brightness(1.08); }
 .kf-focus-input { background: rgba(255,255,255,0.05); border: 1px solid #2a3338; border-radius: 12px; color: #EDEAE3; font-family: 'Nunito', 'Space Grotesk', sans-serif; font-weight: 800; font-size: 20px; width: 100%; box-sizing: border-box; padding: 4px 0; text-align: left; background: transparent; border: none; outline: none; }
 .kf-focus-input:focus { color: #fff; }
 .kf-dash-two {
@@ -14165,6 +14195,8 @@ const styles = {
   // it left. flex-end on both axes keeps the pill and any error/notice
   // text under it flush to the right edge instead.
   studioTimeCompactWrap: {
+    position: "relative",
+    zIndex: 40,
     display: "flex",
     flexDirection: "column",
     alignItems: "flex-end",
@@ -14184,9 +14216,25 @@ const styles = {
     color: "#fff",
     boxShadow: "0 6px 16px rgba(106,71,242,0.35)",
   },
+  studioTimeCompactWrapInline: {
+    position: "relative",
+    zIndex: 40,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "stretch",
+    gap: 4,
+    width: "100%",
+  },
+  studioTimeCompactCard: {
+    width: "100%",
+    boxSizing: "border-box",
+    flexWrap: "wrap",
+    borderRadius: 22,
+    padding: "10px 12px 10px 16px",
+    gap: 10,
+  },
   studioTimeCompactActive: {
-    background: "linear-gradient(135deg, #34D8A0 0%, #6FE8C2 100%)",
-    boxShadow: "0 6px 16px rgba(52,216,160,0.35)",
+    boxShadow: "0 0 0 2px rgba(74,222,128,0.7), 0 6px 16px rgba(106,71,242,0.35)",
   },
   studioTimeCompactValue: {
     fontFamily: "'IBM Plex Mono', monospace",
