@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { S, T, Btn, Pill, Banner, Field, Table, Money, Totals, Tabs, useBusy } from "./ui.jsx";
+import { S, T, Btn, Pill, Banner, Field, Table, Money, Totals, Tabs, CARD_TONES, useBusy } from "./ui.jsx";
+import { ActivityCard } from "../DashboardKit.jsx";
 import { FINANCE_CURRENCIES, formatMoney, r2, todayLocal } from "./currency.js";
 import { rpc, saveManualFxRate, saveDefaultBank, saveFxSnapshot } from "./api.js";
 import { RevenueTrendChart } from "../DashboardCharts.jsx";
@@ -19,7 +20,7 @@ export function PrivacyToggle({ privacy, onChange, compact }) {
   const label = privacy ? "Show finances" : "Hide finances";
   return (
     <button type="button" onClick={() => onChange(!privacy)} aria-pressed={privacy} aria-label={label} title={label}
-      style={{ background: "none", border: `1px solid ${privacy ? T.warn : T.border}`, borderRadius: 6, color: privacy ? T.warn : T.muted, padding: compact ? "4px 7px" : "6px 9px", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", lineHeight: 0 }}>
+      style={{ background: "none", border: `1px solid ${privacy ? T.warn : T.border}`, borderRadius: 999, color: privacy ? T.warn : T.muted, padding: compact ? "4px 7px" : "6px 9px", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", lineHeight: 0 }}>
       <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         {privacy ? (
           <>
@@ -39,14 +40,14 @@ export function PrivacyToggle({ privacy, onChange, compact }) {
   );
 }
 
-function Kpi({ label, base, mode, baseAmount, native, privacy, sub, tone, onClick }) {
+// Headline figure as a dashboard-style gradient card (white icon tile, big number, detail line).
+function Kpi({ label, base, mode, baseAmount, native, privacy, sub, tone, onClick, card = "sky", icon = "wallet" }) {
+  const t = CARD_TONES[card] || CARD_TONES.sky;
+  const value = mode === "native" && native ? <Totals totals={native} privacy={privacy} /> : <Money code={base} amount={baseAmount} privacy={privacy} />;
+  const detail = mode === "both" && native ? <Totals totals={native} privacy={privacy} /> : null;
   return (
-    <div style={{ ...S.card, gap: 4, cursor: onClick ? "pointer" : "default" }} onClick={onClick}>
-      <span style={S.label}>{label}</span>
-      {mode !== "native" && <strong style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, color: tone === "bad" ? T.bad : T.text }}><Money code={base} amount={baseAmount} privacy={privacy} /></strong>}
-      {mode !== "base" && native && <span style={{ fontSize: mode === "native" ? 18 : 12.5, color: mode === "native" ? T.text : T.muted }}><Totals totals={native} privacy={privacy} /></span>}
-      {sub && <span style={{ fontSize: 12, color: T.muted }}>{sub}</span>}
-    </div>
+    <ActivityCard gradient={t.gradient} iconColor={t.icon} icon={icon} title={label} badge={tone === "bad" ? "LOSS" : undefined}
+      value={value} label={<>{detail}{detail && sub ? " \u00b7 " : ""}{sub}</>} onClick={onClick} />
   );
 }
 
@@ -68,23 +69,23 @@ function Overview({ ctx, go }) {
       <div style={{ ...S.row, justifyContent: "space-between" }}>
         <div><h2 style={S.h2}>Overview</h2><p style={S.sub}>Base currency: <strong>{base}</strong>. Amounts use the exchange rate stored with each transaction.</p></div>
         <span style={S.row}>
-          <div style={{ display: "flex", border: `1px solid ${T.border}`, borderRadius: 6, overflow: "hidden" }} role="group" aria-label="Currency view">
-            {[["base", "Base"], ["native", "Native"], ["both", "Both"]].map(([k, l]) => <button key={k} type="button" onClick={() => setMode(k)} aria-pressed={mode === k} style={{ background: mode === k ? "rgba(47,191,166,0.18)" : "none", color: mode === k ? T.text : T.muted, border: "none", padding: "6px 12px", cursor: "pointer", fontSize: 12.5, fontFamily: "inherit" }}>{l}</button>)}
+          <div style={{ display: "flex", border: `1px solid ${T.border}`, borderRadius: 999, overflow: "hidden" }} role="group" aria-label="Currency view">
+            {[["base", "Base"], ["native", "Native"], ["both", "Both"]].map(([k, l]) => <button key={k} type="button" onClick={() => setMode(k)} aria-pressed={mode === k} style={{ background: mode === k ? "rgba(56,182,255,0.2)" : "none", color: mode === k ? T.text : T.muted, border: "none", padding: "6px 12px", cursor: "pointer", fontSize: 12.5, fontFamily: "inherit" }}>{l}</button>)}
           </div>
           <PrivacyToggle privacy={privacy} onChange={ctx.setPrivacy} />
         </span>
       </div>
       {s.fxIssueCount > 0 && <span style={{ fontSize: 12.5, color: T.warn }}>Base-currency figures exclude {s.fxIssueCount} transaction(s) still waiting for an exchange rate. Native amounts are complete.</span>}
       <div style={S.grid(210)}>
-        <Kpi label="Cash & bank" base={base} mode={mode} baseAmount={s.cashBase} native={s.cashNative} privacy={privacy} onClick={() => go("banking")} />
-        <Kpi label="Accounts receivable" base={base} mode={mode} baseAmount={s.receivableBase} native={s.receivableNative} privacy={privacy} sub={`${s.receivableCount} open`} onClick={() => go("sales")} />
-        <Kpi label="Accounts payable" base={base} mode={mode} baseAmount={s.payableBase} native={s.payableNative} privacy={privacy} sub={`${s.payableCount} open`} onClick={() => go("purchases")} />
-        <Kpi label="Net profit (year to date)" base={base} mode={mode} baseAmount={s.netProfitYtd} native={null} privacy={privacy} tone={s.netProfitYtd < 0 ? "bad" : undefined} onClick={() => go("reports")} />
+        <Kpi card="mint" icon="wallet" label="Cash & bank" base={base} mode={mode} baseAmount={s.cashBase} native={s.cashNative} privacy={privacy} onClick={() => go("banking")} />
+        <Kpi card="sky" icon="invoice" label="Accounts receivable" base={base} mode={mode} baseAmount={s.receivableBase} native={s.receivableNative} privacy={privacy} sub={`${s.receivableCount} open`} onClick={() => go("sales")} />
+        <Kpi card="violet" icon="card" label="Accounts payable" base={base} mode={mode} baseAmount={s.payableBase} native={s.payableNative} privacy={privacy} sub={`${s.payableCount} open`} onClick={() => go("purchases")} />
+        <Kpi card="royal" icon="trend" label="Net profit (year to date)" base={base} mode={mode} baseAmount={s.netProfitYtd} native={null} privacy={privacy} tone={s.netProfitYtd < 0 ? "bad" : undefined} onClick={() => go("reports")} />
       </div>
       <div style={S.grid(210)}>
-        <Kpi label="Revenue (year to date)" base={base} mode={mode} baseAmount={s.revenueYtd} native={s.revenueYtdNative} privacy={privacy} />
-        <Kpi label="Expenses (year to date)" base={base} mode={mode} baseAmount={s.expensesYtd} native={null} privacy={privacy} />
-        <Kpi label="Revenue this month" base={base} mode={mode} baseAmount={s.revenueMonth} native={null} privacy={privacy} />
+        <Kpi card="mint" icon="trend" label="Revenue (year to date)" base={base} mode={mode} baseAmount={s.revenueYtd} native={s.revenueYtdNative} privacy={privacy} />
+        <Kpi card="violet" icon="card" label="Expenses (year to date)" base={base} mode={mode} baseAmount={s.expensesYtd} native={null} privacy={privacy} />
+        <Kpi card="sky" icon="calendar" label="Revenue this month" base={base} mode={mode} baseAmount={s.revenueMonth} native={null} privacy={privacy} />
       </div>
       <div style={S.grid(320)}>
         <div style={S.card}>

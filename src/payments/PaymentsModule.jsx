@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { S, T, Btn, Pill, Banner, Field, Modal, Table, Tabs, Totals, useBusy } from "../finance/ui.jsx";
+import { S, T, Btn, Pill, Banner, Field, Modal, Table, Tabs, Totals, CARD_TONES, useBusy } from "../finance/ui.jsx";
+import { ActivityCard } from "../DashboardKit.jsx";
 import { formatMoney, formatTotalsByCurrency, symbolToCode } from "../finance/currency.js";
 import { PrivacyToggle } from "../finance/FinanceModule.jsx";
 import { usePayments } from "./usePayments.js";
@@ -16,20 +17,15 @@ const fmtDay = (iso) => (iso ? String(iso).slice(0, 10) : "-");
 const money = (c, n, priv) => (priv ? "••••" : formatMoney(c, n));
 
 function SandboxBar() {
-  return <div role="note" style={{ border: `1px solid ${T.warn}66`, background: `${T.warn}14`, color: T.warn, borderRadius: 8, padding: "7px 12px", fontSize: 12.5, letterSpacing: "0.04em", fontWeight: 600 }}>{SANDBOX_NOTICE}</div>;
+  return <div role="note" style={{ border: `1px solid ${T.warn}66`, background: `${T.warn}14`, color: T.warn, borderRadius: 14, padding: "7px 14px", fontSize: 12.5, letterSpacing: "0.04em", fontWeight: 600 }}>{SANDBOX_NOTICE}</div>;
 }
 const StatusPill = ({ map, status }) => <Pill tone={map[status]?.tone || "muted"}>{map[status]?.label || status}</Pill>;
 
-function Kpi({ label, totals, privacy, sub, tone }) {
-  return (
-    <div style={{ ...S.card, gap: 4 }}>
-      <span style={S.label}>{label}</span>
-      <strong style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, color: tone === "bad" ? T.bad : T.text }}>
-        {typeof totals === "number" ? (privacy ? "•••" : totals) : <Totals totals={totals} privacy={privacy} />}
-      </strong>
-      {sub && <span style={{ fontSize: 12, color: T.muted }}>{sub}</span>}
-    </div>
-  );
+// Headline figure as a dashboard-style gradient card.
+function Kpi({ label, totals, privacy, sub, tone, card = "sky", icon = "card" }) {
+  const t = CARD_TONES[card] || CARD_TONES.sky;
+  const value = typeof totals === "number" ? (privacy ? "\u2022\u2022\u2022" : totals) : <Totals totals={totals} privacy={privacy} />;
+  return <ActivityCard gradient={t.gradient} iconColor={t.icon} icon={icon} title={label} badge={tone === "bad" ? "ACTION" : undefined} value={value} label={sub || ""} />;
 }
 
 function Overview({ ctx }) {
@@ -38,19 +34,19 @@ function Overview({ ctx }) {
   return (
     <>
       <div style={S.grid(200)}>
-        <Kpi label="Client payments received" totals={s.receivedGross} privacy={privacy} sub="Gross, verified (test data)" />
-        <Kpi label="Received today" totals={s.receivedToday} privacy={privacy} />
-        <Kpi label="Transaction fees (actual)" totals={s.fees} privacy={privacy} sub="As reported by Paystack" />
-        <Kpi label="Net after fees" totals={s.net} privacy={privacy} sub="Gross minus actual fees" />
-        <Kpi label="Refunds" totals={s.refunds} privacy={privacy} />
-        <Kpi label="Outstanding client invoices" totals={s.outstandingInvoices} privacy={privacy} sub={`${s.outstandingInvoiceCount} open`} />
+        <Kpi card="mint" icon="wallet" label="Client payments received" totals={s.receivedGross} privacy={privacy} sub="Gross, verified (test data)" />
+        <Kpi card="sky" icon="clock" label="Received today" totals={s.receivedToday} privacy={privacy} />
+        <Kpi card="violet" icon="percent" label="Transaction fees (actual)" totals={s.fees} privacy={privacy} sub="As reported by Paystack" />
+        <Kpi card="royal" icon="trend" label="Net after fees" totals={s.net} privacy={privacy} sub="Gross minus actual fees" />
+        <Kpi card="violet" icon="undo" label="Refunds" totals={s.refunds} privacy={privacy} />
+        <Kpi card="sky" icon="invoice" label="Outstanding client invoices" totals={s.outstandingInvoices} privacy={privacy} sub={`${s.outstandingInvoiceCount} open`} />
       </div>
       <div style={S.grid(200)}>
-        <Kpi label="Pending / successful" totals={`${s.counts.pending} / ${s.counts.successful}`} privacy={false} sub={`${s.counts.failed} failed or abandoned · ${s.counts.refunded} refunded`} />
-        <Kpi label="Owed to freelancers" totals={s.freelancerOwed} privacy={privacy} sub="Outstanding bills in Finance" />
-        <Kpi label="Approved, awaiting payment" totals={s.approvedPayoutsAwaiting} privacy={privacy} sub={`${formatTotalsByCurrency(s.pendingApprovalPayouts)} pending approval`} />
-        <Kpi label="Freelancer payouts simulated" totals={s.simulatedPaid} privacy={privacy} sub={SIMULATED_NOTICE} />
-        <Kpi label="Unreconciled" totals={s.unreconciledCount + s.unreconciledPayoutCount} privacy={false} sub="Payments + simulated payouts" tone={s.unreconciledCount ? "bad" : undefined} />
+        <Kpi card="sky" icon="clock" label="Pending / successful" totals={`${s.counts.pending} / ${s.counts.successful}`} privacy={false} sub={`${s.counts.failed} failed or abandoned · ${s.counts.refunded} refunded`} />
+        <Kpi card="violet" icon="users" label="Owed to freelancers" totals={s.freelancerOwed} privacy={privacy} sub="Outstanding bills in Finance" />
+        <Kpi card="royal" icon="send" label="Approved, awaiting payment" totals={s.approvedPayoutsAwaiting} privacy={privacy} sub={`${formatTotalsByCurrency(s.pendingApprovalPayouts)} pending approval`} />
+        <Kpi card="mint" icon="zap" label="Freelancer payouts simulated" totals={s.simulatedPaid} privacy={privacy} sub={SIMULATED_NOTICE} />
+        <Kpi card="royal" icon="alert" label="Unreconciled" totals={s.unreconciledCount + s.unreconciledPayoutCount} privacy={false} sub="Payments + simulated payouts" tone={s.unreconciledCount ? "bad" : undefined} />
       </div>
       <div style={S.card}>
         <div style={{ ...S.row, justifyContent: "space-between" }}><h3 style={S.h3}>Recent payment activity</h3><Btn small kind="link" onClick={() => setTab("transactions")}>All transactions</Btn></div>
