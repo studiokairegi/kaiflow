@@ -8251,7 +8251,7 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
     setPipNotice("");
     try {
       // Square by request - 150x180 was noticeably taller than it was wide.
-      const pw = await window.documentPictureInPicture.requestWindow({ width: 150, height: 150 });
+      const pw = await window.documentPictureInPicture.requestWindow({ width: 180, height: 180 });
       // This app's global styles (fonts, keyframes, hover/disabled rules)
       // live in one <style> tag; everything else is inline styles, which
       // render correctly in any document without copying anything else.
