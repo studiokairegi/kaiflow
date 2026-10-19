@@ -8250,8 +8250,8 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
     if (!pipSupported || pipWindow) return;
     setPipNotice("");
     try {
-      // Square by request - 150x180 was noticeably taller than it was wide.
-      const pw = await window.documentPictureInPicture.requestWindow({ width: 180, height: 180 });
+      // Small square by request (half of the earlier 180x180).
+      const pw = await window.documentPictureInPicture.requestWindow({ width: 90, height: 90 });
       // This app's global styles (fonts, keyframes, hover/disabled rules)
       // live in one <style> tag; everything else is inline styles, which
       // render correctly in any document without copying anything else.
@@ -8404,10 +8404,10 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
       <div style={styles.pipInner}>
         <span style={{ ...styles.pipValue, ...(pomodoroPaused ? { opacity: 0.55 } : {}) }}>{formatClockDuration(phaseRemaining)}</span>
         <div style={styles.pipButtonRow}>
-          <button type="button" style={styles.themedPauseButton} onClick={togglePomodoroPause}>
+          <button type="button" style={{ ...styles.themedPauseButton, ...styles.pipThemedSmall }} onClick={togglePomodoroPause}>
             {pomodoroPaused ? "Resume" : "Pause"}
           </button>
-          <button type="button" style={styles.themedStopButton} onClick={() => stopPomodoro()}>
+          <button type="button" style={{ ...styles.themedStopButton, ...styles.pipThemedSmall }} onClick={() => stopPomodoro()}>
             Stop
           </button>
         </div>
@@ -14197,18 +14197,26 @@ const styles = {
     flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
-    gap: 10,
+    gap: 5,
   },
   pipValue: {
     fontFamily: "'IBM Plex Mono', monospace",
-    fontSize: 26,
+    fontSize: 14,
     fontWeight: 600,
     color: paper,
     letterSpacing: 0.5,
   },
   pipButtonRow: {
     display: "flex",
-    gap: 6,
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: 4,
+  },
+  // Themed Pause/Stop shrunk to fit the small pop-out window.
+  pipThemedSmall: {
+    padding: "2px 6px",
+    fontSize: 9,
+    boxShadow: "0 2px 6px rgba(0,0,0,0.25)",
   },
   // Pause/Stop for a running focus session - same look as the dashboard clock pill
   // (white Pause, red-gradient Stop). Inline so they also render in the pop-out window.
@@ -14241,8 +14249,8 @@ const styles = {
     border: `1px solid ${border}`,
     borderRadius: 999,
     color: textMuted,
-    padding: "5px 16px",
-    fontSize: 12,
+    padding: "3px 10px",
+    fontSize: 10,
     fontFamily: "'Inter', sans-serif",
     cursor: "pointer",
   },
