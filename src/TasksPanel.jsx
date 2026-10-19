@@ -16,11 +16,11 @@ import {
 // Completing a task only updates that task: it never sends email, moves a deal
 // stage, approves work or touches finance.
 
-const C = { ink: "#14191c", inkSoft: "#1c2327", paper: "#EDEAE3", teal: "#2FBFA6", tealLight: "#7FE0D0", border: "#2a3338", muted: "#8b9a98", red: "#FF4D4D", green: "#3DDC84", amber: "#F2A65A" };
+const C = { ink: "#14191c", inkSoft: "#1c2327", paper: "#EDEAE3", teal: "#38B6FF", tealLight: "#9ADCFF", border: "#2a3338", muted: "#8b9a98", red: "#FF4D4D", green: "#3DDC84", amber: "#F2A65A" };
 const PRIORITY_COLOR = { low: C.muted, normal: C.teal, high: C.amber, urgent: C.red };
 const field = { width: "100%", boxSizing: "border-box", background: C.ink, color: C.paper, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 10px", fontSize: 13, fontFamily: "inherit" };
 const small = { background: C.ink, color: C.paper, border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 6px", fontSize: 11.5, fontFamily: "inherit" };
-const btn = (color, disabled) => ({ padding: "6px 11px", borderRadius: 9, border: `1px solid ${disabled ? C.border : color}`, background: disabled ? "transparent" : `${color}22`, color: disabled ? C.muted : color, fontSize: 12.5, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.6 : 1, fontFamily: "inherit" });
+const btn = (color, disabled) => ({ padding: "6px 11px", borderRadius: 999, border: `1px solid ${disabled ? C.border : color}`, background: disabled ? "transparent" : `${color}22`, color: disabled ? C.muted : color, fontSize: 12.5, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.6 : 1, fontFamily: "inherit" });
 const iconBtn = (active, color = C.amber) => ({ background: "transparent", border: "none", cursor: "pointer", color: active ? color : C.muted, fontSize: 15, lineHeight: 1, padding: "2px 4px", fontFamily: "inherit" });
 const VIEWS = [["today", "Today"], ["tomorrow", "Tomorrow"], ["week", "This week"], ["upcoming", "Upcoming"], ["completed", "Completed"], ["recurring", "Recurring"]];
 const ESTIMATES = [15, 30, 45, 60, 90, 120, 180, 240];
@@ -169,10 +169,10 @@ export default function TasksPanel({ getToday, leads = [], projects = [], shots 
   );
 
   return (
-    <div className="kf-card kf-tasks-card" style={{ background: C.inkSoft, border: `1px solid ${C.border}`, borderRadius: 14, padding: "10px 12px", flexShrink: 0, display: "flex", flexDirection: "column", gap: 6, color: C.paper, minWidth: 0, overflow: "hidden" }} aria-label="Tasks">
+    <div className="kf-card kf-tasks-card" style={{ background: C.inkSoft, border: `1px solid ${C.border}`, borderRadius: 22, padding: "14px 16px", flexShrink: 0, display: "flex", flexDirection: "column", gap: 6, color: C.paper, minWidth: 0, overflow: "hidden" }} aria-label="Tasks">
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 600 }}>Tasks</span>
-        <button type="button" style={{ ...btn(C.teal), padding: "4px 10px", fontSize: 12 }} onClick={() => openNew()}>+ New task</button>
+        <span style={{ fontFamily: "'Nunito', 'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 800, letterSpacing: "-0.01em" }}>Tasks</span>
+        <button type="button" style={{ border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, color: "#fff", background: "linear-gradient(135deg, #38B6FF 0%, #9ADCFF 100%)", borderRadius: 999, padding: "6px 14px" }} onClick={() => openNew()}>+ New task</button>
       </div>
       {phase === "ready" && (
         <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
@@ -185,7 +185,7 @@ export default function TasksPanel({ getToday, leads = [], projects = [], shots 
       <div role="tablist" aria-label="Task views" style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
         {VIEWS.map(([id, label]) => (
           <button key={id} type="button" role="tab" aria-selected={view === id} onClick={() => chooseView(id)}
-            style={{ ...btn(view === id ? C.teal : C.muted), background: view === id ? "rgba(47,191,166,0.14)" : "transparent", padding: "3px 8px", fontSize: 11.5 }}>
+            style={{ ...btn(view === id ? C.teal : C.muted), background: view === id ? "rgba(56,182,255,0.16)" : "transparent", padding: "3px 8px", fontSize: 11.5 }}>
             {label}
           </button>
         ))}

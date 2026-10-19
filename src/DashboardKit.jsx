@@ -54,8 +54,8 @@ const FONT = "'Nunito', 'Space Grotesk', sans-serif";
 
 export function PanelTitle({ children, right }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
-      <h3 style={{ margin: 0, fontFamily: FONT, fontSize: 17, fontWeight: 800, color: INK, letterSpacing: "-0.01em" }}>{children}</h3>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+      <h3 style={{ margin: 0, fontFamily: FONT, fontSize: 15, fontWeight: 800, color: INK, letterSpacing: "-0.01em" }}>{children}</h3>
       {right}
     </div>
   );
@@ -63,7 +63,7 @@ export function PanelTitle({ children, right }) {
 
 export function Panel({ children, style, onClick }) {
   return (
-    <div onClick={onClick} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 22, padding: "16px 18px", minWidth: 0, display: "flex", flexDirection: "column", cursor: onClick ? "pointer" : "default", ...style }}>
+    <div onClick={onClick} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 20, padding: "12px 14px", minWidth: 0, display: "flex", flexDirection: "column", cursor: onClick ? "pointer" : "default", ...style }}>
       {children}
     </div>
   );
@@ -77,41 +77,41 @@ export function ActivityCard({ gradient, icon, iconColor, title, badge, value, l
     const max = Math.max(...spark, 1);
     const pts = spark.map((v, i) => [(i / (spark.length - 1)) * 120, 30 - (v / max) * 24]);
     const d = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`).join(" ");
-    wave = <svg viewBox="0 0 120 34" width="120" height="34" style={{ position: "absolute", right: 18, top: 14, opacity: 0.5 }} aria-hidden="true"><path d={d} fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+    wave = <svg viewBox="0 0 120 34" width="90" height="26" style={{ position: "absolute", right: 14, top: 10, opacity: 0.5 }} aria-hidden="true"><path d={d} fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg>;
   }
   return (
-    <div onClick={onClick} className="kf-card" style={{ position: "relative", overflow: "hidden", borderRadius: 24, padding: "16px 18px 14px", background: gradient, color: "#fff", cursor: onClick ? "pointer" : "default", display: "flex", flexDirection: "column", gap: 10, minWidth: 0, boxShadow: "0 10px 26px rgba(0,0,0,0.28)" }}>
+    <div onClick={onClick} className="kf-card" style={{ position: "relative", overflow: "hidden", borderRadius: 20, padding: "11px 14px 10px", background: gradient, color: "#fff", cursor: onClick ? "pointer" : "default", display: "flex", flexDirection: "column", gap: 7, minWidth: 0, boxShadow: "0 8px 20px rgba(0,0,0,0.26)" }}>
       <div aria-hidden="true" style={{ position: "absolute", right: -40, top: -50, width: 150, height: 150, borderRadius: "50%", background: "rgba(255,255,255,0.12)" }} />
       <div style={{ display: "flex", alignItems: "center", gap: 10, position: "relative" }}>
-        <span style={{ width: 40, height: 40, borderRadius: 13, background: W, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-          <Icon name={icon} size={20} color={iconColor} stroke={1.8} />
+        <span style={{ width: 30, height: 30, borderRadius: 10, background: W, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Icon name={icon} size={16} color={iconColor} stroke={1.8} />
         </span>
-        <span style={{ fontFamily: FONT, fontWeight: 700, fontSize: 13.5, opacity: 0.95 }}>{title}</span>
+        <span style={{ fontFamily: FONT, fontWeight: 700, fontSize: 12.5, opacity: 0.95 }}>{title}</span>
         {badge && <span style={{ marginLeft: "auto", fontSize: 9.5, fontWeight: 800, letterSpacing: "0.08em", background: "rgba(255,255,255,0.22)", borderRadius: 999, padding: "2px 8px" }}>{badge}</span>}
       </div>
       {wave}
       <div style={{ position: "relative", display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontFamily: FONT, fontWeight: 800, fontSize: 30, lineHeight: 1.05, letterSpacing: "-0.02em", overflowWrap: "anywhere" }}>{value}</div>
-          <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 2 }}>{label}</div>
+          <div style={{ fontFamily: FONT, fontWeight: 800, fontSize: 23, lineHeight: 1.05, letterSpacing: "-0.02em", overflowWrap: "anywhere" }}>{value}</div>
+          <div style={{ fontSize: 11, opacity: 0.9, marginTop: 1 }}>{label}</div>
         </div>
         {delta !== undefined && delta !== null && (
-          <span style={{ fontSize: 12, fontWeight: 700, background: "rgba(255,255,255,0.22)", borderRadius: 999, padding: "4px 10px" }}>
+          <span style={{ fontSize: 10.5, fontWeight: 700, background: "rgba(255,255,255,0.22)", borderRadius: 999, padding: "2px 8px" }}>
             {delta >= 0 ? "+" : "-"}{Math.abs(delta)}% {delta >= 0 ? "\u25B2" : "\u25BC"}
           </span>
         )}
       </div>
       {chips.length > 0 && (
-        <div style={{ position: "relative", display: "flex", flexWrap: "wrap", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ position: "relative", display: "flex", flexWrap: "wrap", gap: 4 }} onClick={(e) => e.stopPropagation()}>
           {chips.map((c) => {
             const inner = (
               <>
-                <Icon name={c.icon} size={12} color="#fff" stroke={1.9} />
+                <Icon name={c.icon} size={11} color="#fff" stroke={1.9} />
                 <strong style={{ fontWeight: 800 }}>{c.value}</strong>
-                <span style={{ opacity: 0.85, fontSize: 10.5 }}>{c.label}</span>
+                <span style={{ opacity: 0.85, fontSize: 9.5 }}>{c.label}</span>
               </>
             );
-            const st = { display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 9px", borderRadius: 999, border: "none", background: c.tone === "bad" ? "rgba(120,10,30,0.35)" : "rgba(255,255,255,0.2)", color: "#fff", fontFamily: "inherit", fontSize: 11.5, opacity: c.dim ? 0.6 : 1, cursor: c.onClick ? "pointer" : "default", whiteSpace: "nowrap" };
+            const st = { display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", borderRadius: 999, border: "none", background: c.tone === "bad" ? "rgba(120,10,30,0.35)" : "rgba(255,255,255,0.2)", color: "#fff", fontFamily: "inherit", fontSize: 10.5, opacity: c.dim ? 0.6 : 1, cursor: c.onClick ? "pointer" : "default", whiteSpace: "nowrap" };
             const t = `${c.label}: ${c.value}`;
             return c.onClick
               ? <button key={c.label} type="button" title={t} onClick={c.onClick} style={st}>{inner}</button>
@@ -137,8 +137,8 @@ export function ProgressRow({ label, value, pct, color = SKY, icon, sub }) {
         </div>
       </div>
       {icon && (
-        <span style={{ width: 38, height: 38, borderRadius: 13, background: `${color}22`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-          <Icon name={icon} size={18} color={color} />
+        <span style={{ width: 30, height: 30, borderRadius: 10, background: `${color}22`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Icon name={icon} size={15} color={color} />
         </span>
       )}
     </div>
@@ -154,7 +154,7 @@ export function WeekStrip({ days, marks = {}, onPick }) {
         const today = i === 0;
         return (
           <button key={d.key} type="button" onClick={() => onPick?.(d, n)} title={n ? `${n} deadline${n === 1 ? "" : "s"}` : d.key}
-            style={{ border: "none", cursor: onPick && n ? "pointer" : "default", fontFamily: "inherit", padding: "10px 0 8px", borderRadius: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, background: today ? GRADIENTS.sky : "rgba(255,255,255,0.03)", color: today ? "#fff" : INK }}>
+            style={{ border: "none", cursor: onPick && n ? "pointer" : "default", fontFamily: "inherit", padding: "7px 0 6px", borderRadius: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, background: today ? GRADIENTS.sky : "rgba(255,255,255,0.03)", color: today ? "#fff" : INK }}>
             <span style={{ fontSize: 10.5, opacity: today ? 0.95 : 0.55 }}>{d.dow}</span>
             <span style={{ fontFamily: FONT, fontWeight: 800, fontSize: 15 }}>{d.day}</span>
             <span style={{ width: 5, height: 5, borderRadius: "50%", background: n ? (today ? "#fff" : SKY) : "transparent" }} />
@@ -176,7 +176,7 @@ function AreaTip({ active, payload, label }) {
 }
 
 // Smooth two-series area chart in the template's sky + mint.
-export function OutreachArea({ data, a = "Cold Emails", b = "Responded", height = 190 }) {
+export function OutreachArea({ data, a = "Cold Emails", b = "Responded", height = "100%" }) {
   return (
     <div style={{ width: "100%", height }}>
       <ResponsiveContainer width="100%" height="100%">

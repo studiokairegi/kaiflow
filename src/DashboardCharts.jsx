@@ -30,6 +30,8 @@ const PALETTE = [
   "#D9C24A",
 ];
 
+const TPL_PALETTE = ["#38B6FF", "#34D8A0", "#8A6BFA", "#3B74F4", "#F2A65A", "#FF8FA3", "#9ADCFF", "#6FE8C2"];
+
 const ink = "#14191c";
 const inkSoft = "#1c2327";
 const paper = "#EDEAE3";
@@ -76,9 +78,9 @@ export function DonutBreakdown({ data, emptyLabel = "Nothing here yet", centerLa
         <div style={{ width: size, height: size, flexShrink: 0, position: "relative" }}>
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
-              <Pie data={filtered} dataKey="value" nameKey="label" innerRadius={innerRadius} outerRadius={outerRadius} paddingAngle={2} stroke="none">
+              <Pie data={filtered} dataKey="value" nameKey="label" innerRadius={innerRadius} outerRadius={outerRadius} paddingAngle={tiny ? 3 : 2} cornerRadius={tiny ? 2 : 0} stroke="none">
                 {filtered.map((entry, i) => (
-                  <Cell key={entry.label} fill={PALETTE[i % PALETTE.length]} />
+                  <Cell key={entry.label} fill={(tiny ? TPL_PALETTE : PALETTE)[i % (tiny ? TPL_PALETTE : PALETTE).length]} />
                 ))}
               </Pie>
               <Tooltip content={<ChartTooltip />} />

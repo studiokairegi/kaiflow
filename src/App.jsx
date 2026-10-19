@@ -8291,11 +8291,22 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
     ? "Studio Time"
     : "Today's studio time";
   const compactBusy = clockingIn || clockingOut;
-  return (
-    <>
-      {visible && (
-      <div style={styles.studioTimeCompactWrap}>
-      <div style={{ ...styles.studioTimeCompact, ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
+  // On the dashboard the pill moves into the header strip (#kf-clock-slot) so it costs no extra row.
+  const [slot, setSlot] = useState(null);
+  useEffect(() => {
+    if (!visible) { setSlot(null); return undefined; }
+    let tries = 0, raf = 0;
+    const find = () => {
+      const el = document.getElementById("kf-clock-slot");
+      if (el) setSlot(el);
+      else if (tries++ < 60) raf = requestAnimationFrame(find);
+    };
+    find();
+    return () => cancelAnimationFrame(raf);
+  }, [visible]);
+  const clockPill = (
+      <div style={slot ? styles.studioTimeCompactWrapInline : styles.studioTimeCompactWrap}>
+      <div className="kf-clock-pill" style={{ ...styles.studioTimeCompact, ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
         {(activeSession || pomodoroPhase) && <span style={styles.studioTimeStatusDot} />}
         <span style={styles.dashboardGreetingCompactDate}>{compactLabel}</span>
         <span style={styles.studioTimeCompactValue}>{displayValue}</span>
@@ -8360,7 +8371,10 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
         <PomodoroSetupForm config={pomodoroConfig} onChange={setPomodoroConfig} onStart={startPomodoro} busy={initializing || clockingIn} />
       )}
       </div>
-      )}
+  );
+  return (
+    <>
+      {visible && (slot ? createPortal(clockPill, slot) : clockPill)}
       {pipWindow && createPortal(<div style={styles.pipContent}>{pipTrackingContent}</div>, pipWindow.document.body)}
       {showSummary && <StudioTimeSummaryModal userId={userId} onClose={() => setShowSummary(false)} />}
     </>
@@ -8679,7 +8693,10 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     <div style={styles.dashboardShell}>
       <div style={styles.dashboardTopStrip}>
         <DashboardGreeting user={user} compact />
-        {fin.data && <PrivacyToggle privacy={fin.privacy} onChange={fin.setPrivacy} compact />}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span id="kf-clock-slot" style={{ display: "inline-flex" }} />
+          {fin.data && <PrivacyToggle privacy={fin.privacy} onChange={fin.setPrivacy} compact />}
+        </div>
       </div>
 
       <div className="kf-dash-body" style={styles.dashboardBody}>
@@ -8697,100 +8714,96 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         />
       </div>
 
-      <div className="kf-dash-two">
-        {/* Left: Activity + Analytics */}
-        <div style={styles.dashboardCol}>
-          <PanelTitle>Activity</PanelTitle>
-          <div style={styles.dashboardGroupGrid}>
-            {activityCards.map((g) => <ActivityCard key={g.title} {...g} />)}
-          </div>
-
-          <Panel style={{ marginTop: 6 }}>
-            <PanelTitle
-              right={
-                <select
-                  style={styles.dashboardPeriodSelect}
-                  value={dashboardPeriod}
-                  onChange={(e) => setDashboardPeriod(e.target.value)}
-                >
-                  {DASHBOARD_PERIOD_OPTIONS.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
-                </select>
-              }
-            >
-              Cold email analytics
-            </PanelTitle>
-            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              <ProgressRow label="Response rate" sub={`${respondedTotal} of ${coldEmailsSentTotal} sent`} value={`${responseRate.toFixed(1)}%`} pct={responseRate} color="#38B6FF" icon="inbox" />
-              <ProgressRow label="Qualified" sub={`${qualifiedTotal} leads`} value={`${qualifiedRate.toFixed(1)}%`} pct={qualifiedRate} color="#8A6BFA" icon="target" />
-              <ProgressRow label="Win rate" sub={`${wonTotal} won \u00b7 ${lostTotal} lost`} value={`${winRate.toFixed(1)}%`} pct={winRate} color="#34D8A0" icon="check" />
-            </div>
-            <div style={styles.dashboardTodayRow}>
-              <span style={styles.dashboardTodayLabel}>Today</span>
-              <span style={styles.dashboardKpiSub}>{newLeadsToday} new</span>
-              <span style={styles.dashboardKpiSub}>{coldEmailsSentToday} sent</span>
-              <span style={styles.dashboardKpiSub}>{respondedToday} replies</span>
-              <span style={styles.dashboardKpiSub}>{noResponseTotal} no response</span>
-            </div>
-          </Panel>
-
-          <Panel>
-            <PanelTitle
-              right={<span style={styles.dashboardCardHeaderHint}>{hiddenChannels.length > 0 ? `${hiddenChannels.length} channel${hiddenChannels.length === 1 ? "" : "s"} hidden` : "hover for detail"}</span>}
-            >
-              Pipeline
-            </PanelTitle>
-            <div style={styles.dashboardDonutRow}>
-              <DonutBreakdown data={shotsByStage} emptyLabel="No shots" centerLabel="Shots" size={46} compact tiny />
-              {legacyShotsByStage.length > 0 && (
-                <DonutBreakdown data={legacyShotsByStage} emptyLabel="No legacy" centerLabel="Legacy" size={46} compact tiny />
-              )}
-              <DonutBreakdown data={leadsByActiveStage} emptyLabel="No outreach" centerLabel="Outreach" size={46} compact tiny />
-              <DonutBreakdown data={leadsByChannel} emptyLabel={allChannelsHidden ? "Channels hidden" : "No channels"} centerLabel="Channels" size={46} compact tiny />
-            </div>
-          </Panel>
+      <div className="kf-dash-main">
+        <div style={styles.dashboardGroupGrid}>
+          {activityCards.map((g) => <ActivityCard key={g.title} {...g} />)}
         </div>
 
-        {/* Right: Calendar, Outreach trend, Needs attention */}
-        <div style={styles.dashboardCol}>
-          <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>{weekDays[0].key.slice(0, 7)} {"\u00b7"} next 7 days</span>}>Calendar</PanelTitle>
-          <Panel>
-            <WeekStrip days={weekDays} marks={deadlineMarks} />
-            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
-              {stats.nearDeadline.length === 0 ? (
-                <p style={{ ...styles.dashboardEmptyState, margin: 0 }}>Nothing due in the next 7 days.</p>
-              ) : stats.nearDeadline.map((p) => (
-                <div key={p.id} style={styles.dashboardDeadlineRow} onClick={() => onOpenProject(p.id)}>
-                  <span style={styles.dashboardDeadlineName}>{p.name}</span>
-                  {p.client && <span style={styles.dashboardKpiSub}>{p.client}</span>}
-                  <span style={styles.dashboardDeadlineDate}>{p.deadline}</span>
-                </div>
-              ))}
-            </div>
-          </Panel>
-
-          <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>6 months</span>}>Outreach performance</PanelTitle>
-          <Panel>
-            <OutreachArea data={outreachTrend} />
-            <div style={{ display: "flex", gap: 14, fontSize: 11.5, color: "#8b9a98", marginTop: 4 }}>
-              <span><span style={{ color: "#38B6FF" }}>{"\u25CF"}</span> Cold emails</span>
-              <span><span style={{ color: "#34D8A0" }}>{"\u25CF"}</span> Responded</span>
-            </div>
-          </Panel>
-
-          <PanelTitle right={needsAttentionItems.length > 0 ? <span style={styles.dashboardCardHeaderHint}>{needsAttentionItems.length}</span> : null}>Needs attention</PanelTitle>
-          <Panel style={{ gap: 8 }}>
-            {needsAttentionItems.length === 0 ? (
-              <p style={{ ...styles.dashboardEmptyState, margin: 0 }}>You're all caught up.</p>
-            ) : needsAttentionItems.map((item) => (
-              <div key={item.label} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 10px", borderRadius: 16, background: "rgba(255,255,255,0.03)" }}>
-                <span style={{ width: 34, height: 34, borderRadius: 12, background: "rgba(56,182,255,0.14)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <KIcon name="bell" size={16} color="#38B6FF" />
-                </span>
-                <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: "#EDEAE3" }}>{item.label}</span>
-                <ActionButton onClick={item.onClick}>View</ActionButton>
+        <div className="kf-dash-row2">
+          {/* Column 1: analytics + pipeline */}
+          <div className="kf-dash-colstack">
+            <Panel style={{ flex: "1 1 0", minHeight: 0, overflow: "hidden" }}>
+              <PanelTitle
+                right={
+                  <select style={{ ...styles.dashboardPeriodSelect, padding: "2px 6px", fontSize: 11 }} value={dashboardPeriod} onChange={(e) => setDashboardPeriod(e.target.value)}>
+                    {DASHBOARD_PERIOD_OPTIONS.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                  </select>
+                }
+              >
+                Cold email analytics
+              </PanelTitle>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <ProgressRow label="Response" sub={`${respondedTotal}/${coldEmailsSentTotal}`} value={`${responseRate.toFixed(1)}%`} pct={responseRate} color="#38B6FF" icon="inbox" />
+                <ProgressRow label="Qualified" sub={`${qualifiedTotal}`} value={`${qualifiedRate.toFixed(1)}%`} pct={qualifiedRate} color="#8A6BFA" icon="target" />
+                <ProgressRow label="Win rate" sub={`${wonTotal} won \u00b7 ${lostTotal} lost`} value={`${winRate.toFixed(1)}%`} pct={winRate} color="#34D8A0" icon="check" />
               </div>
-            ))}
-          </Panel>
+              <div style={{ ...styles.dashboardTodayRow, marginTop: 8 }}>
+                <span style={styles.dashboardTodayLabel}>Today</span>
+                <span style={styles.dashboardKpiSub}>{newLeadsToday} new</span>
+                <span style={styles.dashboardKpiSub}>{coldEmailsSentToday} sent</span>
+                <span style={styles.dashboardKpiSub}>{respondedToday} replies</span>
+              </div>
+            </Panel>
+            <Panel style={{ flex: "0 0 auto" }}>
+              <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>{hiddenChannels.length > 0 ? `${hiddenChannels.length} hidden` : "hover"}</span>}>Pipeline</PanelTitle>
+              <div style={{ ...styles.dashboardDonutRow, gap: 6 }}>
+                <DonutBreakdown data={shotsByStage} emptyLabel="No shots" centerLabel="Shots" size={46} compact tiny />
+                {legacyShotsByStage.length > 0 && (
+                  <DonutBreakdown data={legacyShotsByStage} emptyLabel="No legacy" centerLabel="Legacy" size={46} compact tiny />
+                )}
+                <DonutBreakdown data={leadsByActiveStage} emptyLabel="No outreach" centerLabel="Outreach" size={46} compact tiny />
+                <DonutBreakdown data={leadsByChannel} emptyLabel={allChannelsHidden ? "Channels hidden" : "No channels"} centerLabel="Channels" size={46} compact tiny />
+              </div>
+            </Panel>
+          </div>
+
+          {/* Column 2: outreach trend fills the height */}
+          <div className="kf-dash-colstack">
+            <Panel style={{ flex: "1 1 0", minHeight: 0, overflow: "hidden" }}>
+              <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>6 months</span>}>Outreach performance</PanelTitle>
+              <div style={{ flex: 1, minHeight: 100 }}>
+                <OutreachArea data={outreachTrend} />
+              </div>
+              <div style={{ display: "flex", gap: 14, fontSize: 11, color: "#8b9a98", marginTop: 4 }}>
+                <span><span style={{ color: "#38B6FF" }}>{"\u25CF"}</span> Cold emails</span>
+                <span><span style={{ color: "#34D8A0" }}>{"\u25CF"}</span> Responded</span>
+              </div>
+            </Panel>
+          </div>
+
+          {/* Column 3: calendar + needs attention */}
+          <div className="kf-dash-colstack">
+            <Panel style={{ flex: "0 0 auto" }}>
+              <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>next 7 days</span>}>Calendar</PanelTitle>
+              <WeekStrip days={weekDays} marks={deadlineMarks} />
+              <div style={{ marginTop: 6, maxHeight: 64, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+                {stats.nearDeadline.length === 0 ? (
+                  <p style={{ ...styles.dashboardEmptyState, margin: 0 }}>Nothing due in the next 7 days.</p>
+                ) : stats.nearDeadline.map((p) => (
+                  <div key={p.id} style={styles.dashboardDeadlineRow} onClick={() => onOpenProject(p.id)}>
+                    <span style={styles.dashboardDeadlineName}>{p.name}</span>
+                    <span style={styles.dashboardDeadlineDate}>{p.deadline}</span>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+            <Panel style={{ flex: "1 1 0", minHeight: 0, overflow: "hidden" }}>
+              <PanelTitle right={needsAttentionItems.length > 0 ? <span style={styles.dashboardCardHeaderHint}>{needsAttentionItems.length}</span> : null}>Needs attention</PanelTitle>
+              <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6 }}>
+                {needsAttentionItems.length === 0 ? (
+                  <p style={{ ...styles.dashboardEmptyState, margin: 0 }}>You're all caught up.</p>
+                ) : needsAttentionItems.map((item) => (
+                  <div key={item.label} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 8px", borderRadius: 14, background: "rgba(255,255,255,0.03)" }}>
+                    <span style={{ width: 28, height: 28, borderRadius: 10, background: "rgba(56,182,255,0.14)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <KIcon name="bell" size={14} color="#38B6FF" />
+                    </span>
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "#EDEAE3" }}>{item.label}</span>
+                    <ActionButton onClick={item.onClick}>View</ActionButton>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+          </div>
         </div>
       </div>
       </div>
@@ -13423,17 +13436,31 @@ a:hover {
   display: flex;
   gap: 12px;
   flex: 1;
+  min-height: 0;
 }
-.kf-dash-two {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
-  gap: 22px;
+.kf-clock-pill, .kf-clock-pill span { color: #fff; }
+.kf-clock-pill button { color: #fff; }
+.kf-clock-pill > button:not([title]) { background: #fff !important; color: #5b3de0 !important; border: none !important; }
+.kf-dash-main {
   flex: 1;
   min-width: 0;
-  align-items: start;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
 }
-@media (max-width: 1500px) {
-  .kf-dash-two { grid-template-columns: minmax(0, 1fr); }
+.kf-dash-row2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+}
+.kf-dash-colstack { display: flex; flex-direction: column; gap: 10px; min-height: 0; min-width: 0; }
+.kf-dash-fill { flex: 1 1 0; min-height: 0; overflow: hidden; }
+@media (max-width: 1280px) {
+  .kf-dash-main { grid-template-rows: auto auto; }
+  .kf-dash-row2 { grid-template-columns: minmax(0, 1fr); }
+  .kf-dash-fill { min-height: 220px; }
 }
 .kf-dash-tasks {
   position: relative;
@@ -14086,8 +14113,7 @@ const styles = {
     padding: "14px 24px 16px",
     height: "calc(100vh - 130px)",
     minHeight: 520,
-    overflowX: "hidden",
-    overflowY: "auto",
+    overflow: "hidden",
   },
   dashboardTopStrip: {
     display: "flex",
@@ -14128,24 +14154,32 @@ const styles = {
     padding: "0 28px",
     marginTop: 10,
   },
+  studioTimeCompactWrapInline: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-end",
+    gap: 4,
+  },
   studioTimeCompact: {
     display: "flex",
     alignItems: "center",
     gap: 8,
-    padding: "6px 12px",
+    padding: "4px 6px 4px 14px",
     borderRadius: 999,
-    border: `1px solid ${border}`,
-    background: inkSoft,
+    border: "none",
+    background: "linear-gradient(135deg, #6A47F2 0%, #9174FB 100%)",
+    color: "#fff",
+    boxShadow: "0 6px 16px rgba(106,71,242,0.35)",
   },
   studioTimeCompactActive: {
-    borderColor: "rgba(47,191,166,0.5)",
-    boxShadow: "0 0 0 3px rgba(47,191,166,0.1)",
+    background: "linear-gradient(135deg, #34D8A0 0%, #6FE8C2 100%)",
+    boxShadow: "0 6px 16px rgba(52,216,160,0.35)",
   },
   studioTimeCompactValue: {
     fontFamily: "'IBM Plex Mono', monospace",
     fontSize: 13,
-    fontWeight: 600,
-    color: paper,
+    fontWeight: 700,
+    color: "#fff",
     minWidth: 62,
   },
   dashboardCompactButton: {
@@ -14163,8 +14197,8 @@ const styles = {
   },
   dashboardGroupGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-    gap: 14,
+    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+    gap: 10,
     flexShrink: 0,
     alignItems: "stretch",
   },
@@ -14213,7 +14247,7 @@ const styles = {
   },
   dashboardBody: {
     // Row holding the Tasks column and the overview grid (layout classes: .kf-dash-body).
-    minHeight: 380, // keeps the business overview readable
+    minHeight: 0,
   },
   dashboardMainGrid: {
     display: "grid",
