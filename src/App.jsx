@@ -23,7 +23,7 @@ import FinanceModule, { PrivacyToggle } from "./finance/FinanceModule.jsx";
 import PaymentsModule from "./payments/PaymentsModule.jsx";
 import PayNowDialog from "./payments/PayNowDialog.jsx";
 import { usePayments } from "./payments/usePayments.js";
-import { StatGroup } from "./DashboardKit.jsx";
+import { ActivityCard, ActionButton, GRADIENTS, Icon as KIcon, OutreachArea, Panel, PanelTitle, ProgressRow, WeekStrip } from "./DashboardKit.jsx";
 import { summarizePayments, checkoutBlocker } from "./payments/logic.js";
 import { ProjectPicker } from "./finance/ProjectPicker.jsx";
 import { useFinanceSummary } from "./finance/useLedger.js";
@@ -8457,46 +8457,6 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   const isEmpty = (m) => !m || Object.keys(m).length === 0;
   const unrec = paySummary ? paySummary.unreconciledCount + paySummary.unreconciledPayoutCount : 0;
 
-  // Four grouped cards replace the old 17 separate tiles. Related figures are small icon chips.
-  const statGroups = [
-    {
-      title: "Projects", icon: "folder", value: stats.activeProjectsCount, label: "active", onClick: onGoToProjects,
-      chips: [
-        { icon: "check", label: "completed", value: stats.projectsCompleted },
-        { icon: "film", label: "shots", value: stats.totalShots },
-        { icon: "calendar", label: "due in 7d", value: stats.nearDeadline.length, tone: stats.nearDeadline.length ? "warn" : undefined, dim: !stats.nearDeadline.length },
-      ],
-    },
-    {
-      title: "Leads", icon: "target", value: stats.activeLeadsCount, label: "active", onClick: () => onGoToLeads(),
-      chips: [
-        { icon: "check", label: "won", value: stats.dealsWon, tone: "good", onClick: () => onGoToLeads({ status: "won" }) },
-        { icon: "x", label: "lost", value: stats.dealsLost, tone: "bad", onClick: () => onGoToLeads({ status: "lost" }) },
-      ],
-    },
-    {
-      title: "Finance", icon: "trend", value: money(fin.summary?.revenueMonth ?? 0), label: "revenue this month", delta: finDelta,
-      onClick: onGoToFinance,
-      chips: [
-        { icon: "invoice", label: `outstanding${fin.summary ? ` (${fin.summary.receivableCount})` : ""}`, value: fin.summary ? money(fin.summary.receivableBase) : "...", tone: "warn" },
-        { icon: "users", label: "owed to freelancers", value: payMoney(paySummary?.freelancerOwed), dim: isEmpty(paySummary?.freelancerOwed) },
-      ],
-    },
-    {
-      title: "Payments", icon: "card", badge: "SANDBOX", value: payMoney(paySummary?.receivedGross), label: "received", onClick: onGoToPayments,
-      chips: [
-        { icon: "inbox", label: "today", value: payMoney(paySummary?.receivedToday), dim: isEmpty(paySummary?.receivedToday) },
-        { icon: "percent", label: "fees", value: payMoney(paySummary?.fees), dim: isEmpty(paySummary?.fees) },
-        { icon: "wallet", label: "net", value: payMoney(paySummary?.net), dim: isEmpty(paySummary?.net) },
-        { icon: "clock", label: "pending", value: payMoney(paySummary?.pendingIncoming), dim: isEmpty(paySummary?.pendingIncoming) },
-        { icon: "undo", label: "refunds", value: payMoney(paySummary?.refunds), dim: isEmpty(paySummary?.refunds) },
-        { icon: "send", label: "payouts due", value: payMoney(paySummary?.approvedPayoutsAwaiting), dim: isEmpty(paySummary?.approvedPayoutsAwaiting) },
-        { icon: "zap", label: "simulated", value: payMoney(paySummary?.simulatedPaid), dim: isEmpty(paySummary?.simulatedPaid) },
-        { icon: "alert", label: "unreconciled", value: paySummary ? unrec : "...", tone: unrec ? "bad" : undefined, dim: !unrec },
-      ],
-    },
-  ];
-
   // Design report v2 §11, §D4: group by each shot's own project's pipeline
   // row rather than a single global stage list. This is necessary, not
   // cosmetic — a canonical project's "genga" and a legacy project's
@@ -8665,6 +8625,56 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     return { label, "Cold Emails": coldEmails, Responded: responded, Won: won, Lost: lost, "No Response": noResponse };
   });
 
+  // Four grouped cards replace the old 17 separate tiles. Related figures are small icon chips.
+  const activityCards = [
+    {
+      title: "Projects", gradient: GRADIENTS.sky, iconColor: "#2B9BE0", icon: "folder", value: stats.activeProjectsCount, label: "active", onClick: onGoToProjects,
+      chips: [
+        { icon: "check", label: "completed", value: stats.projectsCompleted },
+        { icon: "film", label: "shots", value: stats.totalShots },
+        { icon: "calendar", label: "due in 7d", value: stats.nearDeadline.length, tone: stats.nearDeadline.length ? "warn" : undefined, dim: !stats.nearDeadline.length },
+      ],
+    },
+    {
+      title: "Leads", gradient: GRADIENTS.mint, iconColor: "#1FB886", icon: "target", spark: outreachTrend.map((m) => m["Cold Emails"]), value: stats.activeLeadsCount, label: "active", onClick: () => onGoToLeads(),
+      chips: [
+        { icon: "check", label: "won", value: stats.dealsWon, tone: "good", onClick: () => onGoToLeads({ status: "won" }) },
+        { icon: "x", label: "lost", value: stats.dealsLost, tone: "bad", onClick: () => onGoToLeads({ status: "lost" }) },
+      ],
+    },
+    {
+      title: "Finance", gradient: GRADIENTS.violet, iconColor: "#6A47F2", icon: "trend", spark: fin.summary?.series?.map((m) => m.revenue), value: money(fin.summary?.revenueMonth ?? 0), label: "revenue this month", delta: finDelta,
+      onClick: onGoToFinance,
+      chips: [
+        { icon: "invoice", label: `outstanding${fin.summary ? ` (${fin.summary.receivableCount})` : ""}`, value: fin.summary ? money(fin.summary.receivableBase) : "...", tone: "warn" },
+        { icon: "users", label: "owed to freelancers", value: payMoney(paySummary?.freelancerOwed), dim: isEmpty(paySummary?.freelancerOwed) },
+      ],
+    },
+    {
+      title: "Payments", gradient: GRADIENTS.royal, iconColor: "#3B74F4", icon: "card", badge: "SANDBOX", value: payMoney(paySummary?.receivedGross), label: "received", onClick: onGoToPayments,
+      chips: [
+        { icon: "inbox", label: "today", value: payMoney(paySummary?.receivedToday), dim: isEmpty(paySummary?.receivedToday) },
+        { icon: "percent", label: "fees", value: payMoney(paySummary?.fees), dim: isEmpty(paySummary?.fees) },
+        { icon: "wallet", label: "net", value: payMoney(paySummary?.net), dim: isEmpty(paySummary?.net) },
+        { icon: "clock", label: "pending", value: payMoney(paySummary?.pendingIncoming), dim: isEmpty(paySummary?.pendingIncoming) },
+        { icon: "undo", label: "refunds", value: payMoney(paySummary?.refunds), dim: isEmpty(paySummary?.refunds) },
+        { icon: "send", label: "payouts due", value: payMoney(paySummary?.approvedPayoutsAwaiting), dim: isEmpty(paySummary?.approvedPayoutsAwaiting) },
+        { icon: "zap", label: "simulated", value: payMoney(paySummary?.simulatedPaid), dim: isEmpty(paySummary?.simulatedPaid) },
+        { icon: "alert", label: "unreconciled", value: paySummary ? unrec : "...", tone: unrec ? "bad" : undefined, dim: !unrec },
+      ],
+    },
+  ];
+
+  const weekDays = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() + i);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    return { key, dow: d.toLocaleDateString(undefined, { weekday: "short" }), day: d.getDate() };
+  });
+  const deadlineMarks = {};
+  for (const p of stats.nearDeadline) if (/^\d{4}-\d{2}-\d{2}$/.test(p.deadline || "")) deadlineMarks[p.deadline] = (deadlineMarks[p.deadline] || 0) + 1;
+  const qualifiedRate = coldEmailsSentTotal > 0 ? (qualifiedTotal / coldEmailsSentTotal) * 100 : 0;
+
   return (
     <div style={styles.dashboardShell}>
       <div style={styles.dashboardTopStrip}>
@@ -8672,11 +8682,6 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         {fin.data && <PrivacyToggle privacy={fin.privacy} onChange={fin.setPrivacy} compact />}
       </div>
 
-      <div style={styles.dashboardGroupGrid}>
-        {statGroups.map((g) => <StatGroup key={g.title} {...g} />)}
-      </div>
-
-      {/* Tasks sits in a compact column on the left; the overview grid keeps the rest. Stacks below 1180px (see .kf-dash-body in fontImport). */}
       <div className="kf-dash-body" style={styles.dashboardBody}>
       <div className="kf-dash-tasks">
         <TasksPanel
@@ -8692,127 +8697,100 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         />
       </div>
 
-      <div style={styles.dashboardMainGrid}>
-        {/* Column A — trends + pipeline */}
+      <div className="kf-dash-two">
+        {/* Left: Activity + Analytics */}
         <div style={styles.dashboardCol}>
-          <div className="kf-card" style={styles.dashboardCard}>
-            <div style={styles.dashboardCardHeaderRow}>
-              <span style={styles.dashboardCardHeader}>Outreach performance</span>
-              <span style={styles.dashboardCardHeaderHint}>6 months</span>
-            </div>
-            <div style={styles.dashboardChartFill}>
-              <LeadOutreachTrendChart data={outreachTrend} height="100%" compact />
-            </div>
+          <PanelTitle>Activity</PanelTitle>
+          <div style={styles.dashboardGroupGrid}>
+            {activityCards.map((g) => <ActivityCard key={g.title} {...g} />)}
           </div>
-          <div className="kf-card" style={{ ...styles.dashboardCard, flex: "0 0 auto" }}>
-            <div style={styles.dashboardCardHeaderRow}>
-              <span style={styles.dashboardCardHeader}>Pipeline</span>
-              <span style={styles.dashboardCardHeaderHint}>
-                {hiddenChannels.length > 0 ? `${hiddenChannels.length} channel${hiddenChannels.length === 1 ? "" : "s"} hidden` : "hover for detail"}
-              </span>
+
+          <Panel style={{ marginTop: 6 }}>
+            <PanelTitle
+              right={
+                <select
+                  style={styles.dashboardPeriodSelect}
+                  value={dashboardPeriod}
+                  onChange={(e) => setDashboardPeriod(e.target.value)}
+                >
+                  {DASHBOARD_PERIOD_OPTIONS.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                </select>
+              }
+            >
+              Cold email analytics
+            </PanelTitle>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <ProgressRow label="Response rate" sub={`${respondedTotal} of ${coldEmailsSentTotal} sent`} value={`${responseRate.toFixed(1)}%`} pct={responseRate} color="#38B6FF" icon="inbox" />
+              <ProgressRow label="Qualified" sub={`${qualifiedTotal} leads`} value={`${qualifiedRate.toFixed(1)}%`} pct={qualifiedRate} color="#8A6BFA" icon="target" />
+              <ProgressRow label="Win rate" sub={`${wonTotal} won \u00b7 ${lostTotal} lost`} value={`${winRate.toFixed(1)}%`} pct={winRate} color="#34D8A0" icon="check" />
             </div>
+            <div style={styles.dashboardTodayRow}>
+              <span style={styles.dashboardTodayLabel}>Today</span>
+              <span style={styles.dashboardKpiSub}>{newLeadsToday} new</span>
+              <span style={styles.dashboardKpiSub}>{coldEmailsSentToday} sent</span>
+              <span style={styles.dashboardKpiSub}>{respondedToday} replies</span>
+              <span style={styles.dashboardKpiSub}>{noResponseTotal} no response</span>
+            </div>
+          </Panel>
+
+          <Panel>
+            <PanelTitle
+              right={<span style={styles.dashboardCardHeaderHint}>{hiddenChannels.length > 0 ? `${hiddenChannels.length} channel${hiddenChannels.length === 1 ? "" : "s"} hidden` : "hover for detail"}</span>}
+            >
+              Pipeline
+            </PanelTitle>
             <div style={styles.dashboardDonutRow}>
               <DonutBreakdown data={shotsByStage} emptyLabel="No shots" centerLabel="Shots" size={46} compact tiny />
               {legacyShotsByStage.length > 0 && (
                 <DonutBreakdown data={legacyShotsByStage} emptyLabel="No legacy" centerLabel="Legacy" size={46} compact tiny />
               )}
               <DonutBreakdown data={leadsByActiveStage} emptyLabel="No outreach" centerLabel="Outreach" size={46} compact tiny />
-              <DonutBreakdown
-                data={leadsByChannel}
-                emptyLabel={allChannelsHidden ? "Channels hidden" : "No channels"}
-                centerLabel="Channels"
-                size={46}
-                compact
-                tiny
-              />
+              <DonutBreakdown data={leadsByChannel} emptyLabel={allChannelsHidden ? "Channels hidden" : "No channels"} centerLabel="Channels" size={46} compact tiny />
             </div>
-          </div>
+          </Panel>
         </div>
 
-        {/* Column B — pipeline snapshot */}
+        {/* Right: Calendar, Outreach trend, Needs attention */}
         <div style={styles.dashboardCol}>
-          <div className="kf-card" style={{ ...styles.dashboardCard, overflowY: "auto" }} onClick={() => onGoToLeads()}>
-            <div style={styles.dashboardCardHeaderRow}>
-              <span style={styles.dashboardCardHeader}>Cold email success rate</span>
-              <select
-                style={styles.dashboardPeriodSelect}
-                value={dashboardPeriod}
-                onClick={(e) => e.stopPropagation()}
-                onChange={(e) => {
-                  e.stopPropagation();
-                  setDashboardPeriod(e.target.value);
-                }}
-              >
-                {DASHBOARD_PERIOD_OPTIONS.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div style={styles.dashboardRateRow}>
-              <span style={styles.dashboardSuccessBig}>{responseRate.toFixed(1)}%</span>
-              <span style={styles.dashboardKpiSub}>response rate</span>
-              <span style={styles.dashboardWinRateBadge}>{winRate.toFixed(1)}% win rate</span>
-            </div>
-            <div style={styles.dashboardMiniFunnelGrid}>
-              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Sent</span><strong>{coldEmailsSentTotal}</strong></div>
-              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Responded</span><strong>{respondedTotal}</strong></div>
-              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Qualified</span><strong>{qualifiedTotal}</strong></div>
-              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Won</span><strong style={{ color: "#3DDC84" }}>{wonTotal}</strong></div>
-              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>Lost</span><strong style={{ color: "#FF4D4D" }}>{lostTotal}</strong></div>
-              <div style={styles.dashboardMiniFunnelItem}><span style={styles.dashboardKpiSub}>No response</span><strong>{noResponseTotal}</strong></div>
-            </div>
-            <div style={styles.dashboardTodayRow}>
-              <span style={styles.dashboardTodayLabel}>Today</span>
-              <span style={styles.dashboardKpiSub}>{newLeadsToday} new lead{newLeadsToday === 1 ? "" : "s"}</span>
-              <span style={styles.dashboardKpiSub}>{coldEmailsSentToday} cold email{coldEmailsSentToday === 1 ? "" : "s"} sent</span>
-              <span style={styles.dashboardKpiSub}>{respondedToday} response{respondedToday === 1 ? "" : "s"}</span>
-              <span style={styles.dashboardKpiSub}>
-                {successRateToday === null ? "\u2014" : `${successRateToday.toFixed(0)}%`} success
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Column C — attention & deadlines */}
-        <div style={styles.dashboardCol}>
-          <div className="kf-card" style={styles.dashboardCard}>
-            <div style={styles.dashboardCardHeaderRow}>
-              <span style={styles.dashboardCardHeader}><BellIcon /> Needs attention</span>
-              {needsAttentionItems.length > 0 && <span style={styles.dashboardCardHeaderHint}>{needsAttentionItems.length}</span>}
-            </div>
-            <div style={styles.dashboardScrollList}>
-              {needsAttentionItems.length === 0 ? (
-                <p style={styles.dashboardEmptyState}>You're all caught up.</p>
-              ) : (
-                needsAttentionItems.map((item) => (
-                  <button key={item.label} type="button" style={styles.dashboardNotifRow} onClick={item.onClick}>
-                    {item.label}
-                  </button>
-                ))
-              )}
-            </div>
-          </div>
-          <div className="kf-card" style={styles.dashboardCard}>
-            <div style={styles.dashboardCardHeaderRow}>
-              <span style={styles.dashboardCardHeader}><CalendarIcon /> Near deadline</span>
-              {stats.nearDeadline.length > 0 && <span style={styles.dashboardCardHeaderHint}>{stats.nearDeadline.length}</span>}
-            </div>
-            <div style={styles.dashboardScrollList}>
+          <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>{weekDays[0].key.slice(0, 7)} {"\u00b7"} next 7 days</span>}>Calendar</PanelTitle>
+          <Panel>
+            <WeekStrip days={weekDays} marks={deadlineMarks} />
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
               {stats.nearDeadline.length === 0 ? (
-                <p style={styles.dashboardEmptyState}>Nothing due in the next 7 days.</p>
-              ) : (
-                stats.nearDeadline.map((p) => (
-                  <div key={p.id} style={styles.dashboardDeadlineRow} onClick={() => onOpenProject(p.id)}>
-                    <span style={styles.dashboardDeadlineName}>{p.name}</span>
-                    {p.client && <span style={styles.dashboardKpiSub}>{p.client}</span>}
-                    <span style={styles.dashboardDeadlineDate}>{p.deadline}</span>
-                  </div>
-                ))
-              )}
+                <p style={{ ...styles.dashboardEmptyState, margin: 0 }}>Nothing due in the next 7 days.</p>
+              ) : stats.nearDeadline.map((p) => (
+                <div key={p.id} style={styles.dashboardDeadlineRow} onClick={() => onOpenProject(p.id)}>
+                  <span style={styles.dashboardDeadlineName}>{p.name}</span>
+                  {p.client && <span style={styles.dashboardKpiSub}>{p.client}</span>}
+                  <span style={styles.dashboardDeadlineDate}>{p.deadline}</span>
+                </div>
+              ))}
             </div>
-          </div>
+          </Panel>
+
+          <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>6 months</span>}>Outreach performance</PanelTitle>
+          <Panel>
+            <OutreachArea data={outreachTrend} />
+            <div style={{ display: "flex", gap: 14, fontSize: 11.5, color: "#8b9a98", marginTop: 4 }}>
+              <span><span style={{ color: "#38B6FF" }}>{"\u25CF"}</span> Cold emails</span>
+              <span><span style={{ color: "#34D8A0" }}>{"\u25CF"}</span> Responded</span>
+            </div>
+          </Panel>
+
+          <PanelTitle right={needsAttentionItems.length > 0 ? <span style={styles.dashboardCardHeaderHint}>{needsAttentionItems.length}</span> : null}>Needs attention</PanelTitle>
+          <Panel style={{ gap: 8 }}>
+            {needsAttentionItems.length === 0 ? (
+              <p style={{ ...styles.dashboardEmptyState, margin: 0 }}>You're all caught up.</p>
+            ) : needsAttentionItems.map((item) => (
+              <div key={item.label} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 10px", borderRadius: 16, background: "rgba(255,255,255,0.03)" }}>
+                <span style={{ width: 34, height: 34, borderRadius: 12, background: "rgba(56,182,255,0.14)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <KIcon name="bell" size={16} color="#38B6FF" />
+                </span>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: "#EDEAE3" }}>{item.label}</span>
+                <ActionButton onClick={item.onClick}>View</ActionButton>
+              </div>
+            ))}
+          </Panel>
         </div>
       </div>
       </div>
@@ -13446,6 +13424,17 @@ a:hover {
   gap: 12px;
   flex: 1;
 }
+.kf-dash-two {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 22px;
+  flex: 1;
+  min-width: 0;
+  align-items: start;
+}
+@media (max-width: 1500px) {
+  .kf-dash-two { grid-template-columns: minmax(0, 1fr); }
+}
 .kf-dash-tasks {
   position: relative;
   flex: 0 0 clamp(290px, 24vw, 350px);
@@ -14174,8 +14163,8 @@ const styles = {
   },
   dashboardGroupGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
-    gap: 10,
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: 14,
     flexShrink: 0,
     alignItems: "stretch",
   },

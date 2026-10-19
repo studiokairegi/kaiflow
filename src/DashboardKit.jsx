@@ -1,4 +1,5 @@
 import React from "react";
+import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 // Dashboard building blocks. Icons follow studiokairegi.com: thin (1.6-1.8) rounded strokes in the
 // brand teal, 24x24 grid, no fills. Everything here is presentational.
@@ -22,6 +23,8 @@ const PATHS = {
   alert: <><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></>,
   inbox: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>,
   layers: <><polygon points="12 2 2 7 12 12 22 7 12 2" /><polyline points="2 17 12 22 22 17" /><polyline points="2 12 12 17 22 12" /></>,
+  bell: <><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" /></>,
+  chevron: <polyline points="9 18 15 12 9 6" />,
   wallet: <><path d="M20 12V8H6a2 2 0 0 1 0-4h12v4" /><path d="M4 6v12a2 2 0 0 0 2 2h14v-4" /><path d="M18 12a2 2 0 0 0 0 4h4v-4z" /></>,
 };
 
@@ -33,53 +36,169 @@ export function Icon({ name, size = 14, stroke = 1.7, color = TEAL }) {
   );
 }
 
-const S = {
-  card: { display: "flex", flexDirection: "column", gap: 10, padding: "12px 14px", borderRadius: 14, border: "1px solid #2a3338", background: "linear-gradient(180deg, #1e272b 0%, #1a2125 100%)", minWidth: 0 },
-  head: { display: "flex", alignItems: "center", gap: 8 },
-  badgeIcon: { width: 24, height: 24, borderRadius: 8, border: "1px solid rgba(77,196,216,0.28)", background: "rgba(77,196,216,0.08)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
-  title: { fontFamily: "'Nunito', 'Space Grotesk', sans-serif", fontSize: 12.5, fontWeight: 700, color: "#EDEAE3", letterSpacing: "0.01em" },
-  pill: { marginLeft: "auto", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.06em", color: "#F2A65A", border: "1px solid rgba(242,166,90,0.4)", background: "rgba(242,166,90,0.1)", borderRadius: 999, padding: "1px 7px" },
-  value: { fontFamily: "'Nunito', 'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 800, color: "#EDEAE3", lineHeight: 1.1 },
-  label: { fontSize: 11, color: "#8b9a98" },
-  chips: { display: "flex", flexWrap: "wrap", gap: 6 },
-  chip: { display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px 3px 6px", borderRadius: 999, border: "1px solid rgba(77,196,216,0.16)", background: "rgba(255,255,255,0.02)", fontFamily: "inherit", color: "#EDEAE3", fontSize: 11.5, lineHeight: 1.3, maxWidth: "100%" },
-};
 
-export function Chip({ icon, value, label, tone, dim, onClick }) {
-  const color = tone === "good" ? "#3DDC84" : tone === "bad" ? "#FF6B6B" : tone === "warn" ? "#F2A65A" : "#EDEAE3";
-  const inner = (
-    <>
-      <Icon name={icon} size={13} color={tone === "bad" ? "#FF6B6B" : tone === "warn" ? "#F2A65A" : TEAL} />
-      <strong style={{ fontWeight: 700, color, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{value}</strong>
-      <span style={{ color: "#8b9a98", fontSize: 10.5, whiteSpace: "nowrap" }}>{label}</span>
-    </>
+// Template palette (Covid-19 admin dashboard): sky blue, mint, violet, royal blue on a soft dark canvas.
+export const GRADIENTS = {
+  sky: "linear-gradient(135deg, #38B6FF 0%, #9ADCFF 100%)",
+  mint: "linear-gradient(135deg, #34D8A0 0%, #6FE8C2 100%)",
+  violet: "linear-gradient(135deg, #6A47F2 0%, #9174FB 100%)",
+  royal: "linear-gradient(135deg, #3B74F4 0%, #77A1FF 100%)",
+};
+const SKY = "#38B6FF";
+const MINT = "#34D8A0";
+const INK = "#EDEAE3";
+const MUTED = "#8b9a98";
+const PANEL = "#1c2327";
+const LINE = "#2a3338";
+const FONT = "'Nunito', 'Space Grotesk', sans-serif";
+
+export function PanelTitle({ children, right }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
+      <h3 style={{ margin: 0, fontFamily: FONT, fontSize: 17, fontWeight: 800, color: INK, letterSpacing: "-0.01em" }}>{children}</h3>
+      {right}
+    </div>
   );
-  const common = { ...S.chip, opacity: dim ? 0.5 : 1, cursor: onClick ? "pointer" : "default" };
-  const title = `${label}: ${value}`;
-  return onClick
-    ? <button type="button" title={title} onClick={onClick} style={{ ...common, background: "rgba(255,255,255,0.02)" }}>{inner}</button>
-    : <span title={title} style={common}>{inner}</span>;
 }
 
-// One compact card: a headline figure plus small icon chips for the related numbers.
-export function StatGroup({ title, icon, badge, value, label, delta, chips = [], onClick }) {
+export function Panel({ children, style, onClick }) {
   return (
-    <div className="kf-card" style={{ ...S.card, cursor: onClick ? "pointer" : "default" }} onClick={onClick}>
-      <div style={S.head}>
-        <span style={S.badgeIcon}><Icon name={icon} size={14} /></span>
-        <span style={S.title}>{title}</span>
-        {badge && <span style={S.pill}>{badge}</span>}
+    <div onClick={onClick} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 22, padding: "16px 18px", minWidth: 0, display: "flex", flexDirection: "column", cursor: onClick ? "pointer" : "default", ...style }}>
+      {children}
+    </div>
+  );
+}
+
+// Gradient activity card: white icon tile, big number, label, delta pill and small translucent chips.
+export function ActivityCard({ gradient, icon, iconColor, title, badge, value, label, delta, chips = [], onClick, spark }) {
+  const W = "rgba(255,255,255,0.97)";
+  let wave = null;
+  if (spark && spark.length > 1 && spark.some((v) => v > 0)) {
+    const max = Math.max(...spark, 1);
+    const pts = spark.map((v, i) => [(i / (spark.length - 1)) * 120, 30 - (v / max) * 24]);
+    const d = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`).join(" ");
+    wave = <svg viewBox="0 0 120 34" width="120" height="34" style={{ position: "absolute", right: 18, top: 14, opacity: 0.5 }} aria-hidden="true"><path d={d} fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+  }
+  return (
+    <div onClick={onClick} className="kf-card" style={{ position: "relative", overflow: "hidden", borderRadius: 24, padding: "16px 18px 14px", background: gradient, color: "#fff", cursor: onClick ? "pointer" : "default", display: "flex", flexDirection: "column", gap: 10, minWidth: 0, boxShadow: "0 10px 26px rgba(0,0,0,0.28)" }}>
+      <div aria-hidden="true" style={{ position: "absolute", right: -40, top: -50, width: 150, height: 150, borderRadius: "50%", background: "rgba(255,255,255,0.12)" }} />
+      <div style={{ display: "flex", alignItems: "center", gap: 10, position: "relative" }}>
+        <span style={{ width: 40, height: 40, borderRadius: 13, background: W, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Icon name={icon} size={20} color={iconColor} stroke={1.8} />
+        </span>
+        <span style={{ fontFamily: FONT, fontWeight: 700, fontSize: 13.5, opacity: 0.95 }}>{title}</span>
+        {badge && <span style={{ marginLeft: "auto", fontSize: 9.5, fontWeight: 800, letterSpacing: "0.08em", background: "rgba(255,255,255,0.22)", borderRadius: 999, padding: "2px 8px" }}>{badge}</span>}
       </div>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-        <span style={S.value}>{value}</span>
-        <span style={S.label}>{label}</span>
+      {wave}
+      <div style={{ position: "relative", display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontFamily: FONT, fontWeight: 800, fontSize: 30, lineHeight: 1.05, letterSpacing: "-0.02em", overflowWrap: "anywhere" }}>{value}</div>
+          <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 2 }}>{label}</div>
+        </div>
         {delta !== undefined && delta !== null && (
-          <span style={{ fontSize: 11, fontWeight: 700, color: delta >= 0 ? "#3DDC84" : "#FF6B6B" }}>{delta >= 0 ? "▲" : "▼"} {Math.abs(delta)}%</span>
+          <span style={{ fontSize: 12, fontWeight: 700, background: "rgba(255,255,255,0.22)", borderRadius: 999, padding: "4px 10px" }}>
+            {delta >= 0 ? "+" : "-"}{Math.abs(delta)}% {delta >= 0 ? "\u25B2" : "\u25BC"}
+          </span>
         )}
       </div>
-      <div style={S.chips} onClick={(e) => e.stopPropagation()}>
-        {chips.map((c) => <Chip key={c.label} {...c} />)}
-      </div>
+      {chips.length > 0 && (
+        <div style={{ position: "relative", display: "flex", flexWrap: "wrap", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+          {chips.map((c) => {
+            const inner = (
+              <>
+                <Icon name={c.icon} size={12} color="#fff" stroke={1.9} />
+                <strong style={{ fontWeight: 800 }}>{c.value}</strong>
+                <span style={{ opacity: 0.85, fontSize: 10.5 }}>{c.label}</span>
+              </>
+            );
+            const st = { display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 9px", borderRadius: 999, border: "none", background: c.tone === "bad" ? "rgba(120,10,30,0.35)" : "rgba(255,255,255,0.2)", color: "#fff", fontFamily: "inherit", fontSize: 11.5, opacity: c.dim ? 0.6 : 1, cursor: c.onClick ? "pointer" : "default", whiteSpace: "nowrap" };
+            const t = `${c.label}: ${c.value}`;
+            return c.onClick
+              ? <button key={c.label} type="button" title={t} onClick={c.onClick} style={st}>{inner}</button>
+              : <span key={c.label} title={t} style={st}>{inner}</span>;
+          })}
+        </div>
+      )}
     </div>
+  );
+}
+
+export function ProgressRow({ label, value, pct, color = SKY, icon, sub }) {
+  const w = Math.max(0, Math.min(100, pct || 0));
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: INK, marginBottom: 6 }}>
+          <span>{label}{sub && <span style={{ color: MUTED, marginLeft: 6, fontSize: 11 }}>{sub}</span>}</span>
+          <strong style={{ fontFamily: FONT }}>{value}</strong>
+        </div>
+        <div style={{ height: 6, borderRadius: 999, background: "rgba(255,255,255,0.07)", overflow: "hidden" }}>
+          <div style={{ width: `${w}%`, height: "100%", borderRadius: 999, background: `linear-gradient(90deg, ${color}, ${color}aa)` }} />
+        </div>
+      </div>
+      {icon && (
+        <span style={{ width: 38, height: 38, borderRadius: 13, background: `${color}22`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Icon name={icon} size={18} color={color} />
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Seven days starting today. `marks` maps YYYY-MM-DD to a count of deadlines.
+export function WeekStrip({ days, marks = {}, onPick }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
+      {days.map((d, i) => {
+        const n = marks[d.key] || 0;
+        const today = i === 0;
+        return (
+          <button key={d.key} type="button" onClick={() => onPick?.(d, n)} title={n ? `${n} deadline${n === 1 ? "" : "s"}` : d.key}
+            style={{ border: "none", cursor: onPick && n ? "pointer" : "default", fontFamily: "inherit", padding: "10px 0 8px", borderRadius: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, background: today ? GRADIENTS.sky : "rgba(255,255,255,0.03)", color: today ? "#fff" : INK }}>
+            <span style={{ fontSize: 10.5, opacity: today ? 0.95 : 0.55 }}>{d.dow}</span>
+            <span style={{ fontFamily: FONT, fontWeight: 800, fontSize: 15 }}>{d.day}</span>
+            <span style={{ width: 5, height: 5, borderRadius: "50%", background: n ? (today ? "#fff" : SKY) : "transparent" }} />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function AreaTip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{ background: GRADIENTS.sky, color: "#fff", borderRadius: 12, padding: "6px 10px", fontSize: 12, boxShadow: "0 6px 18px rgba(0,0,0,0.35)" }}>
+      <div style={{ fontWeight: 800 }}>{label}</div>
+      {payload.map((p) => <div key={p.dataKey}>{p.name}: {p.value}</div>)}
+    </div>
+  );
+}
+
+// Smooth two-series area chart in the template's sky + mint.
+export function OutreachArea({ data, a = "Cold Emails", b = "Responded", height = 190 }) {
+  return (
+    <div style={{ width: "100%", height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 8, right: 8, left: -24, bottom: 0 }}>
+          <defs>
+            <linearGradient id="kdA" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={SKY} stopOpacity={0.5} /><stop offset="100%" stopColor={SKY} stopOpacity={0.02} /></linearGradient>
+            <linearGradient id="kdB" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={MINT} stopOpacity={0.4} /><stop offset="100%" stopColor={MINT} stopOpacity={0.02} /></linearGradient>
+          </defs>
+          <CartesianGrid stroke="rgba(255,255,255,0.06)" strokeDasharray="4 4" vertical={false} />
+          <XAxis dataKey="label" stroke={MUTED} fontSize={11} tickLine={false} axisLine={false} />
+          <YAxis stroke={MUTED} fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} width={40} />
+          <Tooltip content={<AreaTip />} cursor={{ stroke: "rgba(255,255,255,0.15)" }} />
+          <Area type="monotone" dataKey={a} stroke={SKY} strokeWidth={2.2} fill="url(#kdA)" />
+          <Area type="monotone" dataKey={b} stroke={MINT} strokeWidth={2.2} fill="url(#kdB)" />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+export function ActionButton({ children, onClick }) {
+  return (
+    <button type="button" onClick={onClick} style={{ border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, color: "#fff", background: GRADIENTS.sky, borderRadius: 12, padding: "6px 14px", whiteSpace: "nowrap" }}>{children}</button>
   );
 }
