@@ -5,13 +5,14 @@ import { formatMoney, formatTotalsByCurrency, symbolToCode } from "../finance/cu
 import { PrivacyToggle } from "../finance/FinanceModule.jsx";
 import { usePayments } from "./usePayments.js";
 import PayNowDialog from "./PayNowDialog.jsx";
+import ProvidersTab from "./ProvidersTab.jsx";
 import * as api from "./api.js";
 import {
   PAYMENT_PERIODS, PAYOUT_STATUS, SANDBOX_NOTICE, SIMULATED_NOTICE, TX_STATUS, billAvailableForRequest, checkoutBlocker,
   freelancerObligations, needsAttention, outstandingOf, payableInvoices, reconcileTotals, recentActivity, summarizePayments,
 } from "./logic.js";
 
-const TABS = [["overview", "Overview"], ["incoming", "Incoming payments"], ["outgoing", "Outgoing payments"], ["payouts", "Freelancer payouts"], ["transactions", "Transactions"], ["settlements", "Settlements"], ["reconciliation", "Reconciliation"], ["settings", "Settings"]];
+const TABS = [["overview", "Overview"], ["providers", "Providers"], ["incoming", "Incoming payments"], ["outgoing", "Outgoing payments"], ["payouts", "Freelancer payouts"], ["transactions", "Transactions"], ["settlements", "Settlements"], ["reconciliation", "Reconciliation"], ["settings", "Settings"]];
 const fmtDateTime = (iso) => (iso ? new Date(iso).toLocaleString() : "-");
 const fmtDay = (iso) => (iso ? String(iso).slice(0, 10) : "-");
 const money = (c, n, priv) => (priv ? "••••" : formatMoney(c, n));
@@ -397,6 +398,7 @@ export default function PaymentsModule({ userId, projects, invoices, teamMembers
       </div>
       {returnNote && <Banner tone="info" action={<Btn small onClick={() => setReturnNote("")}>Dismiss</Btn>}>{returnNote}</Banner>}
       {tab === "overview" && <Overview ctx={ctx} />}
+      {tab === "providers" && <ProvidersTab />}
       {tab === "incoming" && <Incoming ctx={ctx} />}
       {tab === "outgoing" && <Outgoing ctx={ctx} />}
       {tab === "payouts" && <Payouts ctx={ctx} />}

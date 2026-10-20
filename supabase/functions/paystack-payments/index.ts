@@ -37,6 +37,18 @@ Deno.serve(async (req) => {
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON body." }, 400); }
   const action = String(body?.action || "");
 
+  // ADMIN ONLY (backend gate; the UI hiding Payments is not the control). Every action, including
+  // "status", requires a signed-in administrator.
+  const url = Deno.env.get("SUPABASE_URL")!;
+  const authHeader = req.headers.get("Authorization") || "";
+  // Acts as the signed-in user: RLS and every RPC's auth.uid() check apply.
+  const userClient = createClient(url, Deno.env.get("SUPABASE_ANON_KEY")!, { global: { headers: { Authorization: authHeader } } });
+  const { data: userData, error: userErr } = await userClient.auth.getUser();
+  if (userErr || !userData?.user) return json({ error: "Not authenticated." }, 401);
+  const service = createClient(url, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+  const { data: adminRow } = await service.from("user_settings").select("is_admin").eq("user_id", userData.user.id).maybeSingle();
+  if (!adminRow?.is_admin) return json({ error: "Payments is currently available to administrators only." }, 403);
+
   const cfg = resolveSandboxConfig(Deno.env);
 
   if (action === "status") {
@@ -52,13 +64,6 @@ Deno.serve(async (req) => {
 
   if (!cfg.ok) return json({ error: cfg.message, code: cfg.code, environment: "test" }, 503);
 
-  const url = Deno.env.get("SUPABASE_URL")!;
-  const authHeader = req.headers.get("Authorization") || "";
-  // Acts as the signed-in user: RLS and every RPC's auth.uid() check apply.
-  const userClient = createClient(url, Deno.env.get("SUPABASE_ANON_KEY")!, { global: { headers: { Authorization: authHeader } } });
-  const { data: userData, error: userErr } = await userClient.auth.getUser();
-  if (userErr || !userData?.user) return json({ error: "Not authenticated." }, 401);
-  const service = createClient(url, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
   try {
     if (action === "init") {

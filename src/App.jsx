@@ -23,6 +23,9 @@ import FinanceModule, { PrivacyToggle } from "./finance/FinanceModule.jsx";
 import PaymentsModule from "./payments/PaymentsModule.jsx";
 import PayNowDialog from "./payments/PayNowDialog.jsx";
 import { usePayments } from "./payments/usePayments.js";
+import { canAccessPayments, PAYMENTS_RESTRICTED_BODY, PAYMENTS_RESTRICTED_TITLE } from "./payments/access.js";
+import PaymentsRestricted from "./payments/PaymentsRestricted.jsx";
+import GeneratePaymentLinkDialog from "./payments/GeneratePaymentLinkDialog.jsx";
 import { ActivityCard, ActionButton, GRADIENTS, Icon as KIcon, OutreachArea, Panel, PanelTitle, ProgressRow, WeekStrip } from "./DashboardKit.jsx";
 import { summarizePayments, checkoutBlocker } from "./payments/logic.js";
 import { ProjectPicker } from "./finance/ProjectPicker.jsx";
@@ -2743,6 +2746,8 @@ export default function ShotTracker() {
   const [patreonNotice, setPatreonNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [payNowInvoice, setPayNowInvoice] = useState(null);
+  const [payLinkInvoice, setPayLinkInvoice] = useState(null);
+  const [showPaymentsLocked, setShowPaymentsLocked] = useState(false);
   const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "payments" | "teams"
   const [view, setView] = useState("projects");
   const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices" | "activity"
@@ -3099,7 +3104,7 @@ export default function ShotTracker() {
         const loaded = settingsFromRow(row);
         setSettings(loaded);
         if (!hasAppliedLandingTab.current) {
-          setWorkspace(new URLSearchParams(window.location.search).get("payments_return") ? "payments" : loaded.defaultLandingTab || "dashboard");
+          setWorkspace(new URLSearchParams(window.location.search).get("payments_return") && canAccessPayments(loaded) ? "payments" : loaded.defaultLandingTab || "dashboard");
           hasAppliedLandingTab.current = true;
         }
         if (!hasCheckedTutorial.current) {
@@ -5442,13 +5447,27 @@ export default function ShotTracker() {
           >
             Finance
           </button>
-          <button
-            className={tutorialHighlightTarget === "payments" ? "kf-tutorial-highlight" : undefined}
-            style={{ ...styles.tabButton, ...(workspace === "payments" ? styles.tabButtonActive : {}) }}
-            onClick={() => setWorkspace("payments")}
-          >
-            Payments
-          </button>
+          {canAccessPayments(settings) ? (
+            <button
+              className={tutorialHighlightTarget === "payments" ? "kf-tutorial-highlight" : undefined}
+              style={{ ...styles.tabButton, ...(workspace === "payments" ? styles.tabButtonActive : {}) }}
+              onClick={() => setWorkspace("payments")}
+            >
+              Payments
+            </button>
+          ) : (
+            // Non-admins see Payments, locked. aria-disabled (not disabled) so a click can explain why.
+            <button
+              type="button"
+              aria-disabled="true"
+              title="Coming Soon"
+              style={{ ...styles.tabButton, opacity: 0.5, cursor: "not-allowed", display: "inline-flex", flexDirection: "column", alignItems: "center", lineHeight: 1.15 }}
+              onClick={() => setShowPaymentsLocked(true)}
+            >
+              <span>{"\uD83D\uDD12"} Payments</span>
+              <span style={{ fontSize: 10, letterSpacing: "0.04em" }}>Coming Soon</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -5858,7 +5877,8 @@ export default function ShotTracker() {
         </>
       )}
 
-      {view === "projects" && workspace === "payments" && (
+      {view === "projects" && workspace === "payments" && !canAccessPayments(settings) && <PaymentsRestricted />}
+      {view === "projects" && workspace === "payments" && canAccessPayments(settings) && (
         <PaymentsModule
           userId={userId}
           projects={projects}
@@ -6061,7 +6081,8 @@ export default function ShotTracker() {
           }
           onEdit={setEditingInvoice}
           onMarkPaid={handleMarkInvoicePaid}
-          onPayNow={setPayNowInvoice}
+          onPayNow={canAccessPayments(settings) ? setPayNowInvoice : undefined}
+          onGeneratePaymentLink={canAccessPayments(settings) ? setPayLinkInvoice : undefined}
           onGenerateFollowup={handleGenerateFollowupDoc}
           onDownload={(inv) => downloadInvoicePDF(inv, selectedProject, settings)}
           onOpenMilestones={() => setShowMilestoneModal(true)}
@@ -6214,7 +6235,22 @@ export default function ShotTracker() {
         />
       )}
 
-      {payNowInvoice && (
+      {showPaymentsLocked && (
+        <div role="dialog" aria-modal="true" aria-label="Payments is coming soon" onClick={() => setShowPaymentsLocked(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#151a24", color: "#e8ecf4", borderRadius: 16, padding: 24, maxWidth: 420 }}>
+            <strong style={{ display: "block", marginBottom: 8 }}>{PAYMENTS_RESTRICTED_TITLE}</strong>
+            <p style={{ margin: "0 0 16px", opacity: 0.8, fontSize: 14 }}>{PAYMENTS_RESTRICTED_BODY}</p>
+            <button type="button" style={styles.cancelButton} onClick={() => setShowPaymentsLocked(false)}>OK</button>
+          </div>
+        </div>
+      )}
+
+      {payLinkInvoice && canAccessPayments(settings) && (
+        <GeneratePaymentLinkDialog invoice={payLinkInvoice} onClose={() => setPayLinkInvoice(null)} />
+      )}
+
+      {payNowInvoice && canAccessPayments(settings) && (
         <PayNowDialog
           invoice={payNowInvoice}
           onClose={() => { setPayNowInvoice(null); refreshFinanceSources(); }}
@@ -8627,7 +8663,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
 
   // Payments (Paystack sandbox): same definitions and period filter as the Payments module, shown as
   // TEST data and kept separate from the ledger-based revenue.
-  const payData = usePayments(userId);
+  const payData = usePayments(userId, canAccessPayments(settings));
   const paySummary = useMemo(
     () => (payData.data ? summarizePayments({ ...payData.data, invoices, period: dashboardPeriod }) : null),
     [payData.data, invoices, dashboardPeriod]
@@ -8831,10 +8867,10 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       onClick: onGoToFinance,
       chips: [
         { icon: "invoice", label: `outstanding${fin.summary ? ` (${fin.summary.receivableCount})` : ""}`, value: fin.summary ? money(fin.summary.receivableBase) : "...", tone: "warn" },
-        { icon: "users", label: "owed to freelancers", value: payMoney(paySummary?.freelancerOwed), dim: isEmpty(paySummary?.freelancerOwed) },
+        ...(canAccessPayments(settings) ? [{ icon: "users", label: "owed to freelancers", value: payMoney(paySummary?.freelancerOwed), dim: isEmpty(paySummary?.freelancerOwed) }] : []),
       ],
     },
-    {
+    ...(!canAccessPayments(settings) ? [] : [{
       title: "Payments", gradient: GRADIENTS.royal, iconColor: "#3B74F4", icon: "card", badge: "SANDBOX", value: payMoney(paySummary?.receivedGross), label: "received", onClick: onGoToPayments,
       chips: [
         { icon: "inbox", label: "today", value: payMoney(paySummary?.receivedToday), dim: isEmpty(paySummary?.receivedToday) },
@@ -8846,7 +8882,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         { icon: "zap", label: "simulated", value: payMoney(paySummary?.simulatedPaid), dim: isEmpty(paySummary?.simulatedPaid) },
         { icon: "alert", label: "unreconciled", value: paySummary ? unrec : "...", tone: unrec ? "bad" : undefined, dim: !unrec },
       ],
-    },
+    }]),
   ];
 
   const weekDays = Array.from({ length: 7 }, (_, i) => {
@@ -9235,6 +9271,7 @@ function InvoicesPanel({
   onEdit,
   onMarkPaid,
   onPayNow,
+  onGeneratePaymentLink,
   onGenerateFollowup,
   onDownload,
   onOpenMilestones,
@@ -9359,6 +9396,18 @@ function InvoicesPanel({
                       }}
                     >
                       Pay now (sandbox)
+                    </button>
+                  )}
+                  {onGeneratePaymentLink && inv.status !== "paid" && ["invoice", "proforma"].includes(inv.docType || "invoice") && (
+                    <button
+                      style={styles.cancelButton}
+                      title="Create a secure StudioKairegi checkout link for this invoice"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onGeneratePaymentLink(inv);
+                      }}
+                    >
+                      Payment link
                     </button>
                   )}
                   {docType === "proforma" && !hasFollowup(inv.id, "receipt") && (

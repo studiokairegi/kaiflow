@@ -30,6 +30,8 @@ begin perform set_config('request.jwt.claim.sub', '', false); execute 'reset rol
 -- ------------------------------------------------------------------ setup
 insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000a1', 'a@example.com'), ('00000000-0000-0000-0000-0000000000b1', 'b@example.com');
 select _t.put('A', '00000000-0000-0000-0000-0000000000a1'), _t.put('B', '00000000-0000-0000-0000-0000000000b1');
+-- Payments is admin-only (20261021090000): both test owners are admins so the existing checks still exercise the module.
+insert into user_settings (user_id, is_admin) values ('00000000-0000-0000-0000-0000000000a1', true), ('00000000-0000-0000-0000-0000000000b1', true) on conflict (user_id) do update set is_admin = true;
 
 do $$
 declare a uuid := _t.id('A'); b uuid := _t.id('B'); v_bank uuid; v_proj uuid; v_inv uuid; v_pb uuid; v_ib uuid; v_m uuid;

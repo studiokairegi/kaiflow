@@ -68,3 +68,14 @@ export const startSimulation = (id) => rpc("payments_simulate_payout_start", { p
 export const finishSimulation = (id, succeed, reason) => rpc("payments_simulate_payout_finish", { p_request: id, p_succeed: succeed, p_reason: reason || "" });
 export const reconcilePayout = (id, billPaymentId) => rpc("payments_reconcile_payout", { p_request: id, p_bill_payment: billPaymentId });
 export const billPendingShots = (shotIds) => rpc("finance_bill_pending_shots", { p_shot_ids: shotIds });
+
+// ---- provider-neutral (admin RPCs; every one re-checks admin on the server) -----------------
+export const listProviders = () => rpc("payments_list_providers");
+export const setProviderEnabled = (provider, enabled) => rpc("payments_set_provider_enabled", { p_provider: provider, p_enabled: enabled });
+export const setPrimaryProvider = (provider) => rpc("payments_set_primary_provider", { p_provider: provider });
+export const createCheckoutSession = (invoiceId, amount, expiresDays) =>
+  rpc("payments_create_checkout_session", { p_invoice: invoiceId, p_amount: amount ?? null, p_expires_days: expiresDays ?? 14 }).then((r) => (Array.isArray(r) ? r[0] : r));
+export const cancelCheckoutSession = (sessionId) => rpc("payments_cancel_checkout_session", { p_session: sessionId });
+
+// PUBLIC (no login): the only call the /pay/{token} page makes. Returns a minimal view; see migration.
+export const getPublicCheckout = (token) => rpc("payments_public_checkout", { p_token: token });

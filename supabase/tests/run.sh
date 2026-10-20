@@ -14,7 +14,12 @@ run "$root/supabase/migrations/20261007215055_finance_v2.sql"
 run "$root/supabase/migrations/20261012190000_finance_balance_trigger_security.sql"
 run "$root/supabase/migrations/20261018090000_payments_paystack_sandbox.sql"
 run "$root/supabase/migrations/20261018090000_payments_paystack_sandbox.sql"   # idempotent re-run
-echo "migrations applied (payments migration applied twice)"
+run "$root/supabase/migrations/20261021090000_payments_provider_neutral_admin_only.sql"
+run "$root/supabase/migrations/20261021090000_payments_provider_neutral_admin_only.sql"   # idempotent re-run
+echo "migrations applied (payments migrations applied twice)"
 out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/payments.test.sql" 2>&1)"; code=$?
 echo "$out" | grep -E "PASS|FAIL|SUMMARY|ERROR" | sed 's/^psql:[^ ]* //'
-exit $code
+[ $code -eq 0 ] || exit $code
+out2="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/payments_admin.test.sql" 2>&1)"; code2=$?
+echo "$out2" | grep -E "PASS|FAIL|SUMMARY|ERROR" | sed 's/^psql:[^ ]* //'
+exit $code2

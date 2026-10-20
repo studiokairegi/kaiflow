@@ -4,13 +4,20 @@ import App from "./App.jsx";
 import { ClientPortalView, FreelancerView } from "./SharedViews.jsx";
 import NdaSignPage from "./NdaSignPage.jsx";
 import ContractSignPage from "./ContractSignPage.jsx";
+import PayCheckoutPage from "./payments/PayCheckoutPage.jsx";
+import { tokenFromPath } from "./payments/providers.js";
 
 const params = new URLSearchParams(window.location.search);
 const shareType = params.get("share");
 const shareToken = params.get("token");
 
+const payToken = tokenFromPath(window.location.pathname);
+
 let content;
-if (shareType === "project" && shareToken) {
+if (payToken) {
+  // Public client checkout: /pay/{secure-token}. Needs a host rewrite of /pay/* to index.html.
+  content = <PayCheckoutPage token={payToken} />;
+} else if (shareType === "project" && shareToken) {
   content = <ClientPortalView token={shareToken} />;
 } else if (shareType === "shot" && shareToken) {
   content = <FreelancerView token={shareToken} />;
