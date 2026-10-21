@@ -1,4 +1,4 @@
-// Pure portfolio helpers (no network): validation, storage paths, ordering, link URLs.
+// Pure portfolio helpers (no network): validation, upload routing, ordering, link URLs.
 export const MAX_BYTES = 500 * 1024 * 1024;   // matches the bucket limit and the DB check
 export const MAX_ITEMS = 50;                  // matches the DB trigger
 export const VIDEO_TYPES = ["video/mp4", "video/webm", "video/quicktime"];
@@ -23,11 +23,10 @@ export function validateFile(file, existingCount = 0) {
   return { ok: true, kind };
 }
 
-export const safeFileName = (name) =>
-  String(name || "file").normalize("NFKD").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(-80) || "file";
-
-// Objects live under "<user_id>/": the storage policies and a DB check both enforce that prefix.
-export const buildStoragePath = (userId, fileName, unique) => `${userId}/${unique}-${safeFileName(fileName)}`;
+// Small files go browser -> Edge Function -> Drive in one request (no dependency on Google's CORS);
+// larger ones (reels) are PUT straight to a Drive resumable upload session. Mirrors the server constant.
+export const SERVER_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
+export const uploadRoute = (file) => (file.size <= SERVER_UPLOAD_MAX_BYTES ? "server" : "direct");
 
 export const sortItems = (items) => [...items].sort((a, b) => (a.sort_order - b.sort_order) || String(a.created_at).localeCompare(String(b.created_at)));
 export const nextSortOrder = (items) => (items.length ? Math.max(...items.map((i) => i.sort_order)) + 1 : 0);

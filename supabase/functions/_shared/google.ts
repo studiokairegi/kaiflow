@@ -216,8 +216,40 @@ export async function findChildFolder(
 }
 
 // Streams the file bytes (alt=media) without buffering them in memory.
-export async function fetchDriveFileStream(accessToken: string, fileId: string): Promise<Response> {
-  return await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
+// `range` (e.g. "bytes=0-1048575") is forwarded so media can be seeked; omitted callers behave as before.
+export async function fetchDriveFileStream(accessToken: string, fileId: string, range?: string): Promise<Response> {
+  const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
+  if (range) headers.Range = range;
+  return await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, { headers });
+}
+
+// Starts a Drive RESUMABLE upload and returns the session URL. The browser PUTs the file bytes straight
+// to that URL (no Authorization needed; the URL is the credential), so large videos never pass through
+// an Edge Function. `origin` is the browser's Origin: Google only allows the cross-origin PUT when the
+// session was created with it. The file stays private (no sharing): it is only ever served through
+// portfolio-media.
+export async function createResumableUploadSession(
+  accessToken: string,
+  folderId: string,
+  fileName: string,
+  mimeType: string,
+  size: number,
+  origin?: string
+): Promise<string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json; charset=UTF-8",
+    "X-Upload-Content-Type": mimeType,
+    "X-Upload-Content-Length": String(size),
+  };
+  if (origin) headers.Origin = origin;
+  const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ name: fileName, parents: [folderId] }),
   });
+  if (!res.ok) throw new Error(`Drive upload session failed: ${res.status} ${await res.text()}`);
+  const location = res.headers.get("Location");
+  if (!location) throw new Error("Drive did not return an upload session URL.");
+  return location;
 }

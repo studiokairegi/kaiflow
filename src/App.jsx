@@ -5636,7 +5636,7 @@ export default function ShotTracker() {
         />
       )}
 
-      {view === "projects" && workspace === "leads" && crmTab === "portfolio" && <PortfolioTab />}
+      {view === "projects" && workspace === "leads" && crmTab === "portfolio" && <PortfolioTab driveEmail={driveEmail} onConnectDrive={handleConnectDrive} />}
 
       {view === "projects" && workspace === "leads" && crmTab === "pipeline" && (
         <>

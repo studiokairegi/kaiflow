@@ -1,4 +1,4 @@
-create table if not exists user_settings (user_id uuid primary key references auth.users(id) on delete cascade, currency_symbol text default '$', is_admin boolean not null default false);
+create table if not exists user_settings (user_id uuid primary key references auth.users(id) on delete cascade, currency_symbol text default '$', is_admin boolean not null default false, studio_name text not null default '');
 create table if not exists team_members (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
