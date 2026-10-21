@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, Tabs, Totals, CARD_TONES, useBusy } from "../finance/ui.jsx";
 import { ActivityCard } from "../DashboardKit.jsx";
 import { formatMoney, formatTotalsByCurrency, symbolToCode } from "../finance/currency.js";
-import { PrivacyToggle } from "../finance/FinanceModule.jsx";
+import { PrivacyToggle } from "../finance/PrivacyToggle.jsx";
 import { usePayments } from "./usePayments.js";
 import PayNowDialog from "./PayNowDialog.jsx";
 import ProvidersTab from "./ProvidersTab.jsx";

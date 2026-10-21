@@ -3,7 +3,7 @@
 // Same shape as ndaApi.js: owner side uses RLS + RPCs, signer side uses token-only RPCs.
 
 import { supabase } from "./supabaseClient";
-import { buildSignedDocPdf } from "./ndaApi";
+import { buildSignedDocPdf } from "./ndaPdf.js";
 import { DEFAULT_CONTRACT_BODY, DEFAULT_REVISION_ROUNDS, CONTRACT_CONSENT_TEXT, formatContractMoney } from "./contracts.js";
 
 // ---- owner side -----------------------------------------------------------

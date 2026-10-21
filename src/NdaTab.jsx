@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
 import {
   NDA_STATUS, DEFAULT_NDA_BODY, renderNdaBody, ndaSignLink, loadNdaTemplate, saveNdaTemplate,
-  listNdaRequests, createNdaRequest, voidNdaRequest, downloadNdaPdf,
+  listNdaRequests, createNdaRequest, voidNdaRequest,
 } from "./ndaApi";
+import { downloadNdaPdf } from "./ndaPdf.js";
 
 // "NDA" tab inside TeamMemberEditor. `styles` is App.jsx's styles object.
 export default function NdaTab({ member, studioName, styles, onStatusChange }) {

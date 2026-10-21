@@ -1,26 +1,20 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { supabase, functionUrl } from "./supabaseClient";
-import { jsPDF } from "jspdf";
+import { lazyWithSuspense } from "./lazy.jsx";
 import { genShareToken } from "./SharedViews.jsx";
-import CutWorkflowPanel from "./CutWorkflowPanel.jsx";
-import ContactsPage from "./ContactsPage.jsx";
+import { PrivacyToggle } from "./finance/PrivacyToggle.jsx";
 import ContactPicker from "./ContactPicker.jsx";
-import TasksPanel from "./TasksPanel.jsx";
-import NdaTab from "./NdaTab.jsx";
 import { listNdaStatusByMember, NDA_STATUS } from "./ndaApi.js";
 import { contactsApi } from "./contactsInstance.js";
 import { applyContactSelection, projectContactUpdateFields } from "./contacts.js";
 import { workflowLabel } from "./cutWorkflow.js";
-import SettingsPage from "./settings/SettingsPage.jsx";
 import {
   DEFAULT_SETTINGS, DEFAULT_LEAD_CHANNELS, MILESTONE_DEFAULTS, DEFAULT_FOLLOWUP_SCHEDULE, DEFAULT_ARCHIVE_DAYS,
   settingsFromRow, settingsToRow,
 } from "./settings/schema.js";
 import { runtime, applyRuntimeSettings, categoryAllowed, playNotificationSound, desktopNotificationSilent, workdayTargetSeconds, isWorkday, reasonsFor, todayInZone } from "./settings/runtime.js";
 import { emptyEmailSlots, normalizeEmailSlots, nextScheduledIndex, lastScheduledIndex, followupCountLabel, sendingTriggersNoResponse, visibleSlotCount, emailsSentSummary, isManualFollowupDue, manualFollowupState } from "./settings/followups.js";
-import FinanceModule, { PrivacyToggle } from "./finance/FinanceModule.jsx";
-import PaymentsModule from "./payments/PaymentsModule.jsx";
 import PayNowDialog from "./payments/PayNowDialog.jsx";
 import { usePayments } from "./payments/usePayments.js";
 import { canAccessPayments, PAYMENTS_RESTRICTED_BODY, PAYMENTS_RESTRICTED_TITLE } from "./payments/access.js";
@@ -32,14 +26,18 @@ import { ProjectPicker } from "./finance/ProjectPicker.jsx";
 import { useFinanceSummary } from "./finance/useLedger.js";
 import { displayMoney, codeToSymbol, formatTotalsByCurrency } from "./finance/currency.js";
 import { saveFxSnapshot, listBankAccounts } from "./finance/api.js";
-import {
-  DonutBreakdown,
-  MonthlyFinanceChart,
-  RevenueByClientBarChart,
-  ProjectComparisonChart,
-  LeadOutreachTrendChart,
-  HoursTrendChart,
-} from "./DashboardCharts.jsx";
+
+// Code-split screens and the charting library: fetched on first use instead of at startup.
+const CutWorkflowPanel = lazyWithSuspense(() => import("./CutWorkflowPanel.jsx"));
+const ContactsPage = lazyWithSuspense(() => import("./ContactsPage.jsx"), { label: "Loading contacts…" });
+const TasksPanel = lazyWithSuspense(() => import("./TasksPanel.jsx"), { label: "Loading tasks…" });
+const NdaTab = lazyWithSuspense(() => import("./NdaTab.jsx"));
+const SettingsPage = lazyWithSuspense(() => import("./settings/SettingsPage.jsx"), { label: "Loading settings…" });
+const FinanceModule = lazyWithSuspense(() => import("./finance/FinanceModule.jsx"), { label: "Loading finance…" });
+const PortfolioTab = lazyWithSuspense(() => import("./portfolio/PortfolioTab.jsx"), { label: "Loading portfolio…" });
+const PaymentsModule = lazyWithSuspense(() => import("./payments/PaymentsModule.jsx"), { label: "Loading payments…" });
+const DonutBreakdown = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "DonutBreakdown", label: "" });
+const HoursTrendChart = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "HoursTrendChart", label: "" });
 import {
   buildPipeline,
   cutProgress,
@@ -1946,7 +1944,8 @@ function computeDashboardStats(projects, cards, leads) {
   };
 }
 
-function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS) {
+async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS) {
+  const { jsPDF } = await import("jspdf"); // ~heavy; only loaded when a PDF is actually requested
   const doc = new jsPDF();
   const balance = parseMoney(invoice.amount) - parseMoney(invoice.amountPaid);
   const cur = invoice.currency || settings.currencySymbol || "$";
@@ -2773,7 +2772,7 @@ export default function ShotTracker() {
   const [dragOverStage, setDragOverStage] = useState(null);
   const [leadChannelFilter, setLeadChannelFilter] = useState("all");
   const [leadSearch, setLeadSearch] = useState("");
-  const [crmTab, setCrmTab] = useState("pipeline"); // "pipeline" | "contacts"
+  const [crmTab, setCrmTab] = useState("pipeline"); // "pipeline" | "contacts" | "portfolio"
   const [leadStatusFilter, setLeadStatusFilter] = useState("all");
   const [leadPriorityFilter, setLeadPriorityFilter] = useState("all");
   const [leadFollowupFilter, setLeadFollowupFilter] = useState("all");
@@ -5607,7 +5606,7 @@ export default function ShotTracker() {
 
       {view === "projects" && workspace === "leads" && (
         <div style={{ display: "flex", gap: 8, marginBottom: 12 }} role="tablist" aria-label="CRM sections">
-          {[["pipeline", "Pipeline"], ["contacts", "Contacts"]].map(([id, label]) => (
+          {[["pipeline", "Pipeline"], ["contacts", "Contacts"], ["portfolio", "Portfolio"]].map(([id, label]) => (
             <button
               key={id}
               type="button"
@@ -5636,6 +5635,8 @@ export default function ShotTracker() {
           }}
         />
       )}
+
+      {view === "projects" && workspace === "leads" && crmTab === "portfolio" && <PortfolioTab />}
 
       {view === "projects" && workspace === "leads" && crmTab === "pipeline" && (
         <>

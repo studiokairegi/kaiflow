@@ -1,6 +1,7 @@
 import React from "react";
 import SignDocumentPage from "./SignDocumentPage.jsx";
-import { publicGetNda, publicSignNda, publicDeclineNda, downloadNdaPdf, NDA_CONSENT_TEXT } from "./ndaApi";
+import { publicGetNda, publicSignNda, publicDeclineNda, NDA_CONSENT_TEXT } from "./ndaApi";
+import { downloadNdaPdf } from "./ndaPdf.js";
 
 // Public NDA signing page, rendered when the URL is ?share=nda&token=...
 // No account needed: it talks to the nda_public_* RPCs only.
