@@ -11,6 +11,22 @@ const PortfolioPage = lazyWithSuspense(() => import("./portfolio/PortfolioPage.j
 import { tokenFromPath } from "./payments/providers.js";
 import { tokenFromPortfolioPath } from "./portfolio/logic.js";
 
+// Without a boundary, one render error unmounts the whole tree and leaves a blank page.
+class StartupErrorBoundary extends React.Component {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(error) { console.error("Render failed:", error); }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <div role="alert" style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 12, background: "#14191c", color: "#e8e4dc", fontFamily: "sans-serif" }}>
+        <p style={{ margin: 0 }}>Something went wrong while loading the app.</p>
+        <button type="button" onClick={() => window.location.reload()} style={{ padding: "8px 16px", cursor: "pointer" }}>Reload</button>
+      </div>
+    );
+  }
+}
+
 const params = new URLSearchParams(window.location.search);
 const shareType = params.get("share");
 const shareToken = params.get("token");
@@ -38,5 +54,5 @@ if (portfolioToken) {
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(
-  <React.StrictMode>{content}</React.StrictMode>
+  <React.StrictMode><StartupErrorBoundary>{content}</StartupErrorBoundary></React.StrictMode>
 );

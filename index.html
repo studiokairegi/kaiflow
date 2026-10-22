@@ -19,7 +19,21 @@
     </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div id="boot-fallback" style="min-height:100vh;display:flex;align-items:center;justify-content:center;color:#8fa3a8;font-family:sans-serif;font-size:14px;text-align:center;padding:24px">Loading…</div></div>
     <script type="module" src="/src/main.jsx"></script>
+    <!-- If the app script fails to load or run, React never replaces #boot-fallback. Show a way out
+         instead of a dead screen. data-cfasync keeps Cloudflare Rocket Loader from deferring this. -->
+    <script data-cfasync="false">
+      (function () {
+        function showFailure() {
+          var el = document.getElementById("boot-fallback");
+          if (!el) return;
+          el.innerHTML = '<div><p style="margin:0 0 12px">The app is taking longer than expected to start.</p><button onclick="location.reload()" style="padding:8px 16px;cursor:pointer">Reload</button></div>';
+        }
+        window.addEventListener("error", function () { setTimeout(showFailure, 0); });
+        window.addEventListener("unhandledrejection", function () { setTimeout(showFailure, 0); });
+        setTimeout(showFailure, 15000);
+      })();
+    </script>
   </body>
 </html>

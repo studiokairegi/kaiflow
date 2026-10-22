@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { createPortal } from "react-dom";
 import { supabase, functionUrl } from "./supabaseClient";
 import { lazyWithSuspense } from "./lazy.jsx";
+import { createAuthBootstrap } from "./authBootstrap.js";
 import { genShareToken } from "./SharedViews.jsx";
 import { PrivacyToggle } from "./finance/PrivacyToggle.jsx";
 import ContactPicker from "./ContactPicker.jsx";
@@ -2815,19 +2816,22 @@ export default function ShotTracker() {
     dataRef.current = data;
   }, [data]);
 
-  // Auth session bootstrap and listener
+  // Auth session bootstrap and listener (see authBootstrap.js: bounded wait, rejection handling, retry)
+  const authBootRef = useRef(null);
+  const [authStatus, setAuthStatus] = useState("loading");
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setAuthLoading(false);
+    const boot = createAuthBootstrap({
+      auth: supabase.auth,
+      onChange: (st, event) => {
+        setSession(st.session);
+        setAuthStatus(st.status);
+        setAuthLoading(st.status === "loading");
+        if (event === "PASSWORD_RECOVERY") setIsPasswordRecovery(true);
+      },
     });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      if (_event === "PASSWORD_RECOVERY") {
-        setIsPasswordRecovery(true);
-      }
-    });
-    return () => listener.subscription.unsubscribe();
+    authBootRef.current = boot;
+    boot.start();
+    return () => { boot.dispose(); authBootRef.current = null; };
   }, []);
 
   // Google (and other OAuth) sign-in failures come back as ?error=... or
@@ -4998,6 +5002,23 @@ export default function ShotTracker() {
     return (
       <div style={styles.loadingScreen}>
         <img src="/logo.png" alt="Kairil" style={{ ...styles.loadingClap, width: 48, height: 48, objectFit: "contain" }} />
+      </div>
+    );
+  }
+
+  // Session state is unknown (timed out or errored). Not "signed out": show neither the login form
+  // nor app content, just a way to retry.
+  if (authStatus === "stalled" || authStatus === "error") {
+    return (
+      <div style={styles.loadingScreen}>
+        <div role="alert" style={{ textAlign: "center", maxWidth: 360, padding: 24, color: "#e8e4dc", fontFamily: "sans-serif" }}>
+          <h2 style={{ margin: "0 0 8px" }}>Can't reach your account yet</h2>
+          <p style={{ margin: "0 0 16px", opacity: 0.75, fontSize: 14 }}>
+            {authStatus === "error" ? "Starting your session failed." : "Starting your session is taking longer than expected."} Check your connection, then try again.
+          </p>
+          <button type="button" style={styles.newButton} onClick={() => authBootRef.current?.retry()}>Try again</button>{" "}
+          <button type="button" style={styles.newButton} onClick={() => window.location.reload()}>Reload page</button>
+        </div>
       </div>
     );
   }
