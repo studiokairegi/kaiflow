@@ -22,6 +22,8 @@ import { canAccessPayments, PAYMENTS_RESTRICTED_BODY, PAYMENTS_RESTRICTED_TITLE 
 import PaymentsRestricted from "./payments/PaymentsRestricted.jsx";
 import GeneratePaymentLinkDialog from "./payments/GeneratePaymentLinkDialog.jsx";
 import { ActivityCard, ActionButton, GRADIENTS, Icon as KIcon, OutreachArea, Panel, PanelTitle, ProgressRow, WeekStrip } from "./DashboardKit.jsx";
+import NotificationCenter from "./notifications/NotificationCenter.jsx";
+import { useNotifications } from "./notifications/useNotifications.js";
 import { summarizePayments, checkoutBlocker } from "./payments/logic.js";
 import { ProjectPicker } from "./finance/ProjectPicker.jsx";
 import { useFinanceSummary } from "./finance/useLedger.js";
@@ -2862,6 +2864,8 @@ export default function ShotTracker() {
 
 
   const userId = session?.user?.id || null;
+  // Global activity notifications (bell in the header). Disposes its realtime channel/timers on sign-out.
+  const notifications = useNotifications(userId);
   // Timer changes made on the dashboard are saved to the account (debounced) so they
   // follow the user to another device.
   const settingsRef = useRef(settings);
@@ -4952,6 +4956,22 @@ export default function ShotTracker() {
     setEditingCard(card);
   };
 
+  // Notification click-through: same mechanism as the Activity tab (select project, open the shot,
+  // highlight the activity entry). Returns { ok, message } so the panel can report stale items.
+  const handleOpenNotification = (n) => {
+    const project = projects.find((p) => String(p.id) === String(n.projectId));
+    if (!project) return { ok: false, message: "This project no longer exists, or you no longer have access to it." };
+    setSelectedProjectId(project.id);
+    setView("board");
+    setBoardTab("activity");
+    const card = n.shotId ? cards.find((c) => String(c.id) === String(n.shotId)) : null;
+    if (card) {
+      setSelectedActivityId(n.id);
+      setEditingCard(card);
+    }
+    return { ok: true };
+  };
+
   const handleWorkflowChanged = useCallback((shotId, workflowState, reviewStatus) => {
     setData((prev) => ({
       ...prev,
@@ -5284,6 +5304,7 @@ export default function ShotTracker() {
             {saveState === "saved" && "Saved"}
             {saveState === "error" && "Save failed"}
           </span>
+          <NotificationCenter notifications={notifications} onNavigate={handleOpenNotification} buttonStyle={styles.iconButtonGhost} />
           <button
             className={tutorialHighlightTarget === "settings" ? "kf-tutorial-highlight" : undefined}
             style={styles.iconButtonGhost}

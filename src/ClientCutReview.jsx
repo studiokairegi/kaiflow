@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { startAutoRefresh } from "./autoRefresh.js";
+import { createDownloadGuard } from "./downloadGuard.js";
 import {
   getClientCuts,
   clientAddComment,
@@ -81,6 +82,27 @@ function CutCard({ cut, token, author, onAuthorChange, reload }) {
   const stampValue = stamp.trim() ? parseTimestamp(stamp) : null;
   const stampInvalid = stamp.trim() && stampValue === null;
 
+  // Download click protection (see downloadGuard.js). Created in an effect so React StrictMode's
+  // mount/unmount/mount cycle in dev can't leave us holding a disposed guard.
+  const guardRef = useRef(null);
+  const [lockedDownloads, setLockedDownloads] = useState(() => new Set());
+  useEffect(() => {
+    guardRef.current = createDownloadGuard({ onChange: setLockedDownloads });
+    return () => {
+      guardRef.current?.dispose();
+      guardRef.current = null;
+    };
+  }, []);
+  const downloadKey = release ? `${cut.shotId}:${release.versionId}` : null;
+  const downloading = !!downloadKey && lockedDownloads.has(downloadKey);
+
+  const startDownload = async () => {
+    if (!downloadKey || !guardRef.current) return;
+    setMsg({ type: "", text: "" });
+    const result = await guardRef.current.start(downloadKey, () => clientDownload(token, cut.shotId, release.versionId));
+    if (result.started && !result.ok) setMsg({ type: "err", text: result.error?.message || "The download couldn't be started. Please try again." });
+  };
+
   const act = async (fn, okText) => {
     if (busy) return;
     setBusy(true);
@@ -121,15 +143,19 @@ function CutCard({ cut, token, author, onAuthorChange, reload }) {
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
         <button
           type="button"
-          disabled={!dl.enabled || busy}
-          aria-disabled={!dl.enabled || busy}
-          style={button(C.teal, !dl.enabled || busy)}
-          onClick={() =>
-            act(() => clientDownload(token, cut.shotId, release.versionId), "Your download is starting.")
-          }
+          disabled={!dl.enabled || downloading}
+          aria-disabled={!dl.enabled || downloading}
+          aria-busy={downloading}
+          style={button(C.teal, !dl.enabled || downloading)}
+          onClick={startDownload}
         >
-          Download v{release ? release.version : "—"}
+          {downloading ? "Download started \u2014 please wait\u2026" : `Download v${release ? release.version : "\u2014"}`}
         </button>
+        {downloading && (
+          <span role="status" style={{ fontSize: 12.5, color: C.muted }}>
+            Your download has started and may take a moment to appear. Please wait before clicking again.
+          </span>
+        )}
         {!dl.enabled && <span style={{ fontSize: 12.5, color: C.muted }}>{dl.reason}</span>}
       </div>
 
