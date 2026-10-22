@@ -17,7 +17,7 @@ insert into user_settings (user_id, studio_name) values ('00000000-0000-0000-000
 
 do $$
 declare o uuid := '00000000-0000-0000-0000-0000000000d1'; x uuid := '00000000-0000-0000-0000-0000000000d2';
-        v_item uuid; v_item2 uuid; v_tok text; v_link uuid; v_pub jsonb; v_auth jsonb;
+        v_item uuid; v_item2 uuid; v_legacy uuid; v_xlink uuid; v_tok text; v_link uuid; v_pub jsonb; v_auth jsonb;
 begin
   -- Seed as the service role (this is what the portfolio-drive Edge Function does).
   perform _t.as_super();
@@ -58,9 +58,11 @@ begin
   perform _t.as_anon();
   perform _t.chk('public_get: not callable by anon', _t.err(format('select portfolio_public_get(%L)', v_tok)) ilike '%permission denied%');
   perform _t.as_super();
+  -- A legacy (pre-Drive) item: storage_path only. Must stay listed and authorized, and must not leak its path.
+  insert into portfolio_items (user_id, kind, title, storage_path, mime_type, size_bytes, sort_order) values (o, 'image', 'Legacy', o::text || '/legacy.png', 'image/png', 500, 2) returning id into v_legacy;
   v_pub := portfolio_public_get(v_tok);
-  perform _t.chk('public_get: returns studio name, link id and ordered items', v_pub->>'studio_name' = 'Studio D1' and (v_pub->>'link_id')::uuid = v_link and jsonb_array_length(v_pub->'items') = 2 and v_pub->'items'->0->>'title' = 'Reel');
-  perform _t.chk('public_get: exposes no Drive ids or storage paths', v_pub::text not like '%drive-file-%' and v_pub::text not like '%storage_path%' and v_pub::text not like '%drive_file_id%');
+  perform _t.chk('public_get: returns studio name, link id and ordered items (legacy items included)', v_pub->>'studio_name' = 'Studio D1' and (v_pub->>'link_id')::uuid = v_link and jsonb_array_length(v_pub->'items') = 3 and v_pub->'items'->0->>'title' = 'Reel');
+  perform _t.chk('public_get: exposes no Drive ids or storage paths', v_pub::text not like '%drive-file-%' and v_pub::text not like '%storage_path%' and v_pub::text not like '%drive_file_id%' and v_pub::text not like '%legacy.png%');
   perform _t.chk('public_get: bad / unknown tokens return null', portfolio_public_get(repeat('0', 64)) is null and portfolio_public_get('abc') is null and portfolio_public_get(null) is null);
   perform _t.chk('public_get: counts the view', (select view_count from portfolio_links where id = v_link) = 1);
 
@@ -70,6 +72,11 @@ begin
   perform _t.chk('authorize: owner preview works for own item', portfolio_authorize_media(v_item, null, o) is not null);
   perform _t.chk('authorize: another user''s preview is refused', portfolio_authorize_media(v_item, null, x) is null);
   perform _t.chk('authorize: neither link nor user is refused', portfolio_authorize_media(v_item, null, null) is null);
+  v_auth := portfolio_authorize_media(v_legacy, v_link, null);
+  perform _t.chk('authorize: legacy item yields its storage path and no Drive id (the media function streams it; no signed URL)', v_auth->>'storage_path' = o::text || '/legacy.png' and v_auth->>'drive_file_id' is null and (v_auth->>'user_id')::uuid = o);
+  perform _t.chk('authorize: a legacy item is refused to another user''s preview', portfolio_authorize_media(v_legacy, null, x) is null);
+  insert into portfolio_links (user_id, token_hash) values (x, repeat('e', 64)) returning id into v_xlink;      -- an ACTIVE link, but owned by someone else
+  perform _t.chk('authorize: an active link of ANOTHER owner cannot fetch the item', portfolio_authorize_media(v_item, v_xlink, null) is null and portfolio_authorize_media(v_legacy, v_xlink, null) is null);
   perform _t.chk('authorize: unknown item is refused', portfolio_authorize_media(gen_random_uuid(), v_link, null) is null);
   perform _t.as_user(o);
   perform _t.chk('authorize: not callable from the browser', _t.err(format('select portfolio_authorize_media(%L, null, %L)', v_item, o)) ilike '%permission denied%');
@@ -77,8 +84,11 @@ begin
   perform _t.as_super();
   perform _t.chk('revoked link: public_get returns null', portfolio_public_get(v_tok) is null);
   perform _t.chk('revoked link: media stops IMMEDIATELY (outstanding tickets die)', portfolio_authorize_media(v_item, v_link, null) is null);
+  perform _t.chk('revoked link: legacy media stops IMMEDIATELY too', portfolio_authorize_media(v_legacy, v_link, null) is null);
+  perform _t.chk('revoked link: the owner''s own preview of the legacy item still works', portfolio_authorize_media(v_legacy, null, o) is not null);
   update portfolio_links set revoked_at = null, expires_at = now() - interval '1 minute' where id = v_link;
   perform _t.chk('expired link: public_get and media refused', portfolio_public_get(v_tok) is null and portfolio_authorize_media(v_item, v_link, null) is null);
+  perform _t.chk('expired link: legacy media refused', portfolio_authorize_media(v_legacy, v_link, null) is null);
 end $$;
 
 do $$

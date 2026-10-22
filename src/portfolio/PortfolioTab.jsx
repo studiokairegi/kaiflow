@@ -11,7 +11,7 @@ function ItemCard({ item, url, health, previewFailed, index, count, onMove, onRe
   const [title, setTitle] = useState(item.title);
   const [caption, setCaption] = useState(item.caption);
   const replaceRef = useRef(null);
-  const bad = health && !["ok", "legacy"].includes(health.status);
+  const bad = health && !["ok", "legacy", "legacy_no_range"].includes(health.status);
   const problem = bad ? health.detail : previewFailed ? "The preview couldn't be loaded from Google Drive." : !url ? "No preview URL was issued for this item." : "";
   return (
     <div style={{ ...S.card, display: "flex", flexDirection: "column", gap: 8 }}>
@@ -23,7 +23,7 @@ function ItemCard({ item, url, health, previewFailed, index, count, onMove, onRe
           <div role="alert" style={{ ...fillStyle, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", padding: 12, color: T.bad, fontSize: 12.5 }}>⚠ {problem}</div>
         )}
       </div>
-      {health?.status === "legacy" && <Pill tone="warn">Old storage: move to Google Drive</Pill>}
+      {health?.status?.startsWith("legacy") && <Pill tone="warn">{health.status === "legacy_no_range" ? "Old storage: may not play or seek. Move to Google Drive" : "Old storage: move to Google Drive"}</Pill>}
       <input style={S.input} value={title} maxLength={120} placeholder="Title" aria-label="Title" onChange={(e) => setTitle(e.target.value)} onBlur={() => title !== item.title && onSave(item.id, { title })} />
       <textarea style={{ ...S.input, minHeight: 56 }} value={caption} maxLength={500} placeholder="Caption (optional)" aria-label="Caption" onChange={(e) => setCaption(e.target.value)} onBlur={() => caption !== item.caption && onSave(item.id, { caption })} />
       <div style={{ ...S.row, justifyContent: "space-between" }}>
@@ -89,6 +89,24 @@ export default function PortfolioTab({ driveEmail, onConnectDrive }) {
   const [needsDrive, setNeedsDrive] = useState(false);
   const [mediaError, setMediaError] = useState("");   // previews / Drive check couldn't run
   const [showLink, setShowLink] = useState(false);
+  const [warnings, setWarnings] = useState([]);    // upload succeeded but a cleanup step needs attention
+  // Uploads that reached (or may have reached) Drive but aren't saved yet: [{fileId | uploadId, replaceItemId, fileName, message}].
+  // Kept in this browser, per signed-in user, so a reload doesn't lose track of them (ids only; no credentials).
+  const [pending, setPending] = useState([]);
+  const [pendingKey, setPendingKey] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api.currentUserId().then((id) => {
+      if (!live || !id) return;
+      const key = `portfolio:pending:${id}`;
+      let saved = []; try { saved = JSON.parse(localStorage.getItem(key) || "[]"); } catch { /* unreadable: ignore */ }
+      const idOf = (x) => x.fileId || x.uploadId;
+      setPending((xs) => [...saved.filter((s) => s && idOf(s) && !xs.some((x) => idOf(x) === idOf(s))), ...xs]);
+      setPendingKey(key);
+    }).catch(() => {});
+    return () => { live = false; };
+  }, []);
+  useEffect(() => { if (!pendingKey) return; try { if (pending.length) localStorage.setItem(pendingKey, JSON.stringify(pending)); else localStorage.removeItem(pendingKey); } catch { /* storage unavailable */ } }, [pending, pendingKey]);
   const { busy, error, run } = useBusy();
   const fileRef = useRef(null);
 
@@ -105,7 +123,24 @@ export default function PortfolioTab({ driveEmail, onConnectDrive }) {
   }), []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
 
-  const describe = (e) => { if (e?.code === "not_connected") setNeedsDrive(true); return e?.message || "Unknown error"; };
+  const describe = (e) => {
+    if (e?.code === "not_connected") setNeedsDrive(true);
+    const key = e?.fileId || e?.uploadId;
+    if ((e?.code === "finalize_failed" || e?.code === "upload_unconfirmed") && key) setPending((xs) => (xs.some((x) => (x.fileId || x.uploadId) === key) ? xs : [...xs, { fileId: e.fileId, uploadId: e.uploadId, replaceItemId: e.replaceItemId, fileName: e.fileName, message: e.message }]));
+    return e?.message || "Unknown error";
+  };
+  const warn = (msgs) => setWarnings((w) => [...w, ...msgs.filter((m) => !w.includes(m))]);
+  // Retry REGISTERING a file that is already in Drive (idempotent on the server; never uploads the bytes again).
+  const retryPending = (p) => run(async () => {
+    const same = (x) => (x.fileId || x.uploadId) === (p.fileId || p.uploadId);
+    try { await (p.fileId ? api.finalizeUpload(p, { onWarning: warn }) : api.recoverUpload(p, { onWarning: warn })); setPending((xs) => xs.filter((x) => !same(x))); }
+    catch (e) {
+      // "never finished" is a definite answer: nothing is in Drive, so drop the entry and tell the owner to upload again.
+      if (e?.code === "drive_upload_network") { setPending((xs) => xs.filter((x) => !same(x))); setNotice(e.message); }
+      else setPending((xs) => xs.map((x) => (same(x) ? { ...x, message: e.message } : x)));
+    }
+    await load();
+  });
 
   const upload = (files) => run(async () => {
     const problems = []; let count = items.length; const list = [...files];
@@ -115,8 +150,8 @@ export default function PortfolioTab({ driveEmail, onConnectDrive }) {
       if (!v.ok) { problems.push(v.error); continue; }
       const label = `Uploading ${n + 1} of ${list.length}: ${f.name}`;
       setProgress(label);
-      try { await api.uploadMedia(f, { onProgress: (p) => setProgress(`${label} (${Math.round(p * 100)}%)`) }); count++; }
-      catch (e) { problems.push(`${f.name}: ${describe(e)}`); }
+      try { await api.uploadMedia(f, { onWarning: warn, onProgress: (p) => setProgress(`${label} (${Math.round(p * 100)}%)`) }); count++; }
+      catch (e) { const m = describe(e); if (!["finalize_failed", "upload_unconfirmed"].includes(e?.code)) problems.push(`${f.name}: ${m}`); }
     }
     setProgress(""); setNotice(problems.join("\n")); await load();
   });
@@ -125,8 +160,8 @@ export default function PortfolioTab({ driveEmail, onConnectDrive }) {
     if (!v.ok) return setNotice(v.error);
     run(async () => {
       setProgress(`Replacing: ${f.name}`);
-      try { await api.uploadMedia(f, { replaceItemId: item.id, onProgress: (p) => setProgress(`Replacing: ${f.name} (${Math.round(p * 100)}%)`) }); setNotice(""); }
-      catch (e) { setNotice(`${f.name}: ${describe(e)}`); }
+      try { await api.uploadMedia(f, { replaceItemId: item.id, onWarning: warn, onProgress: (p) => setProgress(`Replacing: ${f.name} (${Math.round(p * 100)}%)`) }); setNotice(""); }
+      catch (e) { const m = describe(e); if (!["finalize_failed", "upload_unconfirmed"].includes(e?.code)) setNotice(`${f.name}: ${m}`); }
       setProgress(""); await load();
     });
   };
@@ -149,8 +184,8 @@ export default function PortfolioTab({ driveEmail, onConnectDrive }) {
         if (!res.ok) throw new Error(`couldn't read the old file (HTTP ${res.status})`);
         const blob = await res.blob();
         const file = new File([blob], `${(it.title || "portfolio").slice(0, 80)}.${EXT[it.mime_type] || "bin"}`, { type: it.mime_type });
-        await api.uploadMedia(file, { replaceItemId: it.id, onProgress: (p) => setProgress(`${label} (${Math.round(p * 100)}%)`) });
-      } catch (e) { problems.push(`${it.title || it.id}: ${describe(e)}`); }
+        await api.uploadMedia(file, { replaceItemId: it.id, onWarning: warn, onProgress: (p) => setProgress(`${label} (${Math.round(p * 100)}%)`) });
+      } catch (e) { const m = describe(e); if (!["finalize_failed", "upload_unconfirmed"].includes(e?.code)) problems.push(`${it.title || it.id}: ${m}`); }
     }
     setProgress(""); setNotice(problems.join("\n")); await load();
   });
@@ -174,6 +209,10 @@ export default function PortfolioTab({ driveEmail, onConnectDrive }) {
       {mediaError && <Banner tone="bad"><span style={{ whiteSpace: "pre-line" }}>{mediaError}</span></Banner>}
       {notice && <Banner tone="bad" action={<Btn small onClick={() => setNotice("")}>Dismiss</Btn>}><span style={{ whiteSpace: "pre-line" }}>Some uploads failed:{"\n"}{notice}</span></Banner>}
       {progress && <Banner tone="info">{progress}</Banner>}
+      {warnings.length > 0 && <Banner tone="warn" action={<Btn small onClick={() => setWarnings([])}>Dismiss</Btn>}><span style={{ whiteSpace: "pre-line" }}>{warnings.join("\n")}</span></Banner>}
+      {pending.map((p) => (
+        <Banner key={p.fileId || p.uploadId} tone="warn" action={<span style={S.row}><Btn small disabled={busy} onClick={() => retryPending(p)}>{p.fileId ? "Retry saving" : "Check again"}</Btn><Btn small onClick={() => setPending((xs) => xs.filter((x) => (x.fileId || x.uploadId) !== (p.fileId || p.uploadId)))}>Dismiss</Btn></span>}>{p.message}</Banner>
+      ))}
       {legacy.length > 0 && (
         <Banner tone="warn" action={<Btn small disabled={busy || !Object.keys(urls).length} onClick={migrate}>Move to Google Drive</Btn>}>
           {legacy.length} item{legacy.length === 1 ? " is" : "s are"} still in the old storage. Move {legacy.length === 1 ? "it" : "them"} to your Google Drive folder.

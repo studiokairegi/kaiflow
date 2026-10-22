@@ -53,3 +53,35 @@ export function linkStatus(link, now = Date.now()) {
   if (link.expires_at && new Date(link.expires_at).getTime() <= now) return "expired";
   return "active";
 }
+
+// ---- upload recovery -----------------------------------------------------------------------------------------
+// A large upload is two steps: the bytes go to Drive, then the server REGISTERS the Drive file. If only the
+// second step fails the file already sits in Drive, so the right recovery is to retry registration with the same
+// Drive file id (the server verifies it again and is idempotent), never to upload the bytes a second time.
+// Server errors carry `retryable`; a dropped connection is always worth retrying.
+export const isRetryableFinalizeError = (e) => e?.retryable === true || e?.code === "network";
+
+export const FINALIZE_RETRY_DELAYS_MS = [600, 2000];
+const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Runs `fn` (a finalize call), retrying retryable failures after the given delays. Resolves with fn's result or
+// throws the LAST error. Non-retryable errors are thrown immediately. `sleep` is injectable for tests.
+export async function withFinalizeRetry(fn, { delays = FINALIZE_RETRY_DELAYS_MS, sleep = realSleep, isRetryable = isRetryableFinalizeError } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await fn(attempt); }
+    catch (e) {
+      if (attempt >= delays.length || !isRetryable(e)) throw e;
+      await sleep(delays[attempt]);
+    }
+  }
+}
+
+// Message for "uploaded OK, but saving failed": tells the owner NOT to upload again.
+export const finalizeFailureMessage = (name, cause) =>
+  `${name || "The file"} reached Google Drive, but saving it to your portfolio failed${cause ? ` (${cause})` : ""}. Use “Retry saving” instead of uploading it again.`;
+
+// Lost PUT response: Drive's file listing can lag the upload by a few seconds, so "not found" is retried for a while
+// before concluding the upload never finished.
+export const RECOVER_RETRY_DELAYS_MS = [1000, 3000, 6000];
+export const unconfirmedUploadMessage = (name, cause) =>
+  `${name || "The file"}: the upload to Google Drive may have finished, but the connection dropped before it could be confirmed${cause ? ` (${cause})` : ""}. Use “Check again” instead of uploading it again.`;

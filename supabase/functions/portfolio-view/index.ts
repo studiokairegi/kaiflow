@@ -4,8 +4,9 @@
 //
 // Deploy with --no-verify-jwt: the recipient has no account. Authorization is the share token, checked in
 // the database (portfolio_public_get: not revoked, not expired). Every item is returned (nothing is silently
-// dropped); `url` points at portfolio-media, which streams from the studio's Google Drive and re-checks the
-// link on EVERY request, so revoking a link stops playback immediately. Bad/expired/revoked tokens all return
+// dropped); `url` points at portfolio-media, which streams from the studio's Google Drive (or, for items not yet
+// moved, the private legacy bucket; no Storage signed URL is ever issued) and re-checks the link on EVERY
+// request, so a revoked link is refused on the next request. Bad/expired/revoked tokens all return
 // the same 404. Required secret: DOWNLOAD_SIGNING_KEY.
 //
 // Note: add rate limiting at the edge/WAF; the token space is large but this endpoint is anonymous.

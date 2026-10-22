@@ -1,18 +1,23 @@
-// Streams portfolio media from Google Drive (or, for not-yet-migrated items, redirects to the old bucket).
+// Streams portfolio media from Google Drive, or, for items not yet moved to Drive, from the private legacy
+// 'portfolio' Storage bucket. BOTH are streamed through this function; no Storage signed URL is ever issued.
 //
 //   GET ?t=<ticket>   (Range supported)
 //
 // Deploy with --no-verify-jwt: <img>/<video> can't send an Authorization header and public viewers have no
 // account. Authorization = a signed, short-lived ticket PLUS a live database check on every request, so a
-// revoked/expired link or deleted item stops working immediately. Required secrets: DOWNLOAD_SIGNING_KEY,
-// DRIVE_TOKEN_ENCRYPTION_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.
+// revoked/expired link or deleted item is refused on the next request. (A response that is already streaming
+// finishes; ranged responses are capped at 16 MB, so players re-authorize at least that often.)
+// Required secrets: DOWNLOAD_SIGNING_KEY, DRIVE_TOKEN_ENCRYPTION_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+// (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are provided by the platform).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { decryptText } from "../_shared/crypto.ts";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
 import { fetchDriveFileStream, getAccessToken } from "../_shared/google.ts";
 import { verifyMediaTicket } from "../_shared/portfolio/ticket.ts";
-import { parseRange } from "../_shared/portfolio/range.ts";
+import { effectiveRange } from "../_shared/portfolio/range.ts";
+import { legacyStorageUrl, serveMedia } from "../_shared/portfolio/stream.ts";
 
+const FULL_RESPONSE_MAX_BYTES = 64 * 1024 * 1024; // an un-ranged request for a video larger than this is answered as its first RANGE_CAP_BYTES (206)
 const RANGE_CAP_BYTES = 16 * 1024 * 1024;     // one response never streams more than this; the player asks for the next range
 const json = (body: unknown, status: number) =>
   new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json", "Cache-Control": "no-store" } });
@@ -25,6 +30,7 @@ async function accessTokenFor(db: ReturnType<typeof createClient>, userId: strin
   const { data: conn } = await db.from("google_drive_connections").select("refresh_token_encrypted").eq("user_id", userId).maybeSingle();
   if (!conn) return null;
   const token = await getAccessToken(await decryptText(conn.refresh_token_encrypted, Deno.env.get("DRIVE_TOKEN_ENCRYPTION_KEY")!));
+  if (tokenCache.size >= 500) for (const [k, v] of tokenCache) if (Date.now() - v.at > 45 * 60_000) tokenCache.delete(k);   // keep the per-isolate cache bounded
   tokenCache.set(userId, { token, at: Date.now() });
   return token;
 }
@@ -44,43 +50,33 @@ Deno.serve(async (req) => {
     const { data: item, error } = await db.rpc("portfolio_authorize_media", { p_item: ticket.i, p_link: ticket.l, p_user: ticket.u });
     if (error || !item) return json({ error: "not_available" }, 404);
 
-    // Items uploaded before the Drive migration: hand off to a short-lived signed URL (browsers follow it, Range included).
-    if (!item.drive_file_id) {
-      if (!item.storage_path) return json({ error: "file_missing" }, 404);
-      const { data: signed } = await db.storage.from("portfolio").createSignedUrl(item.storage_path, 600);
-      return signed?.signedUrl ? new Response(null, { status: 302, headers: { ...corsHeaders, Location: signed.signedUrl, "Cache-Control": "no-store" } }) : json({ error: "file_missing" }, 404);
-    }
-
     const size = Number(item.size_bytes);
-    const range = parseRange(req.headers.get("Range"), size, RANGE_CAP_BYTES);
-    if (range.status === 416) return new Response(null, { status: 416, headers: { ...corsHeaders, "Content-Range": `bytes */${size}` } });
-    const driveRange = range.status === 206 ? `bytes=${range.start}-${range.end}` : undefined;
+    const range = effectiveRange(req.headers.get("Range"), size, RANGE_CAP_BYTES, FULL_RESPONSE_MAX_BYTES, item.kind === "video");
+    const common = { size, mimeType: item.mime_type as string | null, range, baseHeaders: corsHeaders };
+
+    // Items uploaded before the Drive migration: stream the private Storage object through this function
+    // (service role, Range forwarded) instead of redirecting to a signed URL that would outlive a revoked link.
+    if (!item.drive_file_id) {
+      const url = legacyStorageUrl(Deno.env.get("SUPABASE_URL")!, item.user_id, item.storage_path);
+      if (!url) return json({ error: "file_missing" }, 404);
+      const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+      return await serveMedia({ ...common, fetchUpstream: (r, signal) => fetch(url, { signal, headers: { Authorization: `Bearer ${serviceKey}`, apikey: serviceKey, "Accept-Encoding": "identity", ...(r ? { Range: r } : {}) } }) });
+    }
 
     let token = await accessTokenFor(db, item.user_id);
     if (!token) return json({ error: "drive_not_connected" }, 503);
-    let res = await fetchDriveFileStream(token, item.drive_file_id, driveRange);
-    if (res.status === 401) { token = await accessTokenFor(db, item.user_id, true); if (token) res = await fetchDriveFileStream(token, item.drive_file_id, driveRange); }
-    if (res.status === 404) return json({ error: "file_missing" }, 404);
-    if (!res.ok && res.status !== 206) { console.error(`Drive media fetch failed: ${res.status}`); return json({ error: "drive_unavailable" }, 502); }
-    if (!res.body) return json({ error: "drive_unavailable" }, 502);
-
-    const headers: Record<string, string> = {
-      ...corsHeaders,
-      "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length",
-      "Content-Type": item.mime_type || res.headers.get("Content-Type") || "application/octet-stream",
-      "Content-Disposition": "inline",
-      "Accept-Ranges": "bytes",
-      "Cache-Control": "private, no-store",
-      "X-Content-Type-Options": "nosniff",
-    };
-    if (range.status === 206) {
-      headers["Content-Range"] = `bytes ${range.start}-${range.end}/${size}`;
-      headers["Content-Length"] = String(range.end - range.start + 1);
-      return new Response(res.body, { status: 206, headers });
-    }
-    const len = res.headers.get("Content-Length");
-    if (len) headers["Content-Length"] = len;
-    return new Response(res.body, { status: 200, headers });
+    return await serveMedia({
+      ...common,
+      fetchUpstream: async (r, signal) => {
+        let res = await fetchDriveFileStream(token!, item.drive_file_id, r, signal);
+        if (res.status === 401) {
+          void res.body?.cancel();
+          token = await accessTokenFor(db, item.user_id, true);
+          if (token) res = await fetchDriveFileStream(token, item.drive_file_id, r, signal);
+        }
+        return res;
+      },
+    });
   } catch (err) {
     console.error("portfolio-media error:", err instanceof Error ? err.message : String(err));
     return json({ error: "server_error" }, 500);

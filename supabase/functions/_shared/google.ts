@@ -196,6 +196,19 @@ export async function getDriveFileMeta(accessToken: string, fileId: string): Pro
   return (await res.json()) as DriveFileMeta;
 }
 
+// Lists live files in `folderId` carrying appProperties[key] === value. `key` and `value` are restricted to a
+// safe character set because they are interpolated into the Drive query string.
+export async function listFilesByAppProperty(accessToken: string, folderId: string, key: string, value: string): Promise<DriveFileMeta[]> {
+  if (!/^[A-Za-z0-9_]{1,40}$/.test(key) || !/^[A-Za-z0-9-]{1,64}$/.test(value) || !/^[A-Za-z0-9_-]{5,100}$/.test(folderId)) throw new Error("Invalid Drive query parameters.");
+  const q = `appProperties has { key='${key}' and value='${value}' } and '${folderId}' in parents and trashed = false`;
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${encodeURIComponent("files(id,name,mimeType,size,trashed,parents)")}&pageSize=5&spaces=drive`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) throw new Error(`Drive file search failed: ${res.status}`);
+  return ((await res.json()).files ?? []) as DriveFileMeta[];
+}
+
 // Finds an existing, non-trashed folder by exact name under a parent so
 // retries / concurrent requests reuse it instead of creating duplicates.
 export async function findChildFolder(
@@ -217,10 +230,10 @@ export async function findChildFolder(
 
 // Streams the file bytes (alt=media) without buffering them in memory.
 // `range` (e.g. "bytes=0-1048575") is forwarded so media can be seeked; omitted callers behave as before.
-export async function fetchDriveFileStream(accessToken: string, fileId: string, range?: string): Promise<Response> {
+export async function fetchDriveFileStream(accessToken: string, fileId: string, range?: string, signal?: AbortSignal): Promise<Response> {
   const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
   if (range) headers.Range = range;
-  return await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, { headers });
+  return await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, { headers, signal });
 }
 
 // Starts a Drive RESUMABLE upload and returns the session URL. The browser PUTs the file bytes straight
@@ -234,7 +247,8 @@ export async function createResumableUploadSession(
   fileName: string,
   mimeType: string,
   size: number,
-  origin?: string
+  origin?: string,
+  appProperties?: Record<string, string>   // private key/values stored on the file (used to find an upload whose response was lost)
 ): Promise<string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
@@ -246,7 +260,7 @@ export async function createResumableUploadSession(
   const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id", {
     method: "POST",
     headers,
-    body: JSON.stringify({ name: fileName, parents: [folderId] }),
+    body: JSON.stringify({ name: fileName, parents: [folderId], ...(appProperties ? { appProperties } : {}) }),
   });
   if (!res.ok) throw new Error(`Drive upload session failed: ${res.status} ${await res.text()}`);
   const location = res.headers.get("Location");

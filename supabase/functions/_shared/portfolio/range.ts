@@ -24,3 +24,14 @@ export function parseRange(header: string | null | undefined, size: number, cap:
   end = Math.min(end, start + cap - 1);
   return { status: 206, start, end };
 }
+
+// A request WITHOUT a Range header normally gets the whole file. For a large video that would pin one Edge
+// Function invocation (and the Drive connection) for the entire file, so above `fullMax` bytes it is answered
+// as the first `cap` bytes (206 + Content-Range). Browsers' <video> elements always send Range and simply
+// continue from there, so playback and seeking are unaffected; only a raw, non-Range fetch of a huge video
+// sees a partial body (which is always labelled as one).
+export function effectiveRange(header: string | null | undefined, size: number, cap: number, fullMax: number, isVideo: boolean): RangeResult {
+  const r = parseRange(header, size, cap);
+  if (r.status === 200 && isVideo && size > fullMax) return { status: 206, start: 0, end: Math.min(size, cap) - 1 };
+  return r;
+}
