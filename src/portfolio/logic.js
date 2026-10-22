@@ -85,3 +85,32 @@ export const finalizeFailureMessage = (name, cause) =>
 export const RECOVER_RETRY_DELAYS_MS = [1000, 3000, 6000];
 export const unconfirmedUploadMessage = (name, cause) =>
   `${name || "The file"}: the upload to Google Drive may have finished, but the connection dropped before it could be confirmed${cause ? ` (${cause})` : ""}. Use “Check again” instead of uploading it again.`;
+
+// ---- picking files + the upload loop --------------------------------------------------------------------------
+// `input.files` is the input's OWN live FileList. Resetting the input (needed so choosing the same file again fires
+// `change`) empties that list in place in Chromium/WebKit, so it must be COPIED first. Passing the FileList on and
+// resetting afterwards silently uploads nothing. (File objects themselves survive the reset.)
+export function takeFiles(input) {
+  const files = Array.from(input?.files ?? []);
+  if (input) input.value = "";
+  return files;
+}
+
+// Errors whose recovery UI is the "Retry saving / Check again" banner, so they are not repeated in the failure list.
+export const PENDING_ERROR_CODES = ["finalize_failed", "upload_unconfirmed"];
+
+// Validates and uploads files one by one. Never throws: every outcome is returned as a user-visible message.
+//   uploadOne(file, onProgress) performs one upload; describe(error) turns an error into text (and may record state).
+export async function uploadBatch(files, { existingCount = 0, uploadOne, describe = (e) => e?.message || "Unknown error", onProgress } = {}) {
+  const problems = []; const list = [...files]; let count = existingCount; let uploaded = 0;
+  for (let n = 0; n < list.length; n++) {
+    const f = list[n];
+    const v = validateFile(f, count);
+    if (!v.ok) { problems.push(v.error); continue; }
+    const label = `Uploading ${n + 1} of ${list.length}: ${f.name}`;
+    onProgress?.(label);
+    try { await uploadOne(f, (p) => onProgress?.(`${label} (${Math.round(p * 100)}%)`)); count++; uploaded++; }
+    catch (e) { const m = describe(e); if (!PENDING_ERROR_CODES.includes(e?.code)) problems.push(`${f.name}: ${m}`); }
+  }
+  return { problems, uploaded };
+}

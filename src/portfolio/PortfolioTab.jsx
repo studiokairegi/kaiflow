@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { S, T, Btn, Pill, Banner, Modal, Field, useBusy } from "../finance/ui.jsx";
 import * as api from "./api.js";
-import { validateFile, formatBytes, moveItem, portfolioUrl, linkStatus, MAX_ITEMS } from "./logic.js";
+import { validateFile, formatBytes, moveItem, portfolioUrl, linkStatus, takeFiles, uploadBatch, MAX_ITEMS } from "./logic.js";
 
 // Leads > Portfolio. Curate videos/images, then create a separate secure link per recipient.
 const fillStyle = { position: "absolute", inset: 0, width: "100%", height: "100%" };
@@ -35,7 +35,7 @@ function ItemCard({ item, url, health, previewFailed, index, count, onMove, onRe
           <Btn small onClick={() => onDelete(item)}>Delete</Btn>
         </span>
       </div>
-      <input ref={replaceRef} type="file" hidden accept="video/mp4,video/webm,video/quicktime,image/jpeg,image/png,image/webp,image/gif" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onReplace(item, f); }} />
+      <input ref={replaceRef} type="file" hidden accept="video/mp4,video/webm,video/quicktime,image/jpeg,image/png,image/webp,image/gif" onChange={(e) => { const [f] = takeFiles(e.target); if (f) onReplace(item, f); }} />
     </div>
   );
 }
@@ -143,17 +143,15 @@ export default function PortfolioTab({ driveEmail, onConnectDrive }) {
   });
 
   const upload = (files) => run(async () => {
-    const problems = []; let count = items.length; const list = [...files];
-    for (let n = 0; n < list.length; n++) {
-      const f = list[n];
-      const v = validateFile(f, count);
-      if (!v.ok) { problems.push(v.error); continue; }
-      const label = `Uploading ${n + 1} of ${list.length}: ${f.name}`;
-      setProgress(label);
-      try { await api.uploadMedia(f, { onWarning: warn, onProgress: (p) => setProgress(`${label} (${Math.round(p * 100)}%)`) }); count++; }
-      catch (e) { const m = describe(e); if (!["finalize_failed", "upload_unconfirmed"].includes(e?.code)) problems.push(`${f.name}: ${m}`); }
-    }
-    setProgress(""); setNotice(problems.join("\n")); await load();
+    try {
+      const { problems } = await uploadBatch(files, {
+        existingCount: items.length, describe,
+        uploadOne: (f, onProgress) => api.uploadMedia(f, { onWarning: warn, onProgress }),
+        onProgress: setProgress,
+      });
+      setNotice(problems.join("\n"));
+    } finally { setProgress(""); }
+    await load();
   });
   const replace = (item, f) => {
     const v = validateFile(f, 0);
@@ -199,7 +197,7 @@ export default function PortfolioTab({ driveEmail, onConnectDrive }) {
           <Btn kind="primary" disabled={!items.length} onClick={() => setShowLink(true)}>Share portfolio</Btn>
         </span>
       </div>
-      <input ref={fileRef} type="file" multiple hidden accept="video/mp4,video/webm,video/quicktime,image/jpeg,image/png,image/webp,image/gif" onChange={(e) => { const f = e.target.files; e.target.value = ""; if (f?.length) upload(f); }} />
+      <input ref={fileRef} type="file" multiple hidden accept="video/mp4,video/webm,video/quicktime,image/jpeg,image/png,image/webp,image/gif" onChange={(e) => { const files = takeFiles(e.target); if (files.length) upload(files); }} />
 
       {(needsDrive || (!driveEmail && loaded)) && onConnectDrive && !driveEmail && (
         <Banner tone="warn" action={<Btn small onClick={onConnectDrive}>Connect Google Drive</Btn>}>Connect Google Drive to upload and show portfolio media; it's stored in your Drive.</Banner>

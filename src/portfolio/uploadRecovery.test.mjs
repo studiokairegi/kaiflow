@@ -215,3 +215,21 @@ test("recovery of a replacement surfaces the server's 'target vanished -> added 
   const seen = []; await api.uploadMedia(bigFile(), { replaceItemId: "00000000-0000-4000-8000-000000000009", retryDelays: NO_WAIT, onWarning: (m) => seen.push(...m) });
   assert.match(seen[0], /no longer exists/);
 });
+
+// ---------------------------------------------------------------- the UI's upload loop driving the real api.js (server mocked)
+test("batch upload through api.js: exactly one item per file; a failed save is retried via the banner path with no duplicate", async () => {
+  world();
+  const pendingBanner = [];
+  server.script = Array(3).fill({ status: 500, body: { error: "Couldn't save the portfolio item. Try again.", code: "db_error", retryable: true } });
+  const { problems, uploaded } = await L.uploadBatch([bigFile("one.mp4")], {
+    uploadOne: (f, onProgress) => api.uploadMedia(f, { retryDelays: NO_WAIT, onProgress }),
+    describe: (e) => { pendingBanner.push({ fileId: e.fileId, fileName: e.fileName }); return e.message; },
+  });
+  assert.deepEqual(problems, []); assert.equal(uploaded, 0);                          // reported via the banner, not as a plain failure
+  assert.equal(pendingBanner.length, 1); assert.equal(server.drive.size, 0); assert.equal(puts, 1);
+  await api.finalizeUpload(pendingBanner[0], { retryDelays: NO_WAIT });               // owner presses "Retry saving"
+  await api.finalizeUpload(pendingBanner[0], { retryDelays: NO_WAIT });               // ...twice
+  assert.equal(server.drive.size, 1); assert.equal(puts, 1); assert.equal(server.requests.filter((a) => a === "init-upload").length, 1);
+  const second = await L.uploadBatch([bigFile("two.mp4")], { uploadOne: (f) => api.uploadMedia(f, { retryDelays: NO_WAIT }) });
+  assert.equal(second.uploaded, 1); assert.equal(server.drive.size, 2);
+});
