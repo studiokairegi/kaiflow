@@ -10,7 +10,7 @@
 // Authorisation is the unguessable checkout token (64 hex chars). Everything else is derived on
 // the server:
 //   * the invoice, amount and currency come from the database (payments_checkout_prepare),
-//   * the environment (test/live) comes from the PAYSTACK_MODE server secret,
+//   * production checkout requires the PAYSTACK_MODE server secret to be live,
 //   * success is decided ONLY by Paystack's verify API called here with the secret key, and the
 //     reference, amount, currency and environment are checked against OUR stored row.
 // The browser redirect, query strings and anything else the client sends prove nothing.
@@ -46,8 +46,8 @@ Deno.serve(async (req) => {
   if (!TOKEN.test(token)) return json({ error: "This payment link is not valid." }, 400);
 
   const cfg = resolvePaystackConfig(Deno.env);
-  if (!cfg.ok) {
-    console.error("paystack-checkout disabled", { code: cfg.code });
+  if (!cfg.ok || cfg.environment !== "live") {
+    console.error("paystack-checkout disabled", { code: cfg.ok ? "live_required" : cfg.code });
     return json({ error: "Online payment is not available right now. Please contact StudioKairegi." }, 503);
   }
   const service = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);

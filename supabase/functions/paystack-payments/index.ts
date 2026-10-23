@@ -2,10 +2,11 @@
 //
 //   status       -> configuration state for the active environment (no secrets, no Paystack call)
 //   connect      -> confirm the server key works, mark Paystack connected + primary for the active environment
-//   init         -> { invoice_id, email, amount? }  start a TEST-mode checkout for an invoice (live uses the payment link)
+//   init         -> legacy development-only shortcut; production checkout is always the hosted live payment link
 //   verify       -> { reference }                    verify with Paystack server-side, then apply
-//   balance      -> Paystack test-mode balance (only if the API returns one)
-//   settlements  -> Paystack settlements list (only if the API returns any)
+//   balance      -> Paystack live available balance
+//   settlements  -> Paystack live settlements
+//   snapshot     -> live gateway snapshot: transactions, fees, refunds, totals, balances and settlements
 //
 // Required server secrets (never in frontend code or git):
 //   PAYSTACK_MODE=test|live          which environment is ACTIVE; anything else disables payments
@@ -29,6 +30,21 @@ const json = (body: unknown, status = 200) =>
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REFERENCE = /^[A-Za-z0-9_.=-]{6,100}$/;
+
+async function fetchPaged(cfg: any, path: string, mapRow: (row: any) => any, maxPages = 50) {
+  const rows: any[] = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const sep = path.includes("?") ? "&" : "?";
+    const r = await paystackFetch(cfg, `${path}${sep}perPage=100&page=${page}`);
+    if (!r.ok || r.body?.status !== true) return { ok: false, rows, reason: paystackMessage(r), complete: false };
+    const data = Array.isArray(r.body.data) ? r.body.data : [];
+    rows.push(...data.map(mapRow));
+    const meta = r.body.meta || {};
+    if (data.length < 100 && !meta.next) return { ok: true, rows, reason: "", complete: true };
+    if (data.length === 0) return { ok: true, rows, reason: "", complete: true };
+  }
+  return { ok: true, rows, reason: "Paystack pagination limit reached; refresh again to continue synchronizing.", complete: false };
+}
 
 Deno.serve(async (req) => {
   const preflight = handleOptions(req);
@@ -71,6 +87,9 @@ Deno.serve(async (req) => {
 
   if (!cfg.ok) return json({ error: cfg.message, code: cfg.code, environment: null }, 503);
   const env = cfg.environment;
+  if (env !== "live" && ["connect", "snapshot", "balance", "settlements"].includes(action)) {
+    return json({ error: "Production Payments requires PAYSTACK_MODE=live. Test mode is isolated to development and automated tests.", code: "live_required", environment: env }, 503);
+  }
 
   // Confirms the server-side key works against Paystack's API, then marks Paystack connected,
   // primary and enabled in the ACTIVE environment. Test and live are connected separately.
@@ -176,6 +195,41 @@ Deno.serve(async (req) => {
       return json({ environment: tx.environment, ...applied });
     }
 
+    if (action === "snapshot") {
+      if (env !== "live") return json({ available: false, environment: env, reason: "Production finance synchronization requires Paystack Live mode." }, 503);
+      const fetchedAt = new Date().toISOString();
+      const [balanceR, totalsR, txR, refundR, settlementR] = await Promise.all([
+        paystackFetch(cfg, "/balance"),
+        paystackFetch(cfg, "/transaction/totals?perPage=100"),
+        fetchPaged(cfg, "/transaction?status=success", (t: any) => ({
+          id: String(t.id ?? ""), reference: String(t.reference || ""), status: String(t.status || ""),
+          amount: fromMinor(t.amount), currency: String(t.currency || "").toUpperCase(), fees: t.fees == null ? null : fromMinor(t.fees),
+          channel: String(t.channel || ""), paidAt: t.paid_at || t.paidAt || null, createdAt: t.created_at || t.createdAt || null,
+          gatewayResponse: String(t.gateway_response || ""), customerEmail: t.customer?.email || null, domain: String(t.domain || ""),
+        })),
+        fetchPaged(cfg, "/refund", (r: any) => ({
+          id: String(r.id ?? ""), transaction: String(r.transaction ?? ""), status: String(r.status || ""),
+          amount: fromMinor(r.amount), deductedAmount: r.deducted_amount == null ? null : fromMinor(r.deducted_amount),
+          currency: String(r.currency || "").toUpperCase(), refundedAt: r.refunded_at || null, createdAt: r.created_at || r.createdAt || null,
+          domain: String(r.domain || ""),
+        })),
+        fetchPaged(cfg, "/settlement", (s: any) => ({
+          id: String(s.id ?? ""), status: String(s.status || ""), domain: String(s.domain || ""),
+          currency: String(s.currency || "").toUpperCase(), totalAmount: fromMinor(s.total_amount), totalFees: fromMinor(s.total_fees),
+          totalProcessed: fromMinor(s.total_processed), settlementDate: s.settlement_date || s.settled_at || null,
+          createdAt: s.createdAt || s.created_at || null, updatedAt: s.updatedAt || s.updated_at || null,
+        })),
+      ]);
+      const balanceOk = balanceR.ok && balanceR.body?.status === true;
+      const totalsOk = totalsR.ok && totalsR.body?.status === true;
+      return json({
+        environment: env, available: balanceOk && totalsOk, fetchedAt,
+        balance: { available: balanceOk, reason: balanceOk ? "" : paystackMessage(balanceR), balances: balanceOk ? (Array.isArray(balanceR.body.data) ? balanceR.body.data.map((b: any) => ({ currency: String(b.currency || "").toUpperCase(), balance: fromMinor(b.balance) })) : []) : [] },
+        totals: { available: totalsOk, reason: totalsOk ? "" : paystackMessage(totalsR), totalTransactions: totalsOk ? Number(totalsR.body.data?.total_transactions || 0) : null, totalVolume: totalsOk ? fromMinor(totalsR.body.data?.total_volume) : null, totalVolumeByCurrency: totalsOk ? (Array.isArray(totalsR.body.data?.total_volume_by_currency) ? totalsR.body.data.total_volume_by_currency.map((x: any) => ({ currency: String(x.currency || "").toUpperCase(), amount: fromMinor(x.amount) })) : []) : [], pendingTransfersByCurrency: totalsOk ? (Array.isArray(totalsR.body.data?.pending_transfers_by_currency) ? totalsR.body.data.pending_transfers_by_currency.map((x: any) => ({ currency: String(x.currency || "").toUpperCase(), amount: fromMinor(x.amount) })) : []) : [] },
+        transactions: txR, refunds: refundR, settlements: settlementR,
+      });
+    }
+
     if (action === "balance") {
       const r = await paystackFetch(cfg, "/balance");
       if (!r.ok || r.body?.status !== true) {
@@ -185,7 +239,7 @@ Deno.serve(async (req) => {
       return json({
         environment: env,
         available: list.length > 0,
-        reason: list.length ? "" : "Paystack returned no balance for this test account.",
+        reason: list.length ? "" : "Paystack returned no balance for this live account.",
         balances: list.map((b: any) => ({ currency: String(b.currency || ""), balance: fromMinor(b.balance) })),
         fetchedAt: new Date().toISOString(),
       });

@@ -5,7 +5,7 @@
 // Paystack is the only implemented provider and the default. PayPal and Payoneer stay visible but
 // disabled ("Coming soon — not configured"); Wise and M-Pesa are placeholders with no integration code.
 export const PROVIDER_CATALOG = [
-  { id: "paystack", name: "Paystack", subtitle: "Card and bank transfer", available: true },
+  { id: "paystack", name: "Paystack", subtitle: "Card, bank transfer and Apple Pay", available: true },
   { id: "paypal", name: "PayPal", subtitle: "", available: false },
   { id: "payoneer", name: "Payoneer", subtitle: "", available: false },
   { id: "wise", name: "Wise", subtitle: "Embedded Solutions", available: false },
@@ -25,9 +25,9 @@ export function mergeProviders(rows = []) {
     return {
       ...c,
       status: r?.status || "not_connected",
-      enabled: r ? !!r.is_enabled : true,
-      primary: r ? !!r.is_primary : c.id === "paystack",
-      connected: r?.status === "connected",
+      enabled: r ? !!r.is_enabled && r.environment === "live" : true,
+      primary: r ? !!r.is_primary && r.environment === "live" : c.id === "paystack",
+      connected: r?.status === "connected" && r.environment === "live",
     };
   });
 }

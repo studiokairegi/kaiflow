@@ -90,6 +90,9 @@ test("start: bank transfer asks Paystack for the bank_transfer channel only; Pay
   let w = world({ prepare: [newRow], paystack: [initOk] });
   await call({ action: "start", token: TOKEN, email: "a@b.co", channel: "bank_transfer" });
   assert.deepEqual(w.fetches[0].body.channels, ["bank_transfer"]);
+  w = world({ prepare: [newRow], paystack: [initOk] });
+  await call({ action: "start", token: TOKEN, email: "a@b.co", channel: "apple_pay" });
+  assert.deepEqual(w.fetches[0].body.channels, ["apple_pay"]);
   for (const channel of ["paypal", "payoneer", ""]) {
     w = world({});
     const res = await call({ action: "start", token: TOKEN, email: "a@b.co", channel });

@@ -2,3 +2,4 @@ supabase/.temp/
 dist/
 .env
 node_modules/
+paystack-live.env.txt

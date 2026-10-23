@@ -4,11 +4,10 @@ import { ActivityCard } from "../DashboardKit.jsx";
 import { formatMoney, formatTotalsByCurrency, symbolToCode } from "../finance/currency.js";
 import { PrivacyToggle } from "../finance/PrivacyToggle.jsx";
 import { usePayments } from "./usePayments.js";
-import PayNowDialog from "./PayNowDialog.jsx";
 import ProvidersTab from "./ProvidersTab.jsx";
 import * as api from "./api.js";
 import {
-  PAYMENT_PERIODS, PAYOUT_STATUS, SIMULATED_NOTICE, envNotice, txEnvironment, TX_STATUS, billAvailableForRequest, checkoutBlocker,
+  PAYMENT_PERIODS, PAYOUT_STATUS, SIMULATED_NOTICE, TX_STATUS, billAvailableForRequest,
   freelancerObligations, needsAttention, outstandingOf, payableInvoices, reconcileTotals, recentActivity, summarizePayments,
 } from "./logic.js";
 
@@ -17,18 +16,6 @@ const fmtDateTime = (iso) => (iso ? new Date(iso).toLocaleString() : "-");
 const fmtDay = (iso) => (iso ? String(iso).slice(0, 10) : "-");
 const money = (c, n, priv) => (priv ? "••••" : formatMoney(c, n));
 
-function SandboxBar({ view, setView, hasLive }) {
-  const live = view === "live";
-  const tone = live ? T.bad : T.warn;
-  return (
-    <div role="note" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, border: `1px solid ${tone}66`, background: `${tone}14`, color: tone, borderRadius: 14, padding: "7px 14px", fontSize: 12.5, letterSpacing: "0.04em", fontWeight: 600 }}>
-      <span>{envNotice(view)}</span>
-      <span style={{ display: "flex", gap: 6 }}>
-        {["live", "test"].map((v) => <Btn key={v} small kind={view === v ? "primary" : "default"} onClick={() => setView(v)} aria-pressed={view === v} title={v === "live" && !hasLive ? "No live payments yet" : undefined}>{v === "live" ? "Live" : "Test"}</Btn>)}
-      </span>
-    </div>
-  );
-}
 const StatusPill = ({ map, status }) => <Pill tone={map[status]?.tone || "muted"}>{map[status]?.label || status}</Pill>;
 
 // Headline figure as a dashboard-style gradient card.
@@ -40,16 +27,48 @@ function Kpi({ label, totals, privacy, sub, tone, card = "sky", icon = "card" })
 
 function Overview({ ctx }) {
   const { summary: s, privacy, data, setTab } = ctx;
+  const gateway = data.gateway;
+  const feeByCurrency = {};
+  const refundByCurrency = {};
+  for (const t of gateway?.transactions?.rows || []) if (t.fees != null) feeByCurrency[t.currency] = (feeByCurrency[t.currency] || 0) + Number(t.fees || 0);
+  for (const r of gateway?.refunds?.rows || []) if (r.status === "processed") refundByCurrency[r.currency] = (refundByCurrency[r.currency] || 0) + Number(r.amount || 0);
+  const liveVolume = gateway?.totals?.totalVolumeByCurrency || [];
+  const pendingSettlement = {};
+  for (const settlement of gateway?.settlements?.rows || []) {
+    if (["pending", "processing"].includes(settlement.status)) pendingSettlement[settlement.currency] = (pendingSettlement[settlement.currency] || 0) + Number(settlement.totalProcessed || settlement.totalAmount || 0);
+  }
   const activity = recentActivity(data);
   return (
     <>
       <div style={S.grid(200)}>
-        <Kpi card="mint" icon="wallet" label="Client payments received" totals={s.receivedGross} privacy={privacy} sub={ctx.view === "live" ? "Gross, verified" : "Gross, verified (test data)"} />
+        <Kpi card="mint" icon="wallet" label="Client payments received" totals={s.receivedGross} privacy={privacy} sub={"Verified KairFlow payments"} />
         <Kpi card="sky" icon="clock" label="Received today" totals={s.receivedToday} privacy={privacy} />
         <Kpi card="violet" icon="percent" label="Transaction fees (actual)" totals={s.fees} privacy={privacy} sub="As reported by Paystack" />
         <Kpi card="royal" icon="trend" label="Net after fees" totals={s.net} privacy={privacy} sub="Gross minus actual fees" />
         <Kpi card="violet" icon="undo" label="Refunds" totals={s.refunds} privacy={privacy} />
         <Kpi card="sky" icon="invoice" label="Outstanding client invoices" totals={s.outstandingInvoices} privacy={privacy} sub={`${s.outstandingInvoiceCount} open`} />
+      </div>
+      <div style={S.card}>
+        <div style={{ ...S.row, justifyContent: "space-between", marginBottom: 12 }}><div><h3 style={S.h3}>Paystack Live gateway</h3><p style={S.sub}>Direct provider data. This is separate from KairFlow’s accounting ledger.</p></div><Pill tone={gateway?.available ? "ok" : "bad"}>{gateway?.available ? "Synced" : "Unavailable"}</Pill></div>
+        {!gateway?.available ? <Banner tone="bad">Paystack live data is unavailable{gateway?.error ? `: ${gateway.error}` : "."} No stale or hardcoded gateway values are shown.</Banner> : <div style={S.grid(210)}>
+          <Kpi card="royal" icon="wallet" label="Available balance" totals={Object.fromEntries((gateway.balance?.balances || []).map((b) => [b.currency, b.balance]))} privacy={privacy} sub="Reported by Paystack" />
+          <Kpi card="sky" icon="trend" label="Live transaction volume" totals={Object.fromEntries(liveVolume.map((x) => [x.currency, x.amount]))} privacy={privacy} sub={`${gateway.totals?.totalTransactions || 0} transactions`} />
+          <Kpi card="violet" icon="percent" label="Actual gateway fees" totals={feeByCurrency} privacy={privacy} sub="From Paystack transaction records" />
+          <Kpi card="mint" icon="clock" label="Pending settlement" totals={pendingSettlement} privacy={privacy} sub="Pending / processing settlements" />
+          <Kpi card="violet" icon="undo" label="Processed refunds" totals={refundByCurrency} privacy={privacy} sub="From Paystack refund records" />
+        </div>}
+        {gateway?.fetchedAt && <p style={{ ...S.sub, marginTop: 12 }}>Last synchronized {fmtDateTime(gateway.fetchedAt)} · Paystack Live API.</p>}
+        {gateway?.available && <div style={{ marginTop: 18 }}>
+          <h3 style={S.h3}>Recent live Paystack transactions</h3>
+          <Table rowKey={(t) => t.id} empty="No successful Paystack transactions yet." rows={(gateway.transactions?.rows || []).slice(0, 20)} columns={[
+            { key: "d", label: "Paid", render: (t) => fmtDateTime(t.paidAt || t.createdAt) },
+            { key: "r", label: "Reference", render: (t) => t.reference },
+            { key: "c", label: "Currency", render: (t) => t.currency },
+            { key: "a", label: "Amount", num: true, render: (t) => money(t.currency, t.amount, privacy) },
+            { key: "f", label: "Fee", num: true, render: (t) => t.fees == null ? "-" : money(t.currency, t.fees, privacy) },
+            { key: "m", label: "Method", render: (t) => t.channel || "-" },
+          ]} />
+        </div>}
       </div>
       <div style={S.grid(200)}>
         <Kpi card="sky" icon="clock" label="Pending / successful" totals={`${s.counts.pending} / ${s.counts.successful}`} privacy={false} sub={`${s.counts.failed} failed or abandoned · ${s.counts.refunded} refunded`} />
@@ -60,17 +79,17 @@ function Overview({ ctx }) {
       </div>
       <div style={S.card}>
         <div style={{ ...S.row, justifyContent: "space-between" }}><h3 style={S.h3}>Recent payment activity</h3><Btn small kind="link" onClick={() => setTab("transactions")}>All transactions</Btn></div>
-        <Table rowKey={(r) => r.kind + r.id} empty={ctx.view === "live" ? "No live payment activity yet. Send a client an invoice payment link." : "No test payment activity yet. Use Pay now on an invoice to run a test payment."} rows={activity} columns={[
+        <Table rowKey={(r) => r.kind + r.id} empty={"No live payment activity yet. Send a client an invoice payment link."} rows={activity} columns={[
           { key: "at", label: "When", render: (r) => fmtDateTime(r.at) }, { key: "kind", label: "Type", render: (r) => (r.kind === "payout" ? "Payout (simulated)" : "Client payment") },
           { key: "label", label: "Detail" }, { key: "amount", label: "Amount", num: true, render: (r) => money(r.currency, r.amount, privacy) }]} />
       </div>
-      <p style={S.sub}>Totals are grouped by currency and never added across currencies. Pending payments are not counted as received, and test-mode payments are test data, not income. Test and live are shown separately.</p>
+      <p style={S.sub}>KairFlow invoice and Finance balances remain authoritative for accounting. Paystack figures below are live gateway data and are never added into the ledger a second time.</p>
     </>
   );
 }
 
 function Incoming({ ctx }) {
-  const { invoices, projects, privacy, data, onPay } = ctx;
+  const { invoices, projects, privacy, data } = ctx;
   const [q, setQ] = useState("");
   const projectBy = new Map(projects.map((p) => [p.id, p]));
   const txByInvoice = new Map();
@@ -89,7 +108,6 @@ function Incoming({ ctx }) {
         { key: "d", label: "Due", render: (i) => i.dueDate || "-" },
         { key: "o", label: "Outstanding", num: true, render: (i) => money(symbolToCode(i.currency), outstandingOf(i), privacy) },
         { key: "s", label: "Status", render: (i) => (txByInvoice.get(i.id) ? <Pill tone="warn">Checkout open</Pill> : <Pill tone="muted">Unpaid</Pill>) },
-        { key: "a", label: "", render: (i) => { const b = checkoutBlocker(i); return <Btn small kind="primary" disabled={!!b} title={b} onClick={() => onPay(i)}>Pay now (test)</Btn>; } },
       ]} />
     </div>
   );
@@ -233,7 +251,7 @@ function Transactions({ ctx }) {
       </div>
       {open && (
         <Modal title={`Transaction ${open.reference}`} onClose={() => setOpen(null)} footer={<Btn onClick={() => setOpen(null)}>Close</Btn>}>
-          <Banner tone="warn">{envNotice(open.environment === "live" ? "live" : "test")}</Banner>
+          <Banner tone="ok">LIVE · VERIFIED WITH PAYSTACK</Banner>
           <Table rowKey={(r) => r.k} rows={[
             ["Status", TX_STATUS[open.status]?.label || open.status], ["Gross", formatMoney(open.currency, open.amount)],
             ["Actual fee", open.fee_actual == null ? "Not reported" : formatMoney(open.currency, open.fee_actual)],
@@ -257,32 +275,28 @@ function Transactions({ ctx }) {
 }
 
 function Settlements({ ctx }) {
-  const [state, setState] = useState({ loading: true });
-  const load = () => { setState({ loading: true }); api.getSettlements().then((r) => setState({ loading: false, ...r })).catch((e) => setState({ loading: false, error: e.message })); };
-  useEffect(load, []);
-  const mine = ctx.data.transactions.filter((t) => t.settlement_status !== "unknown");
+  const gateway = ctx.data.gateway;
+  const rows = gateway?.settlements?.rows || [];
   return (
     <>
       <div style={S.card}>
-        <div style={{ ...S.row, justifyContent: "space-between" }}><h3 style={S.h3}>Paystack settlements (test mode)</h3><Btn small onClick={load}>Refresh</Btn></div>
-        {state.loading ? <span style={S.sub}>Loading…</span> : state.error ? <Banner tone="bad" action={<Btn small onClick={load}>Retry</Btn>}>{state.error}</Banner>
-          : !state.available ? <Banner tone="info">Paystack returned no settlement data: {state.reason || "none available in test mode"}. Nothing is invented here.</Banner>
-          : <Table rowKey={(s) => s.id} empty="Paystack reports no settlements for this test account." rows={state.settlements} columns={[
-            { key: "d", label: "Date", render: (s) => fmtDay(s.settlementDate) }, { key: "s", label: "Status", render: (s) => s.status },
-            { key: "t", label: "Total", num: true, render: (s) => formatMoney(s.currency, s.totalAmount) }, { key: "f", label: "Fees", num: true, render: (s) => formatMoney(s.currency, s.totalFees) },
-            { key: "p", label: "Processed", num: true, render: (s) => formatMoney(s.currency, s.totalProcessed) }]} />}
-        {state.fetchedAt && <span style={S.sub}>Last refreshed {fmtDateTime(state.fetchedAt)}. Test-mode data, not real funds.</span>}
+        <div style={{ ...S.row, justifyContent: "space-between" }}><h3 style={S.h3}>Paystack live settlements</h3><Btn small onClick={ctx.reload}>Refresh</Btn></div>
+        {!gateway || gateway.available === false ? <Banner tone="bad">Paystack live data is unavailable{gateway?.error ? `: ${gateway.error}` : "."} No stale gateway figures are being presented.</Banner> : <Table rowKey={(s) => s.id} empty="Paystack reports no settlements yet." rows={rows} columns={[
+          { key: "d", label: "Date", render: (s) => fmtDay(s.settlementDate) }, { key: "s", label: "Status", render: (s) => s.status },
+          { key: "c", label: "Currency", render: (s) => s.currency }, { key: "t", label: "Total", num: true, render: (s) => formatMoney(s.currency, s.totalAmount) },
+          { key: "f", label: "Fees", num: true, render: (s) => formatMoney(s.currency, s.totalFees) }, { key: "p", label: "Processed", num: true, render: (s) => formatMoney(s.currency, s.totalProcessed) }]} />}
+        {gateway?.fetchedAt && <span style={S.sub}>Last synchronized {fmtDateTime(gateway.fetchedAt)}. Source: Paystack Live API.</span>}
       </div>
-      <div style={S.card}><h3 style={S.h3}>Settlement status on transactions</h3>
-        <Table rowKey={(t) => t.id} empty="No transaction has a settlement status yet." rows={mine} columns={[{ key: "r", label: "Reference", render: (t) => t.reference }, { key: "s", label: "Settlement", render: (t) => t.settlement_status }, { key: "x", label: "Reference", render: (t) => t.settlement_reference || "-" }]} /></div>
+      <div style={S.card}><h3 style={S.h3}>Settlement status on KairFlow transactions</h3>
+        <Table rowKey={(t) => t.id} empty="No transaction has a settlement status recorded in KairFlow yet." rows={ctx.data.transactions.filter((t) => t.settlement_status !== "unknown")} columns={[{ key: "r", label: "Reference", render: (t) => t.reference }, { key: "s", label: "Settlement", render: (t) => t.settlement_status }, { key: "x", label: "Reference", render: (t) => t.settlement_reference || "-" }]} /></div>
     </>
   );
 }
 
 function Reconciliation({ ctx }) {
-  const { data, privacy, view } = ctx;
+  const { data, privacy } = ctx;
   const attention = needsAttention(data.transactions);
-  const check = reconcileTotals({ transactions: data.transactions, invoicePayments: data.invoicePayments, expenses: data.feeExpenses, environment: view });
+  const check = reconcileTotals({ transactions: data.transactions.filter((t) => t.environment === "live"), invoicePayments: data.invoicePayments.filter((p) => p.method === "Paystack"), expenses: data.feeExpenses, environment: "live" });
   const unrecPayouts = data.payouts.filter((p) => p.status === "completed_simulated" && !p.reconciled);
   const [notes, setNotes] = useState({});
   const { busy, error, run } = useBusy();
@@ -334,7 +348,7 @@ function SettingsTab({ ctx }) {
   const [status, setStatus] = useState(null);
   const [bal, setBal] = useState(null);
   const { busy, error, run } = useBusy();
-  const check = () => run(async () => { setStatus(await api.getSandboxStatus()); });
+  const check = () => run(async () => { setStatus(await api.getPaystackStatus()); });
   useEffect(() => { check(); }, []);
   const loadBal = () => run(async () => { setBal(await api.getBalance()); });
   const origin = typeof window !== "undefined" ? window.location.origin : "";
@@ -343,23 +357,23 @@ function SettingsTab({ ctx }) {
       <div style={S.card}>
         <h3 style={S.h3}>Paystack connection</h3>
         {error && <Banner tone="bad" action={<Btn small onClick={check}>Retry</Btn>}>{error}</Banner>}
-        {status && <Banner tone={status.ok ? "ok" : "bad"}>{status.ok ? "Paystack is configured in the server's active mode. See Providers for the environment and connection." : status.message}</Banner>}
+        {status && <Banner tone={status.ok && status.environment === "live" ? "ok" : "bad"}>{status.ok && status.environment === "live" ? "Paystack Live is configured. See Providers for the merchant channels and connection." : status.ok ? "Production Payments requires PAYSTACK_MODE=live." : status.message}</Banner>}
         {status && !status.ok && (
           <ol style={{ ...S.sub, paddingLeft: 18 }}>
-            <li>In Paystack, switch the dashboard to <strong>Test mode</strong> and copy the test secret key (starts with <code>sk_test_</code>).</li>
-            <li>Set Supabase function secrets: <code>PAYSTACK_SECRET_KEY</code>, <code>PAYMENTS_MODE=sandbox</code>, optionally <code>APP_URL</code>.</li>
+            <li>In Paystack, enable Live mode and copy the live secret key (starts with <code>sk_live_</code>).</li>
+            <li>Set Supabase function secrets: <code>PAYSTACK_MODE=live</code>, <code>PAYSTACK_LIVE_SECRET_KEY</code>, and <code>APP_URL=https://your-production-app.example</code>.</li>
             <li>Deploy <code>paystack-payments</code>, and <code>paystack-webhook</code> with <code>--no-verify-jwt</code>.</li>
-            <li>In Paystack (Test mode) set the webhook URL to <code>{`<project-url>/functions/v1/paystack-webhook`}</code>.</li>
+            <li>In Paystack Live mode set the webhook URL to <code>{`<project-url>/functions/v1/paystack-webhook`}</code>.</li>
           </ol>)}
-        <div style={S.row}><Btn small onClick={check} disabled={busy}>Re-check</Btn><span style={S.sub}>Environment: TEST. Secret keys live only in server secrets; the browser never sees them.</span></div>
+        <div style={S.row}><Btn small onClick={check} disabled={busy}>Re-check</Btn><span style={S.sub}>Environment: LIVE. Secret keys live only in server secrets; the browser never sees them.</span></div>
       </div>
       <div style={S.card}>
-        <h3 style={S.h3}>Paystack test balance</h3>
-        <p style={S.sub}>Shown only if the sandbox API returns one. It is simulated and does not represent real funds, and it is separate from settled funds and outstanding invoices.</p>
-        <div><Btn small onClick={loadBal} disabled={busy || !status?.ok}>Fetch balance</Btn></div>
-        {bal && (bal.available ? <Table rowKey={(b) => b.currency} rows={bal.balances} columns={[{ key: "c", label: "Currency", render: (b) => b.currency }, { key: "b", label: "Test balance", num: true, render: (b) => formatMoney(b.currency, b.balance) }]} />
+        <h3 style={S.h3}>Paystack available balance</h3>
+        <p style={S.sub}>Shown directly from Paystack. It is the gateway balance, not the KairFlow Finance cash balance.</p>
+        <div><Btn small onClick={loadBal} disabled={busy || !status?.ok || status?.environment !== "live"}>Fetch balance</Btn></div>
+        {bal && (bal.available ? <Table rowKey={(b) => b.currency} rows={bal.balances} columns={[{ key: "c", label: "Currency", render: (b) => b.currency }, { key: "b", label: "Available balance", num: true, render: (b) => formatMoney(b.currency, b.balance) }]} />
           : <Banner tone="info">No balance available: {bal.reason}</Banner>)}
-        {bal?.fetchedAt && <span style={S.sub}>Environment: test · refreshed {fmtDateTime(bal.fetchedAt)}</span>}
+        {bal?.fetchedAt && <span style={S.sub}>Environment: live · refreshed {fmtDateTime(bal.fetchedAt)}</span>}
       </div>
       <div style={S.card}>
         <h3 style={S.h3}>Accounting settings</h3>
@@ -375,43 +389,26 @@ export default function PaymentsModule({ userId, projects, invoices, teamMembers
   const [tab, setTab] = useState("overview");
   const [period, setPeriod] = useState(PAYMENT_PERIODS.some((p) => p.id === defaultPeriod) ? defaultPeriod : "all");
   const [privacy, setPrivacy] = useState(false);
-  const [payInvoice, setPayInvoice] = useState(null);
-  const [returnNote, setReturnNote] = useState("");
-  const [envView, setEnvView] = useState(null);   // null = follow the data: live if any live payment exists, else test
-
-  // Returning from Paystack's checkout (?payments_return=1&reference=...): verify server-side, then tidy the URL.
-  useEffect(() => {
-    const q = new URLSearchParams(window.location.search);
-    const ref = q.get("reference") || q.get("trxref");
-    if (!q.get("payments_return") || !ref) return;
-    api.verifyPayment(ref)
-      .then((r) => { setReturnNote(r.applied ? `Payment verified and recorded${r.environment === "live" ? "" : " (test data)"}.` : r.note || `Payment status: ${r.status}.`); reload(); refreshApp?.(); })
-      .catch((e) => setReturnNote(`Could not verify the payment: ${e.message}`))
-      .finally(() => window.history.replaceState({}, "", window.location.pathname));
-  }, []);
-
-  const hasLive = !!data?.transactions?.some((t) => txEnvironment(t) === "live");
-  const view = envView || (hasLive ? "live" : "test");
-  // Test and live transactions are never summed together: every screen below sees one environment.
-  const viewData = useMemo(() => (data ? { ...data, transactions: data.transactions.filter((t) => txEnvironment(t) === view),
-    invoicePayments: (data.invoicePayments || []).filter((p) => (view === "live" ? p.method === "Paystack" : p.method !== "Paystack")) } : null), [data, view]);
+  const viewData = useMemo(() => data ? { ...data, transactions: (data.transactions || []).filter((t) => t.environment === "live"), invoicePayments: (data.invoicePayments || []).filter((p) => p.method === "Paystack") } : null, [data]);
   const summary = useMemo(() => (viewData ? summarizePayments({ ...viewData, invoices, period }) : null), [viewData, invoices, period]);
   if (loading) return <div style={{ ...S.page, color: T.muted }}>Loading Payments…</div>;
-  if (error || !data) return <div style={S.page}><Banner tone="bad" action={<Btn small onClick={reload}>Retry</Btn>}>Payments couldn't load: {error || "no data"}. If this is the first run, apply the 20261018090000_payments_paystack_sandbox.sql migration.</Banner></div>;
+  if (error || !data) return <div style={S.page}><Banner tone="bad" action={<Btn small onClick={reload}>Retry</Btn>}>Payments couldn't load: {error || "no data"}. Apply the payment migrations, including the live-only Apple Pay migration.</Banner></div>;
 
   const attention = needsAttention(viewData.transactions).length;
-  const ctx = { data: viewData, view, summary, privacy, invoices, projects, teamMembers, cards, reload: async () => { await reload(); }, refreshApp, onPay: setPayInvoice, onOpenProject, onGoFinance, onGoTeams, setTab };
+  const ctx = { data: viewData, summary, privacy, invoices, projects, teamMembers, cards, reload: async () => { await reload(); }, refreshApp, onOpenProject, onGoFinance, onGoTeams, setTab };
   return (
     <div style={S.page}>
-      <SandboxBar view={view} setView={setEnvView} hasLive={hasLive} />
+      <div style={{ ...S.card, marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
+        <div><strong style={{ color: T.text }}>Paystack Live</strong><div style={S.sub}>Production payment data only. Historical sandbox records remain auditable but are excluded from these totals.</div></div>
+        <Pill tone="ok">LIVE · REAL PAYMENTS</Pill>
+      </div>
       <div style={{ ...S.row, justifyContent: "space-between" }}>
         <Tabs value={tab} onChange={setTab} tabs={TABS.map(([id, label]) => ({ id, label, badge: id === "reconciliation" && attention ? `• ${attention}` : "" }))} />
         <span style={S.row}>
-          {["overview"].includes(tab) && <select style={{ ...S.input, width: 160 }} value={period} onChange={(e) => setPeriod(e.target.value)} aria-label="Period">{PAYMENT_PERIODS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}</select>}
+          {tab === "overview" && <select style={{ ...S.input, width: 160 }} value={period} onChange={(e) => setPeriod(e.target.value)} aria-label="Period">{PAYMENT_PERIODS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}</select>}
           <PrivacyToggle privacy={privacy} onChange={setPrivacy} compact />
         </span>
       </div>
-      {returnNote && <Banner tone="info" action={<Btn small onClick={() => setReturnNote("")}>Dismiss</Btn>}>{returnNote}</Banner>}
       {tab === "overview" && <Overview ctx={ctx} />}
       {tab === "providers" && <ProvidersTab />}
       {tab === "incoming" && <Incoming ctx={ctx} />}
@@ -421,7 +418,6 @@ export default function PaymentsModule({ userId, projects, invoices, teamMembers
       {tab === "settlements" && <Settlements ctx={ctx} />}
       {tab === "reconciliation" && <Reconciliation ctx={ctx} />}
       {tab === "settings" && <SettingsTab ctx={ctx} />}
-      {payInvoice && <PayNowDialog invoice={payInvoice} onClose={() => { setPayInvoice(null); reload(); refreshApp?.(); }} onChanged={() => { reload(); }} />}
     </div>
   );
 }

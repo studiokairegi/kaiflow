@@ -23,7 +23,7 @@ test("catalogue: Paystack first, enabled + primary by default, not connected unt
 });
 test("catalogue: stored rows win for Paystack; a stored row can never enable PayPal or Payoneer", () => {
   const ps = P.mergeProviders([
-    { provider: "paystack", status: "connected", is_enabled: true, is_primary: true },
+    { provider: "paystack", status: "connected", is_enabled: true, is_primary: true, environment: "live" },
     { provider: "paypal", status: "connected", is_enabled: true, is_primary: true },
     { provider: "payoneer", status: "connected", is_enabled: true, is_primary: false },
   ]);

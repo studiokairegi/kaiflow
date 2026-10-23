@@ -29,7 +29,7 @@ function ProviderCard({ p, onManage }) {
   );
 }
 
-const CHANNEL_LABELS = { card: "Card", bank_transfer: "Bank transfer" };
+const CHANNEL_LABELS = { card: "Card", bank_transfer: "Bank transfer", apple_pay: "Apple Pay" };
 const CURRENCIES = ["KES", "USD", "NGN", "GHS", "ZAR"];
 
 function ManageDialog({ provider, row, onClose, onChanged }) {
@@ -48,23 +48,23 @@ function ManageDialog({ provider, row, onClose, onChanged }) {
   return (
     <Modal title={`${provider.name}${provider.subtitle ? ` · ${provider.subtitle}` : ""}`} onClose={onClose} width={560} footer={<Btn onClick={onClose}>Close</Btn>}>
       {error && <Banner tone="bad">{error}</Banner>}
-      {status && (status.ok
-        ? <Banner tone={env === "live" ? "warn" : "info"}>Server is in <strong>{env.toUpperCase()}</strong> mode. {env === "live" ? "Payments made through client links are REAL." : "Test mode: no real money moves."} Test and live transactions are stored separately and never mix.</Banner>
-        : <Banner tone="bad">{status.message}</Banner>)}
+      {status && (status.ok && env === "live"
+        ? <Banner tone="ok">Paystack Live is configured. Client payment links use real Paystack checkout; sandbox transactions remain historical and are excluded from production reporting.</Banner>
+        : <Banner tone="bad">{status.ok ? "Production Payments requires Paystack Live mode." : status.message}</Banner>)}
       <div style={S.row}>
         <Pill tone={provider.enabled ? "ok" : "muted"}>{provider.enabled ? "✓ Enabled" : "Disabled"}</Pill>
         <Pill tone={provider.connected ? "ok" : "warn"}>{provider.connected ? `Connected${row?.environment && row.environment !== "none" ? ` (${row.environment === "sandbox" ? "test" : "live"})` : ""}` : "Not connected"}</Pill>
       </div>
-      <p style={S.sub}>Secret keys are server secrets (<code>PAYSTACK_TEST_SECRET_KEY</code>, <code>PAYSTACK_LIVE_SECRET_KEY</code>, <code>PAYSTACK_MODE</code>); they are never entered or stored in the browser. “Connect” checks the active key against Paystack and switches clients to this environment.</p>
+      <p style={S.sub}>The live secret key is a server secret and is never entered or stored in the browser. “Connect” verifies the configured Paystack Live key against Paystack.</p>
       <div style={S.row}>
-        <Btn small kind="primary" disabled={busy || !status?.ok} onClick={connect}>{provider.connected ? "Re-check connection" : "Connect"}</Btn>
+        <Btn small kind="primary" disabled={busy || !status?.ok || status?.environment !== "live"} onClick={connect}>{provider.connected ? "Re-check connection" : "Connect"}</Btn>
         <Btn small disabled={busy} onClick={toggle}>{provider.enabled ? "Disable" : "Enable"}</Btn>
         <Btn small disabled={busy || !provider.enabled || provider.primary} onClick={makePrimary}>{provider.primary ? "Default provider" : "Make default"}</Btn>
       </div>
       {provider.connected && (
         <>
           <h4 style={{ ...S.h3, marginTop: 16 }}>Enabled on your Paystack account</h4>
-          <p style={S.sub}>Tick only what your merchant account actually has switched on in the Paystack dashboard. Clients are offered exactly these; nothing is assumed (bank transfer and USD are not enabled on every Kenyan account).</p>
+          <p style={S.sub}>Enable only payment methods and currencies that are actually active on your Paystack merchant account. Apple Pay must first be activated in Paystack Dashboard; it is then shown here as an available checkout channel.</p>
           <div style={S.row}>{Object.entries(CHANNEL_LABELS).map(([k, l]) => <label key={k}><input type="checkbox" checked={channels.has(k)} onChange={() => flip(channels, setChannels, k)} /> {l}</label>)}</div>
           <div style={{ ...S.row, marginTop: 8 }}>{CURRENCIES.map((c) => <label key={c}><input type="checkbox" checked={currencies.has(c)} onChange={() => flip(currencies, setCurrencies, c)} /> {c}</label>)}</div>
           <div style={{ marginTop: 10 }}><Btn small disabled={busy || !channels.size || !currencies.size} onClick={saveOptions}>{saved ? "Saved" : "Save channels and currencies"}</Btn></div>

@@ -82,9 +82,10 @@ begin
   perform _t.chk('anon cannot apply a verification', _t.err($q$select payments_apply_verification('x', 'live', 'success', 1, 'KES', 0, 'card', '1', now(), 'ok')$q$) like '%permission denied%');
   perform _t.as_user(_t.id('C'));
   perform _t.chk('even a signed-in admin cannot call the service-only functions from the browser', _t.err(format($q$select * from payments_checkout_prepare(%L, 'a@b.co', 'live', 'card')$q$, _t.get('token'))) like '%permission denied%');
-  perform _t.chk('admin can enable bank transfer', _t.err($q$select payments_set_paystack_options(array['card','bank_transfer'], array['KES'])$q$) is null);
+  perform _t.chk('admin can enable bank transfer and Apple Pay', _t.err($q$select payments_set_paystack_options(array['card','bank_transfer','apple_pay'], array['KES'])$q$) is null);
   perform _t.chk('unsupported channel / currency are refused', _t.err($q$select payments_set_paystack_options(array['paypal'], array['KES'])$q$) like '%Unsupported channel%'
-     and _t.err($q$select payments_set_paystack_options(array['card'], array['EUR'])$q$) like '%cannot collect%');
+     and _t.err($q$select payments_set_paystack_options(array['card'], array['EUR'])$q$) like '%cannot collect%'
+     and _t.err($q$select payments_set_paystack_options(array['apple_pay'], array['KES'])$q$) is null);
   perform _t.as_admin();
 end $$;
 

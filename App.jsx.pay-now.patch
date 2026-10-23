@@ -1,0 +1,87 @@
+﻿--- a/src/App.jsx
++++ b/src/App.jsx
+@@ -2082,6 +2082,36 @@
+   doc.text("Balance due", 130, lineY + 20);
+   doc.text(`${cur}${formatMoney(balance)}`, 170, lineY + 20, { align: "right" });
+
++  // --- Pay Now: secure hosted checkout link for THIS invoice (invoices/proformas with a balance only) ---
++  // The link carries an unguessable token (never a database id). If a link can't be created (not signed in
++  // as an admin, nothing outstanding, payments not set up) the PDF is produced exactly as before.
++  let noteY = lineY + 40;
++  if ((docType === "invoice" || docType === "proforma") && invoice.status !== "paid" && balance > 0.005 && invoice.id) {
++    let payUrl = "";
++    try {
++      const { createCheckoutSession } = await import("./payments/api.js");
++      const { checkoutUrl } = await import("./payments/providers.js");
++      const session = await createCheckoutSession(invoice.id, null, 30);
++      if (session?.token) payUrl = checkoutUrl(session.token, window.location.origin);
++    } catch (e) { payUrl = ""; }
++    if (payUrl) {
++      const btnY = lineY + 30;
++      doc.setFillColor(20, 24, 31);
++      doc.roundedRect(left, btnY, 52, 11, 2, 2, "F");
++      doc.setFontSize(11);
++      doc.setTextColor(255);
++      doc.text("Pay Now", left + 26, btnY + 7.2, { align: "center" });
++      doc.link(left, btnY, 52, 11, { url: payUrl });
++      doc.setFontSize(8);
++      doc.setTextColor(90);
++      doc.text("Or open this link in your browser:", left, btnY + 17);
++      const urlLines = doc.splitTextToSize(payUrl, 170);
++      doc.setTextColor(30, 80, 160);
++      urlLines.forEach((ln, i) => doc.textWithLink(ln, left, btnY + 21.5 + i * 3.6, { url: payUrl }));
++      noteY = btnY + 21.5 + urlLines.length * 3.6 + 8;
++    }
++  }
++
+   doc.setFontSize(9);
+   doc.setTextColor(130);
+   const studioDisplayName = settings.studioLegalName || settings.studioName || "Studio Kairegi";
+@@ -2091,7 +2121,7 @@
+     invoice: `Thank you for working with ${studioDisplayName}.`,
+   };
+   const noteLines = doc.splitTextToSize(noteByType[docType] || noteByType.invoice, 170);
+-  doc.text(noteLines, left, lineY + 40);
++  doc.text(noteLines, left, noteY);
+
+   doc.save(`${invoice.invoiceNumber || "invoice"}.pdf`);
+ }
+@@ -8707,9 +8737,11 @@
+   // Payments (Paystack sandbox): same definitions and period filter as the Payments module, shown as
+   // TEST data and kept separate from the ledger-based revenue.
+   const payData = usePayments(userId, canAccessPayments(settings));
++  // Live payments when any exist; otherwise test data (badged SANDBOX). Test and live are never summed together.
++  const payHasLive = !!payData.data?.transactions?.some((t) => t.environment === "live");
+   const paySummary = useMemo(
+-    () => (payData.data ? summarizePayments({ ...payData.data, invoices, period: dashboardPeriod }) : null),
+-    [payData.data, invoices, dashboardPeriod]
++    () => (payData.data ? summarizePayments({ ...payData.data, transactions: payData.data.transactions.filter((t) => (t.environment === "live") === payHasLive), invoices, period: dashboardPeriod }) : null),
++    [payData.data, invoices, dashboardPeriod, payHasLive]
+   );
+   const hide = fin.privacy;
+   const payMoney = (m) => {
+@@ -8914,7 +8946,7 @@
+       ],
+     },
+     ...(!canAccessPayments(settings) ? [] : [{
+-      title: "Payments", gradient: GRADIENTS.royal, iconColor: "#3B74F4", icon: "card", badge: "SANDBOX", value: payMoney(paySummary?.receivedGross), label: "received", onClick: onGoToPayments,
++      title: "Payments", gradient: GRADIENTS.royal, iconColor: "#3B74F4", icon: "card", badge: payHasLive ? "LIVE" : "SANDBOX", value: payMoney(paySummary?.receivedGross), label: "received", onClick: onGoToPayments,
+       chips: [
+         { icon: "inbox", label: "today", value: payMoney(paySummary?.receivedToday), dim: isEmpty(paySummary?.receivedToday) },
+         { icon: "percent", label: "fees", value: payMoney(paySummary?.fees), dim: isEmpty(paySummary?.fees) },
+@@ -9432,13 +9464,13 @@
+                     <button
+                       style={styles.cancelButton}
+                       disabled={!!checkoutBlocker(inv)}
+-                      title={checkoutBlocker(inv) || "Pay with Paystack (sandbox / test mode only)"}
++                      title={checkoutBlocker(inv) || "Test-mode Paystack checkout (client payments use the invoice payment link)"}
+                       onClick={(e) => {
+                         e.stopPropagation();
+                         onPayNow(inv);
+                       }}
+                     >
+-                      Pay now (sandbox)
++                      Pay now (test)
+                     </button>
+                   )}
+                   {onGeneratePaymentLink && inv.status !== "paid" && ["invoice", "proforma"].includes(inv.docType || "invoice") && (

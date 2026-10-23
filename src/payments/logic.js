@@ -5,11 +5,11 @@
 // not a dollar, and the Finance module takes the same position.
 import { symbolToCode } from "../finance/currency.js";
 
-export const SANDBOX_NOTICE = "SANDBOX · TEST DATA · NOT REAL MONEY";
 export const SIMULATED_NOTICE = "SIMULATED — NO MONEY TRANSFERRED";
 export const FEE_CATEGORY = "Payment processing fees";
+export const SANDBOX_NOTICE = "SANDBOX · TEST DATA · NOT REAL MONEY";
 export const PAYSTACK_METHOD = "Paystack (test mode)";
-export const PAYSTACK_LIVE_METHOD = "Paystack";        // label on live invoice payments in Finance
+export const PAYSTACK_LIVE_METHOD = "Paystack";
 export const LIVE_NOTICE = "LIVE · REAL PAYMENTS";
 export const envNotice = (env) => (env === "live" ? LIVE_NOTICE : SANDBOX_NOTICE);
 export const txEnvironment = (t) => (t?.environment === "live" ? "live" : "test");
@@ -127,7 +127,7 @@ export function freelancerObligations({ teamMembers = [], bills = [], billPaymen
 }
 
 // ---- summary (Overview tab + Dashboard) -----------------------------------------------------
-export function summarizePayments({ transactions = [], payouts = [], bills = [], billPayments = [], invoices = [], period = "all", now = new Date(), todayIso } = {}) {
+export function summarizePayments({ transactions = [], payouts = [], bills = [], billPayments = [], invoices = [], gatewayTransactions = [], period = "all", now = new Date(), todayIso } = {}) {
   const tx = transactions.filter((t) => inPeriod(t.paid_at || t.created_at, period, now));
   const counted = tx.filter((t) => COUNTED.includes(t.status) && t.apply_status === "applied");
   const fees = tx.filter((t) => SETTLED.includes(t.status) && t.apply_status === "applied" && t.fee_actual != null);

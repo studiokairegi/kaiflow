@@ -18,7 +18,7 @@ async function fetchAll(table, { order, ascending = false, filter } = {}) {
 }
 
 export async function loadPaymentsData() {
-  const [transactions, payouts, bills, billPayments, billShots, invoicePayments, feeExpenses, events, audit] = await Promise.all([
+  const [transactions, payouts, bills, billPayments, billShots, invoicePayments, feeExpenses, events, audit, gateway] = await Promise.all([
     fetchAll("paystack_transactions", { order: "created_at" }),
     fetchAll("freelancer_payout_requests", { order: "created_at" }),
     fetchAll("bills", { order: "issue_date" }),
@@ -28,8 +28,9 @@ export async function loadPaymentsData() {
     fetchAll("expenses", { filter: (q) => q.eq("category", "Payment processing fees") }),
     supabase.from("paystack_webhook_events").select("id,event,reference,status,attempts,error,received_at,processed_at").order("received_at", { ascending: false }).limit(50).then((r) => r.data || []),
     supabase.from("finance_audit_log").select("*").in("object_type", ["paystack_transaction", "payout_request"]).order("at", { ascending: false }).limit(100).then((r) => r.data || []),
+    callPayments("snapshot").catch((error) => ({ available: false, error: error?.message || "Paystack live data is unavailable." })),
   ]);
-  return { transactions, payouts, bills, billPayments, billShots, invoicePayments, feeExpenses, events, audit };
+  return { transactions, payouts, bills, billPayments, billShots, invoicePayments, feeExpenses, events, audit, gateway };
 }
 
 async function readFunctionError(error) {
@@ -55,10 +56,10 @@ async function rpc(name, args = {}) {
 export const startCheckout = (invoiceId, email, amount) => callPayments("init", { invoice_id: invoiceId, email, amount: amount ?? null });
 export const verifyPayment = (reference) => callPayments("verify", { reference });
 export const getPaystackStatus = () => callPayments("status");
-export const getSandboxStatus = getPaystackStatus;   // legacy name
 export const connectPaystack = () => callPayments("connect");
 export const getBalance = () => callPayments("balance");
 export const getSettlements = () => callPayments("settlements");
+export const getGatewaySnapshot = () => callPayments("snapshot");
 
 export const retryApply = (id) => rpc("payments_retry_apply", { p_transaction: id });
 export const resolveReview = (id, note) => rpc("payments_resolve_review", { p_transaction: id, p_note: note });

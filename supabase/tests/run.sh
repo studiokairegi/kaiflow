@@ -22,6 +22,8 @@ run "$root/supabase/migrations/20261023090000_portfolio_google_drive.sql"
 run "$root/supabase/migrations/20261023090000_portfolio_google_drive.sql"   # idempotent re-run
 run "$root/supabase/migrations/20261025090000_paystack_live_checkout.sql"
 run "$root/supabase/migrations/20261025090000_paystack_live_checkout.sql"   # idempotent re-run
+run "$root/supabase/migrations/20261025110000_paystack_production_live_apple_pay.sql"
+run "$root/supabase/migrations/20261025110000_paystack_production_live_apple_pay.sql"   # idempotent re-run
 echo "migrations applied (payments + portfolio + live checkout migrations applied twice)"
 out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/payments.test.sql" 2>&1)"; code=$?
 echo "$out" | grep -E "PASS|FAIL|SUMMARY|ERROR" | sed 's/^psql:[^ ]* //'

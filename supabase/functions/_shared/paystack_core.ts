@@ -17,7 +17,7 @@ export type PaystackEnvironment = "test" | "live";
 // Currencies Paystack can collect in principle. Whether THIS merchant account can collect a
 // currency or channel is configuration (payment_providers.settings), not an assumption made here.
 export const PAYSTACK_CURRENCIES = ["NGN", "GHS", "ZAR", "KES", "USD"] as const;
-export const PAYSTACK_CHANNELS = ["card", "bank_transfer"] as const;
+export const PAYSTACK_CHANNELS = ["card", "bank_transfer", "apple_pay"] as const;
 export type PaystackChannel = (typeof PAYSTACK_CHANNELS)[number];
 
 export type EnvReader = { get(key: string): string | undefined };
@@ -97,6 +97,7 @@ export async function identifyWebhookEnvironment(
 export function channelsFor(channel: string): PaystackChannel[] | null {
   if (channel === "card") return ["card"];
   if (channel === "bank_transfer") return ["bank_transfer"];
+  if (channel === "apple_pay") return ["apple_pay"];
   return null;
 }
 

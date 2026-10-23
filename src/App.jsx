@@ -16,7 +16,6 @@ import {
 } from "./settings/schema.js";
 import { runtime, applyRuntimeSettings, categoryAllowed, playNotificationSound, desktopNotificationSilent, workdayTargetSeconds, isWorkday, reasonsFor, todayInZone } from "./settings/runtime.js";
 import { emptyEmailSlots, normalizeEmailSlots, nextScheduledIndex, lastScheduledIndex, followupCountLabel, sendingTriggersNoResponse, visibleSlotCount, emailsSentSummary, isManualFollowupDue, manualFollowupState } from "./settings/followups.js";
-import PayNowDialog from "./payments/PayNowDialog.jsx";
 import { usePayments } from "./payments/usePayments.js";
 import { canAccessPayments, PAYMENTS_RESTRICTED_BODY, PAYMENTS_RESTRICTED_TITLE } from "./payments/access.js";
 import PaymentsRestricted from "./payments/PaymentsRestricted.jsx";
@@ -24,7 +23,7 @@ import GeneratePaymentLinkDialog from "./payments/GeneratePaymentLinkDialog.jsx"
 import { ActivityCard, ActionButton, GRADIENTS, Icon as KIcon, OutreachArea, Panel, PanelTitle, ProgressRow, WeekStrip } from "./DashboardKit.jsx";
 import NotificationCenter from "./notifications/NotificationCenter.jsx";
 import { useNotifications } from "./notifications/useNotifications.js";
-import { summarizePayments, checkoutBlocker } from "./payments/logic.js";
+import { summarizePayments } from "./payments/logic.js";
 import { ProjectPicker } from "./finance/ProjectPicker.jsx";
 import { useFinanceSummary } from "./finance/useLedger.js";
 import { displayMoney, codeToSymbol, formatTotalsByCurrency } from "./finance/currency.js";
@@ -2747,7 +2746,6 @@ export default function ShotTracker() {
   const [patreonConnected, setPatreonConnected] = useState(false);
   const [patreonNotice, setPatreonNotice] = useState("");
   const [loading, setLoading] = useState(true);
-  const [payNowInvoice, setPayNowInvoice] = useState(null);
   const [payLinkInvoice, setPayLinkInvoice] = useState(null);
   const [showPaymentsLocked, setShowPaymentsLocked] = useState(false);
   const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "payments" | "teams"
@@ -6124,7 +6122,6 @@ export default function ShotTracker() {
           }
           onEdit={setEditingInvoice}
           onMarkPaid={handleMarkInvoicePaid}
-          onPayNow={canAccessPayments(settings) ? setPayNowInvoice : undefined}
           onGeneratePaymentLink={canAccessPayments(settings) ? setPayLinkInvoice : undefined}
           onGenerateFollowup={handleGenerateFollowupDoc}
           onDownload={(inv) => downloadInvoicePDF(inv, selectedProject, settings)}
@@ -6291,14 +6288,6 @@ export default function ShotTracker() {
 
       {payLinkInvoice && canAccessPayments(settings) && (
         <GeneratePaymentLinkDialog invoice={payLinkInvoice} onClose={() => setPayLinkInvoice(null)} />
-      )}
-
-      {payNowInvoice && canAccessPayments(settings) && (
-        <PayNowDialog
-          invoice={payNowInvoice}
-          onClose={() => { setPayNowInvoice(null); refreshFinanceSources(); }}
-          onChanged={() => refreshFinanceSources()}
-        />
       )}
 
       {editingInvoice && (
@@ -8704,11 +8693,11 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     setDashboardPeriod(settings.userPrefs?.dashboardPeriod || "all");
   }, [settings.userPrefs?.dashboardPeriod]);
 
-  // Payments (Paystack sandbox): same definitions and period filter as the Payments module, shown as
-  // TEST data and kept separate from the ledger-based revenue.
+  // Payments: only verified Paystack Live rows are included in the production dashboard; historical
+  // sandbox rows remain stored for audit but never contribute to live reporting.
   const payData = usePayments(userId, canAccessPayments(settings));
   const paySummary = useMemo(
-    () => (payData.data ? summarizePayments({ ...payData.data, invoices, period: dashboardPeriod }) : null),
+    () => (payData.data ? summarizePayments({ ...payData.data, transactions: (payData.data.transactions || []).filter((t) => t.environment === "live"), invoicePayments: (payData.data.invoicePayments || []).filter((p) => p.method === "Paystack"), invoices, period: dashboardPeriod }) : null),
     [payData.data, invoices, dashboardPeriod]
   );
   const hide = fin.privacy;
@@ -8914,7 +8903,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       ],
     },
     ...(!canAccessPayments(settings) ? [] : [{
-      title: "Payments", gradient: GRADIENTS.royal, iconColor: "#3B74F4", icon: "card", badge: "SANDBOX", value: payMoney(paySummary?.receivedGross), label: "received", onClick: onGoToPayments,
+      title: "Payments", gradient: GRADIENTS.royal, iconColor: "#3B74F4", icon: "card", badge: "LIVE", value: payMoney(paySummary?.receivedGross), label: "received", onClick: onGoToPayments,
       chips: [
         { icon: "inbox", label: "today", value: payMoney(paySummary?.receivedToday), dim: isEmpty(paySummary?.receivedToday) },
         { icon: "percent", label: "fees", value: payMoney(paySummary?.fees), dim: isEmpty(paySummary?.fees) },
@@ -9313,7 +9302,6 @@ function InvoicesPanel({
   onNew,
   onEdit,
   onMarkPaid,
-  onPayNow,
   onGeneratePaymentLink,
   onGenerateFollowup,
   onDownload,
@@ -9428,29 +9416,16 @@ function InvoicesPanel({
                       Mark as paid
                     </button>
                   )}
-                  {onPayNow && inv.status !== "paid" && (inv.docType || "invoice") !== "receipt" && (
-                    <button
-                      style={styles.cancelButton}
-                      disabled={!!checkoutBlocker(inv)}
-                      title={checkoutBlocker(inv) || "Pay with Paystack (sandbox / test mode only)"}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onPayNow(inv);
-                      }}
-                    >
-                      Pay now (sandbox)
-                    </button>
-                  )}
                   {onGeneratePaymentLink && inv.status !== "paid" && ["invoice", "proforma"].includes(inv.docType || "invoice") && (
                     <button
-                      style={styles.cancelButton}
-                      title="Create a secure StudioKairegi checkout link for this invoice"
+                      style={styles.saveButton}
+                      title="Create a secure live Paystack checkout link for this invoice"
                       onClick={(e) => {
                         e.stopPropagation();
                         onGeneratePaymentLink(inv);
                       }}
                     >
-                      Payment link
+                      Pay Now
                     </button>
                   )}
                   {docType === "proforma" && !hasFollowup(inv.id, "receipt") && (
