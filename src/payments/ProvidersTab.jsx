@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { S, T, Btn, Pill, Banner, Modal, useBusy } from "../finance/ui.jsx";
 import { mergeProviders, offeredToClients, COMING_SOON_LABEL } from "./providers.js";
 import * as api from "./api.js";
+import { WiseManualSettings } from "./ManualTransfers.jsx";
 
 // Payment Providers: Paystack is the default; PayPal and Payoneer are shown greyed out as "Coming soon — not configured".
 // This screen manages configuration; the only provider call is the server-side connection check.
@@ -97,6 +98,7 @@ export default function ProvidersTab() {
           : <p style={S.sub}>Offered at checkout, in order: {offered.map((p) => p.name).join(", ")}.</p>}
         <p style={S.sub}>Payment links look like <code>/pay/&#123;secure-token&#125;</code>. The token is random and unguessable; invoice IDs are never in the link.</p>
       </div>
+      {!error && rows && <WiseManualSettings row={(rows || []).find((r) => r.provider === "wise")} onChanged={load} />}
       {current && <ManageDialog provider={current} row={(rows || []).find((r) => r.provider === current.id)} onClose={() => setManaging(null)} onChanged={load} />}
     </>
   );

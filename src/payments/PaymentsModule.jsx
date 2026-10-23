@@ -5,13 +5,14 @@ import { formatMoney, formatTotalsByCurrency, symbolToCode } from "../finance/cu
 import { PrivacyToggle } from "../finance/PrivacyToggle.jsx";
 import { usePayments } from "./usePayments.js";
 import ProvidersTab from "./ProvidersTab.jsx";
+import { ManualTransfersTab } from "./ManualTransfers.jsx";
 import * as api from "./api.js";
 import {
   PAYMENT_PERIODS, PAYOUT_STATUS, SIMULATED_NOTICE, TX_STATUS, billAvailableForRequest,
   freelancerObligations, needsAttention, outstandingOf, payableInvoices, reconcileTotals, recentActivity, summarizePayments,
 } from "./logic.js";
 
-const TABS = [["overview", "Overview"], ["providers", "Providers"], ["incoming", "Incoming payments"], ["outgoing", "Outgoing payments"], ["payouts", "Freelancer payouts"], ["transactions", "Transactions"], ["settlements", "Settlements"], ["reconciliation", "Reconciliation"], ["settings", "Settings"]];
+const TABS = [["overview", "Overview"], ["providers", "Providers"], ["wise", "Wise transfers"], ["incoming", "Incoming payments"], ["outgoing", "Outgoing payments"], ["payouts", "Freelancer payouts"], ["transactions", "Transactions"], ["settlements", "Settlements"], ["reconciliation", "Reconciliation"], ["settings", "Settings"]];
 const fmtDateTime = (iso) => (iso ? new Date(iso).toLocaleString() : "-");
 const fmtDay = (iso) => (iso ? String(iso).slice(0, 10) : "-");
 const money = (c, n, priv) => (priv ? "••••" : formatMoney(c, n));
@@ -411,6 +412,7 @@ export default function PaymentsModule({ userId, projects, invoices, teamMembers
       </div>
       {tab === "overview" && <Overview ctx={ctx} />}
       {tab === "providers" && <ProvidersTab />}
+      {tab === "wise" && <ManualTransfersTab onChanged={ctx.reload || (() => {})} />}
       {tab === "incoming" && <Incoming ctx={ctx} />}
       {tab === "outgoing" && <Outgoing ctx={ctx} />}
       {tab === "payouts" && <Payouts ctx={ctx} />}

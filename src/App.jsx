@@ -20,6 +20,8 @@ import { usePayments } from "./payments/usePayments.js";
 import { canAccessPayments, PAYMENTS_RESTRICTED_BODY, PAYMENTS_RESTRICTED_TITLE } from "./payments/access.js";
 import PaymentsRestricted from "./payments/PaymentsRestricted.jsx";
 import GeneratePaymentLinkDialog from "./payments/GeneratePaymentLinkDialog.jsx";
+import { createCheckoutSession } from "./payments/api.js";
+import { requestPayLink, drawPayNowButton } from "./payments/pdfPayLink.js";
 import { ActivityCard, ActionButton, GRADIENTS, Icon as KIcon, OutreachArea, Panel, PanelTitle, ProgressRow, WeekStrip } from "./DashboardKit.jsx";
 import NotificationCenter from "./notifications/NotificationCenter.jsx";
 import { useNotifications } from "./notifications/useNotifications.js";
@@ -2091,6 +2093,18 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
   };
   const noteLines = doc.splitTextToSize(noteByType[docType] || noteByType.invoice, 170);
   doc.text(noteLines, left, lineY + 40);
+
+  // --- Pay Now: a real link annotation to the secure hosted checkout. Created through the existing payment-link
+  // RPC; if that fails (not an admin, Paystack not connected, offline) the PDF is still produced, without a button.
+  const payLink = await requestPayLink(invoice, balance, { create: createCheckoutSession, origin: window.location.origin });
+  if (payLink.ok) {
+    let btnY = lineY + 40 + noteLines.length * 4 + 10;
+    if (btnY > 262) { doc.addPage(); btnY = 24; }
+    drawPayNowButton(doc, payLink.url, { x: left, y: btnY });
+    doc.setFontSize(8);
+    doc.setTextColor(130);
+    doc.text("Secure online payment. Amounts are shown in the invoice currency; any currency conversion is explained before you pay.", left, btnY + 17);
+  }
 
   doc.save(`${invoice.invoiceNumber || "invoice"}.pdf`);
 }

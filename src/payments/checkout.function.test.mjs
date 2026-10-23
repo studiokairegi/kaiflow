@@ -31,14 +31,15 @@ globalThis.Deno = { env: { get: (k) => globalThis.__env[k] }, serve: (fn) => { h
 await import(pathToFileURL(path.join(tmp, "paystack-checkout", "index.ts")).href);
 
 // ---- scripted world ---------------------------------------------------------------------------
-function world({ prepare = [], status = [], paystack = [], tx = {} } = {}) {
-  const w = { rpcs: [], updates: [], fetches: [], prepare: [...prepare], status: [...status], paystack: [...paystack], tx };
+function world({ prepare = [], status = [], paystack = [], tx = {}, custom = {} } = {}) {
+  const w = { rpcs: [], updates: [], fetches: [], prepare: [...prepare], status: [...status], paystack: [...paystack], tx, custom };
   globalThis.__env = { ...ENV };
   globalThis.__fake = {
     client: () => ({
       rpc: async (name, args) => {
         w.rpcs.push({ name, args });
-        if (name === "payments_checkout_prepare") { const n = w.prepare.shift(); return n?.error ? { data: null, error: { message: n.error } } : { data: [n], error: null }; }
+        if (w.custom[name]) return w.custom[name](args);
+        if (name === "payments_checkout_prepare") { const n = w.prepare.shift(); return n?.error ? { data: null, error: { message: n.error, details: n.details } } : { data: [n], error: null }; }
         if (name === "payments_checkout_status") return { data: w.status.length > 1 ? w.status.shift() : w.status[0], error: null };
         if (name === "payments_apply_verification") return { data: { applied: args.p_outcome === "success", status: args.p_outcome }, error: null };
         return { data: null, error: null };
@@ -82,7 +83,8 @@ test("start: amount, currency and reference come from the database row; browser 
   assert.equal(init.body.email, "client@example.com");
   assert.equal(init.body.metadata.kairil_environment, "live");
   const prep = w.rpcs.find((r) => r.name === "payments_checkout_prepare").args;
-  assert.deepEqual(Object.keys(prep).sort(), ["p_channel", "p_email", "p_environment", "p_token"]);   // no amount/currency/invoice parameters exist
+  assert.deepEqual(Object.keys(prep).sort(), ["p_channel", "p_email", "p_environment", "p_quote", "p_token"]);   // a quote id, never an amount/currency/invoice/rate parameter
+  assert.equal(prep.p_quote, null);
   assert.equal(prep.p_environment, "live");                                                             // from the server secret, not the request
 });
 
@@ -234,4 +236,77 @@ test("malformed tokens are rejected before anything else", async () => {
     assert.equal(res.status, 400);
   }
   assert.equal(w.rpcs.length, 0);
+});
+
+
+// ---- FX quote + confirmation (new) ------------------------------------------------------------------
+const QID = "11111111-1111-4111-8111-111111111111";
+const convRow = { ...newRow, amount: 127685.19, currency: "KES", invoice_amount: 150000, invoice_currency: "JPY", quote_id: QID };
+
+test("quote: the browser can only name a channel; the server's quote is returned as-is", async () => {
+  const quote = { quote_id: QID, converted: true, charge_amount: 127685.19, charge_currency: "KES" };
+  const w = world({ custom: { payments_quote_create: () => ({ data: quote, error: null }) } });
+  const res = await call({ action: "quote", token: TOKEN, channel: "card", amount: 1, rate: 99, currency: "JPY", fx_rate: 1 });
+  assert.equal(res.status, 200); assert.deepEqual((await res.json()).quote, quote);
+  assert.deepEqual(Object.keys(w.rpcs.find((r) => r.name === "payments_quote_create").args).sort(), ["p_channel", "p_token"]);
+  assert.equal(w.fetches.length, 0);
+});
+
+test("quote: no reliable rate -> 503 fx_unavailable and nothing else happens", async () => {
+  const w = world({ custom: { payments_quote_create: () => ({ data: null, error: { message: "We can’t show a reliable currency conversion right now.", details: "fx_unavailable" } }) } });
+  const res = await call({ action: "quote", token: TOKEN, channel: "card" });
+  assert.equal(res.status, 503); assert.equal((await res.json()).code, "fx_unavailable"); assert.equal(w.fetches.length, 0);
+  const bad = world({});
+  assert.equal((await call({ action: "quote", token: TOKEN, channel: "paypal" })).status, 400); assert.equal(bad.rpcs.length, 0);
+});
+
+test("start with a quote: Paystack is asked for exactly the server-approved charge, in the charge currency", async () => {
+  const w = world({ prepare: [convRow], paystack: [initOk] });
+  const res = await call({ action: "start", token: TOKEN, email: "a@b.co", channel: "card", quote_id: QID, amount: 5, currency: "JPY" });
+  assert.equal(res.status, 200);
+  assert.equal(w.fetches[0].body.amount, 12768519); assert.equal(w.fetches[0].body.currency, "KES");
+  assert.equal(w.fetches[0].body.metadata.invoice_currency, "JPY");
+  assert.equal(w.rpcs.find((r) => r.name === "payments_checkout_prepare").args.p_quote, QID);
+});
+
+test("start: expired / superseded / foreign quote -> 409 with a requote code, Paystack never called", async () => {
+  for (const code of ["quote_expired", "quote_superseded", "quote_invalid", "quote_used", "quote_required"]) {
+    const w = world({ prepare: [{ error: "price changed", details: code }] });
+    const res = await call({ action: "start", token: TOKEN, email: "a@b.co", channel: "card", quote_id: QID });
+    assert.equal(res.status, 409); assert.equal((await res.json()).code, code); assert.equal(w.fetches.length, 0);
+  }
+  const w = world({});
+  const res = await call({ action: "start", token: TOKEN, email: "a@b.co", channel: "card", quote_id: "not-a-uuid" });
+  assert.equal(res.status, 409); assert.equal(w.rpcs.length, 0); assert.equal(w.fetches.length, 0);
+});
+
+test("start: an invalid or non-live link is refused before any database or provider call", async () => {
+  const w = world({});
+  assert.equal((await call({ action: "start", token: "short", email: "a@b.co", channel: "card" })).status, 400);
+  assert.equal(w.rpcs.length, 0); assert.equal(w.fetches.length, 0);
+});
+
+// ---- Wise manual flow (new) -------------------------------------------------------------------------
+test("wise_start / wise_submit never touch Paystack and never mark anything paid", async () => {
+  const transfer = { reference: "KRL-W-ABCD1234-0000000001", status: "pending", amount: 150000, currency: "JPY" };
+  const w = world({ custom: {
+    payments_manual_start: () => ({ data: transfer, error: null }),
+    payments_manual_submit: () => ({ data: { status: "submitted" }, error: null }),
+  } });
+  globalThis.__env = { ...ENV, PAYSTACK_MODE: "test" };                      // even with Paystack misconfigured, Wise works and stays manual
+  let res = await call({ action: "wise_start", token: TOKEN, email: "a@b.co" });
+  assert.equal(res.status, 200); assert.equal((await res.json()).status, "wise_instructions");
+  res = await call({ action: "wise_submit", token: TOKEN, reference: transfer.reference, transfer_reference: "W-998877" });
+  assert.equal(res.status, 200); assert.equal((await res.json()).status, "submitted");
+  assert.equal(w.fetches.length, 0);
+  assert.equal(w.rpcs.filter((r) => /apply|settle|review/.test(r.name)).length, 0);
+});
+
+test("wise_submit: a malformed reference is rejected; a database refusal (duplicate reference) is a clean 409", async () => {
+  let w = world({});
+  assert.equal((await call({ action: "wise_submit", token: TOKEN, reference: "x y", transfer_reference: "W-1234" })).status, 400);
+  assert.equal(w.rpcs.length, 0);
+  w = world({ custom: { payments_manual_submit: () => ({ data: null, error: { message: "That transfer reference has already been submitted." } }) } });
+  const res = await call({ action: "wise_submit", token: TOKEN, reference: "KRL-W-ABCD1234-0000000001", transfer_reference: "W-1234" });
+  assert.equal(res.status, 409);
 });

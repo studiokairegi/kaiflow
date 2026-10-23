@@ -1,8 +1,14 @@
 // POST /paystack-checkout    body: { action, token, ... }      PUBLIC (deploy with --no-verify-jwt)
 //
-//   start   { token, email, channel: "card" | "bank_transfer" }
+//   start   { token, email, channel: "card" | "bank_transfer" | "apple_pay", quote_id }
 //             -> { status: "redirect", authorization_url }   send the client to Paystack-hosted checkout
 //             -> { status: "paid" | "pending", ... }          nothing new was started
+//   quote   { token, channel }
+//             -> { quote: {...} }   a server-made, 15-minute, session-bound price (FX included). The page shows it,
+//                                   the client confirms it, and `start` must echo its quote_id. The browser never
+//                                   supplies a rate, a converted amount or a currency.
+//   wise_start  { token, email? }  -> manual Wise/M-PESA instructions + a pending record (NOTHING is paid or posted)
+//   wise_submit { token, reference, transfer_reference, payer_name?, note? } -> evidence only; status "submitted"
 //   confirm { token, reference? }
 //             -> verifies with Paystack from the server and reports the TRUSTED state.
 //                Used by the return page and by the "check my payment" button.
@@ -29,6 +35,7 @@ const json = (body: unknown, status = 200) =>
 
 const TOKEN = /^[0-9a-f]{64}$/;
 const REFERENCE = /^[A-Za-z0-9_.=-]{6,100}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const RETIRE_AFTER_MS = 30 * 60 * 1000;       // an unpaid ("abandoned") attempt may only be retired after this long
 const INIT_GRACE_MS = 2 * 60 * 1000;          // an attempt Paystack has never heard of may only be retired after this long
 
@@ -45,14 +52,25 @@ Deno.serve(async (req) => {
   const token = String(body?.token || "");
   if (!TOKEN.test(token)) return json({ error: "This payment link is not valid." }, 400);
 
+  const service = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+
+  // Wise is a manual flow: it needs no Paystack key and can never start a Paystack transaction.
+  try {
+    if (action === "wise_start") return await wiseStart(service, token, body);
+    if (action === "wise_submit") return await wiseSubmit(service, token, body);
+  } catch (e) {
+    console.error("paystack-checkout wise error", e instanceof Error ? e.message : "unknown");
+    return json({ error: "Something went wrong. Please try again in a moment." }, 500);
+  }
+
   const cfg = resolvePaystackConfig(Deno.env);
   if (!cfg.ok || cfg.environment !== "live") {
     console.error("paystack-checkout disabled", { code: cfg.ok ? "live_required" : cfg.code });
     return json({ error: "Online payment is not available right now. Please contact StudioKairegi." }, 503);
   }
-  const service = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
   try {
+    if (action === "quote") return await quote(service, token, String(body?.channel || ""));
     if (action === "start") return await start(service, cfg, token, body);
     if (action === "confirm") return await confirm(service, cfg, token, String(body?.reference || ""));
     return json({ error: "Unknown action." }, 400);
@@ -103,6 +121,8 @@ async function loadTx(service: any, reference: string) {
 async function start(service: any, cfg: Ok, token: string, body: any) {
   const email = String(body?.email || "").trim();
   const channel = String(body?.channel || "");
+  const quoteId = body?.quote_id == null || body.quote_id === "" ? null : String(body.quote_id);
+  if (quoteId !== null && !UUID.test(quoteId)) return json({ error: "Please review the amount and confirm again.", code: "quote_invalid" }, 409);
   const channels = channelsFor(channel);
   if (!channels) return json({ error: "Choose a payment method." }, 400);        // PayPal / Payoneer land here
   if (!isValidEmail(email)) return json({ error: "Enter a valid email address for your payment receipt." }, 400);
@@ -110,11 +130,13 @@ async function start(service: any, cfg: Ok, token: string, body: any) {
   // At most two passes: the second only happens after an old unknown attempt was resolved with Paystack.
   for (let pass = 0; pass < 2; pass++) {
     const { data, error } = await service.rpc("payments_checkout_prepare", {
-      p_token: token, p_email: email, p_environment: cfg.environment, p_channel: channel,
+      p_token: token, p_email: email, p_environment: cfg.environment, p_channel: channel, p_quote: quoteId,
     });
     if (error) {
       // These messages are written for the client by the database (link expired, already paid, ...).
-      return json({ error: error.message, code: "not_payable" }, 409);
+      // A quote problem means: show the (new) price and ask the client to confirm again. Nothing was started.
+      const code = /^quote_/.test(String(error.details || "")) ? String(error.details) : "not_payable";
+      return json({ error: error.message, code }, 409);
     }
     const row = Array.isArray(data) ? data[0] : data;
     if (!row) return json({ error: "Could not start the payment." }, 500);
@@ -158,7 +180,8 @@ async function start(service: any, cfg: Ok, token: string, body: any) {
         reference: row.reference,
         callback_url: callback,
         channels,
-        metadata: { kairil_environment: cfg.environment, invoice_number: row.invoice_number, channel },
+        metadata: { kairil_environment: cfg.environment, invoice_number: row.invoice_number, channel,
+                    invoice_amount: row.invoice_amount, invoice_currency: row.invoice_currency, quote_id: row.quote_id },
       },
     });
     if (r.networkError) {
@@ -216,4 +239,37 @@ async function confirm(service: any, cfg: Ok, token: string, reference: string) 
     status: state,
     invoice_number: s.invoice_number, amount: s.amount, currency: s.currency, reference: s.reference || null,
   });
+}
+
+// ---- quotes -------------------------------------------------------------------------------------
+// The database derives the invoice, balance, currency, FX rate (from the stored snapshots), rounding and
+// final charge. A snapshot older than 36 hours is "no reliable rate": we say so instead of guessing.
+async function quote(service: any, token: string, channel: string) {
+  if (!channelsFor(channel)) return json({ error: "Choose a payment method." }, 400);
+  const { data, error } = await service.rpc("payments_quote_create", { p_token: token, p_channel: channel });
+  if (error) {
+    if (error.details === "fx_unavailable") return json({ error: error.message, code: "fx_unavailable" }, 503);
+    return json({ error: error.message, code: "not_payable" }, 409);
+  }
+  return json({ quote: data });
+}
+
+// ---- Wise / M-PESA (manual) ----------------------------------------------------------------------
+async function wiseStart(service: any, token: string, body: any) {
+  const email = String(body?.email || "").trim();
+  const { data, error } = await service.rpc("payments_manual_start", { p_token: token, p_email: email });
+  if (error) return json({ error: error.message, code: "not_payable" }, 409);
+  return json({ status: "wise_instructions", transfer: data });
+}
+
+async function wiseSubmit(service: any, token: string, body: any) {
+  const reference = String(body?.reference || "");
+  if (!REFERENCE.test(reference)) return json({ error: "Invalid reference." }, 400);
+  const { data, error } = await service.rpc("payments_manual_submit", {
+    p_token: token, p_reference: reference, p_transfer_ref: String(body?.transfer_reference || ""),
+    p_payer_name: String(body?.payer_name || ""), p_note: String(body?.note || ""),
+  });
+  if (error) return json({ error: error.message, code: "not_submittable" }, 409);
+  // Evidence only: the invoice is not touched until an administrator verifies that the money arrived.
+  return json({ status: data?.status || "submitted", reference });
 }

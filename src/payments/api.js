@@ -36,14 +36,14 @@ export async function loadPaymentsData() {
 async function readFunctionError(error) {
   try {
     const body = await error?.context?.json?.();
-    if (body?.error) return body.error;
+    if (body?.error) return { message: body.error, code: body.code || "" };
   } catch { /* fall through */ }
-  return error?.message || "Request failed.";
+  return { message: error?.message || "Request failed.", code: "" };
 }
 
 export async function callPayments(action, payload = {}) {
   const { data, error } = await supabase.functions.invoke("paystack-payments", { body: { action, ...payload } });
-  if (error) throw new Error(await readFunctionError(error));
+  if (error) { const e = await readFunctionError(error); throw Object.assign(new Error(e.message), { code: e.code }); }
   return data;
 }
 
@@ -89,8 +89,20 @@ export const setPaystackOptions = (channels, currencies) => rpc("payments_set_pa
 // environment from the token; the browser only says which method and which email.
 async function callCheckout(action, payload) {
   const { data, error } = await supabase.functions.invoke("paystack-checkout", { body: { action, ...payload } });
-  if (error) throw new Error(await readFunctionError(error));
+  if (error) { const e = await readFunctionError(error); throw Object.assign(new Error(e.message), { code: e.code }); }
   return data;
 }
-export const startPublicCheckout = (token, email, channel) => callCheckout("start", { token, email, channel });
+// quote_id is the id of the server-made quote the client just confirmed; the server rejects a missing, expired,
+// superseded or foreign quote and re-derives every amount itself.
+export const getCheckoutQuote = (token, channel) => callCheckout("quote", { token, channel });
+export const startPublicCheckout = (token, email, channel, quoteId) => callCheckout("start", { token, email, channel, quote_id: quoteId || null });
+export const startWiseTransfer = (token, email) => callCheckout("wise_start", { token, email: email || "" });
+export const submitWiseTransfer = (token, { reference, transferReference, payerName, note }) =>
+  callCheckout("wise_submit", { token, reference, transfer_reference: transferReference, payer_name: payerName || "", note: note || "" });
 export const confirmPublicCheckout = (token, reference) => callCheckout("confirm", { token, reference: reference || "" });
+
+// ---- Wise / M-PESA manual payments (admin) --------------------------------------------------------
+export const setWiseManual = (settings) => rpc("payments_set_wise_manual", { p_settings: settings });
+export const loadManualPayments = async () => fetchAll("payment_manual_payments", { order: "created_at" });
+export const reviewManualPayment = (id, decision, { credited, received, receivedCurrency, note } = {}) =>
+  rpc("payments_manual_review", { p_id: id, p_decision: decision, p_credited_amount: credited ?? null, p_received_amount: received ?? null, p_received_currency: receivedCurrency || null, p_note: note || "" });
