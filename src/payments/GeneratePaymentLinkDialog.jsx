@@ -43,7 +43,7 @@ export default function GeneratePaymentLinkDialog({ invoice, onClose, onChanged 
           <Banner tone="warn">Copy this link now. For security it is shown only once and can’t be retrieved later.</Banner>
           <input readOnly style={S.input} value={link.url} onFocus={(e) => e.target.select()} aria-label="Payment link" />
           <div style={S.row}><Btn kind="primary" onClick={copy}>{copied ? "Copied" : "Copy link"}</Btn><span style={{ color: T.muted, fontSize: 13 }}>{formatMoney(link.currency, link.amount)} · expires {new Date(link.expires).toLocaleDateString()}</span></div>
-          <p style={S.sub}>Until a payment provider is connected, the page will tell the client online payment isn’t available yet.</p>
+          <p style={S.sub}>Clients can pay by the methods you enabled under Providers. If none is connected, the page tells them online payment isn’t available yet. The invoice is marked paid only after the server confirms the payment with Paystack.</p>
         </>
       )}
     </Modal>

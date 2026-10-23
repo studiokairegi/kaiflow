@@ -7,23 +7,45 @@ import * as L from "./logic.js";
 const env = (o) => ({ get: (k) => o[k] });
 const KEY = "sk_test_abcdefghijklmnop1234";
 
-// ---------------------------------------------------------------- sandbox configuration
-test("config: sandbox mode + test key is accepted", () => {
-  const c = core.resolveSandboxConfig(env({ PAYMENTS_MODE: "sandbox", PAYSTACK_SECRET_KEY: KEY, APP_URL: "https://app.example.com/" }));
-  assert.equal(c.ok, true); assert.equal(c.mode, "sandbox"); assert.equal(c.appUrl, "https://app.example.com");
+// ---------------------------------------------------------------- configuration (test / live)
+const LIVE = "sk_live_ABCDEFGHIJKLMNOP1234";
+test("config: test mode + test key is accepted", () => {
+  const c = core.resolvePaystackConfig(env({ PAYSTACK_MODE: "test", PAYSTACK_TEST_SECRET_KEY: KEY, APP_URL: "https://app.example.com/" }));
+  assert.equal(c.ok, true); assert.equal(c.environment, "test"); assert.equal(c.secretKey, KEY); assert.equal(c.appUrl, "https://app.example.com");
 });
-test("config: live key is rejected and never echoed", () => {
-  const live = "sk_live_SUPERSECRET123456";
-  const c = core.resolveSandboxConfig(env({ PAYMENTS_MODE: "sandbox", PAYSTACK_SECRET_KEY: live }));
-  assert.equal(c.ok, false); assert.equal(c.code, "live_key_rejected");
-  assert.ok(!JSON.stringify(c).includes("SUPERSECRET"));
+test("config: live mode + live key is accepted, but needs an https APP_URL", () => {
+  const c = core.resolvePaystackConfig(env({ PAYSTACK_MODE: "live", PAYSTACK_LIVE_SECRET_KEY: LIVE, APP_URL: "https://app.example.com" }));
+  assert.equal(c.ok, true); assert.equal(c.environment, "live"); assert.equal(c.secretKey, LIVE);
+  assert.equal(core.resolvePaystackConfig(env({ PAYSTACK_MODE: "live", PAYSTACK_LIVE_SECRET_KEY: LIVE })).code, "app_url_required");
+  assert.equal(core.resolvePaystackConfig(env({ PAYSTACK_MODE: "live", PAYSTACK_LIVE_SECRET_KEY: LIVE, APP_URL: "http://app.example.com" })).code, "app_url_required");
 });
-test("config: missing key, bad format and missing/other mode all disable payments", () => {
-  assert.equal(core.resolveSandboxConfig(env({ PAYMENTS_MODE: "sandbox" })).code, "missing_secret_key");
-  assert.equal(core.resolveSandboxConfig(env({ PAYMENTS_MODE: "sandbox", PAYSTACK_SECRET_KEY: "pk_test_xxxxxxxxxxxx" })).code, "invalid_key_format");
-  assert.equal(core.resolveSandboxConfig(env({ PAYSTACK_SECRET_KEY: KEY })).code, "payments_mode_not_sandbox");
-  assert.equal(core.resolveSandboxConfig(env({ PAYMENTS_MODE: "live", PAYSTACK_SECRET_KEY: KEY })).code, "payments_mode_not_sandbox");
-  assert.equal(core.resolveSandboxConfig(env({ PAYMENTS_MODE: "production", PAYSTACK_SECRET_KEY: "sk_live_x" })).ok, false);
+test("config: the key must match the mode; there is never a fallback to the other environment", () => {
+  const both = { PAYSTACK_TEST_SECRET_KEY: KEY, PAYSTACK_LIVE_SECRET_KEY: LIVE, APP_URL: "https://a.example.com" };
+  assert.equal(core.resolvePaystackConfig(env({ ...both, PAYSTACK_MODE: "test" })).secretKey, KEY);
+  assert.equal(core.resolvePaystackConfig(env({ ...both, PAYSTACK_MODE: "live" })).secretKey, LIVE);
+  const onlyTest = core.resolvePaystackConfig(env({ PAYSTACK_MODE: "live", PAYSTACK_TEST_SECRET_KEY: KEY, APP_URL: "https://a.example.com" }));
+  assert.equal(onlyTest.ok, false); assert.equal(onlyTest.code, "key_mode_mismatch");
+  const onlyLive = core.resolvePaystackConfig(env({ PAYSTACK_MODE: "test", PAYSTACK_LIVE_SECRET_KEY: LIVE }));
+  assert.equal(onlyLive.ok, false); assert.equal(onlyLive.code, "key_mode_mismatch");
+});
+test("config: a single PAYSTACK_SECRET_KEY is filed by its prefix; legacy sandbox switch maps to test", () => {
+  assert.equal(core.resolvePaystackConfig(env({ PAYMENTS_MODE: "sandbox", PAYSTACK_SECRET_KEY: KEY })).environment, "test");
+  assert.equal(core.resolvePaystackConfig(env({ PAYSTACK_MODE: "live", PAYSTACK_SECRET_KEY: LIVE, APP_URL: "https://a.example.com" })).environment, "live");
+});
+test("config: missing mode, missing key and bad format disable payments and never echo a key", () => {
+  assert.equal(core.resolvePaystackConfig(env({ PAYSTACK_TEST_SECRET_KEY: KEY })).code, "mode_not_set");
+  assert.equal(core.resolvePaystackConfig(env({ PAYSTACK_MODE: "production", PAYSTACK_LIVE_SECRET_KEY: LIVE })).code, "mode_not_set");
+  assert.equal(core.resolvePaystackConfig(env({ PAYSTACK_MODE: "test" })).code, "missing_secret_key");
+  const bad = core.resolvePaystackConfig(env({ PAYSTACK_MODE: "test", PAYSTACK_SECRET_KEY: "pk_test_SUPERSECRETXXXX" }));
+  assert.equal(bad.code, "invalid_key_format");
+  for (const c of [bad, core.resolvePaystackConfig(env({ PAYSTACK_MODE: "live", PAYSTACK_TEST_SECRET_KEY: KEY, APP_URL: "https://a.example.com" }))]) {
+    const txt = JSON.stringify(c); assert.ok(!txt.includes("SUPERSECRET")); assert.ok(!txt.includes(KEY));
+  }
+});
+test("only the two supported channels map to Paystack channels; PayPal/Payoneer map to nothing", () => {
+  assert.deepEqual(core.channelsFor("card"), ["card"]);
+  assert.deepEqual(core.channelsFor("bank_transfer"), ["bank_transfer"]);
+  for (const c of ["paypal", "payoneer", "ussd", "", undefined]) assert.equal(core.channelsFor(c), null);
 });
 
 // ---------------------------------------------------------------- amounts / currency / email
@@ -51,6 +73,19 @@ test("webhook signature: valid, tampered, wrong key, missing", async () => {
   assert.equal(await core.verifyWebhookSignature(KEY, body, null), false);
   assert.equal(await core.verifyWebhookSignature("", body, sig), false);
 });
+test("webhook environment is decided by which key reproduces the signature", async () => {
+  const ring = core.loadKeyRing(env({ PAYSTACK_TEST_SECRET_KEY: KEY, PAYSTACK_LIVE_SECRET_KEY: LIVE }));
+  const body = JSON.stringify({ event: "charge.success", data: { id: 9, reference: "R9" } });
+  const sign = (k) => createHmac("sha512", k).update(body).digest("hex");
+  assert.equal((await core.identifyWebhookEnvironment(ring, body, sign(LIVE))).environment, "live");
+  assert.equal((await core.identifyWebhookEnvironment(ring, body, sign(KEY))).environment, "test");
+  assert.equal(await core.identifyWebhookEnvironment(ring, body, sign("sk_live_someOtherKey123456")), null);
+  assert.equal(await core.identifyWebhookEnvironment(ring, body, ""), null);
+  assert.equal(await core.identifyWebhookEnvironment(ring, body + " ", sign(LIVE)), null);
+  // only a test key configured: a live-signed request cannot be authenticated
+  const testOnly = core.loadKeyRing(env({ PAYSTACK_TEST_SECRET_KEY: KEY }));
+  assert.equal(await core.identifyWebhookEnvironment(testOnly, body, sign(LIVE)), null);
+});
 test("webhook event key is stable across retries and distinct per event", async () => {
   const a = { event: "charge.success", data: { id: 42, reference: "R" } };
   assert.equal(await core.webhookEventKey("x", a), await core.webhookEventKey("y", a));
@@ -63,7 +98,8 @@ test("only checkout and refund events are handled", () => {
 });
 
 // ---------------------------------------------------------------- verification interpretation
-const exp = { reference: "KRL-1", amountMinor: 100000, currency: "USD" };
+const exp = { reference: "KRL-1", amountMinor: 100000, currency: "USD", environment: "test" };
+const expLive = { ...exp, environment: "live" };
 const ok = (o = {}) => ({ status: true, data: { status: "success", reference: "KRL-1", amount: 100000, currency: "USD", fees: 1500, channel: "card", id: 77, paid_at: "2026-10-18T10:00:00Z", gateway_response: "Successful", domain: "test", ...o } });
 test("verification: success carries actual fee, channel and id", () => {
   const r = core.interpretVerification(ok(), exp);
@@ -79,6 +115,16 @@ test("verification: amount, currency, reference and live domain mismatches are r
   assert.equal(core.interpretVerification(ok({ domain: "live" }), exp).kind, "rejected");
   assert.equal(core.interpretVerification({ status: false, data: null }, exp).kind, "rejected");
   assert.equal(core.interpretVerification(null, exp).kind, "rejected");
+});
+test("verification: a live key only confirms live transactions, a test key only test ones", () => {
+  assert.equal(core.interpretVerification(ok({ domain: "live" }), expLive).kind, "success");
+  assert.equal(core.interpretVerification(ok({ domain: "test" }), expLive).kind, "rejected");
+  assert.equal(core.interpretVerification(ok({ domain: "live" }), exp).kind, "rejected");
+  // live money is never accepted without Paystack stating the domain
+  assert.equal(core.interpretVerification(ok({ domain: undefined }), expLive).kind, "rejected");
+  // live: amount / currency / reference are still checked against OUR row
+  assert.equal(core.interpretVerification(ok({ domain: "live", amount: 100001 }), expLive).kind, "rejected");
+  assert.equal(core.interpretVerification(ok({ domain: "live", currency: "KES" }), expLive).kind, "rejected");
 });
 test("verification: failed, abandoned, pending, reversed are not success", () => {
   assert.equal(core.interpretVerification(ok({ status: "failed" }), exp).kind, "failed");
@@ -181,6 +227,15 @@ test("reconcile: gateway and Finance totals match, and differences are surfaced"
   assert.equal(L.reconcileTotals({ transactions: [t1, t2], invoicePayments: pays, expenses: exps }).ok, true);
   const bad = L.reconcileTotals({ transactions: [t1, t2], invoicePayments: pays.slice(0, 1), expenses: exps });
   assert.equal(bad.ok, false); assert.equal(bad.rows[0].grossDifference, 600);
+});
+test("reconcile: live payments are matched by their own Finance label and never mixed with test ones", () => {
+  const t = tx({ reference: "L1", amount: 500, fee_actual: 7.5, environment: "live" });
+  const pays = [{ method: L.PAYSTACK_LIVE_METHOD, status: "posted", currency: "USD", amount: 500 }, { method: L.PAYSTACK_METHOD, status: "posted", currency: "USD", amount: 900 }];
+  const exps = [{ category: L.FEE_CATEGORY, reference: "L1", currency: "$", amount: 7.5 }];
+  assert.equal(L.reconcileTotals({ transactions: [t], invoicePayments: pays, expenses: exps, environment: "live" }).ok, true);
+  assert.equal(L.reconcileTotals({ transactions: [t], invoicePayments: pays, expenses: exps }).ok, false);   // test view would see 900 of "test" ledger money
+  assert.equal(L.txEnvironment({ environment: "live" }), "live"); assert.equal(L.txEnvironment({}), "test");
+  assert.match(L.envNotice("live"), /REAL/); assert.match(L.envNotice("test"), /NOT REAL MONEY/);
 });
 test("needsAttention lists unapplied or unreviewed verified payments only", () => {
   const rows = [tx({ reconciliation_status: "needs_review", apply_status: "failed" }), tx({}), tx({ status: "failed", apply_status: "none", reconciliation_status: "unreconciled" })];

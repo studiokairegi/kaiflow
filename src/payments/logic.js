@@ -9,6 +9,11 @@ export const SANDBOX_NOTICE = "SANDBOX · TEST DATA · NOT REAL MONEY";
 export const SIMULATED_NOTICE = "SIMULATED — NO MONEY TRANSFERRED";
 export const FEE_CATEGORY = "Payment processing fees";
 export const PAYSTACK_METHOD = "Paystack (test mode)";
+export const PAYSTACK_LIVE_METHOD = "Paystack";        // label on live invoice payments in Finance
+export const LIVE_NOTICE = "LIVE · REAL PAYMENTS";
+export const envNotice = (env) => (env === "live" ? LIVE_NOTICE : SANDBOX_NOTICE);
+export const txEnvironment = (t) => (t?.environment === "live" ? "live" : "test");
+export const methodLabelFor = (env) => (env === "live" ? PAYSTACK_LIVE_METHOD : PAYSTACK_METHOD);
 
 // Same ids/labels/days as the Dashboard's period filter.
 export const PAYMENT_PERIODS = [
@@ -179,10 +184,10 @@ export function recentActivity({ transactions = [], payouts = [] }, limit = 10) 
 // ---- reconciliation -------------------------------------------------------------------------
 // Compares what the gateway says with what Finance holds, by currency. A non-zero difference is
 // surfaced, never silently "fixed".
-export function reconcileTotals({ transactions = [], invoicePayments = [], expenses = [] }) {
+export function reconcileTotals({ transactions = [], invoicePayments = [], expenses = [], environment = "test" }) {
   const refs = new Set(transactions.map((t) => t.reference));
   const gatewayGross = sumBy(transactions.filter((t) => COUNTED.includes(t.status) && t.apply_status === "applied"), (t) => t.currency, (t) => t.amount);
-  const ledgerGross = sumBy(invoicePayments.filter((p) => p.method === PAYSTACK_METHOD && p.status === "posted"), (p) => p.currency, (p) => p.amount);
+  const ledgerGross = sumBy(invoicePayments.filter((p) => p.method === methodLabelFor(environment) && p.status === "posted"), (p) => p.currency, (p) => p.amount);
   const gatewayFees = sumBy(transactions.filter((t) => SETTLED.includes(t.status) && t.apply_status === "applied" && t.fee_actual != null), (t) => t.currency, (t) => t.fee_actual);
   const ledgerFees = sumBy(expenses.filter((e) => e.category === FEE_CATEGORY && refs.has(e.reference)), (e) => symbolToCode(e.currency), (e) => e.amount);
   const ccys = [...new Set([...Object.keys(gatewayGross), ...Object.keys(ledgerGross), ...Object.keys(gatewayFees), ...Object.keys(ledgerFees)])].sort();

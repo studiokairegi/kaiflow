@@ -8,7 +8,7 @@ import PayNowDialog from "./PayNowDialog.jsx";
 import ProvidersTab from "./ProvidersTab.jsx";
 import * as api from "./api.js";
 import {
-  PAYMENT_PERIODS, PAYOUT_STATUS, SANDBOX_NOTICE, SIMULATED_NOTICE, TX_STATUS, billAvailableForRequest, checkoutBlocker,
+  PAYMENT_PERIODS, PAYOUT_STATUS, SIMULATED_NOTICE, envNotice, txEnvironment, TX_STATUS, billAvailableForRequest, checkoutBlocker,
   freelancerObligations, needsAttention, outstandingOf, payableInvoices, reconcileTotals, recentActivity, summarizePayments,
 } from "./logic.js";
 
@@ -17,8 +17,17 @@ const fmtDateTime = (iso) => (iso ? new Date(iso).toLocaleString() : "-");
 const fmtDay = (iso) => (iso ? String(iso).slice(0, 10) : "-");
 const money = (c, n, priv) => (priv ? "••••" : formatMoney(c, n));
 
-function SandboxBar() {
-  return <div role="note" style={{ border: `1px solid ${T.warn}66`, background: `${T.warn}14`, color: T.warn, borderRadius: 14, padding: "7px 14px", fontSize: 12.5, letterSpacing: "0.04em", fontWeight: 600 }}>{SANDBOX_NOTICE}</div>;
+function SandboxBar({ view, setView, hasLive }) {
+  const live = view === "live";
+  const tone = live ? T.bad : T.warn;
+  return (
+    <div role="note" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, border: `1px solid ${tone}66`, background: `${tone}14`, color: tone, borderRadius: 14, padding: "7px 14px", fontSize: 12.5, letterSpacing: "0.04em", fontWeight: 600 }}>
+      <span>{envNotice(view)}</span>
+      <span style={{ display: "flex", gap: 6 }}>
+        {["live", "test"].map((v) => <Btn key={v} small kind={view === v ? "primary" : "default"} onClick={() => setView(v)} aria-pressed={view === v} title={v === "live" && !hasLive ? "No live payments yet" : undefined}>{v === "live" ? "Live" : "Test"}</Btn>)}
+      </span>
+    </div>
+  );
 }
 const StatusPill = ({ map, status }) => <Pill tone={map[status]?.tone || "muted"}>{map[status]?.label || status}</Pill>;
 
@@ -35,7 +44,7 @@ function Overview({ ctx }) {
   return (
     <>
       <div style={S.grid(200)}>
-        <Kpi card="mint" icon="wallet" label="Client payments received" totals={s.receivedGross} privacy={privacy} sub="Gross, verified (test data)" />
+        <Kpi card="mint" icon="wallet" label="Client payments received" totals={s.receivedGross} privacy={privacy} sub={ctx.view === "live" ? "Gross, verified" : "Gross, verified (test data)"} />
         <Kpi card="sky" icon="clock" label="Received today" totals={s.receivedToday} privacy={privacy} />
         <Kpi card="violet" icon="percent" label="Transaction fees (actual)" totals={s.fees} privacy={privacy} sub="As reported by Paystack" />
         <Kpi card="royal" icon="trend" label="Net after fees" totals={s.net} privacy={privacy} sub="Gross minus actual fees" />
@@ -51,11 +60,11 @@ function Overview({ ctx }) {
       </div>
       <div style={S.card}>
         <div style={{ ...S.row, justifyContent: "space-between" }}><h3 style={S.h3}>Recent payment activity</h3><Btn small kind="link" onClick={() => setTab("transactions")}>All transactions</Btn></div>
-        <Table rowKey={(r) => r.kind + r.id} empty="No payment activity yet. Use Pay now on an invoice to run a sandbox payment." rows={activity} columns={[
+        <Table rowKey={(r) => r.kind + r.id} empty={ctx.view === "live" ? "No live payment activity yet. Send a client an invoice payment link." : "No test payment activity yet. Use Pay now on an invoice to run a test payment."} rows={activity} columns={[
           { key: "at", label: "When", render: (r) => fmtDateTime(r.at) }, { key: "kind", label: "Type", render: (r) => (r.kind === "payout" ? "Payout (simulated)" : "Client payment") },
           { key: "label", label: "Detail" }, { key: "amount", label: "Amount", num: true, render: (r) => money(r.currency, r.amount, privacy) }]} />
       </div>
-      <p style={S.sub}>Totals are grouped by currency and never added across currencies. Pending payments are not counted as received, and sandbox payments are test data, not income.</p>
+      <p style={S.sub}>Totals are grouped by currency and never added across currencies. Pending payments are not counted as received, and test-mode payments are test data, not income. Test and live are shown separately.</p>
     </>
   );
 }
@@ -80,7 +89,7 @@ function Incoming({ ctx }) {
         { key: "d", label: "Due", render: (i) => i.dueDate || "-" },
         { key: "o", label: "Outstanding", num: true, render: (i) => money(symbolToCode(i.currency), outstandingOf(i), privacy) },
         { key: "s", label: "Status", render: (i) => (txByInvoice.get(i.id) ? <Pill tone="warn">Checkout open</Pill> : <Pill tone="muted">Unpaid</Pill>) },
-        { key: "a", label: "", render: (i) => { const b = checkoutBlocker(i); return <Btn small kind="primary" disabled={!!b} title={b} onClick={() => onPay(i)}>Pay now (sandbox)</Btn>; } },
+        { key: "a", label: "", render: (i) => { const b = checkoutBlocker(i); return <Btn small kind="primary" disabled={!!b} title={b} onClick={() => onPay(i)}>Pay now (test)</Btn>; } },
       ]} />
     </div>
   );
@@ -224,7 +233,7 @@ function Transactions({ ctx }) {
       </div>
       {open && (
         <Modal title={`Transaction ${open.reference}`} onClose={() => setOpen(null)} footer={<Btn onClick={() => setOpen(null)}>Close</Btn>}>
-          <Banner tone="warn">{SANDBOX_NOTICE}</Banner>
+          <Banner tone="warn">{envNotice(open.environment === "live" ? "live" : "test")}</Banner>
           <Table rowKey={(r) => r.k} rows={[
             ["Status", TX_STATUS[open.status]?.label || open.status], ["Gross", formatMoney(open.currency, open.amount)],
             ["Actual fee", open.fee_actual == null ? "Not reported" : formatMoney(open.currency, open.fee_actual)],
@@ -271,9 +280,9 @@ function Settlements({ ctx }) {
 }
 
 function Reconciliation({ ctx }) {
-  const { data, privacy } = ctx;
+  const { data, privacy, view } = ctx;
   const attention = needsAttention(data.transactions);
-  const check = reconcileTotals({ transactions: data.transactions, invoicePayments: data.invoicePayments, expenses: data.feeExpenses });
+  const check = reconcileTotals({ transactions: data.transactions, invoicePayments: data.invoicePayments, expenses: data.feeExpenses, environment: view });
   const unrecPayouts = data.payouts.filter((p) => p.status === "completed_simulated" && !p.reconciled);
   const [notes, setNotes] = useState({});
   const { busy, error, run } = useBusy();
@@ -332,9 +341,9 @@ function SettingsTab({ ctx }) {
   return (
     <>
       <div style={S.card}>
-        <h3 style={S.h3}>Sandbox connection</h3>
+        <h3 style={S.h3}>Paystack connection</h3>
         {error && <Banner tone="bad" action={<Btn small onClick={check}>Retry</Btn>}>{error}</Banner>}
-        {status && <Banner tone={status.ok ? "ok" : "bad"}>{status.ok ? "Paystack TEST mode is configured. Live payments are not possible from this module." : status.message}</Banner>}
+        {status && <Banner tone={status.ok ? "ok" : "bad"}>{status.ok ? "Paystack is configured in the server's active mode. See Providers for the environment and connection." : status.message}</Banner>}
         {status && !status.ok && (
           <ol style={{ ...S.sub, paddingLeft: 18 }}>
             <li>In Paystack, switch the dashboard to <strong>Test mode</strong> and copy the test secret key (starts with <code>sk_test_</code>).</li>
@@ -368,6 +377,7 @@ export default function PaymentsModule({ userId, projects, invoices, teamMembers
   const [privacy, setPrivacy] = useState(false);
   const [payInvoice, setPayInvoice] = useState(null);
   const [returnNote, setReturnNote] = useState("");
+  const [envView, setEnvView] = useState(null);   // null = follow the data: live if any live payment exists, else test
 
   // Returning from Paystack's checkout (?payments_return=1&reference=...): verify server-side, then tidy the URL.
   useEffect(() => {
@@ -375,20 +385,25 @@ export default function PaymentsModule({ userId, projects, invoices, teamMembers
     const ref = q.get("reference") || q.get("trxref");
     if (!q.get("payments_return") || !ref) return;
     api.verifyPayment(ref)
-      .then((r) => { setReturnNote(r.applied ? "Payment verified and recorded (test data)." : r.note || `Payment status: ${r.status}.`); reload(); refreshApp?.(); })
+      .then((r) => { setReturnNote(r.applied ? `Payment verified and recorded${r.environment === "live" ? "" : " (test data)"}.` : r.note || `Payment status: ${r.status}.`); reload(); refreshApp?.(); })
       .catch((e) => setReturnNote(`Could not verify the payment: ${e.message}`))
       .finally(() => window.history.replaceState({}, "", window.location.pathname));
   }, []);
 
-  const summary = useMemo(() => (data ? summarizePayments({ ...data, invoices, period }) : null), [data, invoices, period]);
+  const hasLive = !!data?.transactions?.some((t) => txEnvironment(t) === "live");
+  const view = envView || (hasLive ? "live" : "test");
+  // Test and live transactions are never summed together: every screen below sees one environment.
+  const viewData = useMemo(() => (data ? { ...data, transactions: data.transactions.filter((t) => txEnvironment(t) === view),
+    invoicePayments: (data.invoicePayments || []).filter((p) => (view === "live" ? p.method === "Paystack" : p.method !== "Paystack")) } : null), [data, view]);
+  const summary = useMemo(() => (viewData ? summarizePayments({ ...viewData, invoices, period }) : null), [viewData, invoices, period]);
   if (loading) return <div style={{ ...S.page, color: T.muted }}>Loading Payments…</div>;
   if (error || !data) return <div style={S.page}><Banner tone="bad" action={<Btn small onClick={reload}>Retry</Btn>}>Payments couldn't load: {error || "no data"}. If this is the first run, apply the 20261018090000_payments_paystack_sandbox.sql migration.</Banner></div>;
 
-  const attention = needsAttention(data.transactions).length;
-  const ctx = { data, summary, privacy, invoices, projects, teamMembers, cards, reload: async () => { await reload(); }, refreshApp, onPay: setPayInvoice, onOpenProject, onGoFinance, onGoTeams, setTab };
+  const attention = needsAttention(viewData.transactions).length;
+  const ctx = { data: viewData, view, summary, privacy, invoices, projects, teamMembers, cards, reload: async () => { await reload(); }, refreshApp, onPay: setPayInvoice, onOpenProject, onGoFinance, onGoTeams, setTab };
   return (
     <div style={S.page}>
-      <SandboxBar />
+      <SandboxBar view={view} setView={setEnvView} hasLive={hasLive} />
       <div style={{ ...S.row, justifyContent: "space-between" }}>
         <Tabs value={tab} onChange={setTab} tabs={TABS.map(([id, label]) => ({ id, label, badge: id === "reconciliation" && attention ? `• ${attention}` : "" }))} />
         <span style={S.row}>

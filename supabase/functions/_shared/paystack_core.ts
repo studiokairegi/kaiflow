@@ -2,56 +2,102 @@
 // No Deno or Node globals beyond Web Crypto, so the same file is unit-tested under
 // `node --test` (see src/payments/payments.test.mjs).
 //
-// SANDBOX ONLY. Nothing in here can be configured to touch live money:
-//   * the secret key must be an `sk_test_...` key AND PAYMENTS_MODE must be the
-//     literal string "sandbox" (a server-side secret, never a client flag);
-//   * `sk_live_...` keys are rejected without ever being echoed or used;
-//   * any provider response that says it belongs to the live domain is rejected.
+// TEST and LIVE are kept apart structurally:
+//   * the active environment comes from the server secret PAYSTACK_MODE ("test" | "live");
+//     nothing the browser sends can change it;
+//   * the secret key's prefix must match that environment (sk_test_ for test, sk_live_ for live),
+//     otherwise payments stay disabled and the key is never echoed;
+//   * every transaction row is tagged with its environment and a verification made in one
+//     environment can never settle a row from the other (enforced here AND in SQL);
+//   * the webhook decides the environment from WHICH key produced the signature, so a live
+//     event is never verified with a test key or the reverse.
 
-export const SANDBOX_MODE = "sandbox";
+export type PaystackEnvironment = "test" | "live";
 
-// Currencies Paystack can collect. Anything else (EUR, GBP, JPY, ...) is refused
-// up front instead of being sent to Paystack and failing later.
+// Currencies Paystack can collect in principle. Whether THIS merchant account can collect a
+// currency or channel is configuration (payment_providers.settings), not an assumption made here.
 export const PAYSTACK_CURRENCIES = ["NGN", "GHS", "ZAR", "KES", "USD"] as const;
+export const PAYSTACK_CHANNELS = ["card", "bank_transfer"] as const;
+export type PaystackChannel = (typeof PAYSTACK_CHANNELS)[number];
 
 export type EnvReader = { get(key: string): string | undefined };
 
-export type SandboxConfig =
-  | { ok: true; secretKey: string; mode: "sandbox"; appUrl: string }
+export type ConfigErrorCode = "mode_not_set" | "missing_secret_key" | "key_mode_mismatch" | "invalid_key_format" | "app_url_required";
+
+export type PaystackConfig =
+  | { ok: true; secretKey: string; environment: PaystackEnvironment; appUrl: string }
   | { ok: false; code: ConfigErrorCode; message: string };
 
-export type ConfigErrorCode =
-  | "payments_mode_not_sandbox"
-  | "missing_secret_key"
-  | "live_key_rejected"
-  | "invalid_key_format";
+const KEY_RE: Record<PaystackEnvironment, RegExp> = {
+  test: /^sk_test_[A-Za-z0-9]{8,}$/,
+  live: /^sk_live_[A-Za-z0-9]{8,}$/,
+};
 
-// Decides whether payment operations may run at all. Never returns the secret
-// inside an error, and never falls back from sandbox to anything else.
-export function resolveSandboxConfig(env: EnvReader): SandboxConfig {
-  const mode = (env.get("PAYMENTS_MODE") || "").trim();
-  if (mode !== SANDBOX_MODE) {
-    return {
-      ok: false,
-      code: "payments_mode_not_sandbox",
-      message: 'Payments are disabled. Set the server secret PAYMENTS_MODE to "sandbox" to enable Paystack test mode.',
-    };
+export type KeyRing = { test?: string; live?: string; invalid: boolean };
+
+// Collects every configured secret key, sorted by its prefix. PAYSTACK_SECRET_KEY (single key) is
+// accepted and filed under whichever environment its prefix says.
+export function loadKeyRing(env: EnvReader): KeyRing {
+  const ring: KeyRing = { invalid: false };
+  const candidates = [env.get("PAYSTACK_TEST_SECRET_KEY"), env.get("PAYSTACK_LIVE_SECRET_KEY"), env.get("PAYSTACK_SECRET_KEY")];
+  for (const raw of candidates) {
+    const key = (raw || "").trim();
+    if (!key) continue;
+    if (KEY_RE["test"].test(key)) ring.test = key;
+    else if (KEY_RE["live"].test(key)) ring.live = key;
+    else ring.invalid = true;
   }
-  const key = (env.get("PAYSTACK_SECRET_KEY") || "").trim();
+  return ring;
+}
+
+export function activeMode(env: EnvReader): PaystackEnvironment | null {
+  const raw = (env.get("PAYSTACK_MODE") || "").trim().toLowerCase();
+  if (raw === "test" || raw === "live") return raw;
+  // Legacy sandbox switch from the first version of this module.
+  if ((env.get("PAYMENTS_MODE") || "").trim() === "sandbox") return "test";
+  return null;
+}
+
+// Decides whether payment OPERATIONS (start a checkout, verify) may run, and with which key.
+// Never returns a secret inside an error, and never falls back from one environment to the other.
+export function resolvePaystackConfig(env: EnvReader): PaystackConfig {
+  const mode = activeMode(env);
+  if (!mode) {
+    return { ok: false, code: "mode_not_set", message: 'Payments are disabled. Set the server secret PAYSTACK_MODE to "test" or "live".' };
+  }
+  const ring = loadKeyRing(env);
+  const key = ring[mode];
   if (!key) {
-    return { ok: false, code: "missing_secret_key", message: "PAYSTACK_SECRET_KEY is not set. Add your Paystack TEST secret key (sk_test_...) as a server secret." };
+    if (ring.invalid) return { ok: false, code: "invalid_key_format", message: "A configured Paystack secret key is not in the expected sk_test_… / sk_live_… format." };
+    if (ring.test || ring.live) {
+      return { ok: false, code: "key_mode_mismatch", message: `PAYSTACK_MODE is "${mode}" but only a ${mode === "live" ? "test" : "live"} key is configured. Payments stay disabled.` };
+    }
+    return { ok: false, code: "missing_secret_key", message: `No Paystack ${mode} secret key is configured on the server.` };
   }
-  if (/^sk_live_/i.test(key)) {
-    return {
-      ok: false,
-      code: "live_key_rejected",
-      message: "A live Paystack key is configured. Payments stay disabled: this module only runs against test keys. Replace it with an sk_test_ key.",
-    };
+  const appUrl = (env.get("APP_URL") || "").trim().replace(/\/+$/, "");
+  if (mode === "live" && !/^https:\/\//.test(appUrl)) {
+    return { ok: false, code: "app_url_required", message: "APP_URL must be set to the https:// address of Kairil before live payments can start." };
   }
-  if (!/^sk_test_[A-Za-z0-9]{8,}$/.test(key)) {
-    return { ok: false, code: "invalid_key_format", message: "PAYSTACK_SECRET_KEY is not a valid Paystack test secret key (expected sk_test_...)." };
+  return { ok: true, secretKey: key, environment: mode, appUrl };
+}
+
+// Webhook: the environment is whichever configured key reproduces the signature. A request signed
+// with neither key is rejected. Constant-time comparison; nothing about the keys is returned.
+export async function identifyWebhookEnvironment(
+  ring: KeyRing, rawBody: string, signatureHeader: string | null | undefined,
+): Promise<{ environment: PaystackEnvironment; secretKey: string } | null> {
+  for (const environment of ["live", "test"] as const) {
+    const key = ring[environment];
+    if (key && (await verifyWebhookSignature(key, rawBody, signatureHeader))) return { environment, secretKey: key };
   }
-  return { ok: true, secretKey: key, mode: "sandbox", appUrl: (env.get("APP_URL") || "").trim().replace(/\/+$/, "") };
+  return null;
+}
+
+// Paystack hosted-checkout channels for a request. Card -> card only; bank transfer -> bank_transfer only.
+export function channelsFor(channel: string): PaystackChannel[] | null {
+  if (channel === "card") return ["card"];
+  if (channel === "bank_transfer") return ["bank_transfer"];
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +170,7 @@ export async function webhookEventKey(rawBody: string, parsed: any): Promise<str
 // Validation of a verify-transaction response against what WE stored.
 // Never trusts anything the browser sent: expected values come from our own row.
 // ---------------------------------------------------------------------------
-export type Expected = { reference: string; amountMinor: number; currency: string };
+export type Expected = { reference: string; amountMinor: number; currency: string; environment: PaystackEnvironment };
 
 export type VerifyOutcome =
   | { kind: "success"; feeMinor: number | null; channel: string; paystackId: string; paidAt: string | null; gateway: string }
@@ -134,8 +180,11 @@ export type VerifyOutcome =
 export function interpretVerification(resp: any, expected: Expected): VerifyOutcome {
   const d = resp?.data;
   if (!resp || resp.status !== true || !d) return { kind: "rejected", reason: "Paystack did not return a verified transaction." };
-  if (d.domain && String(d.domain).toLowerCase() !== "test") {
-    return { kind: "rejected", reason: "Transaction belongs to a non-test Paystack domain. Refusing to process it." };
+  // Paystack labels every transaction with its domain. A live key must only ever confirm live
+  // transactions and a test key test ones; a missing domain is not accepted for live money.
+  const domain = String(d.domain || "").toLowerCase();
+  if (domain ? domain !== expected.environment : expected.environment === "live") {
+    return { kind: "rejected", reason: `Transaction domain does not match the ${expected.environment} environment. Refusing to process it.` };
   }
   if (String(d.reference || "") !== expected.reference) return { kind: "rejected", reason: "Reference mismatch." };
   const gateway = String(d.gateway_response || "");

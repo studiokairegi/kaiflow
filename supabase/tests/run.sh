@@ -20,7 +20,9 @@ run "$root/supabase/migrations/20261022090000_studio_portfolio.sql"
 run "$root/supabase/migrations/20261022090000_studio_portfolio.sql"   # idempotent re-run
 run "$root/supabase/migrations/20261023090000_portfolio_google_drive.sql"
 run "$root/supabase/migrations/20261023090000_portfolio_google_drive.sql"   # idempotent re-run
-echo "migrations applied (payments + portfolio migrations applied twice)"
+run "$root/supabase/migrations/20261025090000_paystack_live_checkout.sql"
+run "$root/supabase/migrations/20261025090000_paystack_live_checkout.sql"   # idempotent re-run
+echo "migrations applied (payments + portfolio + live checkout migrations applied twice)"
 out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/payments.test.sql" 2>&1)"; code=$?
 echo "$out" | grep -E "PASS|FAIL|SUMMARY|ERROR" | sed 's/^psql:[^ ]* //'
 [ $code -eq 0 ] || exit $code
@@ -29,4 +31,7 @@ echo "$out2" | grep -E "PASS|FAIL|SUMMARY|ERROR" | sed 's/^psql:[^ ]* //'
 [ $code2 -eq 0 ] || exit $code2
 out3="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/portfolio.test.sql" 2>&1)"; code3=$?
 echo "$out3" | grep -E "PASS|FAIL|SUMMARY|ERROR" | sed 's/^psql:[^ ]* //'
-exit $code3
+[ $code3 -eq 0 ] || exit $code3
+out4="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/payments_live.test.sql" 2>&1)"; code4=$?
+echo "$out4" | grep -E "PASS|FAIL|SUMMARY|ERROR" | sed 's/^psql:[^ ]* //'
+exit $code4

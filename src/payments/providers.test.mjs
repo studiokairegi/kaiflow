@@ -14,21 +14,22 @@ test("access: only an explicit isAdmin=true opens Payments; everything else fail
 });
 
 // ---------------------------------------------------------------- provider catalogue
-test("catalogue: Wise first, enabled + primary by default, not connected; others Coming Soon", () => {
+test("catalogue: Paystack first, enabled + primary by default, not connected until confirmed; others Coming Soon", () => {
   const ps = P.mergeProviders([]);
-  assert.deepEqual(ps.map((p) => p.id), ["wise", "paystack", "paypal", "payoneer", "mpesa"]);
+  assert.deepEqual(ps.map((p) => p.id), ["paystack", "paypal", "payoneer", "wise", "mpesa"]);
   assert.equal(ps[0].enabled, true); assert.equal(ps[0].primary, true); assert.equal(ps[0].connected, false);
   for (const p of ps.slice(1)) { assert.equal(p.status, "coming_soon"); assert.equal(p.enabled, false); assert.equal(p.primary, false); }
+  assert.equal(P.COMING_SOON_LABEL, "Coming soon — not configured");
 });
-test("catalogue: stored rows win for Wise; a stored row can never enable a Coming Soon provider", () => {
+test("catalogue: stored rows win for Paystack; a stored row can never enable PayPal or Payoneer", () => {
   const ps = P.mergeProviders([
-    { provider: "wise", status: "connected", is_enabled: true, is_primary: false },
+    { provider: "paystack", status: "connected", is_enabled: true, is_primary: true },
     { provider: "paypal", status: "connected", is_enabled: true, is_primary: true },
+    { provider: "payoneer", status: "connected", is_enabled: true, is_primary: false },
   ]);
-  assert.equal(ps[0].connected, true); assert.equal(ps[0].primary, false);
-  assert.equal(ps.find((p) => p.id === "paypal").enabled, false);
+  assert.equal(ps[0].connected, true); assert.equal(ps[0].primary, true);
+  for (const id of ["paypal", "payoneer"]) { assert.equal(ps.find((p) => p.id === id).enabled, false); assert.equal(P.offeredToClients(ps.find((p) => p.id === id)), false); }
   assert.equal(P.offeredToClients(ps[0]), true);
-  assert.equal(P.offeredToClients(ps.find((p) => p.id === "paypal")), false);
 });
 test("offeredToClients needs enabled AND connected", () => {
   const w = (o) => ({ available: true, enabled: true, connected: true, ...o });
@@ -45,8 +46,15 @@ test("token: only 64 lowercase hex chars is accepted; invoice-id-like values are
 test("path: /pay/{token} is recognised; other paths are not", () => {
   assert.equal(P.tokenFromPath(`/pay/${HEX64}`), HEX64);
   assert.equal(P.tokenFromPath(`/pay/${HEX64}/`), HEX64);
-  for (const p of ["/", "/pay", "/pay/", `/payments/${HEX64}`, `/pay/${HEX64}/extra`, `/x/pay/${HEX64}`]) assert.equal(P.tokenFromPath(p), null);
+  for (const p of ["/", "/pay", "/pay/", `/payments/${HEX64}`, `/pay/${HEX64}/extra`, `/x/pay/${HEX64}`, `/pay/${HEX64}/return`]) assert.equal(P.tokenFromPath(p), null);
   assert.equal(P.checkoutUrl(HEX64, "https://studiokairegi.com/"), `https://studiokairegi.com/pay/${HEX64}`);
+});
+
+test("path: /pay/{token}/return is the post-Paystack return route", () => {
+  assert.deepEqual(P.parsePayPath(`/pay/${HEX64}`), { token: HEX64, view: "checkout" });
+  assert.deepEqual(P.parsePayPath(`/pay/${HEX64}/return`), { token: HEX64, view: "return" });
+  assert.deepEqual(P.parsePayPath(`/pay/${HEX64}/return/`), { token: HEX64, view: "return" });
+  for (const p of ["/", "/pay", `/pay/${HEX64}/other`, `/pay/${HEX64}/return/x`]) assert.equal(P.parsePayPath(p), null);
 });
 
 // ---------------------------------------------------------------- server-side registry

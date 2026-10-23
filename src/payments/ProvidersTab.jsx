@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { S, T, Btn, Pill, Banner, Modal, useBusy } from "../finance/ui.jsx";
-import { mergeProviders, offeredToClients } from "./providers.js";
+import { mergeProviders, offeredToClients, COMING_SOON_LABEL } from "./providers.js";
 import * as api from "./api.js";
 
-// Payment Providers: Wise first and clearly primary; future providers shown as Coming Soon.
-// This screen only manages configuration. It never calls a provider.
+// Payment Providers: Paystack is the default; PayPal and Payoneer are shown greyed out as "Coming soon — not configured".
+// This screen manages configuration; the only provider call is the server-side connection check.
 function ProviderCard({ p, onManage }) {
   const soon = !p.available;
   return (
@@ -15,7 +15,7 @@ function ProviderCard({ p, onManage }) {
       </div>
       {p.subtitle && <span style={S.sub}>{p.subtitle}</span>}
       {soon ? (
-        <div style={{ marginTop: 10 }}><Pill tone="muted">Coming Soon</Pill></div>
+        <div style={{ marginTop: 10 }}><Pill tone="muted">{COMING_SOON_LABEL}</Pill></div>
       ) : (
         <>
           <div style={{ ...S.row, marginTop: 10 }}>
@@ -29,22 +29,47 @@ function ProviderCard({ p, onManage }) {
   );
 }
 
-function ManageDialog({ provider, onClose, onChanged }) {
+const CHANNEL_LABELS = { card: "Card", bank_transfer: "Bank transfer" };
+const CURRENCIES = ["KES", "USD", "NGN", "GHS", "ZAR"];
+
+function ManageDialog({ provider, row, onClose, onChanged }) {
   const { busy, error, run } = useBusy();
+  const [status, setStatus] = useState(null);
+  const [channels, setChannels] = useState(() => new Set(row?.settings?.channels || ["card"]));
+  const [currencies, setCurrencies] = useState(() => new Set(row?.settings?.currencies || ["KES"]));
+  const [saved, setSaved] = useState(false);
+  useEffect(() => { api.getPaystackStatus().then(setStatus).catch(() => setStatus({ ok: false, message: "Could not read the server configuration." })); }, []);
   const toggle = () => run(async () => { await api.setProviderEnabled(provider.id, !provider.enabled); await onChanged(); });
   const makePrimary = () => run(async () => { await api.setPrimaryProvider(provider.id); await onChanged(); });
+  const connect = () => run(async () => { await api.connectPaystack(); setStatus(await api.getPaystackStatus()); await onChanged(); });
+  const flip = (set, setter, v) => { const n = new Set(set); n.has(v) ? n.delete(v) : n.add(v); setter(n); setSaved(false); };
+  const saveOptions = () => run(async () => { await api.setPaystackOptions([...channels], [...currencies]); setSaved(true); await onChanged(); });
+  const env = status?.environment;
   return (
-    <Modal title={`${provider.name}${provider.subtitle ? ` · ${provider.subtitle}` : ""}`} onClose={onClose} width={520} footer={<Btn onClick={onClose}>Close</Btn>}>
+    <Modal title={`${provider.name}${provider.subtitle ? ` · ${provider.subtitle}` : ""}`} onClose={onClose} width={560} footer={<Btn onClick={onClose}>Close</Btn>}>
       {error && <Banner tone="bad">{error}</Banner>}
-      <Banner tone="info">
-        The {provider.name} connection is not available yet. Credentials will be added as server secrets when the integration is built; they are never entered or stored in the browser.
-        Until {provider.name} is connected, it is <strong>not shown to clients</strong> at checkout, even though it is enabled.
-      </Banner>
+      {status && (status.ok
+        ? <Banner tone={env === "live" ? "warn" : "info"}>Server is in <strong>{env.toUpperCase()}</strong> mode. {env === "live" ? "Payments made through client links are REAL." : "Test mode: no real money moves."} Test and live transactions are stored separately and never mix.</Banner>
+        : <Banner tone="bad">{status.message}</Banner>)}
       <div style={S.row}>
-        <Btn small disabled={busy} onClick={toggle}>{provider.enabled ? "Disable" : "Enable"}</Btn>
-        <Btn small disabled={busy || !provider.enabled || provider.primary} onClick={makePrimary}>{provider.primary ? "Primary provider" : "Make primary"}</Btn>
-        <Btn small disabled title="Available when the integration is implemented">Connect (soon)</Btn>
+        <Pill tone={provider.enabled ? "ok" : "muted"}>{provider.enabled ? "✓ Enabled" : "Disabled"}</Pill>
+        <Pill tone={provider.connected ? "ok" : "warn"}>{provider.connected ? `Connected${row?.environment && row.environment !== "none" ? ` (${row.environment === "sandbox" ? "test" : "live"})` : ""}` : "Not connected"}</Pill>
       </div>
+      <p style={S.sub}>Secret keys are server secrets (<code>PAYSTACK_TEST_SECRET_KEY</code>, <code>PAYSTACK_LIVE_SECRET_KEY</code>, <code>PAYSTACK_MODE</code>); they are never entered or stored in the browser. “Connect” checks the active key against Paystack and switches clients to this environment.</p>
+      <div style={S.row}>
+        <Btn small kind="primary" disabled={busy || !status?.ok} onClick={connect}>{provider.connected ? "Re-check connection" : "Connect"}</Btn>
+        <Btn small disabled={busy} onClick={toggle}>{provider.enabled ? "Disable" : "Enable"}</Btn>
+        <Btn small disabled={busy || !provider.enabled || provider.primary} onClick={makePrimary}>{provider.primary ? "Default provider" : "Make default"}</Btn>
+      </div>
+      {provider.connected && (
+        <>
+          <h4 style={{ ...S.h3, marginTop: 16 }}>Enabled on your Paystack account</h4>
+          <p style={S.sub}>Tick only what your merchant account actually has switched on in the Paystack dashboard. Clients are offered exactly these; nothing is assumed (bank transfer and USD are not enabled on every Kenyan account).</p>
+          <div style={S.row}>{Object.entries(CHANNEL_LABELS).map(([k, l]) => <label key={k}><input type="checkbox" checked={channels.has(k)} onChange={() => flip(channels, setChannels, k)} /> {l}</label>)}</div>
+          <div style={{ ...S.row, marginTop: 8 }}>{CURRENCIES.map((c) => <label key={c}><input type="checkbox" checked={currencies.has(c)} onChange={() => flip(currencies, setCurrencies, c)} /> {c}</label>)}</div>
+          <div style={{ marginTop: 10 }}><Btn small disabled={busy || !channels.size || !currencies.size} onClick={saveOptions}>{saved ? "Saved" : "Save channels and currencies"}</Btn></div>
+        </>
+      )}
     </Modal>
   );
 }
@@ -61,18 +86,18 @@ export default function ProvidersTab() {
   return (
     <>
       <div><h2 style={S.h2}>Payment providers</h2><p style={S.sub}>Clients pay through a StudioKairegi checkout page. The methods they see come from the providers below; the invoice and finance screens never depend on which provider was used.</p></div>
-      {error && <Banner tone="warn" action={<Btn small onClick={load} disabled={busy}>Retry</Btn>}>Couldn't load saved provider settings ({error}). Showing defaults, read-only. If this is the first run, apply the 20261021090000 migration.</Banner>}
+      {error && <Banner tone="warn" action={<Btn small onClick={load} disabled={busy}>Retry</Btn>}>Couldn't load saved provider settings ({error}). Showing defaults, read-only. If this is the first run, apply the 20261021090000 and 20261025090000 migrations.</Banner>}
       <div style={S.grid(240)}>
         {providers.map((p) => <ProviderCard key={p.id} p={p} onManage={error ? () => {} : setManaging} />)}
       </div>
       <div style={S.card}>
         <h3 style={S.h3}>What clients see</h3>
         {offered.length === 0
-          ? <p style={S.sub}>No payment method is live yet, so a payment link would show “online payment isn’t available for this invoice”. Wise appears here, as the primary option, once it is connected.</p>
+          ? <p style={S.sub}>No payment method is live yet, so a payment link would show “online payment isn’t available for this invoice”. Connect Paystack above to turn on card and bank transfer.</p>
           : <p style={S.sub}>Offered at checkout, in order: {offered.map((p) => p.name).join(", ")}.</p>}
         <p style={S.sub}>Payment links look like <code>/pay/&#123;secure-token&#125;</code>. The token is random and unguessable; invoice IDs are never in the link.</p>
       </div>
-      {current && <ManageDialog provider={current} onClose={() => setManaging(null)} onChanged={load} />}
+      {current && <ManageDialog provider={current} row={(rows || []).find((r) => r.provider === current.id)} onClose={() => setManaging(null)} onChanged={load} />}
     </>
   );
 }

@@ -54,7 +54,9 @@ async function rpc(name, args = {}) {
 
 export const startCheckout = (invoiceId, email, amount) => callPayments("init", { invoice_id: invoiceId, email, amount: amount ?? null });
 export const verifyPayment = (reference) => callPayments("verify", { reference });
-export const getSandboxStatus = () => callPayments("status");
+export const getPaystackStatus = () => callPayments("status");
+export const getSandboxStatus = getPaystackStatus;   // legacy name
+export const connectPaystack = () => callPayments("connect");
 export const getBalance = () => callPayments("balance");
 export const getSettlements = () => callPayments("settlements");
 
@@ -79,3 +81,15 @@ export const cancelCheckoutSession = (sessionId) => rpc("payments_cancel_checkou
 
 // PUBLIC (no login): the only call the /pay/{token} page makes. Returns a minimal view; see migration.
 export const getPublicCheckout = (token) => rpc("payments_public_checkout", { p_token: token });
+
+export const setPaystackOptions = (channels, currencies) => rpc("payments_set_paystack_options", { p_channels: channels, p_currencies: currencies });
+
+// PUBLIC checkout actions (anonymous Edge Function). The server decides amount, currency and
+// environment from the token; the browser only says which method and which email.
+async function callCheckout(action, payload) {
+  const { data, error } = await supabase.functions.invoke("paystack-checkout", { body: { action, ...payload } });
+  if (error) throw new Error(await readFunctionError(error));
+  return data;
+}
+export const startPublicCheckout = (token, email, channel) => callCheckout("start", { token, email, channel });
+export const confirmPublicCheckout = (token, reference) => callCheckout("confirm", { token, reference: reference || "" });

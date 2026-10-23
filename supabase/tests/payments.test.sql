@@ -94,7 +94,7 @@ do $$
 declare a uuid := _t.id('A'); b uuid := _t.id('B');
 begin
   perform _t.as_user(a);
-  perform _t.chk('browser cannot call payments_apply_verification', _t.err($q$select payments_apply_verification('x','success',100,'USD',1,'card','1',now(),'ok')$q$) like '%permission denied%');
+  perform _t.chk('browser cannot call payments_apply_verification', _t.err($q$select payments_apply_verification('x', 'test','success',100,'USD',1,'card','1',now(),'ok')$q$) like '%permission denied%');
   perform _t.chk('browser cannot call payments_apply_refund', _t.err($q$select payments_apply_refund('x',100,'USD','e1')$q$) like '%permission denied%');
   perform _t.chk('browser cannot insert transactions directly', _t.err($q$insert into paystack_transactions (reference, amount, currency) values ('FAKE', 1, 'USD')$q$) like '%permission denied%');
   perform _t.chk('browser cannot mark a transaction successful', _t.err(format($q$update paystack_transactions set status = 'success' where id = %L$q$, _t.id('tx_full'))) like '%permission denied%');
@@ -103,7 +103,7 @@ begin
   perform _t.as_user(b);
   perform _t.chk('RLS: another user sees none of my transactions', (select count(*) from paystack_transactions) = 0);
   perform _t.as_admin();
-  perform _t.chk('live environment rows are impossible (CHECK)', _t.err($q$insert into paystack_transactions (user_id, environment, reference, amount, currency) values ('00000000-0000-0000-0000-0000000000a1', 'live', 'LIVE1', 1, 'USD')$q$) like '%environment%');
+  perform _t.chk('unknown environments are impossible (CHECK)', _t.err($q$insert into paystack_transactions (user_id, environment, reference, amount, currency) values ('00000000-0000-0000-0000-0000000000a1', 'prod', 'LIVE1', 1, 'USD')$q$) like '%environment%');
   perform _t.chk('non-simulated payout rows are impossible (CHECK)', _t.err($q$insert into freelancer_payout_requests (user_id, bill_id, amount, currency, is_simulated) values ('00000000-0000-0000-0000-0000000000a1', gen_random_uuid(), 1, 'USD', false)$q$) like '%is_simulated%');
 end $$;
 
@@ -117,7 +117,7 @@ begin
   perform _t.chk('partial checkout is created for the requested amount', r.amount = 400 and not r.reused);
   perform _t.put('tx_p1', r.transaction_id::text); perform _t.put('ref_p1', r.reference);
   perform _t.as_service();
-  res := payments_apply_verification(r.reference, 'success', 40000, 'USD', 600, 'card', '99001', now(), 'Successful');
+  res := payments_apply_verification(r.reference, 'test', 'success', 40000, 'USD', 600, 'card', '99001', now(), 'Successful');
   perform _t.chk('verified success is applied', (res->>'applied')::boolean);
   select * into v_inv from invoices where id = _t.id('inv1');
   perform _t.chk('invoice paid amount follows the verified payment (400)', v_inv.amount_paid = 400 and v_inv.status = 'unpaid');
@@ -128,15 +128,15 @@ begin
   perform _t.chk('fee is booked once as an expense in the ledger', v_exp.amount = 6.00 and v_exp.category = 'Payment processing fees' and v_exp.journal_entry_id is not null and v_tx.fee_expense_id = v_exp.id);
 
   -- replays: browser refresh, webhook retry, simultaneous callbacks
-  res := payments_apply_verification(v_tx.reference, 'success', 40000, 'USD', 600, 'card', '99001', now(), 'Successful');
-  res := payments_apply_verification(v_tx.reference, 'success', 40000, 'USD', 600, 'card', '99001', now(), 'Successful');
+  res := payments_apply_verification(v_tx.reference, 'test', 'success', 40000, 'USD', 600, 'card', '99001', now(), 'Successful');
+  res := payments_apply_verification(v_tx.reference, 'test', 'success', 40000, 'USD', 600, 'card', '99001', now(), 'Successful');
   perform _t.chk('replayed verification is a no-op', (res->>'duplicate')::boolean);
   perform _t.chk('still exactly one invoice payment for the reference', (select count(*) from invoice_payments where reference = v_tx.reference) = 1);
   perform _t.chk('still exactly one fee expense for the reference', (select count(*) from expenses where reference = v_tx.reference) = 1);
   perform _t.chk('invoice paid amount unchanged after replays', (select amount_paid from invoices where id = _t.id('inv1')) = 400);
 
-  perform _t.chk('mismatched amount is rejected', _t.err(format($q$select payments_apply_verification(%L,'success',99999,'USD',600,'card','1',now(),'ok')$q$, v_tx.reference)) like '%does not match%');
-  perform _t.chk('unknown reference is rejected', _t.err($q$select payments_apply_verification('NOPE','success',100,'USD',1,'card','1',now(),'ok')$q$) like '%Unknown payment reference%');
+  perform _t.chk('mismatched amount is rejected', _t.err(format($q$select payments_apply_verification(%L, 'test','success',99999,'USD',600,'card','1',now(),'ok')$q$, v_tx.reference)) like '%does not match%');
+  perform _t.chk('unknown reference is rejected', _t.err($q$select payments_apply_verification('NOPE', 'test','success',100,'USD',1,'card','1',now(),'ok')$q$) like '%Unknown payment reference%');
   perform _t.as_admin();
 end $$;
 
@@ -149,10 +149,10 @@ begin
   perform _t.put('tx_p2', r.transaction_id::text); perform _t.put('ref_p2', r.reference);
   perform _t.as_service();
   -- amount that disagrees with our stored row is refused and nothing is applied
-  perform _t.chk('amount mismatch is refused', _t.err(format($q$select payments_apply_verification(%L,'success',50000,'USD',600,'card','1',now(),'ok')$q$, r.reference)) like '%does not match%');
-  perform _t.chk('currency mismatch is refused', _t.err(format($q$select payments_apply_verification(%L,'success',60000,'GHS',600,'card','1',now(),'ok')$q$, r.reference)) like '%does not match%');
+  perform _t.chk('amount mismatch is refused', _t.err(format($q$select payments_apply_verification(%L, 'test','success',50000,'USD',600,'card','1',now(),'ok')$q$, r.reference)) like '%does not match%');
+  perform _t.chk('currency mismatch is refused', _t.err(format($q$select payments_apply_verification(%L, 'test','success',60000,'GHS',600,'card','1',now(),'ok')$q$, r.reference)) like '%does not match%');
   perform _t.chk('refused verification applied nothing', (select count(*) from invoice_payments where reference = r.reference) = 0);
-  res := payments_apply_verification(r.reference, 'success', 60000, 'USD', 900, 'card', '99002', now(), 'Successful');
+  res := payments_apply_verification(r.reference, 'test', 'success', 60000, 'USD', 900, 'card', '99002', now(), 'Successful');
   perform _t.chk('second payment settles the invoice', (select status from invoices where id = _t.id('inv1')) = 'paid' and (select amount_paid from invoices where id = _t.id('inv1')) = 1000);
   perform _t.as_admin();
   perform _t.chk('paid invoice has no outstanding balance', payments_invoice_outstanding(_t.id('inv1')) = 0);
@@ -173,16 +173,16 @@ begin
   perform _t.as_user(a);
   select * into r from payments_prepare_charge(_t.id('inv2'), null, 'client@example.com');
   perform _t.as_service();
-  res := payments_apply_verification(r.reference, 'pending', null, null, null, null, null, null, 'Waiting for OTP');
+  res := payments_apply_verification(r.reference, 'test', 'pending', null, null, null, null, null, null, 'Waiting for OTP');
   perform _t.chk('pending payment is recorded as pending, not received', (select status from paystack_transactions where id = r.transaction_id) = 'pending' and (select amount_paid from invoices where id = _t.id('inv2')) = 0);
-  res := payments_apply_verification(r.reference, 'abandoned', null, null, null, null, null, null, '');
+  res := payments_apply_verification(r.reference, 'test', 'abandoned', null, null, null, null, null, null, '');
   perform _t.chk('abandoned payment is recorded', (select status from paystack_transactions where id = r.transaction_id) = 'abandoned');
-  res := payments_apply_verification(r.reference, 'failed', null, null, null, null, null, null, 'Declined');
+  res := payments_apply_verification(r.reference, 'test', 'failed', null, null, null, null, null, null, 'Declined');
   perform _t.chk('failed payment is recorded and nothing is posted', (select status from paystack_transactions where id = r.transaction_id) = 'failed'
      and not exists (select 1 from invoice_payments where reference = r.reference) and (select status from invoices where id = _t.id('inv2')) = 'unpaid');
-  res := payments_apply_verification(r.reference, 'success', 10000, 'USD', 150, 'card', '99003', now(), 'Successful');
+  res := payments_apply_verification(r.reference, 'test', 'success', 10000, 'USD', 150, 'card', '99003', now(), 'Successful');
   perform _t.chk('a later verified success still applies after a failure', (select status from invoices where id = _t.id('inv2')) = 'paid');
-  res := payments_apply_verification(r.reference, 'failed', null, null, null, null, null, null, 'late');
+  res := payments_apply_verification(r.reference, 'test', 'failed', null, null, null, null, null, null, 'late');
   perform _t.chk('a late "failed" never downgrades a settled payment', (select status from paystack_transactions where id = r.transaction_id) = 'success' and (select status from invoices where id = _t.id('inv2')) = 'paid');
   perform _t.as_admin();
 end $$;
@@ -199,8 +199,8 @@ begin
   insert into paystack_transactions (user_id, reference, invoice_id, invoice_number, amount, currency)
     values (a, 'KRL-RACE-2', _t.id('inv3'), 'INV-3', 500, 'USD') returning id into v_b;
   perform _t.as_service();
-  res := payments_apply_verification(r.reference, 'success', 50000, 'USD', 750, 'card', '99004', now(), 'Successful');
-  res := payments_apply_verification('KRL-RACE-2', 'success', 50000, 'USD', 750, 'card', '99005', now(), 'Successful');
+  res := payments_apply_verification(r.reference, 'test', 'success', 50000, 'USD', 750, 'card', '99004', now(), 'Successful');
+  res := payments_apply_verification('KRL-RACE-2', 'test', 'success', 50000, 'USD', 750, 'card', '99005', now(), 'Successful');
   perform _t.chk('second payment cannot over-collect the invoice', (select amount_paid from invoices where id = _t.id('inv3')) = 500 and (select count(*) from invoice_payments where invoice_id = _t.id('inv3')) = 1);
   perform _t.chk('over-collected payment is flagged for review, not dropped', (select apply_status from paystack_transactions where reference = 'KRL-RACE-2') = 'failed'
      and (select reconciliation_status from paystack_transactions where reference = 'KRL-RACE-2') = 'needs_review'

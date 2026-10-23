@@ -1,14 +1,18 @@
 // Thin server-side Paystack client. The secret key only ever lives in this process:
 // it is passed in by the caller, sent as a Bearer header, and never logged or returned.
-import { type SandboxConfig } from "./paystack_core.ts";
+import { type PaystackConfig } from "./paystack_core.ts";
 
 const API = "https://api.paystack.co";
 
+export type PaystackCreds = Extract<PaystackConfig, { ok: true }> | { secretKey: string; environment: "test" | "live" };
+
 export type PaystackResult = { ok: boolean; httpStatus: number; body: any; networkError?: string };
 
-export async function paystackFetch(cfg: Extract<SandboxConfig, { ok: true }>, path: string, init: { method?: string; body?: unknown } = {}): Promise<PaystackResult> {
-  // Defence in depth: this module can only talk to Paystack's API host, and only with a test key.
-  if (!/^sk_test_/.test(cfg.secretKey)) return { ok: false, httpStatus: 0, body: null, networkError: "Refusing to call Paystack without a test key." };
+export async function paystackFetch(cfg: PaystackCreds, path: string, init: { method?: string; body?: unknown } = {}): Promise<PaystackResult> {
+  // Defence in depth: this module can only talk to Paystack's API host, and the key prefix must match
+  // the environment the caller says it is operating in (test key <-> test, live key <-> live).
+  const prefix = cfg.environment === "live" ? "sk_live_" : "sk_test_";
+  if (!cfg.secretKey.startsWith(prefix)) return { ok: false, httpStatus: 0, body: null, networkError: "Paystack key does not match the environment." };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 15000);
   try {

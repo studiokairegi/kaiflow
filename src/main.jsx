@@ -8,7 +8,7 @@ const NdaSignPage = lazyWithSuspense(() => import("./NdaSignPage.jsx"));
 const ContractSignPage = lazyWithSuspense(() => import("./ContractSignPage.jsx"));
 const PayCheckoutPage = lazyWithSuspense(() => import("./payments/PayCheckoutPage.jsx"));
 const PortfolioPage = lazyWithSuspense(() => import("./portfolio/PortfolioPage.jsx"));
-import { tokenFromPath } from "./payments/providers.js";
+import { parsePayPath } from "./payments/providers.js";
 import { tokenFromPortfolioPath } from "./portfolio/logic.js";
 
 // Without a boundary, one render error unmounts the whole tree and leaves a blank page.
@@ -31,16 +31,16 @@ const params = new URLSearchParams(window.location.search);
 const shareType = params.get("share");
 const shareToken = params.get("token");
 
-const payToken = tokenFromPath(window.location.pathname);
+const payRoute = parsePayPath(window.location.pathname);
 const portfolioToken = tokenFromPortfolioPath(window.location.pathname);
 
 let content;
 if (portfolioToken) {
   // Public studio portfolio: /portfolio/{secure-token}. Needs a host rewrite of /portfolio/* to index.html.
   content = <PortfolioPage token={portfolioToken} />;
-} else if (payToken) {
+} else if (payRoute) {
   // Public client checkout: /pay/{secure-token}. Needs a host rewrite of /pay/* to index.html.
-  content = <PayCheckoutPage token={payToken} />;
+  content = <PayCheckoutPage token={payRoute.token} view={payRoute.view} />;
 } else if (shareType === "project" && shareToken) {
   content = <ClientPortalView token={shareToken} />;
 } else if (shareType === "shot" && shareToken) {
