@@ -1,0 +1,8 @@
+Paywise merge notes
+==================
+
+This package is based on the current paywise rebrand repository. Existing notification UI, engine, API, hook, and migration are preserved unchanged. The older archive's parallel NotificationBell/controller and activity_notification_state migration were intentionally not overlaid because the current repository already has its own notification center and migration; overlaying the second system would duplicate functionality and created a migration timestamp collision.
+
+Merged update: stronger duplicate-download protection in src/downloadGuard.js and its tests, plus a React Strict Mode-safe lifecycle in src/ClientCutReview.jsx. Timestamped client feedback/annotation controls in the current ClientCutReview remain intact.
+
+Database migrations are not applied by this ZIP. The existing .env, .git directory, and node_modules are intentionally excluded.
