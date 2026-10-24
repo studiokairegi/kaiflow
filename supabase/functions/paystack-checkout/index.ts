@@ -193,7 +193,7 @@ async function start(service: any, cfg: Ok, token: string, body: any) {
       // Paystack answered and said no: a definite failure, safe to close the attempt.
       await service.from("paystack_transactions").update({ status: "failed", gateway_response: paystackMessage(r), updated_at: new Date().toISOString() })
         .eq("id", row.transaction_id).eq("status", "initialized");
-      console.error("paystack-checkout init rejected", { reference: row.reference, http: r.httpStatus });
+      console.error("paystack-checkout init rejected", { reference: row.reference, http: r.httpStatus, gateway: paystackMessage(r) });
       return json({ error: "The payment provider could not start this payment. Please try again, or contact StudioKairegi." }, 502);
     }
     const authUrl = String(r.body.data.authorization_url);
