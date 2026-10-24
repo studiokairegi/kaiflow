@@ -1,0 +1,511 @@
+/* Responsive layout foundation for the Kairil admin app and public client pages.
+   The app historically uses many inline styles; these scoped overrides adapt
+   those layouts without changing data flow or payment behaviour. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  overflow-x: hidden;
+  scroll-padding-top: 12px;
+}
+
+body {
+  margin: 0;
+  overflow-x: hidden;
+}
+
+img,
+video,
+canvas,
+svg {
+  max-width: 100%;
+}
+
+.kf-app-shell {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: clip;
+}
+
+.kf-app-shell :where(input, select, textarea, button) {
+  max-width: 100%;
+}
+
+.kf-modal-overlay {
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.kf-content-wrap,
+.kf-projects-grid,
+.kf-settings-page-wrap,
+.kf-settings-grid,
+.kf-field-row {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.kf-payment-page {
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: clip;
+}
+
+.kf-payment-shell {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.kf-payment-card {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.kf-payment-method {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  touch-action: manipulation;
+}
+
+.kf-payment-method > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kf-portfolio-page {
+  width: 100%;
+  max-width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: clip;
+}
+
+.kf-shared-page {
+  width: 100%;
+  max-width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: clip;
+}
+
+@media (max-width: 900px) {
+  .kf-app-shell > .kf-app-header {
+    padding: 14px 16px !important;
+    gap: 10px !important;
+  }
+
+  .kf-app-header-left {
+    min-width: 0;
+    flex: 1 1 48%;
+    gap: 10px !important;
+  }
+
+  .kf-app-header-left > div:last-child {
+    min-width: 0;
+    max-width: calc(100vw - 82px);
+  }
+
+  .kf-app-header-left h1 {
+    max-width: 100%;
+    font-size: 18px !important;
+    line-height: 1.2 !important;
+    overflow-wrap: anywhere;
+  }
+
+  .kf-app-header-left p {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+  }
+
+  .kf-app-header-right {
+    width: 100%;
+    min-width: 0;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start !important;
+    gap: 8px !important;
+  }
+
+  .kf-app-header-right > span {
+    min-width: 0 !important;
+    font-size: 11px !important;
+    text-align: left !important;
+    flex: 0 0 auto;
+  }
+
+  .kf-primary-tabs,
+  .kf-secondary-tabs,
+  .kf-modal-tabs {
+    width: 100%;
+    max-width: 100%;
+    padding: 0 12px 12px !important;
+    gap: 7px !important;
+    flex-wrap: nowrap !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scroll-snap-type: x proximity;
+  }
+
+  .kf-primary-tabs > button,
+  .kf-secondary-tabs > button,
+  .kf-modal-tabs > button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    min-height: 42px;
+    padding: 9px 13px !important;
+    scroll-snap-align: start;
+  }
+
+  .kf-content-wrap {
+    padding: 0 14px 24px !important;
+  }
+
+  .kf-projects-grid {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr)) !important;
+    gap: 10px !important;
+    padding: 6px 14px 24px !important;
+  }
+
+  .kf-settings-page-wrap {
+    padding: 8px 14px 24px !important;
+  }
+
+  .kf-settings-grid,
+  .kf-app-shell [style*="minmax(320px"],
+  .kf-app-shell [style*="minmax(240px"],
+  .kf-app-shell [style*="minmax(260px"] {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .kf-app-shell .kf-field-row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    flex-wrap: nowrap;
+    gap: 10px !important;
+  }
+
+  .kf-app-shell .kf-field-row > * {
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+
+  .kf-app-shell [style*="padding: 12px 28px"],
+  .kf-app-shell [style*="padding: 0px 28px 18px"],
+  .kf-app-shell [style*="padding: 0px 28px 40px"],
+  .kf-app-shell [style*="padding: 0px 28px 48px"],
+  .kf-app-shell [style*="padding: 6px 28px 32px"],
+  .kf-app-shell [style*="padding: 8px 28px 32px"] {
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+  }
+
+  .kf-app-shell [style*="margin: 0px 28px 14px"] {
+    margin-left: 14px !important;
+    margin-right: 14px !important;
+  }
+
+  .kf-app-shell [style*="margin-left: 28px"] {
+    margin-left: 14px !important;
+  }
+
+  .kf-app-shell .kf-modal-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .kf-app-shell .kf-modal-footer > button {
+    flex: 1 1 auto;
+  }
+
+  .kf-app-shell .kf-modal-footer > div[style*="flex: 1"] {
+    display: none !important;
+  }
+
+  .kf-app-shell [role="dialog"][aria-modal="true"] {
+    padding: max(8px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom)) !important;
+    align-items: center !important;
+    overflow-y: auto !important;
+  }
+
+  .kf-app-shell [role="dialog"][aria-modal="true"] > div {
+    width: 100% !important;
+    max-width: min(100%, 640px) !important;
+    max-height: calc(100dvh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    overflow-y: auto !important;
+    padding: 16px !important;
+  }
+
+  .kf-app-shell .kf-modal-overlay {
+    padding: max(8px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom)) !important;
+    align-items: center !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .kf-app-shell .kf-modal {
+    width: 100% !important;
+    max-width: min(100%, 640px) !important;
+    max-height: calc(100dvh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    overflow-x: hidden;
+    overflow-y: auto !important;
+    padding: 18px !important;
+    border-radius: 16px !important;
+  }
+
+  .kf-app-shell [style*="width: 200px"],
+  .kf-app-shell [style*="width: 240px"],
+  .kf-app-shell [style*="width: 260px"],
+  .kf-app-shell [style*="width: 320px"] {
+    max-width: 100% !important;
+  }
+
+  .kf-app-shell :where(input:not([style*="font-size: 30px"]), select, textarea) {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    font-size: max(16px, 1em) !important;
+  }
+
+  .kf-app-shell :where(button, input[type="checkbox"], input[type="radio"]) {
+    touch-action: manipulation;
+  }
+
+  .kf-app-shell button {
+    min-height: 40px;
+  }
+
+  .kf-app-shell table {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .kf-app-shell th,
+  .kf-app-shell td {
+    white-space: nowrap;
+  }
+
+  .kf-app-shell pre,
+  .kf-app-shell code {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-wrap: anywhere;
+  }
+
+  .kf-shared-page {
+    padding: 20px 12px !important;
+  }
+
+  .kf-portfolio-page {
+    padding: max(12px, env(safe-area-inset-top)) 10px max(20px, env(safe-area-inset-bottom)) !important;
+  }
+
+  .kf-portfolio-page > div {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .kf-portfolio-page [style*="minmax(150px"] {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr)) !important;
+  }
+
+  .kf-shared-page > div {
+    width: 100%;
+    max-width: 640px;
+    min-width: 0;
+  }
+
+  .kf-shared-page h1 {
+    font-size: clamp(21px, 6vw, 24px) !important;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+  }
+
+  .kf-shared-page :where(input, select, textarea) {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    font-size: max(16px, 1em) !important;
+  }
+
+  .kf-shared-page button {
+    min-height: 40px;
+    touch-action: manipulation;
+  }
+
+  .kf-shared-page [style*="display: flex"] {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .kf-payment-page {
+    padding: max(12px, env(safe-area-inset-top)) 10px max(20px, env(safe-area-inset-bottom)) !important;
+  }
+
+  .kf-payment-brand-header {
+    padding: 16px !important;
+    gap: 10px !important;
+    flex-wrap: wrap;
+  }
+
+  .kf-payment-brand-header > div:first-child {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .kf-payment-brand-header > div:last-child {
+    flex: 0 0 auto;
+  }
+
+  .kf-payment-card {
+    border-radius: 16px !important;
+  }
+
+  .kf-payment-columns {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .kf-payment-summary,
+  .kf-payment-actions {
+    min-width: 0;
+    padding: 22px 16px !important;
+  }
+
+  .kf-payment-summary {
+    border-right: 0 !important;
+    border-bottom: 1px solid #dfe3df;
+  }
+
+  .kf-payment-result-body {
+    padding: 24px 16px !important;
+  }
+
+  .kf-payment-card h1 {
+    font-size: clamp(24px, 7vw, 32px) !important;
+    line-height: 1.12 !important;
+    overflow-wrap: anywhere;
+  }
+
+  .kf-payment-card h2 {
+    font-size: 20px !important;
+    line-height: 1.25 !important;
+  }
+
+  .kf-payment-card :where(input, select, textarea) {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    font-size: max(16px, 1em) !important;
+  }
+
+  .kf-payment-card button {
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+
+  .kf-payment-card [style*="justify-content: space-between"] {
+    flex-wrap: wrap;
+    gap: 8px !important;
+  }
+
+  .kf-payment-card [style*="justify-content: space-between"] > :last-child {
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (max-width: 540px) {
+  .kf-app-shell > .kf-app-header {
+    padding: 12px !important;
+  }
+
+  .kf-app-header-left {
+    flex: 1 1 100%;
+  }
+
+  .kf-app-header-right {
+    gap: 7px !important;
+  }
+
+  .kf-app-header-right .kf-clock-btn,
+  .kf-app-header-right .kf-focus-link {
+    min-height: 40px;
+  }
+
+  .kf-content-wrap {
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+  }
+
+  .kf-projects-grid {
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .kf-app-shell .kf-modal {
+    padding: 14px !important;
+  }
+
+  .kf-app-shell .kf-modal-footer,
+  .kf-app-shell [style*="justify-content: flex-end"] {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .kf-app-shell .kf-modal-footer > button {
+    flex: 1 1 auto;
+  }
+
+  .kf-app-shell .kf-modal-footer > div[style*="flex: 1"] {
+    display: none !important;
+  }
+
+  .kf-payment-brand-header {
+    align-items: flex-start !important;
+  }
+
+  .kf-payment-brand-header > div:first-child img {
+    width: 36px !important;
+    height: 36px !important;
+  }
+
+  .kf-payment-card .kf-payment-method {
+    min-height: 56px !important;
+    padding: 12px !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

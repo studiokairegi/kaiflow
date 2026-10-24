@@ -5057,7 +5057,7 @@ export default function ShotTracker() {
 
   if (isPasswordRecovery) {
     return (
-      <div style={styles.app}>
+      <div className="kf-app-shell" style={styles.app}>
         <style>{fontImport}</style>
         <div style={styles.lockScreen}>
           <div style={styles.logoMark}><img src="/logo.png" alt="Kairil" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
@@ -5090,7 +5090,7 @@ export default function ShotTracker() {
 
   if (!session) {
     return (
-      <div style={styles.app}>
+      <div className="kf-app-shell" style={styles.app}>
         <style>{fontImport}</style>
         <div style={styles.lockScreen}>
           <div style={styles.logoMark}><img src="/logo.png" alt="Kairil" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
@@ -5230,7 +5230,7 @@ export default function ShotTracker() {
   const atBudgetPlannerLimit = !hasProAccess && budgetPlanners.length >= FREE_BUDGET_PLANNER_LIMIT;
 
   return (
-    <div style={styles.app}>
+    <div className="kf-app-shell" style={styles.app}>
       <style>{fontImport}</style>
 
       {driveNotice && (
@@ -5270,8 +5270,8 @@ export default function ShotTracker() {
         </div>
       )}
 
-      <header style={styles.header}>
-        <div style={styles.headerLeft}>
+      <header className="kf-app-header" style={styles.header}>
+        <div className="kf-app-header-left" style={styles.headerLeft}>
           {view === "board" ? (
             <button style={styles.backButton} onClick={() => setView("projects")}>
               <BackIcon />
@@ -5310,7 +5310,7 @@ export default function ShotTracker() {
             </p>
           </div>
         </div>
-        <div style={styles.headerRight}>
+        <div className="kf-app-header-right" style={styles.headerRight}>
           <span style={styles.saveIndicator}>
             {saveState === "saving" && "Saving..."}
             {saveState === "saved" && "Saved"}
@@ -5458,7 +5458,7 @@ export default function ShotTracker() {
       <StudioTimeCard userId={userId} visible={view === "projects" && workspace === "dashboard"} accountConfig={settings.userPrefs?.focusTimer} />
 
       {showTabs && (
-        <div style={styles.tabRow}>
+        <div className="kf-primary-tabs" style={styles.tabRow}>
           <button
             className={tutorialHighlightTarget === "dashboard" ? "kf-tutorial-highlight" : undefined}
             style={{ ...styles.tabButton, ...(workspace === "dashboard" ? styles.tabButtonActive : {}) }}
@@ -5525,7 +5525,7 @@ export default function ShotTracker() {
       )}
 
       {view === "board" && (
-        <div style={styles.tabRow}>
+        <div className="kf-secondary-tabs" style={styles.tabRow}>
           <button
             style={{ ...styles.tabButton, ...(boardTab === "shots" ? styles.tabButtonActive : {}) }}
             onClick={() => setBoardTab("shots")}
@@ -5567,7 +5567,7 @@ export default function ShotTracker() {
       )}
 
       {view === "board" && boardTab === "shots" && (
-        <div style={styles.progressBar}>
+        <div className="kf-progress-bar" style={styles.progressBar}>
           {pipelineSummaryLabel(selectedProject) && (
             <div style={{ ...styles.progressLabel, fontSize: 11.5, opacity: 0.75, marginBottom: 4 }}>
               {pipelineSummaryLabel(selectedProject)}
@@ -5694,7 +5694,7 @@ export default function ShotTracker() {
 
       {view === "projects" && workspace === "leads" && crmTab === "pipeline" && (
         <>
-          <div style={styles.fieldRow}>
+          <div className="kf-field-row" style={styles.fieldRow}>
             <input
               style={styles.input}
               value={leadSearch}
@@ -6434,7 +6434,7 @@ function ProjectsGrid({
           </button>
         </div>
       ) : (
-        <div style={styles.projectsGrid}>
+        <div className="kf-projects-grid" style={styles.projectsGrid}>
           {activeProjects.map((project) => (
             <ProjectCard
               key={project.id}
@@ -6462,7 +6462,7 @@ function ProjectsGrid({
             {showArchived ? "Hide" : "Show"} archived ({archivedProjects.length})
           </button>
           {showArchived && (
-            <div style={styles.projectsGrid}>
+            <div className="kf-projects-grid" style={styles.projectsGrid}>
               {archivedProjects.map((project) => (
                 <ProjectCard
                   key={project.id}
@@ -6651,7 +6651,7 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
 
   if (teamMembers.length === 0) {
     return (
-      <div style={styles.invoicesWrap}>
+      <div className="kf-content-wrap" style={styles.invoicesWrap}>
         {loadError && (
           <p style={{ ...styles.fieldHint, color: "#FF4D4D" }} role="alert">
             Team data couldn't be loaded: {loadError}
@@ -6670,7 +6670,7 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
   }
 
   return (
-    <div style={styles.invoicesWrap}>
+    <div className="kf-content-wrap" style={styles.invoicesWrap}>
       {loadError && (
         <p style={{ ...styles.fieldHint, color: "#FF4D4D" }} role="alert">
           Team data couldn't be loaded: {loadError}
@@ -6887,7 +6887,7 @@ function LegacyAssignmentReview({ matches, onLink }) {
   };
 
   return (
-    <div style={{ ...styles.invoicesWrap, marginTop: 8, border: "1px solid #2a3634", borderRadius: 8, padding: 12 }}>
+    <div className="kf-content-wrap" style={{ ...styles.invoicesWrap, marginTop: 8, border: "1px solid #2a3634", borderRadius: 8, padding: 12 }}>
       {matches.unique.length > 0 && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -7001,7 +7001,7 @@ function PlannerDashboard({ plans, settings, onOpen, onNew, atLimit, hasProAcces
   };
 
   return (
-    <div style={styles.invoicesWrap}>
+    <div className="kf-content-wrap" style={styles.invoicesWrap}>
       <div style={styles.plannerPageHeader}>
         <div>
           <h2 style={styles.plannerPageTitle}>Budget Planner</h2>
@@ -7765,8 +7765,8 @@ function StudioTimeSummaryModal({ userId, onClose }) {
   }));
 
   return (
-    <div style={styles.overlay} onClick={onClose}>
-      <div style={{ ...styles.modal, maxWidth: 600, gap: 18 }} onClick={(e) => e.stopPropagation()}>
+    <div className="kf-modal-overlay" style={styles.overlay} onClick={onClose}>
+      <div className="kf-modal" style={{ ...styles.modal, maxWidth: 600, gap: 18 }} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <h3 style={styles.modalTitle}>Studio Time Summary</h3>
           <button style={styles.iconButton} onClick={onClose}>
@@ -7774,7 +7774,7 @@ function StudioTimeSummaryModal({ userId, onClose }) {
           </button>
         </div>
 
-        <div style={styles.tabRow}>
+        <div className="kf-modal-tabs" style={styles.tabRow}>
           <button
             style={{ ...styles.tabButton, ...(period === "week" ? styles.tabButtonActive : {}) }}
             onClick={() => setPeriod("week")}
@@ -9148,8 +9148,8 @@ function SupportModal({ email, onSubmit, onCancel }) {
   };
 
   return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+      <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{sent ? "Message sent" : "Report a problem"}</span>
           <button style={styles.iconButton} onClick={onCancel}>
@@ -9180,7 +9180,7 @@ function SupportModal({ email, onSubmit, onCancel }) {
           </>
         )}
 
-        <div style={styles.modalFooter}>
+        <div className="kf-modal-footer" style={styles.modalFooter}>
           <button style={styles.cancelButton} onClick={onCancel}>
             {sent ? "Close" : "Cancel"}
           </button>
@@ -9206,8 +9206,8 @@ function TutorialModal({ onComplete, onStepChange }) {
   }, [step]);
 
   return (
-    <div style={styles.overlay}>
-      <div style={{ ...styles.modal, maxWidth: 440 }} onClick={(e) => e.stopPropagation()}>
+    <div className="kf-modal-overlay" style={styles.overlay}>
+      <div className="kf-modal" style={{ ...styles.modal, maxWidth: 440 }} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{current.title}</span>
           <button style={styles.iconButton} onClick={onComplete}>
@@ -9231,7 +9231,7 @@ function TutorialModal({ onComplete, onStepChange }) {
           ))}
         </div>
 
-        <div style={styles.modalFooter}>
+        <div className="kf-modal-footer" style={styles.modalFooter}>
           {step > 0 ? (
             <button style={styles.cancelButton} onClick={() => setStep(step - 1)}>
               Back
@@ -9277,7 +9277,7 @@ function ActivityPanel({ entries, cards, onRefresh, onOpenActivity }) {
   const sorted = [...entries].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
   return (
-    <div style={styles.invoicesWrap}>
+    <div className="kf-content-wrap" style={styles.invoicesWrap}>
       <button type="button" style={{ ...styles.cancelButton, alignSelf: "flex-start" }} onClick={onRefresh}>
         Refresh
       </button>
@@ -9335,7 +9335,7 @@ function InvoicesPanel({
     invoices.some((other) => other.convertedFromId === sourceId && other.docType === targetType);
 
   return (
-    <div style={styles.invoicesWrap}>
+    <div className="kf-content-wrap" style={styles.invoicesWrap}>
       <div style={styles.budgetSummaryRow}>
         <div style={styles.budgetStat}>
           <span style={styles.label}>Total budget</span>
@@ -9620,8 +9620,8 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
   };
 
   return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+      <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{isNew ? "New project" : "Edit project"}</span>
           <button style={styles.iconButton} onClick={onCancel}>
@@ -9932,7 +9932,7 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
           </div>
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Budget</label>
             <input
@@ -10012,7 +10012,7 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
           />
         </div>
 
-        <div style={styles.modalFooter}>
+        <div className="kf-modal-footer" style={styles.modalFooter}>
           {!isNew && (
             <button
               style={styles.deleteButton}
@@ -10191,8 +10191,8 @@ function PipelineMigrationDialog({ project, projectCards, pipelineLibrary, onCan
   };
 
   return (
-    <div style={{ ...styles.overlay, zIndex: 60 }} onClick={onCancel}>
-      <div style={{ ...styles.modal, maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+    <div className="kf-modal-overlay" style={{ ...styles.overlay, zIndex: 60 }} onClick={onCancel}>
+      <div className="kf-modal" style={{ ...styles.modal, maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>Move to the new pipeline</span>
           <button style={styles.iconButton} onClick={onCancel}>
@@ -10478,8 +10478,8 @@ function LeadEditor({
   const stageMeta = ALL_LEAD_STAGES.find((s) => s.id === form.stage);
 
   return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+      <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>
             {isNew ? "New lead" : isEditing ? "Edit lead" : form.companyName || "Untitled lead"}
@@ -10517,7 +10517,7 @@ function LeadEditor({
               {form.needsFollowup && <span style={{ ...styles.cardTag, color: followupTagColor(form) }}>Needs follow-up{form.followupDate ? ` \u00b7 ${formatShortDate(form.followupDate)}` : ""}</span>}
             </div>
 
-            <div style={styles.fieldRow}>
+            <div className="kf-field-row" style={styles.fieldRow}>
               <div style={styles.field}>
                 <label style={styles.label}>Contact</label>
                 <p style={styles.readOnlyValue}>{form.contactPerson || "\u2014"}</p>
@@ -10536,7 +10536,7 @@ function LeadEditor({
               </div>
             </div>
 
-            <div style={styles.fieldRow}>
+            <div className="kf-field-row" style={styles.fieldRow}>
               <div style={styles.field}>
                 <label style={styles.label}>Website</label>
                 <p style={styles.readOnlyValue}>{form.website || "\u2014"}</p>
@@ -10548,7 +10548,7 @@ function LeadEditor({
             </div>
 
             {(form.billingAddress || form.taxId) && (
-              <div style={styles.fieldRow}>
+              <div className="kf-field-row" style={styles.fieldRow}>
                 <div style={styles.field}>
                   <label style={styles.label}>Billing address</label>
                   <p style={styles.readOnlyValue}>{form.billingAddress || "\u2014"}</p>
@@ -10624,7 +10624,7 @@ function LeadEditor({
                 ))}
             </div>
 
-            <div style={styles.modalFooter}>
+            <div className="kf-modal-footer" style={styles.modalFooter}>
               {!isNew && (
                 <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
                   <TrashIcon />
@@ -10662,7 +10662,7 @@ function LeadEditor({
               />
             </div>
 
-            <div style={styles.fieldRow}>
+            <div className="kf-field-row" style={styles.fieldRow}>
               <div style={styles.field}>
                 <label style={styles.label}>Contact person</label>
                 <input
@@ -10691,7 +10691,7 @@ function LeadEditor({
               </div>
             </div>
 
-            <div style={styles.fieldRow}>
+            <div className="kf-field-row" style={styles.fieldRow}>
               <div style={styles.field}>
                 <label style={styles.label}>Website</label>
                 <input
@@ -10745,7 +10745,7 @@ function LeadEditor({
               />
             </div>
 
-            <div style={styles.fieldRow}>
+            <div className="kf-field-row" style={styles.fieldRow}>
               <div style={styles.field}>
                 <label style={styles.label}>Priority</label>
                 <div style={styles.lostReasonGrid}>
@@ -10941,7 +10941,7 @@ function LeadEditor({
             {showNegotiation && (
               <>
                 <div style={styles.fieldDivider}>Negotiation</div>
-                <div style={styles.fieldRow}>
+                <div className="kf-field-row" style={styles.fieldRow}>
                   <div style={styles.field}>
                     <label style={styles.label}>Proposed budget</label>
                     <input
@@ -11019,7 +11019,7 @@ function LeadEditor({
               </div>
             )}
 
-            <div style={styles.modalFooter}>
+            <div className="kf-modal-footer" style={styles.modalFooter}>
               {!isNew && (
                 <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
                   <TrashIcon />
@@ -11220,8 +11220,8 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
   };
 
   return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+      <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{isNew ? "New shot" : "Edit shot"}</span>
           <button style={styles.iconButton} onClick={onCancel}>
@@ -11240,7 +11240,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
           />
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Client</label>
             <input
@@ -11261,7 +11261,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
           </div>
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Due date</label>
             <input
@@ -11388,7 +11388,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
           </select>
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Payment amount</label>
             <input
@@ -11526,7 +11526,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
           </>
         )}
 
-        <div style={styles.modalFooter}>
+        <div className="kf-modal-footer" style={styles.modalFooter}>
           {!isNew && (
             <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
               <TrashIcon />
@@ -11564,8 +11564,8 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
 
   return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+      <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{isNew ? "New expense" : "Edit expense"}</span>
           <button style={styles.iconButton} onClick={onCancel}>
@@ -11610,7 +11610,7 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
           />
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Amount</label>
             <input
@@ -11637,7 +11637,7 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
           <input style={styles.input} type="date" value={form.date || ""} onChange={set("date")} />
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Vendor (optional)</label>
             <input style={styles.input} value={form.vendor || ""} onChange={set("vendor")} placeholder="Who was paid" />
@@ -11658,7 +11658,7 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
         </div>
         <p style={styles.fieldHint}>An account only appears here if it holds the same currency as the expense.</p>
 
-        <div style={styles.modalFooter}>
+        <div className="kf-modal-footer" style={styles.modalFooter}>
           {!isNew && (
             <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
               <TrashIcon />
@@ -12467,8 +12467,8 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
   const dependability = dependabilityTier(form.dependabilityScore ?? 80);
 
   return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+      <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{isNew ? "New team member" : "Edit team member"}</span>
           <button style={styles.iconButton} onClick={onCancel}>
@@ -12505,7 +12505,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
           </p>
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Role</label>
             <input
@@ -12624,7 +12624,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
           <>
         <div style={styles.fieldDivider}>Rate</div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Rate type</label>
             <select style={styles.input} value={form.rateType || "hour"} onChange={set("rateType")}>
@@ -12691,7 +12691,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
           <>
         <div style={styles.fieldDivider}>Freelancer info</div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Member type</label>
             <select style={styles.input} value={form.memberType || "freelancer"} onChange={set("memberType")}>
@@ -12702,7 +12702,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
         </div>
         {form.memberType === "freelancer" && (
           <>
-            <div style={styles.fieldRow}>
+            <div className="kf-field-row" style={styles.fieldRow}>
               <div style={styles.field}>
                 <label style={styles.label}>Upwork rating (0&ndash;5)</label>
                 <input
@@ -12745,7 +12745,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
           <>
         <div style={styles.fieldDivider}>Payments</div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Payment method</label>
             <select style={styles.input} value={form.paymentMethod || ""} onChange={set("paymentMethod")}>
@@ -12849,7 +12849,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
           </div>
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Available from</label>
             <input
@@ -12870,7 +12870,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
           </div>
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Max workload</label>
             <input
@@ -12913,7 +12913,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
           </p>
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Default speed</label>
             <input
@@ -13025,7 +13025,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
             ))}
             {addingPortfolioItem ? (
               <div style={{ border: "1px solid #2a3634", borderRadius: 8, padding: 10, marginTop: 6 }}>
-                <div style={styles.fieldRow}>
+                <div className="kf-field-row" style={styles.fieldRow}>
                   <div style={styles.field}>
                     <label style={styles.label}>Title</label>
                     <input
@@ -13052,7 +13052,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                     onChange={(e) => setNewPortfolioItem({ ...newPortfolioItem, description: e.target.value })}
                   />
                 </div>
-                <div style={styles.fieldRow}>
+                <div className="kf-field-row" style={styles.fieldRow}>
                   <div style={styles.field}>
                     <label style={styles.label}>External URL</label>
                     <input
@@ -13114,7 +13114,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
             ))}
             {addingReview ? (
               <div style={{ border: "1px solid #2a3634", borderRadius: 8, padding: 10, marginTop: 6 }}>
-                <div style={styles.fieldRow}>
+                <div className="kf-field-row" style={styles.fieldRow}>
                   <div style={styles.field}>
                     <label style={styles.label}>Rating</label>
                     <select
@@ -13169,7 +13169,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
           </p>
         )}
 
-        <div style={styles.modalFooter}>
+        <div className="kf-modal-footer" style={styles.modalFooter}>
           {!isNew && form.status !== "archived" && !confirmingArchive && (
             <button style={styles.deleteButton} onClick={() => setConfirmingArchive(true)}>
               <TrashIcon />
@@ -13253,8 +13253,8 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
   };
 
   return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+      <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>
             {isNew ? `New ${DOC_TYPES.find((t) => t.id === docType)?.label.toLowerCase() || "invoice"}` : "Edit document"}
@@ -13291,7 +13291,7 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
           )}
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Document number</label>
             <input
@@ -13417,7 +13417,7 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
           </div>
         )}
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Amount</label>
             <input
@@ -13443,7 +13443,7 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
           </div>
         </div>
 
-        <div style={styles.fieldRow}>
+        <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
             <label style={styles.label}>Issue date</label>
             <input
@@ -13526,7 +13526,7 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
           </div>
         )}
 
-        <div style={styles.modalFooter}>
+        <div className="kf-modal-footer" style={styles.modalFooter}>
           {!isNew && (
             <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
               <TrashIcon />
@@ -13568,8 +13568,8 @@ function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, c
   };
 
   return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+      <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>Set up milestone payments</span>
           <button style={styles.iconButton} onClick={onCancel}>
@@ -13609,7 +13609,7 @@ function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, c
           Total: {totalPercent}%{totalPercent !== 100 ? " — doesn't add up to 100%, invoices will use these amounts anyway" : ""}
         </p>
 
-        <div style={styles.modalFooter}>
+        <div className="kf-modal-footer" style={styles.modalFooter}>
           <div style={{ flex: 1 }} />
           <button style={styles.cancelButton} onClick={onCancel}>
             Cancel

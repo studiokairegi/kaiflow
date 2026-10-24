@@ -43,7 +43,7 @@ export default function PortfolioPage({ token }) {
   const next = () => { if (index < items.length - 1) { setIndex(index + 1); } };
 
   return (
-    <main style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "system-ui, -apple-system, Segoe UI, sans-serif", padding: "20px 16px 40px" }}>
+    <main className="kf-portfolio-page" style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "system-ui, -apple-system, Segoe UI, sans-serif", padding: "20px 16px 40px" }}>
       <div style={{ maxWidth: 1000, margin: "0 auto" }}>
         <div style={{ fontWeight: 700, letterSpacing: "0.06em", fontSize: 13, color: C.muted, marginBottom: 16 }}>{(data?.studioName || "PORTFOLIO").toUpperCase()}</div>
         {phase === "loading" && <p style={{ color: C.muted }}>Loading…</p>}

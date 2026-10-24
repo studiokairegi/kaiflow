@@ -57,15 +57,15 @@ function Shell({ children }) {
     return () => meta.forEach((m) => m.remove());
   }, []);
   return (
-    <main style={page}>
-      <div style={shell}>{children}</div>
+    <main className="kf-payment-page" style={page}>
+      <div className="kf-payment-shell" style={shell}>{children}</div>
     </main>
   );
 }
 
 function BrandHeader() {
   return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, padding: "22px 24px", borderBottom: `1px solid ${BRAND.line}` }}>
+    <div className="kf-payment-brand-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, padding: "22px 24px", borderBottom: `1px solid ${BRAND.line}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <img src="/logo.png" alt="Studio Kairegi" style={{ width: 42, height: 42, objectFit: "contain" }} />
         <div>
@@ -128,9 +128,9 @@ function ReturnView({ token }) {
   const back = <a href={`/pay/${token}`} style={{ color: BRAND.ink, fontWeight: 700 }}>Return to payment</a>;
   return (
     <Shell>
-      <div style={card}>
+      <div className="kf-payment-card" style={card}>
         <BrandHeader />
-        <div style={{ padding: "42px 34px 36px", maxWidth: 660 }}>
+        <div className="kf-payment-result-body" style={{ padding: "42px 34px 36px", maxWidth: 660 }}>
           {res.status === "checking" && <><div style={label}>Checking payment</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Confirming your payment</h1><p role="status" style={muted}>We’re verifying the transaction with Paystack. Please don’t make another payment while this is checking.</p></>}
           {res.status === "paid" && <><div style={{ ...label, color: BRAND.accent }}>Payment received</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Thank you.</h1><p style={muted}>Invoice <strong>{res.invoice_number}</strong> for <strong>{formatMoney(res.currency, res.amount)}</strong> has been confirmed and marked paid.</p>{res.reference && <p style={{ ...muted, fontSize: 12, marginTop: 16 }}>Reference: {res.reference}</p>}</>}
           {res.status === "paid_elsewhere" && <><div style={{ ...label, color: BRAND.accent }}>Invoice settled</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Nothing more is due.</h1><p style={muted}>Invoice <strong>{res.invoice_number}</strong> has already been settled.</p></>}
@@ -340,7 +340,7 @@ function CheckoutView({ token }) {
   const methodBtn = (m, primary) => {
     const loading = busy === m.channel;
     return (
-      <button key={m.channel} type="button" disabled={!!busy} onClick={() => choose(m)}
+      <button className="kf-payment-method" key={m.channel} type="button" disabled={!!busy} onClick={() => choose(m)}
         style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", minHeight: primary ? 60 : 54, padding: "13px 15px", borderRadius: 14, border: `1px solid ${primary ? BRAND.primary : BRAND.line}`, background: primary ? BRAND.primary : BRAND.white, color: primary ? BRAND.white : BRAND.ink, cursor: busy ? "not-allowed" : "pointer", fontSize: 15, fontWeight: 700, fontFamily: "inherit", textAlign: "left", boxShadow: primary ? "0 5px 16px rgba(8,125,184,.16)" : "none" }}>
         <MethodIcon kind={m.channel} color={primary ? BRAND.white : BRAND.muted} />
         <span style={{ flex: 1 }}>{m.name}{m.converted ? <span style={{ display: "block", fontSize: 11.5, fontWeight: 600, opacity: .72 }}>Charged in {m.charge_currency}</span> : null}</span>
@@ -351,13 +351,13 @@ function CheckoutView({ token }) {
 
   return (
     <Shell>
-      <div style={card}>
+      <div className="kf-payment-card" style={card}>
         <BrandHeader />
         {phase === "loading" && <div style={{ padding: 36 }}><p style={muted}>Loading secure payment details…</p></div>}
-        {MESSAGES[phase] && <div style={{ padding: "42px 34px" }}><div style={{ ...label, color: BRAND.danger }}>Unavailable</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>{MESSAGES[phase][0]}</h1><p style={muted}>{MESSAGES[phase][1]}</p></div>}
+        {MESSAGES[phase] && <div className="kf-payment-result-body" style={{ padding: "42px 34px" }}><div style={{ ...label, color: BRAND.danger }}>Unavailable</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>{MESSAGES[phase][0]}</h1><p style={muted}>{MESSAGES[phase][1]}</p></div>}
         {live && data && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))" }}>
-            <section style={{ padding: "36px 30px", background: BRAND.paper, borderRight: `1px solid ${BRAND.line}` }}>
+          <div className="kf-payment-columns" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))" }}>
+            <section className="kf-payment-summary" style={{ padding: "36px 30px", background: BRAND.paper, borderRight: `1px solid ${BRAND.line}` }}>
               <div style={label}>Secure checkout</div>
               <h1 style={{ fontSize: "clamp(30px, 5vw, 46px)", lineHeight: 1, letterSpacing: "-.04em", margin: "12px 0 8px" }}>{formatMoney(data.currency, data.amount)}</h1>
               <p style={{ ...muted, fontSize: 14 }}>Due now · Invoice <strong style={{ color: BRAND.ink }}>{data.invoice_number}</strong>{data.client_name ? ` · ${data.client_name}` : ""}</p>
@@ -370,7 +370,7 @@ function CheckoutView({ token }) {
               <SecurityNote expiresAt={data.expires_at} wise={step.name === "wise"} />
             </section>
 
-            <section style={{ padding: "32px 28px" }}>
+            <section className="kf-payment-actions" style={{ padding: "32px 28px" }}>
               {step.name === "choose" && (
                 <>
                   <h2 style={{ fontSize: 22, margin: "0 0 18px" }}>Choose how to pay</h2>
@@ -388,7 +388,7 @@ function CheckoutView({ token }) {
                   {wise && (
                     <div style={{ marginTop: 22 }}>
                       <div style={{ ...label, marginBottom: 8 }}>Other way to pay</div>
-                      <button type="button" disabled={!!busy} onClick={() => { setError(""); setStep({ name: "wise" }); }}
+                      <button className="kf-payment-method" type="button" disabled={!!busy} onClick={() => { setError(""); setStep({ name: "wise" }); }}
                         style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", padding: "12px 14px", borderRadius: 14, border: `1px solid ${BRAND.line}`, background: "#fafaf8", color: BRAND.ink, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
                         <MethodIcon kind="wise" color={BRAND.muted} />
                         <span style={{ flex: 1 }}>

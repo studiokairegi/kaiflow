@@ -172,7 +172,7 @@ export function ClientPortalView({ token }) {
   );
 
   return (
-    <div style={wrapStyle}>
+    <div className="kf-shared-page" style={wrapStyle}>
       <div style={{ maxWidth: 640, margin: "0 auto" }}>
         <p style={{ color: textMuted, fontSize: 12.5, textTransform: "uppercase", letterSpacing: "0.05em" }}>
           Client Portal
@@ -323,7 +323,7 @@ export function FreelancerView({ token }) {
   const isApproved = shot.review_status === "approved";
 
   return (
-    <div style={wrapStyle}>
+    <div className="kf-shared-page" style={wrapStyle}>
       <div style={{ maxWidth: 560, margin: "0 auto" }}>
         <p style={{ color: textMuted, fontSize: 12.5, textTransform: "uppercase", letterSpacing: "0.05em" }}>
           {shot.studio_name}
