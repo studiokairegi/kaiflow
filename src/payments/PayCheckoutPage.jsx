@@ -13,6 +13,7 @@ const BRAND = {
   muted: "#68737a",
   line: "#dfe3df",
   accent: "#2fbfa6",
+  primary: "#087db8",
   accentSoft: "#e9f7f4",
   danger: "#a84848",
   warning: "#8a691e",
@@ -151,7 +152,7 @@ const fmtTime = (iso) => {
 };
 const mmss = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 const row = { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 14, fontSize: 13.5, padding: "7px 0" };
-const primaryBtn = (disabled) => ({ width: "100%", minHeight: 52, padding: "13px 16px", borderRadius: 14, border: "none", background: disabled ? "#9ba3a5" : "#087db8", color: BRAND.white, fontSize: 15, fontWeight: 800, fontFamily: "inherit", cursor: disabled ? "not-allowed" : "pointer", boxShadow: disabled ? "none" : "0 5px 16px rgba(8,125,184,.22)" });
+const primaryBtn = (disabled) => ({ width: "100%", minHeight: 52, padding: "13px 16px", borderRadius: 14, border: "none", background: disabled ? "#9ba3a5" : BRAND.primary, color: BRAND.white, fontSize: 15, fontWeight: 800, fontFamily: "inherit", cursor: disabled ? "not-allowed" : "pointer", boxShadow: disabled ? "none" : "0 5px 16px rgba(8,125,184,.22)" });
 const ghostBtn = { background: "none", border: "none", padding: 0, color: BRAND.muted, fontSize: 13, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", textDecoration: "underline" };
 
 function QuoteSummary({ quote, data }) {
@@ -340,8 +341,8 @@ function CheckoutView({ token }) {
     const loading = busy === m.channel;
     return (
       <button key={m.channel} type="button" disabled={!!busy} onClick={() => choose(m)}
-        style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", minHeight: primary ? 60 : 54, padding: "13px 15px", borderRadius: 14, border: `1px solid ${primary ? BRAND.ink : BRAND.line}`, background: primary ? BRAND.ink : BRAND.white, color: primary ? BRAND.white : BRAND.ink, cursor: busy ? "not-allowed" : "pointer", fontSize: 15, fontWeight: 700, fontFamily: "inherit", textAlign: "left" }}>
-        <MethodIcon kind={m.channel} color={primary ? BRAND.accent : BRAND.muted} />
+        style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", minHeight: primary ? 60 : 54, padding: "13px 15px", borderRadius: 14, border: `1px solid ${primary ? BRAND.primary : BRAND.line}`, background: primary ? BRAND.primary : BRAND.white, color: primary ? BRAND.white : BRAND.ink, cursor: busy ? "not-allowed" : "pointer", fontSize: 15, fontWeight: 700, fontFamily: "inherit", textAlign: "left", boxShadow: primary ? "0 5px 16px rgba(8,125,184,.16)" : "none" }}>
+        <MethodIcon kind={m.channel} color={primary ? BRAND.white : BRAND.muted} />
         <span style={{ flex: 1 }}>{m.name}{m.converted ? <span style={{ display: "block", fontSize: 11.5, fontWeight: 600, opacity: .72 }}>Charged in {m.charge_currency}</span> : null}</span>
         <span style={{ fontSize: 12, fontWeight: 600, opacity: .75 }}>{loading ? "Preparing…" : "Select"}</span>
       </button>
