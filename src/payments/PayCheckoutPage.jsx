@@ -151,7 +151,7 @@ const fmtTime = (iso) => {
 };
 const mmss = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 const row = { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 14, fontSize: 13.5, padding: "7px 0" };
-const primaryBtn = (disabled) => ({ width: "100%", minHeight: 52, padding: "13px 16px", borderRadius: 14, border: "none", background: disabled ? "#9ba3a5" : BRAND.ink, color: BRAND.white, fontSize: 15, fontWeight: 800, fontFamily: "inherit", cursor: disabled ? "not-allowed" : "pointer" });
+const primaryBtn = (disabled) => ({ width: "100%", minHeight: 52, padding: "13px 16px", borderRadius: 14, border: "none", background: disabled ? "#9ba3a5" : "#087db8", color: BRAND.white, fontSize: 15, fontWeight: 800, fontFamily: "inherit", cursor: disabled ? "not-allowed" : "pointer", boxShadow: disabled ? "none" : "0 5px 16px rgba(8,125,184,.22)" });
 const ghostBtn = { background: "none", border: "none", padding: 0, color: BRAND.muted, fontSize: 13, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", textDecoration: "underline" };
 
 function QuoteSummary({ quote, data }) {

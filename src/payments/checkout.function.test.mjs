@@ -31,8 +31,9 @@ globalThis.Deno = { env: { get: (k) => globalThis.__env[k] }, serve: (fn) => { h
 await import(pathToFileURL(path.join(tmp, "paystack-checkout", "index.ts")).href);
 
 // ---- scripted world ---------------------------------------------------------------------------
-function world({ prepare = [], status = [], paystack = [], tx = {}, custom = {} } = {}) {
-  const w = { rpcs: [], updates: [], fetches: [], prepare: [...prepare], status: [...status], paystack: [...paystack], tx, custom };
+function world({ prepare = [], status = [], paystack = [], tx = {}, custom = {}, fxPayload = null, fxError = false } = {}) {
+  const defaultFxPayload = { result: "success", time_last_update_unix: Math.floor(Date.now() / 1000), rates: { USD: 1, EUR: 0.92, GBP: 0.79, JPY: 150, KES: 129 } };
+  const w = { rpcs: [], updates: [], fetches: [], fxFetches: [], prepare: [...prepare], status: [...status], paystack: [...paystack], tx, custom, fxPayload: fxPayload || defaultFxPayload, fxError };
   globalThis.__env = { ...ENV };
   globalThis.__fake = {
     client: () => ({
@@ -42,6 +43,7 @@ function world({ prepare = [], status = [], paystack = [], tx = {}, custom = {} 
         if (name === "payments_checkout_prepare") { const n = w.prepare.shift(); return n?.error ? { data: null, error: { message: n.error, details: n.details } } : { data: [n], error: null }; }
         if (name === "payments_checkout_status") return { data: w.status.length > 1 ? w.status.shift() : w.status[0], error: null };
         if (name === "payments_apply_verification") return { data: { applied: args.p_outcome === "success", status: args.p_outcome }, error: null };
+        if (name === "payments_checkout_fx_snapshot_save") return { data: true, error: null };
         return { data: null, error: null };
       },
       from: (table) => {
@@ -55,7 +57,13 @@ function world({ prepare = [], status = [], paystack = [], tx = {}, custom = {} 
     }),
   };
   globalThis.fetch = async (url, init) => {
-    w.fetches.push({ url: String(url), method: init?.method || "GET", body: init?.body ? JSON.parse(init.body) : null, auth: init?.headers?.Authorization });
+    const target = String(url);
+    if (target.includes("open.er-api.com")) {
+      w.fxFetches.push({ url: target, method: init?.method || "GET" });
+      if (w.fxError) throw new Error("FX provider unavailable");
+      return { ok: true, status: 200, json: async () => w.fxPayload };
+    }
+    w.fetches.push({ url: target, method: init?.method || "GET", body: init?.body ? JSON.parse(init.body) : null, auth: init?.headers?.Authorization });
     const next = w.paystack.shift();
     if (next === "NETWORK") throw new Error("socket hang up");
     return { ok: next.status < 300, status: next.status, json: async () => next.body };
@@ -250,6 +258,37 @@ test("quote: the browser can only name a channel; the server's quote is returned
   assert.equal(res.status, 200); assert.deepEqual((await res.json()).quote, quote);
   assert.deepEqual(Object.keys(w.rpcs.find((r) => r.name === "payments_quote_create").args).sort(), ["p_channel", "p_token"]);
   assert.equal(w.fetches.length, 0);
+});
+
+test("quote refreshes server-side FX snapshots before SQL creates the quote", async () => {
+  const quote = { quote_id: QID, converted: true, charge_amount: 127685.19, charge_currency: "KES" };
+  const w = world({ custom: { payments_quote_create: () => ({ data: quote, error: null }) } });
+  const res = await call({ action: "quote", token: TOKEN, channel: "card" });
+  assert.equal(res.status, 200);
+  assert.equal(w.fxFetches.length, 1);
+  const save = w.rpcs.find((r) => r.name === "payments_checkout_fx_snapshot_save");
+  assert.ok(save);
+  assert.deepEqual(save.args.p_rates, { EUR: 0.92, GBP: 0.79, JPY: 150, KES: 129 });
+  assert.equal(save.args.p_token, TOKEN);
+  assert.equal(save.args.p_fetched_at, new Date(w.fxPayload.time_last_update_unix * 1000).toISOString());
+});
+
+test("quote rejects stale provider data and does not store it", async () => {
+  const stale = { result: "success", time_last_update_unix: Math.floor(Date.now() / 1000) - 40 * 60 * 60, rates: { EUR: 0.92, JPY: 150, KES: 129 } };
+  const w = world({ fxPayload: stale, custom: { payments_quote_create: () => ({ data: null, error: { message: "No reliable FX", details: "fx_unavailable" } }) } });
+  const res = await call({ action: "quote", token: TOKEN, channel: "card" });
+  assert.equal(res.status, 503);
+  assert.equal(w.rpcs.some((r) => r.name === "payments_checkout_fx_snapshot_save"), false);
+  assert.equal(w.rpcs.find((r) => r.name === "payments_quote_create") !== undefined, true);
+});
+
+test("quote provider outage still allows a valid recent stored snapshot to be used", async () => {
+  const quote = { quote_id: QID, converted: true, charge_amount: 129, charge_currency: "KES" };
+  const w = world({ fxError: true, custom: { payments_quote_create: () => ({ data: quote, error: null }) } });
+  const res = await call({ action: "quote", token: TOKEN, channel: "card" });
+  assert.equal(res.status, 200);
+  assert.equal(w.rpcs.some((r) => r.name === "payments_checkout_fx_snapshot_save"), false);
+  assert.equal(w.rpcs.some((r) => r.name === "payments_quote_create"), true);
 });
 
 test("quote: no reliable rate -> 503 fx_unavailable and nothing else happens", async () => {

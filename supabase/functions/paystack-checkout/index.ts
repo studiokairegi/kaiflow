@@ -246,12 +246,68 @@ async function confirm(service: any, cfg: Ok, token: string, reference: string) 
 // final charge. A snapshot older than 36 hours is "no reliable rate": we say so instead of guessing.
 async function quote(service: any, token: string, channel: string) {
   if (!channelsFor(channel)) return json({ error: "Choose a payment method." }, 400);
+
+  // Refresh the owner's checkout FX snapshot from the provider before asking SQL to quote.
+  // A provider outage must not destroy a still-fresh snapshot; SQL will use a snapshot no older
+  // than 36 hours and otherwise fail closed with fx_unavailable.
+  await refreshCheckoutFx(service, token);
   const { data, error } = await service.rpc("payments_quote_create", { p_token: token, p_channel: channel });
   if (error) {
     if (error.details === "fx_unavailable") return json({ error: error.message, code: "fx_unavailable" }, 503);
     return json({ error: error.message, code: "not_payable" }, 409);
   }
   return json({ quote: data });
+}
+
+
+const FX_PROVIDER_URL = "https://open.er-api.com/v6/latest/USD";
+const FX_MAX_AGE_MS = 36 * 60 * 60 * 1000;
+const FX_SUPPORTED = ["EUR", "GBP", "JPY", "KES"] as const;
+
+async function refreshCheckoutFx(service: any, token: string) {
+  let response: Response;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      response = await fetch(FX_PROVIDER_URL, { method: "GET", signal: controller.signal, headers: { Accept: "application/json" } });
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch {
+    return; // Quote RPC may still use a snapshot that is within the strict freshness window.
+  }
+  if (!response.ok) return;
+
+  let payload: any;
+  try { payload = await response.json(); } catch { return; }
+  const updatedUnix = Number(payload?.time_last_update_unix);
+  const updatedAtMs = updatedUnix * 1000;
+  const now = Date.now();
+  if (payload?.result !== "success" || !Number.isFinite(updatedAtMs) || updatedAtMs <= 0 ||
+      updatedAtMs > now + 5 * 60 * 1000 || now - updatedAtMs > FX_MAX_AGE_MS || !payload?.rates || typeof payload.rates !== "object") return;
+
+  const rates: Record<string, number> = {};
+  for (const currency of FX_SUPPORTED) {
+    const value = Number(payload.rates[currency]);
+    if (Number.isFinite(value) && value > 0) rates[currency] = value;
+  }
+  // We need KES for Paystack and the original invoice currency to derive a cross rate.
+  if (!rates.KES || Object.keys(rates).length === 0) return;
+
+  const fetchedAt = new Date(updatedAtMs).toISOString();
+  const rateDate = fetchedAt.slice(0, 10);
+  try {
+    const { error } = await service.rpc("payments_checkout_fx_snapshot_save", {
+      p_token: token,
+      p_rates: rates,
+      p_rate_date: rateDate,
+      p_fetched_at: fetchedAt,
+    });
+    if (error) console.error("checkout FX snapshot save failed", error.message);
+  } catch (e) {
+    console.error("checkout FX snapshot save failed", e instanceof Error ? e.message : "unknown");
+  }
 }
 
 // ---- Wise / M-PESA (manual) ----------------------------------------------------------------------

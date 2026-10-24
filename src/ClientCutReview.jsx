@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { createDownloadGuard, downloadButtonView, downloadKey } from "./downloadGuard.js";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { startAutoRefresh } from "./autoRefresh.js";
+import { createDownloadGuard } from "./downloadGuard.js";
 import {
   getClientCuts,
   clientAddComment,
@@ -73,26 +73,6 @@ function CutCard({ cut, token, author, onAuthorChange, reload }) {
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState({ type: "", text: "" });
-  const [dlError, setDlError] = useState("");
-  const [, rerender] = useReducer((n) => n + 1, 0);
-
-  // Duplicate-download protection. Create the guard in the effect, not during render:
-  // React Strict Mode deliberately runs setup -> cleanup -> setup in development. A render-time
-  // guard can be disposed by that probe and then accidentally reused by the live component.
-  const guardRef = useRef(null);
-  useEffect(() => {
-    const guard = createDownloadGuard({
-      onChange: () => {
-        if (guardRef.current === guard) rerender();
-      },
-    });
-    guardRef.current = guard;
-    rerender(); // refresh the button after the guard is ready
-    return () => {
-      guard.dispose();
-      if (guardRef.current === guard) guardRef.current = null;
-    };
-  }, []);
 
   const status = cut.clientStatus;
   const release = cut.release;
@@ -102,18 +82,25 @@ function CutCard({ cut, token, author, onAuthorChange, reload }) {
   const stampValue = stamp.trim() ? parseTimestamp(stamp) : null;
   const stampInvalid = stamp.trim() && stampValue === null;
 
-  const startDownload = () => {
-    const guard = guardRef.current;
-    if (!release || !dl.enabled || !guard) return;
-    setDlError("");
-    guard
-      .run(downloadKey(cut.shotId, release.versionId), () => clientDownload(token, cut.shotId, release.versionId))
-      .then((res) => {
-        // A request can settle after this card unmounts. Don't update stale component state.
-        if (guardRef.current === guard && res.started && !res.ok) {
-          setDlError(res.error?.message || "This file isn't available for download right now.");
-        }
-      });
+  // Download click protection (see downloadGuard.js). Created in an effect so React StrictMode's
+  // mount/unmount/mount cycle in dev can't leave us holding a disposed guard.
+  const guardRef = useRef(null);
+  const [lockedDownloads, setLockedDownloads] = useState(() => new Set());
+  useEffect(() => {
+    guardRef.current = createDownloadGuard({ onChange: setLockedDownloads });
+    return () => {
+      guardRef.current?.dispose();
+      guardRef.current = null;
+    };
+  }, []);
+  const downloadKey = release ? `${cut.shotId}:${release.versionId}` : null;
+  const downloading = !!downloadKey && lockedDownloads.has(downloadKey);
+
+  const startDownload = async () => {
+    if (!downloadKey || !guardRef.current) return;
+    setMsg({ type: "", text: "" });
+    const result = await guardRef.current.start(downloadKey, () => clientDownload(token, cut.shotId, release.versionId));
+    if (result.started && !result.ok) setMsg({ type: "err", text: result.error?.message || "The download couldn't be started. Please try again." });
   };
 
   const act = async (fn, okText) => {
@@ -154,32 +141,21 @@ function CutCard({ cut, token, author, onAuthorChange, reload }) {
       )}
 
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        {(() => {
-          const view = downloadButtonView(
-            release && guardRef.current ? guardRef.current.phase(downloadKey(cut.shotId, release.versionId)) : "idle",
-            { version: release ? release.version : null, enabled: dl.enabled }
-          );
-          return (
-            <>
-              <button
-                type="button"
-                disabled={view.disabled}
-                aria-disabled={view.disabled}
-                aria-busy={view.busy}
-                style={button(C.teal, view.disabled)}
-                onClick={startDownload}
-              >
-                {view.label}
-              </button>
-              <span role="status" aria-live="polite" style={{ fontSize: 12.5, color: C.teal }}>
-                {view.statusMessage}
-              </span>
-              {dlError && !view.busy && (
-                <span role="alert" style={{ fontSize: 12.5, color: C.red }}>{dlError}</span>
-              )}
-            </>
-          );
-        })()}
+        <button
+          type="button"
+          disabled={!dl.enabled || downloading}
+          aria-disabled={!dl.enabled || downloading}
+          aria-busy={downloading}
+          style={button(C.teal, !dl.enabled || downloading)}
+          onClick={startDownload}
+        >
+          {downloading ? "Download started \u2014 please wait\u2026" : `Download v${release ? release.version : "\u2014"}`}
+        </button>
+        {downloading && (
+          <span role="status" style={{ fontSize: 12.5, color: C.muted }}>
+            Your download has started and may take a moment to appear. Please wait before clicking again.
+          </span>
+        )}
         {!dl.enabled && <span style={{ fontSize: 12.5, color: C.muted }}>{dl.reason}</span>}
       </div>
 
