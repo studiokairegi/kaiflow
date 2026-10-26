@@ -40,6 +40,7 @@ const SettingsPage = lazyWithSuspense(() => import("./settings/SettingsPage.jsx"
 const FinanceModule = lazyWithSuspense(() => import("./finance/FinanceModule.jsx"), { label: "Loading finance…" });
 const PortfolioTab = lazyWithSuspense(() => import("./portfolio/PortfolioTab.jsx"), { label: "Loading portfolio…" });
 const PaymentsModule = lazyWithSuspense(() => import("./payments/PaymentsModule.jsx"), { label: "Loading payments…" });
+const ChatPage = lazyWithSuspense(() => import("./chat/ChatPage.jsx"), { label: "Loading studio chat…" });
 const DonutBreakdown = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "DonutBreakdown", label: "" });
 const HoursTrendChart = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "HoursTrendChart", label: "" });
 import {
@@ -514,6 +515,7 @@ function emptyInvoice(projectId, suggestedNumber, currency = "$", docType = "inv
 function invoiceFromRow(row) {
   return {
     id: row.id,
+    ownerUserId: row.user_id || null,
     projectId: row.project_id,
     invoiceNumber: row.invoice_number,
     docType: row.doc_type || "invoice",
@@ -687,6 +689,7 @@ function emptyExpense(projectId = null, overrides = {}) {
 function expenseFromRow(row) {
   return {
     id: row.id,
+    ownerUserId: row.user_id || null,
     projectId: row.project_id,
     category: row.category,
     description: row.description,
@@ -1994,7 +1997,13 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
   doc.setFontSize(14);
   doc.setTextColor(0);
   const docType = invoice.docType || "invoice";
-  doc.text(`${DOC_TYPE_TITLE[docType] || "Invoice"} ${invoice.invoiceNumber}`, left, y);
+  const documentTitle = DOC_TYPE_TITLE[docType] || "Invoice";
+  doc.text(documentTitle, left, y);
+  y += 6;
+  doc.setFontSize(10);
+  doc.setTextColor(70);
+  const referenceLabel = docType === "invoice" ? "Invoice Ref. No." : `${documentTitle} Ref. No.`;
+  doc.text(`${referenceLabel}: ${invoice.invoiceNumber || "—"}`, left, y);
   const detailsTop = y + 8;
 
   // --- Left column: issue/due date and status ---
@@ -2762,7 +2771,16 @@ export default function ShotTracker() {
   const [loading, setLoading] = useState(true);
   const [payLinkInvoice, setPayLinkInvoice] = useState(null);
   const [showPaymentsLocked, setShowPaymentsLocked] = useState(false);
-  const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "payments" | "teams"
+  const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "payments" | "teams" | "chat"
+  const [chatUnreadCount, setChatUnreadCount] = useState(0);
+  const [chatTargetConversationId, setChatTargetConversationId] = useState(null);
+  const [chatTargetMessageId, setChatTargetMessageId] = useState(null);
+  const handleChatConversationChange = useCallback((id) => {
+    if (id === null || id !== chatTargetConversationId) {
+      setChatTargetConversationId(null);
+      setChatTargetMessageId(null);
+    }
+  }, [chatTargetConversationId]);
   const [view, setView] = useState("projects");
   const [boardTab, setBoardTab] = useState("shots"); // "shots" | "invoices" | "activity"
   const [selectedProjectId, setSelectedProjectId] = useState(null);
@@ -3353,6 +3371,7 @@ export default function ShotTracker() {
       }
       const nextProjects = (projectsRes.data || []).map((p) => ({
         id: p.id,
+        ownerUserId: p.user_id || null,
         name: p.name,
         client: p.client,
         clientAddress: p.client_address || "",
@@ -4268,7 +4287,7 @@ export default function ShotTracker() {
     } catch (e) {
       console.error("Invoice save failed:", e);
       alertLedgerError(e);
-      if (e?.code === "23505") window.alert("That invoice number is already used. Close the editor and reopen it to get the next free number.");
+      if (e?.code === "23505") window.alert("That invoice reference is already used. Close the editor and reopen it to get the next free reference.");
       flashSave(false);
       // Keep the editor open on failure so unsaved edits aren't lost.
     }
@@ -4971,6 +4990,13 @@ export default function ShotTracker() {
   // Notification click-through: same mechanism as the Activity tab (select project, open the shot,
   // highlight the activity entry). Returns { ok, message } so the panel can report stale items.
   const handleOpenNotification = (n) => {
+    if (n?.type === "chat_message" && n.conversationId) {
+      setChatTargetConversationId(n.conversationId);
+      setChatTargetMessageId(n.messageId || null);
+      setView("projects");
+      setWorkspace("chat");
+      return { ok: true };
+    }
     const project = projects.find((p) => String(p.id) === String(n.projectId));
     if (!project) return { ok: false, message: "This project no longer exists, or you no longer have access to it." };
     setSelectedProjectId(project.id);
@@ -5299,6 +5325,8 @@ export default function ShotTracker() {
                 ? "Payments"
                 : workspace === "teams"
                 ? "Teams"
+                : workspace === "chat"
+                ? "Chat"
                 : "Kairil"}
             </h1>
             <p style={styles.subtitle}>
@@ -5375,7 +5403,7 @@ export default function ShotTracker() {
               <PlusIcon />
               New member
             </button>
-          ) : workspace === "planner" && !editingBudgetPlanner ? (
+          ) : workspace === "chat" ? null : workspace === "planner" && !editingBudgetPlanner ? (
             <>
               <button
                 style={styles.newButton}
@@ -5492,6 +5520,14 @@ export default function ShotTracker() {
             onClick={() => setWorkspace("teams")}
           >
             Teams{showProBadge && <> <span style={styles.proBadge}>PRO</span></>}
+          </button>
+          <button
+            type="button"
+            aria-current={workspace === "chat" ? "page" : undefined}
+            style={{ ...styles.tabButton, ...(workspace === "chat" ? styles.tabButtonActive : {}), position: "relative" }}
+            onClick={() => setWorkspace("chat")}
+          >
+            Chat{chatUnreadCount > 0 && <span className="kf-chat-nav-unread" aria-label={`${chatUnreadCount} unread messages`}>{chatUnreadCount > 99 ? "99+" : chatUnreadCount}</span>}
           </button>
           <button
             className={tutorialHighlightTarget === "finance" ? "kf-tutorial-highlight" : undefined}
@@ -5612,6 +5648,16 @@ export default function ShotTracker() {
           onAccountAction={handleAccountAction}
           onSave={handleSaveSettings}
           onClose={handleCloseSettings}
+        />
+      )}
+
+      {view === "projects" && workspace === "chat" && (
+        <ChatPage
+          userId={userId}
+          initialConversationId={chatTargetConversationId}
+          initialMessageId={chatTargetMessageId}
+          onConversationChange={handleChatConversationChange}
+          onUnreadCountChange={setChatUnreadCount}
         />
       )}
 
@@ -5903,11 +5949,13 @@ export default function ShotTracker() {
 
       {view === "projects" && workspace === "finance" && (
         <>
+          {/* Finance ledger/payment writes remain user-scoped. Keep shared records
+              out of its calculations until cross-owner read-only Finance is designed. */}
           <FinanceModule
             userId={userId}
-            projects={projects}
-            invoices={invoices}
-            expenses={expenses}
+            projects={projects.filter((project) => !project.ownerUserId || project.ownerUserId === userId)}
+            invoices={invoices.filter((invoice) => !invoice.ownerUserId || invoice.ownerUserId === userId)}
+            expenses={expenses.filter((expense) => !expense.ownerUserId || expense.ownerUserId === userId)}
             cards={cards}
             teamMembers={teamMembers}
             liveRates={fxRates}
@@ -13293,7 +13341,7 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
 
         <div className="kf-field-row" style={styles.fieldRow}>
           <div style={styles.field}>
-            <label style={styles.label}>Document number</label>
+            <label style={styles.label}>{docType === "invoice" ? "Invoice Ref. No." : "Document reference"}</label>
             <input
               style={styles.input}
               value={form.invoiceNumber}

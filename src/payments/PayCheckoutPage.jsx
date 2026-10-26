@@ -132,8 +132,8 @@ function ReturnView({ token }) {
         <BrandHeader />
         <div className="kf-payment-result-body" style={{ padding: "42px 34px 36px", maxWidth: 660 }}>
           {res.status === "checking" && <><div style={label}>Checking payment</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Confirming your payment</h1><p role="status" style={muted}>We’re verifying the transaction with Paystack. Please don’t make another payment while this is checking.</p></>}
-          {res.status === "paid" && <><div style={{ ...label, color: BRAND.accent }}>Payment received</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Thank you.</h1><p style={muted}>Invoice <strong>{res.invoice_number}</strong> for <strong>{formatMoney(res.currency, res.amount)}</strong> has been confirmed and marked paid.</p>{res.reference && <p style={{ ...muted, fontSize: 12, marginTop: 16 }}>Reference: {res.reference}</p>}</>}
-          {res.status === "paid_elsewhere" && <><div style={{ ...label, color: BRAND.accent }}>Invoice settled</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Nothing more is due.</h1><p style={muted}>Invoice <strong>{res.invoice_number}</strong> has already been settled.</p></>}
+          {res.status === "paid" && <><div style={{ ...label, color: BRAND.accent }}>Payment received</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Thank you.</h1><p style={muted}>Invoice Ref. <strong>{res.invoice_number}</strong> for <strong>{formatMoney(res.currency, res.amount)}</strong> has been confirmed and marked paid.</p>{res.reference && <p style={{ ...muted, fontSize: 12, marginTop: 16 }}>Reference: {res.reference}</p>}</>}
+          {res.status === "paid_elsewhere" && <><div style={{ ...label, color: BRAND.accent }}>Invoice settled</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Nothing more is due.</h1><p style={muted}>Invoice Ref. <strong>{res.invoice_number}</strong> has already been settled.</p></>}
           {res.status === "pending" && <><div style={{ ...label, color: BRAND.warning }}>Payment pending</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>We’re waiting for confirmation.</h1><p role="status" style={muted}>Your payment hasn’t been confirmed yet. Bank transfers can take a few minutes. This page will keep checking automatically; you do not need to pay again.</p></>}
           {res.status === "incomplete" && <><div style={label}>Payment not completed</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>No payment was taken.</h1><p style={muted}>You can return to the payment page and try again.</p><p style={{ marginTop: 20 }}>{back}</p></>}
           {res.status === "failed" && <><div style={{ ...label, color: BRAND.danger }}>Payment unsuccessful</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>The payment didn’t go through.</h1><p style={muted}>The invoice has not been marked paid. You can return and try again.</p><p style={{ marginTop: 20 }}>{back}</p></>}
@@ -215,7 +215,7 @@ function WisePanel({ token, data, email, onBack }) {
       <div role="status">
         <div style={{ ...label, color: BRAND.warning }}>Transfer submitted</div>
         <h2 style={{ fontSize: 22, margin: "8px 0 10px" }}>We’ll confirm once the money arrives.</h2>
-        <p style={muted}>Invoice <strong style={{ color: BRAND.ink }}>{t.invoice_number}</strong> stays open until Studio Kairegi confirms the funds. Keep reference <strong style={{ color: BRAND.ink }}>{t.reference}</strong> for any questions{t.support_contact ? ` — contact ${t.support_contact}` : ""}.</p>
+        <p style={muted}>Invoice Ref. <strong style={{ color: BRAND.ink }}>{t.invoice_number}</strong> stays open until Studio Kairegi confirms the funds. Keep reference <strong style={{ color: BRAND.ink }}>{t.reference}</strong> for any questions{t.support_contact ? ` — contact ${t.support_contact}` : ""}.</p>
         <p style={{ marginTop: 18 }}><button type="button" style={ghostBtn} onClick={onBack}>Back to payment options</button></p>
       </div>
     );
@@ -360,7 +360,7 @@ function CheckoutView({ token }) {
             <section className="kf-payment-summary" style={{ padding: "36px 30px", background: BRAND.paper, borderRight: `1px solid ${BRAND.line}` }}>
               <div style={label}>Secure checkout</div>
               <h1 style={{ fontSize: "clamp(30px, 5vw, 46px)", lineHeight: 1, letterSpacing: "-.04em", margin: "12px 0 8px" }}>{formatMoney(data.currency, data.amount)}</h1>
-              <p style={{ ...muted, fontSize: 14 }}>Due now · Invoice <strong style={{ color: BRAND.ink }}>{data.invoice_number}</strong>{data.client_name ? ` · ${data.client_name}` : ""}</p>
+              <p style={{ ...muted, fontSize: 14 }}>Due now · Invoice Ref. <strong style={{ color: BRAND.ink }}>{data.invoice_number}</strong>{data.client_name ? ` · ${data.client_name}` : ""}</p>
               <div style={{ marginTop: 22, borderTop: `1px solid ${BRAND.line}`, paddingTop: 10 }}>
                 <div style={row}><span style={muted}>Invoice amount</span><strong>{formatMoney(data.currency, data.original_amount)}</strong></div>
                 <div style={row}><span style={muted}>Remaining due</span><strong>{formatMoney(data.currency, data.outstanding)}</strong></div>

@@ -104,7 +104,7 @@ function Incoming({ ctx }) {
       <div style={{ ...S.row, justifyContent: "space-between" }}><h3 style={S.h3}>Outstanding client invoices</h3>
         <input style={{ ...S.input, maxWidth: 260 }} placeholder="Search invoice, client, project" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search invoices" /></div>
       <Table rowKey={(i) => i.id} empty="No outstanding invoices." rows={rows} columns={[
-        { key: "n", label: "Invoice", render: (i) => i.invoiceNumber },
+        { key: "n", label: "Invoice Ref.", render: (i) => i.invoiceNumber },
         { key: "c", label: "Client / project", render: (i) => { const p = projectBy.get(i.projectId); return p ? <Btn small kind="link" onClick={() => ctx.onOpenProject(p.id)}>{p.client || p.name}</Btn> : "-"; } },
         { key: "d", label: "Due", render: (i) => i.dueDate || "-" },
         { key: "o", label: "Outstanding", num: true, render: (i) => money(symbolToCode(i.currency), outstandingOf(i), privacy) },
@@ -244,7 +244,7 @@ function Transactions({ ctx }) {
         </div>
         <Table rowKey={(t) => t.id} onRow={setOpen} empty="No transactions yet." rows={rows} columns={[
           { key: "d", label: "Created", render: (t) => fmtDateTime(t.created_at) }, { key: "r", label: "Reference", render: (t) => t.reference },
-          { key: "i", label: "Invoice", render: (t) => t.invoice_number || "-" },
+          { key: "i", label: "Invoice Ref.", render: (t) => t.invoice_number || "-" },
           { key: "a", label: "Gross", num: true, render: (t) => money(t.currency, t.amount, privacy) },
           { key: "f", label: "Fee", num: true, render: (t) => (t.fee_actual == null ? "-" : money(t.currency, t.fee_actual, privacy)) },
           { key: "n", label: "Net", num: true, render: (t) => (t.net_amount == null ? "-" : money(t.currency, t.net_amount, privacy)) },

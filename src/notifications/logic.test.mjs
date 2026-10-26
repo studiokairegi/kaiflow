@@ -9,11 +9,19 @@ import {
 const row = (o = {}) => ({ id: "a1", event_type: "client_comment", project_id: "p1", shot_id: "s1", description: "Sam commented", created_at: "2026-10-22T10:00:00Z", meta: { commentId: "c9" }, ...o });
 
 test("only event types the app really writes become notifications", () => {
-  assert.deepEqual([...FEED_EVENT_TYPES].sort(), ["client_approved", "client_comment", "client_revisions_requested", "cut_submitted", "freelancer_upload"]);
+  assert.deepEqual([...FEED_EVENT_TYPES].sort(), ["chat_message", "client_approved", "client_comment", "client_revisions_requested", "cut_submitted", "freelancer_upload"]);
   for (const t of FEED_EVENT_TYPES) assert.ok(toNotification(row({ event_type: t })));
   for (const t of ["client_download_started", "cut_released", "cut_withdrawn", "review_approved", "review_revisions", "note", "made_up"]) {
     assert.equal(toNotification(row({ event_type: t })), null, t);
   }
+});
+
+test("chat notifications carry only safe conversation/message navigation metadata", () => {
+  const n = toNotification(row({ event_type: "chat_message", description: "New studio message", meta: { conversationId: "conv-1", messageId: "msg-1" } }));
+  assert.equal(n.type, "chat_message");
+  assert.equal(n.conversationId, "conv-1");
+  assert.equal(n.messageId, "msg-1");
+  assert.equal(n.commentId, null);
 });
 
 test("toNotification maps fields, tolerates case, rejects malformed rows", () => {

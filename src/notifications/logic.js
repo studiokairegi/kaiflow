@@ -17,6 +17,7 @@ export const NOTIFY_TYPES = {
   client_approved: { title: "Client approved a cut", actor: "client" },
   freelancer_upload: { title: "Freelancer uploaded a file", actor: "freelancer" },
   cut_submitted: { title: "Freelancer submitted a cut", actor: "freelancer" },
+  chat_message: { title: "New studio message", actor: "staff" },
 };
 export const FEED_EVENT_TYPES = Object.keys(NOTIFY_TYPES);
 
@@ -45,6 +46,8 @@ export function toNotification(row) {
     createdAt: row.created_at,
     createdMs,
     commentId: row.meta && row.meta.commentId ? String(row.meta.commentId) : null,
+    conversationId: row.meta && row.meta.conversationId ? String(row.meta.conversationId) : null,
+    messageId: row.meta && row.meta.messageId ? String(row.meta.messageId) : null,
   };
 }
 

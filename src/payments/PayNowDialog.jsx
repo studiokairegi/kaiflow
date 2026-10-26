@@ -31,7 +31,7 @@ export default function PayNowDialog({ invoice, defaultEmail = "", onClose, onCh
   });
 
   return (
-    <Modal title={`Pay ${invoice.invoiceNumber} (sandbox)`} onClose={onClose} width={520}
+    <Modal title={`Pay invoice ref. ${invoice.invoiceNumber} (sandbox)`} onClose={onClose} width={520}
       footer={<Btn onClick={onClose}>Close</Btn>}>
       <Banner tone="warn"><strong>{SANDBOX_NOTICE}.</strong> This opens Paystack's test checkout. Use Paystack's test cards only; no real card is charged and no real money moves.</Banner>
       {error && <Banner tone="bad">{error}</Banner>}

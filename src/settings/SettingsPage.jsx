@@ -263,7 +263,7 @@ function FinanceTab({ form, set, errors, userId, onPrivacy }) {
           <div style={S.row}>{m.map((v, i) => <Num key={i} value={v} min={0} max={100} width={90} onChange={(x) => set({ milestoneDefaults: m.map((y, j) => (j === i ? (x === "" ? "" : Number(x)) : y)) })} />)}<span style={{ color: sum === 100 ? T.ok : T.warn, fontSize: 13 }}>= {sum}%</span></div>
           <Err msg={errors.milestoneDefaults} />
         </Field>
-        <Field label="Document number prefixes" hint="Used for the next number only. Numbers already issued never change.">
+        <Field label="Document reference prefixes" hint="Used for the next reference only. References already issued never change.">
           <div style={S.row}>{[["proforma", "Pro-forma"], ["invoice", "Invoice"], ["receipt", "Receipt"]].map(([k, l]) => (
             <label key={k} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>{l}<input style={{ ...S.input, width: 90, textTransform: "uppercase" }} maxLength={6} value={pf[k]} onChange={(e) => set({ invoicePrefixes: { ...pf, [k]: e.target.value.toUpperCase() } })} /></label>
           ))}</div>

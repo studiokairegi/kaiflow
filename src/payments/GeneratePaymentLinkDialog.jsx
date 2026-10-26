@@ -29,7 +29,7 @@ export default function GeneratePaymentLinkDialog({ invoice, onClose, onChanged 
   const copy = async () => { try { await navigator.clipboard.writeText(link.url); setCopied(true); } catch { setCopied(false); } };
 
   return (
-    <Modal title={`Payment link for ${invoice.invoiceNumber}`} onClose={onClose} width={540} footer={<Btn onClick={onClose}>Close</Btn>}>
+    <Modal title={`Payment link for invoice ref. ${invoice.invoiceNumber}`} onClose={onClose} width={540} footer={<Btn onClick={onClose}>Close</Btn>}>
       {error && <Banner tone="bad">{error}</Banner>}
       {blocked ? <Banner tone="bad">{blocked}</Banner> : !link ? (
         <>

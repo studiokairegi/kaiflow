@@ -90,7 +90,7 @@ export function Sales({ ctx }) {
       <div style={S.card}>
         <h3 style={S.h3}>Invoices</h3>
         <Table rowKey={(r) => r.inv.id} empty="No invoices yet." rows={rows} columns={[
-          { key: "n", label: "Number", render: (r) => <><strong style={{ whiteSpace: "nowrap" }}>{r.inv.invoiceNumber}</strong>{r.inv.docType && r.inv.docType !== "invoice" ? <span style={{ color: T.muted }}> {"\u00b7"} {r.inv.docType}</span> : null}</> },
+          { key: "n", label: "Invoice Ref.", render: (r) => <><strong style={{ whiteSpace: "nowrap" }}>{r.inv.invoiceNumber}</strong>{r.inv.docType && r.inv.docType !== "invoice" ? <span style={{ color: T.muted }}> {"\u00b7"} {r.inv.docType}</span> : null}</> },
           { key: "c", label: "Client / project", render: (r) => <>{projectBy.get(r.inv.projectId)?.client || "-"}<div style={{ fontSize: 12, color: T.muted }}>{projectBy.get(r.inv.projectId)?.name}</div></> },
           { key: "d", label: "Issued", render: (r) => <span style={{ whiteSpace: "nowrap" }}>{r.inv.issueDate ? fmtDate(r.inv.issueDate) : "-"}</span> },
           { key: "due", label: "Due", render: (r) => <span style={{ whiteSpace: "nowrap" }}>{r.inv.dueDate ? fmtDate(r.inv.dueDate) : "-"}</span> },

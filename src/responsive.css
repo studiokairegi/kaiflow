@@ -509,3 +509,20 @@ svg {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Chat navigation unread badge, scoped so existing tabs keep their layout. */
+.kf-chat-nav-unread {
+  display: inline-grid;
+  place-items: center;
+  min-width: 17px;
+  height: 17px;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 99px;
+  background: #e54f62;
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 800;
+  vertical-align: middle;
+}
