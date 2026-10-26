@@ -32,6 +32,46 @@ export const chatApi = {
   async studioMembers(organizationId) {
     return (await rpc("chat_list_studio_members", { p_organization_id: organizationId })) || [];
   },
+  async teamAccessLinks(organizationId) {
+    return (await rpc("studio_list_team_access_links", { p_organization_id: organizationId })) || [];
+  },
+  async teamInvites(organizationId) {
+    return (await rpc("studio_list_team_invites", { p_organization_id: organizationId })) || [];
+  },
+  async createTeamInvite({ organizationId, teamMemberId, departmentId = null, role, token }) {
+    const rows = await rpc("studio_create_team_invite", {
+      p_organization_id: organizationId, p_team_member_id: teamMemberId,
+      p_department_id: departmentId, p_role: role, p_token: token,
+    });
+    return Array.isArray(rows) ? rows[0] : rows;
+  },
+  async teamAccessOverview(organizationId) {
+    return (await rpc("studio_team_access_overview", { p_organization_id: organizationId })) || [];
+  },
+  async setMemberDepartment(organizationId, teamMemberId, departmentId = null) {
+    return rpc("studio_set_member_department", {
+      p_organization_id: organizationId, p_team_member_id: teamMemberId, p_department_id: departmentId,
+    });
+  },
+  async setMemberAccess(organizationId, teamMemberId, active) {
+    return rpc("studio_set_member_access", {
+      p_organization_id: organizationId, p_team_member_id: teamMemberId, p_active: !!active,
+    });
+  },
+  async revokeTeamInvite(inviteId) {
+    return rpc("studio_revoke_team_invite", { p_invite_id: inviteId });
+  },
+  async readTeamInvite(token) {
+    return (await rpc("studio_get_team_invite", { p_token: token }))?.[0] || null;
+  },
+  async acceptTeamInvite(token) {
+    return rpc("studio_accept_team_invite", { p_token: token });
+  },
+  async myAppAccessContext(organizationId = null) {
+    return organizationId
+      ? rpc("studio_get_app_access_context_for_org", { p_organization_id: organizationId })
+      : rpc("studio_get_my_app_access_context");
+  },
   async conversationMembers(conversationId, organizationId) {
     const { data, error } = await supabase.from("chat_conversation_members")
       .select("id, organization_id, conversation_id, user_id, role, status, joined_at, left_at, removed_at")

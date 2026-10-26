@@ -6,7 +6,7 @@ This implementation adds authenticated **internal** one-to-one, group, and proje
 
 The existing client portal supports token/guest workflows; this repository does not establish a verified authenticated client identity and trusted client-to-project membership suitable for RLS. For that reason, this release intentionally blocks client accounts from internal chat and does not create client-facing chat. Client discussion should be added only after client Auth identity and project relationship authorization are designed and tested.
 
-The additive multi-user migration provides explicit opt-in sharing for existing workspaces and explicit project assignments. A user cannot access a project just because they were added to chat; the Master User must share the project's owner's workspace and assign project access. Assignment is synchronized with project-chat membership, and revocation removes that access. Existing data not mapped/shared remains owner-scoped. This is a migration foundation, not proof that every feature in KairFlow's legacy UI has been converted to department-aware behavior.
+The additive multi-user migration provides explicit opt-in sharing for existing workspaces and explicit project assignments. A user cannot access a project just because they were added to chat; the Master User must share the project's owner's workspace and assign project access. Assignment is synchronized with project-chat membership, and revocation removes that access. Existing data not mapped/shared remains owner-scoped. Multi-organization membership is separate from workspace ownership: one authenticated login can hold a Master User membership in one studio and a staff/freelancer/department-admin membership in another. Accepting an invite inserts or updates only the membership for the invited organization, never changes roles in other organizations, and never changes `studio_data_owners`. The selected organization is loaded through a dedicated, membership-checked access-context RPC.
 
 The Master User may administer groups and project conversations and can view studio membership/audit metadata. The Master User does **not** get message-body access to private direct messages unless they are a participant. This is a deliberate privacy boundary, not an accidental missing button.
 
@@ -26,18 +26,18 @@ The Master User may administer groups and project conversations and can view stu
 
 A person's authenticated identity is always `auth.uid()`, never a client-provided display name or author ID. Writes occur through granted `SECURITY DEFINER` RPCs with fixed search paths, argument validation, and authorization checks. Authenticated clients get read-only SQL grants for chat tables, subject to RLS; direct INSERT/UPDATE/DELETE on protected records is not granted. Audit rows and edit history are not directly mutable by authenticated clients.
 
-`studio_memberships.role` currently supports `master_user`, `department_admin`, `staff`, `freelancer`, and `client`, but chat methods reject the client role. A freelancer record in the old Teams roster is not treated as a login account. Add only users that already exist in `auth.users`; no account invitation or identity-link flow is introduced here.
+`studio_memberships.role` supports `master_user`, `department_admin`, `staff`, `freelancer`, and `client`; internal chat rejects the client role. The same `auth.users.id` may have a different role per organization, and the `(organization_id, user_id)` key means membership identity is not globally unique by user. The one-active-Master constraint is also per organization. Normal invitation RPCs cannot assign the Master User role. A trusted database operator or the protected new-owner bootstrap establishes a studio's initial Master User.
 
-Department administration is scoped to department-linked groups and membership assignment. Department membership alone does not expose every conversation. Department admins are not Master Users. The migration enforces one active Master User per organization, and normal application RPCs cannot assign that role. A trusted database operator must bootstrap the first Master User.
+Teams remains the roster of record. A Master User picks a roster entry with a valid email and generates a single-use invite. The link binds to the roster email, token hash, organization, department, and role; it expires after seven days and is consumed once. A person without an account can sign up from the invitation; the auth trigger validates the email/token and deliberately skips creating a separate studio for invite signup. An already-authenticated Master User can accept the invitation with that same login. The new membership is scoped only to the invited organization; their other studio role and workspace owner mapping stay unchanged.
 
 ## Pre-deployment checks — do not skip
 
-1. Review both `supabase/migrations/20261029090000_chat_collaboration.sql` and `supabase/migrations/20261030090000_studio_multiuser_core.sql` as complete SQL units.
-2. Confirm the intended production database and the applied history in `supabase_migrations.schema_migrations`. This repository also contains root-level legacy SQL files; do not assume those are the CLI migration history.
+1. Review the migrations `20261029090000_chat_collaboration.sql`, `20261030090000_studio_multiuser_core.sql`, `20261031090000_studio_team_invites_and_bootstrap.sql`, and `20261031100000_multi_organization_memberships.sql` as complete SQL units in timestamp order.
+2. Confirm the intended database and applied history in `supabase_migrations.schema_migrations`. This repository also contains root-level legacy SQL files; do not assume those are the CLI migration history.
 3. Confirm the actual schema of `projects`, `shots`, `leads`, `contacts`, `team_members`, `invoices`, `expenses`, and `activity_log`, including ownership columns and every existing RLS policy that may combine permissively with the new policies.
 4. Back up the target database under the normal operational procedure.
-5. Run `npx supabase db push --dry-run` against the correct linked project and review the proposed migrations. Neither new migration has been applied by this work.
-6. Apply only after explicit approval and after validating on a non-production environment. Then run the Master User bootstrap below as a trusted operator.
+5. Run `npx supabase db push --dry-run` against the correct linked project and review the proposed migrations. The multi-organization follow-up migration has not been applied by this work.
+6. Apply only after explicit approval and after validating on a non-production environment. Bootstrap a Master User only for a genuinely new studio; never rerun the bootstrap for an existing organization.
 7. Verify the `chat-attachments` bucket is private, the bucket limit/MIME allowlist is correct, Storage policies are active, and `supabase_realtime` includes the intended tables. Confirm private Broadcast/Presence policies using two authenticated test accounts.
 8. Deploy the frontend through the existing release process after the migration is applied. No Edge Function is required specifically for chat.
 
@@ -87,12 +87,15 @@ $bootstrap$;
 
 This statement is intentionally not idempotent: a second run should stop on the unique slug constraint rather than silently create another studio. If the studio already exists, inspect the existing organization and memberships and use a reviewed, explicit repair statement rather than rerunning the bootstrap blindly.
 
-After both migrations and the trusted bootstrap, sign in as the owner, open **Chat → Studio administration**, verify the studio membership loads, and add staff accounts that already have KairFlow logins. Use the workspace-sharing checkbox only after deciding to expose that account's existing business records. Then use **Project access** to explicitly assign members to shared projects, and configure department scopes as needed. Users without accounts remain in the existing Teams roster but cannot use chat until a secure login-linking/invitation workflow is implemented.
+After the required migrations and trusted bootstrap, sign in as the owner, open **Teams → Studio access**, verify that the selected organization matches the owner account, and invite people from the existing roster. A new invitee may create a login from the one-time link; an existing login (including a Master User in another organization) accepts the link with the already-confirmed invited email. Use workspace sharing only after making a deliberate data-sharing decision. Then use **Project access** to explicitly assign members to mapped projects, and configure department scopes as needed. Merely adding someone to a roster or organization does not grant every project or workspace record.
 
 ## Test plan before production
 
 Use at least two staff test accounts plus one ordinary authenticated account outside the organization. Verify:
 
+- Multi-organization acceptance: create two disposable studios with distinct Master Users; invite the first studio's Master User email into the second studio as ordinary staff; accept using the same existing auth account; verify the first membership remains `master_user` and active, the second membership has only the invited role, and the `studio_data_owners` mapping is unchanged.
+- Organization switching: switch between both studios and verify the active header, module permissions, data queries, Chat directory/conversation list, department administration, and project assignments use only the selected organization. The Master User of Studio A must not become an administrator in Studio B.
+- Organization isolation: verify the invited user cannot read Studio B records without the relevant department/module permission or project assignment, and cannot read Studio A records while operating in Studio B. Removing or suspending the Studio B membership must revoke access to that studio without affecting Studio A.
 - Non-members cannot list organizations/conversations, guess IDs, read messages, search messages, or retrieve storage objects.
 - A normal member cannot write raw rows directly or spoof `sender_user_id` via the browser/Supabase API.
 - Direct-message idempotency prevents duplicate records after a retried request; reused keys with different content are rejected.
@@ -111,6 +114,6 @@ Automated client helper tests exist at `src/chat/logic.test.mjs`. The provided s
 
 - Client-facing chat requires a trusted authenticated client identity plus explicit client/project access model; intentionally not included.
 - The core multi-user permission model is additive and currently covers selected owner-scoped records; all older modules, finance ledgers, client portal, and all write paths still need live-schema integration tests and follow-up review. The Finance ledger remains user-scoped and existing Finance RPCs are intentionally not broadened.
-- Organization setup/invitation UX is not provided beyond adding existing authenticated accounts. Email invitations/account creation need a separate trusted flow.
+- The Teams invitation flow exists and supports both existing logins and invite-driven signup, but it requires real staging acceptance tests with multiple organizations before production use.
 - Master User has no private-DM content override. If product governance later requires an emergency disclosure procedure, it should be a separately specified, audited, explicit security feature.
-- RLS/Storage policy behavior and the SQL migration still require execution against a disposable Supabase environment and a live-schema comparison. A frontend build alone cannot establish security correctness.
+- RLS/Storage policy behavior and the multi-organization SQL override still require execution against a disposable Supabase environment and a live-schema comparison. The code-level contract tests do not substitute for a two-organization database test. A frontend build alone cannot establish security correctness.

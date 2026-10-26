@@ -8,10 +8,12 @@ plans, and time tracking.
 Built with React + Vite on Supabase (Postgres, Auth, Edge Functions), deployed
 as a static site on Cloudflare Pages.
 
-> Each account is its own isolated studio workspace: every record is tagged with
-> the signed-in user's ID and filtered by row-level security. This is *not* a
-> shared multi-user workspace where several people collaborate inside one
-> studio's data - that would be a `workspace_id` schema change.
+> Studio membership is organization-scoped and can be many-to-many: one authenticated
+> login can be the Master User of one studio and a staff member in another. A role is
+> always scoped to its organization, and an invitation only adds a membership; it never
+> replaces a role, moves workspace ownership, or shares the invited user's personal
+> records. Shared access to existing studio data is explicitly mapped in
+> `studio_data_owners` and checked by RLS and trusted database functions.
 
 ## Modules
 

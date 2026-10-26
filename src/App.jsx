@@ -30,6 +30,21 @@ import { ProjectPicker } from "./finance/ProjectPicker.jsx";
 import { useFinanceSummary } from "./finance/useLedger.js";
 import { displayMoney, codeToSymbol, formatTotalsByCurrency } from "./finance/currency.js";
 import { saveFxSnapshot, listBankAccounts } from "./finance/api.js";
+import DepartmentHome from "./studio/DepartmentHome.jsx";
+import { useTeamAccess, MemberAccessRow, AccessFeedback, DepartmentsDrawer } from "./studio/TeamAccessPanel.jsx";
+import { allowedWorkspaceKeys, friendlyInviteError, readFunctionError } from "./studio/access.js";
+import "./studio/invite.css";
+
+// Used only as a guaranteed-empty UUID filter when a studio has no mapped
+// business-data owners. It prevents a missing owner mapping from widening a query.
+const EMPTY_SCOPE_UUID = "00000000-0000-0000-0000-000000000000";
+function scopeOwnedQuery(query, ownerUserIds) {
+  if (!Array.isArray(ownerUserIds)) return query;
+  return query.in("user_id", ownerUserIds.length ? ownerUserIds : [EMPTY_SCOPE_UUID]);
+}
+function emptyWorkspaceData() {
+  return { projects: [], cards: [], leads: [], invoices: [], expenses: [], teamMembers: [], activity: [], budgetPlanners: [], plannerTemplates: [], pipelineLibrary: [] };
+}
 
 // Code-split screens and the charting library: fetched on first use instead of at startup.
 const CutWorkflowPanel = lazyWithSuspense(() => import("./CutWorkflowPanel.jsx"));
@@ -2724,9 +2739,17 @@ const CalendarIcon = () => (
 export default function ShotTracker() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [authMode, setAuthMode] = useState(() =>
-    new URLSearchParams(window.location.search).get("signup") === "1" ? "signup" : "signin"
-  );
+  const [inviteToken, setInviteToken] = useState(() => {
+    const token = new URLSearchParams(window.location.search).get("studio-invite") || "";
+    return /^[0-9a-f]{64}$/i.test(token) ? token.toLowerCase() : "";
+  });
+  const [invitePreview, setInvitePreview] = useState(null);
+  const [inviteAcceptanceMessage, setInviteAcceptanceMessage] = useState("");
+  const inviteAcceptanceInFlight = useRef("");
+  const [authMode, setAuthMode] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.has("studio-invite") || params.get("signup") === "1" ? "signup" : "signin";
+  });
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState("");
@@ -2771,8 +2794,13 @@ export default function ShotTracker() {
   const [loading, setLoading] = useState(true);
   const [payLinkInvoice, setPayLinkInvoice] = useState(null);
   const [showPaymentsLocked, setShowPaymentsLocked] = useState(false);
-  const [workspace, setWorkspace] = useState("dashboard"); // "dashboard" | "projects" | "leads" | "finance" | "payments" | "teams" | "chat"
+  const [workspace, setWorkspace] = useState("dashboard"); // Chat is a persistent floating tool, not a workspace.
+  const [chatOpen, setChatOpen] = useState(false);
   const [chatUnreadCount, setChatUnreadCount] = useState(0);
+  const [studioAccess, setStudioAccess] = useState(null);
+  const [studioAccessReady, setStudioAccessReady] = useState(false);
+  const [studioMemberships, setStudioMemberships] = useState([]);
+  const [activeStudioOrganizationId, setActiveStudioOrganizationId] = useState("");
   const [chatTargetConversationId, setChatTargetConversationId] = useState(null);
   const [chatTargetMessageId, setChatTargetMessageId] = useState(null);
   const handleChatConversationChange = useCallback((id) => {
@@ -2878,22 +2906,199 @@ export default function ShotTracker() {
       params.get("error_description") || hashParams.get("error_description") || params.get("error") || hashParams.get("error");
     if (errorDescription) {
       setAuthError(decodeURIComponent(errorDescription).replace(/\+/g, " "));
-      const cleanUrl = window.location.pathname;
-      window.history.replaceState({}, "", cleanUrl);
+      const keepInvite = new URLSearchParams(window.location.search).get("studio-invite");
+      const cleanParams = new URLSearchParams();
+      if (keepInvite && /^[0-9a-f]{64}$/i.test(keepInvite)) cleanParams.set("studio-invite", keepInvite);
+      const query = cleanParams.toString();
+      window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
     }
   }, []);
 
-  // Tidy up ?signup=1 from the URL once we've used it to pick the initial
-  // auth mode, no need for it to linger in the address bar.
+  // Remove only the one-shot signup hint; a studio invite token must survive
+  // the email-confirmation round trip until the signed-in user accepts it.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get("signup") === "1") {
-      window.history.replaceState({}, "", window.location.pathname);
+      params.delete("signup");
+      const query = params.toString();
+      window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : "") + window.location.hash);
     }
   }, []);
 
-
   const userId = session?.user?.id || null;
+  useEffect(() => {
+    if (!inviteToken) { setInvitePreview(null); return undefined; }
+    let cancelled = false;
+    setAuthMode("signup");
+    setAuthError("");
+    supabase.rpc("studio_get_team_invite", { p_token: inviteToken }).then(({ data: rows, error }) => {
+      if (cancelled) return;
+      const invite = Array.isArray(rows) ? rows[0] : rows;
+      if (error || !invite?.studio_name) {
+        setInvitePreview(null);
+        setAuthError("This invite link has expired or was already used. Ask the studio owner for a new one.");
+        return;
+      }
+      setInvitePreview(invite);
+    }).catch(() => {
+      if (!cancelled) { setInvitePreview(null); setAuthError("The invitation could not be checked. Please try again."); }
+    });
+    return () => { cancelled = true; };
+  }, [inviteToken]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!userId) {
+      setStudioAccess(null);
+      setStudioAccessReady(false);
+      setStudioMemberships([]);
+      setActiveStudioOrganizationId("");
+      return undefined;
+    }
+
+    setStudioAccessReady(false);
+    (async () => {
+      try {
+        const { data: memberships, error: membershipsError } = await supabase.rpc("chat_get_my_memberships");
+        if (cancelled) return;
+
+        if (!membershipsError && Array.isArray(memberships)) {
+          setStudioMemberships(memberships);
+          const storageKey = `kf-active-studio:${userId}`;
+          let rememberedId = "";
+          try { rememberedId = window.localStorage.getItem(storageKey) || ""; } catch { /* storage can be disabled */ }
+          const remembered = memberships.find((item) => item.organization_id === rememberedId);
+          // Preserve the Master User's home studio as the default for old accounts.
+          // A newly accepted invitation deliberately stores its target org before reload.
+          const preferred = remembered || memberships.find((item) => item.role === "master_user") || memberships[0];
+          const orgId = preferred?.organization_id || "";
+          setActiveStudioOrganizationId(orgId);
+          if (orgId) {
+            try { window.localStorage.setItem(storageKey, orgId); } catch { /* storage is only a preference */ }
+            const { data: access, error: accessError } = await supabase.rpc("studio_get_app_access_context_for_org", { p_organization_id: orgId });
+            if (cancelled) return;
+            if (!accessError) {
+              setStudioAccess(access || { is_member: false });
+            } else if (memberships.length <= 1) {
+              // Compatibility for installations that have the old single-studio RPC
+              // but have not yet applied the additive multi-organization migration.
+              const { data: legacyAccess, error: legacyError } = await supabase.rpc("studio_get_my_app_access_context");
+              if (cancelled) return;
+              setStudioAccess(legacyError ? null : (legacyAccess || { is_member: false }));
+            } else {
+              setStudioAccess({ is_member: false, organization_id: orgId, multi_org_context_unavailable: true });
+            }
+          } else {
+            const { data: legacyAccess, error: legacyError } = await supabase.rpc("studio_get_my_app_access_context");
+            if (cancelled) return;
+            setStudioAccess(legacyError ? null : (legacyAccess || { is_member: false }));
+          }
+        } else {
+          // Legacy fallback only when the membership-list RPC isn't installed.
+          setStudioMemberships([]);
+          setActiveStudioOrganizationId("");
+          const { data: legacyAccess, error: legacyError } = await supabase.rpc("studio_get_my_app_access_context");
+          if (cancelled) return;
+          setStudioAccess(legacyError ? null : (legacyAccess || { is_member: false }));
+        }
+      } catch {
+        if (!cancelled) setStudioAccess(null);
+      } finally {
+        if (!cancelled) setStudioAccessReady(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [userId]);
+
+  useEffect(() => {
+    if (!userId || !inviteToken || inviteAcceptanceInFlight.current === inviteToken) return undefined;
+    inviteAcceptanceInFlight.current = inviteToken;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data, error } = await supabase.rpc("studio_accept_team_invite", { p_token: inviteToken });
+        if (error) throw error;
+        if (cancelled) return;
+        setInviteAcceptanceMessage(`Invitation accepted. Welcome to ${data?.organization_name || "the studio"}. Refreshing your workspace…`);
+        // Joining an organization adds a scoped membership. Select the invited studio
+        // for this session without replacing the user's existing Master User membership.
+        if (data?.organization_id) {
+          try { window.localStorage.setItem(`kf-active-studio:${userId}`, data.organization_id); } catch { /* preference only */ }
+          setActiveStudioOrganizationId(data.organization_id);
+        }
+        const { data: access, error: accessError } = data?.organization_id
+          ? await supabase.rpc("studio_get_app_access_context_for_org", { p_organization_id: data.organization_id })
+          : await supabase.rpc("studio_get_my_app_access_context");
+        if (!accessError) setStudioAccess(access || null);
+        const url = new URL(window.location.href);
+        url.searchParams.delete("studio-invite");
+        url.searchParams.delete("signup");
+        window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+        setInviteToken("");
+        setInvitePreview(null);
+        // Reload after linking the login to the existing Team record so the app
+        // re-fetches rows under the new membership/RLS context. No database work
+        // is performed by the browser except the authorized acceptance RPC.
+        window.location.reload();
+      } catch (error) {
+        if (cancelled) return;
+        const message = String(error?.message || "");
+        const friendly = /invite_not_found_or_expired/i.test(message)
+          ? "This invite link has expired or was already used. Ask the studio owner for a new one."
+          : /function .* does not exist|schema cache/i.test(message)
+            ? "Studio invite onboarding isn't installed in this Supabase project yet."
+            : (message || "We couldn't accept this invitation.");
+        setInviteAcceptanceMessage(friendly);
+        inviteAcceptanceInFlight.current = "";
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [userId, inviteToken]);
+
+  const visibleWorkspaces = useMemo(() => {
+    if (!studioAccessReady) return ["dashboard"];
+    return allowedWorkspaceKeys(studioAccess, { legacyFallback: studioAccess === null && !inviteToken });
+  }, [studioAccessReady, studioAccess, inviteToken]);
+  const handleSwitchStudio = useCallback(async (organizationId) => {
+    const target = studioMemberships.find((membership) => membership.organization_id === organizationId && membership.status !== "suspended");
+    if (!target || organizationId === activeStudioOrganizationId) return;
+    setStudioAccessReady(false);
+    setData(emptyWorkspaceData());
+    setWorkspace("dashboard");
+    setView("projects");
+    setSelectedProjectId(null);
+    setEditingProject(null);
+    setEditingCard(null);
+    setEditingLead(null);
+    setEditingInvoice(null);
+    setEditingExpense(null);
+    setEditingBudgetPlanner(null);
+    setEditingTeamMember(null);
+    setChatTargetConversationId(null);
+    setChatTargetMessageId(null);
+    try { window.localStorage.setItem(`kf-active-studio:${userId}`, organizationId); } catch { /* preference only */ }
+    setActiveStudioOrganizationId(organizationId);
+    try {
+      const { data: access, error } = await supabase.rpc("studio_get_app_access_context_for_org", { p_organization_id: organizationId });
+      if (error) throw error;
+      if (!access?.is_member) throw new Error("Your membership in that studio is no longer active.");
+      setStudioAccess(access);
+      setInviteAcceptanceMessage("");
+    } catch (error) {
+      setStudioAccess({ is_member: false, organization_id: organizationId, multi_org_context_unavailable: true });
+      setInviteAcceptanceMessage(error?.message || "We couldn't switch studios. Please refresh and try again.");
+    } finally {
+      setStudioAccessReady(true);
+    }
+  }, [studioMemberships, activeStudioOrganizationId, userId]);
+  useEffect(() => {
+    if (!studioAccessReady || studioAccess === null || studioAccess.role === "master_user") return;
+    if (!visibleWorkspaces.includes(workspace)) setWorkspace("dashboard");
+    if (view === "board" && !visibleWorkspaces.includes("projects")) {
+      setView("projects");
+      setWorkspace("dashboard");
+    }
+  }, [studioAccessReady, studioAccess, visibleWorkspaces, workspace, view]);
   // Global activity notifications (bell in the header). Disposes its realtime channel/timers on sign-out.
   const notifications = useNotifications(userId);
   // Timer changes made on the dashboard are saved to the account (debounced) so they
@@ -3307,29 +3512,38 @@ export default function ShotTracker() {
   };
 
   const loadData = useCallback(async () => {
-    if (!userId) return;
+    if (!userId || !studioAccessReady) return;
     setLoading(true);
     try {
-      const [projectsRes, shotsRes, leadsRes, invoicesRes, expensesRes, teamRes, activityRes, plannersRes, plannerTemplatesRes, pipelineLibraryRes, projectStagesRes] = await Promise.all([
-        supabase.from("projects").select("*").order("created_at"),
-        supabase.from("shots").select("*").order("created_at"),
-        supabase.from("leads").select("*").order("created_at"),
-        supabase.from("invoices").select("*").order("created_at"),
-        supabase.from("expenses").select("*").order("created_at"),
-        supabase.from("team_members").select("*").order("created_at"),
-        supabase.from("activity_log").select("*").order("created_at", { ascending: false }),
-        supabase.from("budget_planners").select("*").order("created_at", { ascending: false }),
-        supabase.from("planner_templates").select("*").order("created_at", { ascending: false }),
-        // Pipeline redesign phase 3 (design report v2 §3, §15). Both
-        // queries are wrapped so that running this client BEFORE the
-        // phase-2 schema migration ships (tables don't exist yet) fails
-        // softly into the pre-migration LEGACY_PIPELINE fallback below,
-        // rather than breaking the whole load - same non-fatal spirit as
-        // the Teams isolation right below.
-        supabase.from("pipeline_stages").select("*").then((r) => r, () => ({ data: [], error: null })),
-        supabase.from("project_stages").select("*").then((r) => r, () => ({ data: [], error: null })),
-      ]);
+      // Owner-scoped legacy tables do not carry organization_id columns. The
+      // selected org's trusted mapping is therefore used as a tenant filter,
+      // with RLS remaining authoritative for each individual record.
+      const ownerScope = studioAccess?.is_member === true
+        ? (Array.isArray(studioAccess.data_owner_user_ids) ? studioAccess.data_owner_user_ids : [])
+        : (studioAccess === null && !inviteToken ? null : []);
+      const projectsQuery = scopeOwnedQuery(supabase.from("projects").select("*").order("created_at"), ownerScope);
+      const projectsRes = await projectsQuery;
       if (projectsRes.error) throw projectsRes.error;
+      const visibleProjectIds = (projectsRes.data || []).map((project) => project.id);
+      let shotsQuery = supabase.from("shots").select("*").order("created_at");
+      let projectStagesQuery = supabase.from("project_stages").select("*");
+      if (ownerScope !== null) {
+        shotsQuery = shotsQuery.in("project_id", visibleProjectIds.length ? visibleProjectIds : [EMPTY_SCOPE_UUID]);
+        projectStagesQuery = projectStagesQuery.in("project_id", visibleProjectIds.length ? visibleProjectIds : [EMPTY_SCOPE_UUID]);
+      }
+      const [shotsRes, leadsRes, invoicesRes, expensesRes, teamRes, activityRes, plannersRes, plannerTemplatesRes, pipelineLibraryRes, projectStagesRes] = await Promise.all([
+        shotsQuery,
+        scopeOwnedQuery(supabase.from("leads").select("*").order("created_at"), ownerScope),
+        scopeOwnedQuery(supabase.from("invoices").select("*").order("created_at"), ownerScope),
+        scopeOwnedQuery(supabase.from("expenses").select("*").order("created_at"), ownerScope),
+        scopeOwnedQuery(supabase.from("team_members").select("*").order("created_at"), ownerScope),
+        scopeOwnedQuery(supabase.from("activity_log").select("*").order("created_at", { ascending: false }), ownerScope),
+        scopeOwnedQuery(supabase.from("budget_planners").select("*").order("created_at", { ascending: false }), ownerScope),
+        scopeOwnedQuery(supabase.from("planner_templates").select("*").order("created_at", { ascending: false }), ownerScope),
+        // Pipeline library is a global vocabulary, not tenant data.
+        supabase.from("pipeline_stages").select("*").then((r) => r, () => ({ data: [], error: null })),
+        projectStagesQuery.then((r) => r, () => ({ data: [], error: null })),
+      ]);
       if (shotsRes.error) throw shotsRes.error;
       if (leadsRes.error) throw leadsRes.error;
       if (invoicesRes.error) throw invoicesRes.error;
@@ -3430,7 +3644,7 @@ export default function ShotTracker() {
     } finally {
       setLoading(false);
     }
-  }, [userId]);
+  }, [userId, studioAccessReady, studioAccess, inviteToken]);
 
   useEffect(() => {
     if (userId) loadData();
@@ -3448,6 +3662,63 @@ export default function ShotTracker() {
         pipelineLibrary: [],
       });
   }, [userId, loadData]);
+
+  // Reconcile workspace access when the user returns to the tab. RLS remains
+  // authoritative, while this clears stale in-memory rows after a role/project
+  // access change without polling every table continuously.
+  useEffect(() => {
+    if (!userId) return undefined;
+    let active = true;
+    let refreshing = false;
+    const refreshAccessOnReturn = async () => {
+      if (refreshing || document.visibilityState === "hidden") return;
+      refreshing = true;
+      try {
+        const { data: memberships, error: membershipError } = await supabase.rpc("chat_get_my_memberships");
+        if (membershipError || !active) return;
+        const currentMemberships = Array.isArray(memberships) ? memberships : [];
+        setStudioMemberships(currentMemberships);
+        let targetOrganizationId = activeStudioOrganizationId;
+        if (!currentMemberships.some((item) => item.organization_id === targetOrganizationId)) {
+          targetOrganizationId = currentMemberships.find((item) => item.role === "master_user")?.organization_id
+            || currentMemberships[0]?.organization_id || "";
+          // If the selected organization was suspended/removed, clear old rows before
+          // switching so data from the previous studio is never briefly shown under
+          // the fallback studio's header.
+          setData(emptyWorkspaceData());
+          setWorkspace("dashboard");
+          setView("projects");
+          setSelectedProjectId(null);
+          setActiveStudioOrganizationId(targetOrganizationId);
+          try {
+            if (targetOrganizationId) window.localStorage.setItem(`kf-active-studio:${userId}`, targetOrganizationId);
+            else window.localStorage.removeItem(`kf-active-studio:${userId}`);
+          } catch { /* persistence is only a preference */ }
+        }
+        if (!targetOrganizationId) {
+          setStudioAccess({ is_member: false });
+          return;
+        }
+        const { data: nextAccess, error } = await supabase.rpc("studio_get_app_access_context_for_org", { p_organization_id: targetOrganizationId });
+        if (error || !active) return;
+        setStudioAccess(nextAccess || { is_member: false });
+        // loadData is memoized against the active access context. Updating it here
+        // triggers the normal data-loading effect with the new organization scope;
+        // calling the current closure would load the previous studio's rows once.
+      } catch {
+        // A transient connection failure must not erase the last known access.
+      } finally {
+        refreshing = false;
+      }
+    };
+    window.addEventListener("focus", refreshAccessOnReturn);
+    document.addEventListener("visibilitychange", refreshAccessOnReturn);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refreshAccessOnReturn);
+      document.removeEventListener("visibilitychange", refreshAccessOnReturn);
+    };
+  }, [userId, loadData, activeStudioOrganizationId]);
 
   useEffect(() => {
     if (!userId) return;
@@ -3934,11 +4205,13 @@ export default function ShotTracker() {
   const handleSaveCard = async (card) => {
     setSaveState("saving");
     try {
+      const projectOwnerId = projects.find((project) => project.id === card.projectId)?.ownerUserId
+        || studioAccess?.primary_data_owner_user_id || userId;
       if (card.id) {
         const previous = cards.find((c) => c.id === card.id);
         const { error } = await supabase
           .from("shots")
-          .update(cardToRow(card, userId))
+          .update(cardToRow(card, projectOwnerId))
           .eq("id", card.id);
         if (error) throw error;
         setData((prev) => ({
@@ -3954,7 +4227,7 @@ export default function ShotTracker() {
                 : `Revisions requested on ${card.title || "shot"}`;
             try {
               const { error: logError } = await supabase.from("activity_log").insert({
-                user_id: userId,
+                user_id: projectOwnerId,
                 project_id: card.projectId,
                 shot_id: card.id,
                 event_type: eventType,
@@ -3983,7 +4256,7 @@ export default function ShotTracker() {
       } else {
         const { data: inserted, error } = await supabase
           .from("shots")
-          .insert(cardToRow(card, userId))
+          .insert(cardToRow(card, projectOwnerId))
           .select()
           .single();
         if (error) throw error;
@@ -4103,9 +4376,10 @@ export default function ShotTracker() {
           leads: prev.leads.map((l) => (l.id === lead.id ? lead : l)),
         }));
       } else {
+        const recordOwnerId = studioAccess?.primary_data_owner_user_id || userId;
         const { data: inserted, error } = await supabase
           .from("leads")
-          .insert(leadToRow(lead, userId))
+          .insert(leadToRow(lead, recordOwnerId))
           .select()
           .single();
         if (error) throw error;
@@ -4784,10 +5058,28 @@ export default function ShotTracker() {
         });
         if (error) throw error;
       } else {
-        const { error } = await supabase.auth.signUp({
-          email: authEmail,
-          password: authPassword,
-        });
+        const normalizedEmail = String(authEmail || "").trim().toLowerCase();
+        if (inviteToken) {
+          // One-time invite: the link is the credential. The server creates a confirmed
+          // account for the typed email, links it to the roster entry, then we sign in.
+          if (!invitePreview?.studio_name) throw new Error("This invite link has expired or was already used. Ask the studio owner for a new one.");
+          const { error: joinError } = await supabase.functions.invoke("studio-invite-accept", {
+            body: { token: inviteToken, email: normalizedEmail, password: authPassword },
+          });
+          if (joinError) {
+            const code = await readFunctionError(joinError);
+            if (/account_exists/i.test(code)) {
+              setAuthMode("signin");
+              setAuthNotice(friendlyInviteError(code));
+              return;
+            }
+            throw new Error(friendlyInviteError(code));
+          }
+          const { error: signInError } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password: authPassword });
+          if (signInError) throw signInError;
+          return;
+        }
+        const { error } = await supabase.auth.signUp({ email: normalizedEmail, password: authPassword });
         if (error) throw error;
         setAuthNotice("Check your inbox to confirm your email, then sign in.");
       }
@@ -4838,7 +5130,7 @@ export default function ShotTracker() {
     try {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
-        options: { redirectTo: window.location.origin },
+        options: { redirectTo: inviteToken ? `${window.location.origin}/?studio-invite=${encodeURIComponent(inviteToken)}` : window.location.origin },
       });
       if (error) throw error;
     } catch (err) {
@@ -4993,8 +5285,7 @@ export default function ShotTracker() {
     if (n?.type === "chat_message" && n.conversationId) {
       setChatTargetConversationId(n.conversationId);
       setChatTargetMessageId(n.messageId || null);
-      setView("projects");
-      setWorkspace("chat");
+      setChatOpen(true);
       return { ok: true };
     }
     const project = projects.find((p) => String(p.id) === String(n.projectId));
@@ -5123,6 +5414,13 @@ export default function ShotTracker() {
           <h1 style={styles.title}>Kairil</h1>
           <p style={styles.subtitle}>CRM plus Shot Tracker</p>
 
+          {inviteToken && <div className="kf-auth-invite-banner">
+            <span className="kf-auth-invite-mark" aria-hidden="true">↗</span>
+            <div><strong>{invitePreview ? `Join ${invitePreview.studio_name}` : "Studio invitation"}</strong>
+              <p>{invitePreview ? `Welcome, ${invitePreview.display_name}. Enter your email and choose a password to get started.` : "Checking your one-time invite…"}</p>
+            </div>
+          </div>}
+
           {authMode === "reset" ? (
             <>
               <form onSubmit={handleRequestPasswordReset} style={styles.lockForm}>
@@ -5157,7 +5455,7 @@ export default function ShotTracker() {
             </>
           ) : (
             <>
-              <button style={styles.googleButton} onClick={handleGoogleSignIn} type="button">
+              {!inviteToken && <button style={styles.googleButton} onClick={handleGoogleSignIn} type="button">
                 <svg width="16" height="16" viewBox="0 0 24 24">
                   <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" />
                   <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.99.67-2.26 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.85A11 11 0 0 0 12 23z" />
@@ -5165,13 +5463,13 @@ export default function ShotTracker() {
                   <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1a11 11 0 0 0-9.82 6.05l3.66 2.85C6.71 7.3 9.14 5.38 12 5.38z" />
                 </svg>
                 Continue with Google
-              </button>
+              </button>}
 
-              <div style={styles.dividerRow}>
+              {!inviteToken && <div style={styles.dividerRow}>
                 <div style={styles.dividerLine} />
                 <span style={styles.dividerText}>or</span>
                 <div style={styles.dividerLine} />
-              </div>
+              </div>}
 
               <form onSubmit={handleAuthSubmit} style={styles.lockForm}>
                 <input
@@ -5189,13 +5487,13 @@ export default function ShotTracker() {
                   type="password"
                   value={authPassword}
                   onChange={(e) => setAuthPassword(e.target.value)}
-                  placeholder="Password"
+                  placeholder={inviteToken && authMode !== "signin" ? "Choose a password" : "Password"}
                   autoComplete={authMode === "signin" ? "current-password" : "new-password"}
-                  minLength={6}
+                  minLength={inviteToken && authMode !== "signin" ? 8 : 6}
                   required
                 />
-                <button type="submit" style={styles.newButton} disabled={authBusy}>
-                  {authBusy ? "Please wait..." : authMode === "signin" ? "Sign in" : "Create account"}
+                <button type="submit" style={styles.newButton} disabled={authBusy || (inviteToken && authMode !== "signin" && !invitePreview)}>
+                  {authBusy ? "Please wait..." : authMode === "signin" ? "Sign in" : inviteToken ? "Join studio" : "Create account"}
                 </button>
               </form>
 
@@ -5223,9 +5521,7 @@ export default function ShotTracker() {
                   setAuthNotice("");
                 }}
               >
-                {authMode === "signin"
-                  ? "Need an account? Sign up"
-                  : "Already have an account? Sign in"}
+                {authMode === "signin" ? (inviteToken ? "Create an account with this invite" : "Need an account? Sign up") : (inviteToken ? "Already have an account? Sign in to accept invite" : "Already have an account? Sign in")}
               </button>
             </>
           )}
@@ -5248,6 +5544,12 @@ export default function ShotTracker() {
   const boardPipeline = getProjectPipeline(selectedProject);
   const boardRecognizedKeys = new Set(boardPipeline.rows.map((r) => r.stageKey));
   const showTabs = view === "projects";
+  const studioScoped = Boolean(studioAccess?.is_member && studioAccess.role !== "master_user");
+  const canSeeProjects = !studioScoped || visibleWorkspaces.includes("projects");
+  const canSeeFinance = !studioScoped || visibleWorkspaces.includes("finance");
+  const dashboardProjects = canSeeProjects ? projects : [];
+  const dashboardCards = canSeeProjects ? cards : [];
+  const dashboardInvoices = canSeeFinance ? invoices : [];
   const isProMember = settings.isAdmin || settings.plan === "pro";
   const hasProAccess = PRO_GATING_TEMPORARILY_DISABLED || isProMember;
   const showProBadge = !isProMember;
@@ -5258,6 +5560,32 @@ export default function ShotTracker() {
   return (
     <div className="kf-app-shell" style={styles.app}>
       <style>{fontImport}</style>
+
+      {inviteAcceptanceMessage && <div className="kf-invite-status" role="status">
+        <span>{inviteAcceptanceMessage}</span>
+        <button type="button" aria-label="Dismiss invitation message" onClick={() => setInviteAcceptanceMessage("")}>×</button>
+      </div>}
+
+      <div className="kf-chat-widget">
+        <div className={`kf-chat-popup${chatOpen ? " is-open" : ""}`} hidden={!chatOpen} role="dialog" aria-label="Studio chat" aria-modal="false">
+          <ChatPage
+            userId={userId}
+            initialConversationId={chatTargetConversationId}
+            initialMessageId={chatTargetMessageId}
+            onConversationChange={handleChatConversationChange}
+            onUnreadCountChange={setChatUnreadCount}
+            activeOrganizationId={activeStudioOrganizationId}
+            onOrganizationChange={handleSwitchStudio}
+            onClose={() => setChatOpen(false)}
+          />
+        </div>
+        <button type="button" className="kf-chat-launcher" onClick={() => setChatOpen((open) => !open)} aria-label={chatOpen ? "Minimize chat" : "Open chat"} aria-expanded={chatOpen} title={chatOpen ? "Minimize chat" : "Chat"}>
+          <svg viewBox="0 0 24 24" width="25" height="25" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            {chatOpen ? <path d="m6 6 12 12M18 6 6 18" /> : <><path d="M20 11.5a7.6 7.6 0 0 1-8 7.5 8.8 8.8 0 0 1-3.8-.8L4 20l1-3.4A7.1 7.1 0 0 1 4 12c0-4.1 3.6-7.5 8-7.5s8 3.1 8 7Z" /><path d="M8 11.8h.01M12 11.8h.01M16 11.8h.01" /></>}
+          </svg>
+          {!chatOpen && chatUnreadCount > 0 && <span className="kf-chat-launcher-badge">{chatUnreadCount > 99 ? "99+" : chatUnreadCount}</span>}
+        </button>
+      </div>
 
       {driveNotice && (
         <div style={styles.driveToast}>
@@ -5325,8 +5653,6 @@ export default function ShotTracker() {
                 ? "Payments"
                 : workspace === "teams"
                 ? "Teams"
-                : workspace === "chat"
-                ? "Chat"
                 : "Kairil"}
             </h1>
             <p style={styles.subtitle}>
@@ -5339,6 +5665,24 @@ export default function ShotTracker() {
           </div>
         </div>
         <div className="kf-app-header-right" style={styles.headerRight}>
+          {studioMemberships.length > 1 && (
+            <label style={{ display: "flex", alignItems: "center", gap: 7, color: "var(--kf-muted, #9caeb5)", fontSize: 12 }}>
+              <span>Studio</span>
+              <select
+                aria-label="Switch active studio"
+                title="Switch the active studio workspace"
+                value={activeStudioOrganizationId}
+                onChange={(event) => handleSwitchStudio(event.target.value)}
+                style={{ ...styles.input, width: 190, minWidth: 130, margin: 0, padding: "8px 10px", fontSize: 12 }}
+              >
+                {studioMemberships.map((membership) => (
+                  <option key={membership.organization_id} value={membership.organization_id}>
+                    {membership.organization_name} — {String(membership.role || "member").replaceAll("_", " ")}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <span style={styles.saveIndicator}>
             {saveState === "saving" && "Saving..."}
             {saveState === "saved" && "Saved"}
@@ -5372,7 +5716,7 @@ export default function ShotTracker() {
               <PlusIcon />
               New invoice
             </button>
-          ) : view === "board" && boardTab === "activity" ? null : view === "board" ? (
+          ) : view === "board" && boardTab === "activity" ? null : view === "board" && studioAccess?.is_member === true && studioAccess.role !== "master_user" && Number(studioAccess.editable_project_count || 0) === 0 ? null : view === "board" ? (
             <button
               style={styles.newButton}
               onClick={() =>
@@ -5388,22 +5732,22 @@ export default function ShotTracker() {
               <PlusIcon />
               New shot
             </button>
-          ) : workspace === "leads" ? (
+          ) : workspace === "leads" && (studioAccess === null || (studioAccess?.is_member === true && (studioAccess.role === "master_user" || studioAccess.department_permission_keys?.includes("crm.write")))) ? (
             <button style={styles.newButton} onClick={() => setEditingLead(emptyLead())}>
               <PlusIcon />
               New lead
             </button>
-          ) : workspace === "finance" ? (
+          ) : workspace === "leads" ? null : workspace === "finance" && (!studioAccess?.is_member || studioAccess.role === "master_user") ? (
             <button style={styles.newButton} onClick={() => setEditingExpense(emptyExpense())}>
               <PlusIcon />
               New expense
             </button>
-          ) : workspace === "teams" ? (
+          ) : workspace === "teams" && (studioAccess === null || (studioAccess?.is_member === true && studioAccess.role === "master_user")) ? (
             <button style={styles.newButton} onClick={() => setEditingTeamMember(emptyTeamMember())}>
               <PlusIcon />
               New member
             </button>
-          ) : workspace === "chat" ? null : workspace === "planner" && !editingBudgetPlanner ? (
+          ) : workspace === "teams" ? null : workspace === "planner" && !editingBudgetPlanner ? (
             <>
               <button
                 style={styles.newButton}
@@ -5494,49 +5838,41 @@ export default function ShotTracker() {
           >
             Dashboard
           </button>
-          <button
+          {visibleWorkspaces.includes("leads") && <button
             className={tutorialHighlightTarget === "leads" ? "kf-tutorial-highlight" : undefined}
             style={{ ...styles.tabButton, ...(workspace === "leads" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("leads")}
           >
             Leads
-          </button>
-          <button
+          </button>}
+          {visibleWorkspaces.includes("planner") && <button
             style={{ ...styles.tabButton, ...(workspace === "planner" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("planner")}
           >
             Planner
-          </button>
-          <button
+          </button>}
+          {visibleWorkspaces.includes("projects") && <button
             className={tutorialHighlightTarget === "projects" ? "kf-tutorial-highlight" : undefined}
             style={{ ...styles.tabButton, ...(workspace === "projects" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("projects")}
           >
             Projects
-          </button>
-          <button
+          </button>}
+          {visibleWorkspaces.includes("teams") && <button
             className={tutorialHighlightTarget === "teams" ? "kf-tutorial-highlight" : undefined}
             style={{ ...styles.tabButton, ...(workspace === "teams" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("teams")}
           >
             Teams{showProBadge && <> <span style={styles.proBadge}>PRO</span></>}
-          </button>
-          <button
-            type="button"
-            aria-current={workspace === "chat" ? "page" : undefined}
-            style={{ ...styles.tabButton, ...(workspace === "chat" ? styles.tabButtonActive : {}), position: "relative" }}
-            onClick={() => setWorkspace("chat")}
-          >
-            Chat{chatUnreadCount > 0 && <span className="kf-chat-nav-unread" aria-label={`${chatUnreadCount} unread messages`}>{chatUnreadCount > 99 ? "99+" : chatUnreadCount}</span>}
-          </button>
-          <button
+          </button>}
+          {visibleWorkspaces.includes("finance") && <button
             className={tutorialHighlightTarget === "finance" ? "kf-tutorial-highlight" : undefined}
             style={{ ...styles.tabButton, ...(workspace === "finance" ? styles.tabButtonActive : {}) }}
             onClick={() => setWorkspace("finance")}
           >
             Finance
-          </button>
-          {canAccessPayments(settings) ? (
+          </button>}
+          {visibleWorkspaces.includes("payments") && (canAccessPayments(settings) ? (
             <button
               className={tutorialHighlightTarget === "payments" ? "kf-tutorial-highlight" : undefined}
               style={{ ...styles.tabButton, ...(workspace === "payments" ? styles.tabButtonActive : {}) }}
@@ -5556,7 +5892,7 @@ export default function ShotTracker() {
               <span>{"\uD83D\uDD12"} Payments</span>
               <span style={{ fontSize: 10, letterSpacing: "0.04em" }}>Coming Soon</span>
             </button>
-          )}
+          ))}
         </div>
       )}
 
@@ -5646,33 +5982,39 @@ export default function ShotTracker() {
           onExport={handleExport}
           onSignOut={handleSignOut}
           onAccountAction={handleAccountAction}
+          studioScoped={studioScoped}
+          workspaceAccess={visibleWorkspaces}
           onSave={handleSaveSettings}
           onClose={handleCloseSettings}
         />
       )}
 
-      {view === "projects" && workspace === "chat" && (
-        <ChatPage
-          userId={userId}
-          initialConversationId={chatTargetConversationId}
-          initialMessageId={chatTargetMessageId}
-          onConversationChange={handleChatConversationChange}
-          onUnreadCountChange={setChatUnreadCount}
+      {view === "projects" && workspace === "dashboard" && studioScoped && (
+        <DepartmentHome
+          studioAccess={studioAccess}
+          workspaces={visibleWorkspaces}
+          leads={leads}
+          cards={cards}
+          projects={projects}
+          onGoTo={(target) => { if (visibleWorkspaces.includes(target)) setWorkspace(target); }}
+          onOpenLead={(lead) => setEditingLead(lead)}
+          onOpenShot={(card) => { openProject(card.projectId); setEditingCard(card); }}
         />
       )}
 
-      {view === "projects" && workspace === "dashboard" && (
+      {view === "projects" && workspace === "dashboard" && !studioScoped && (
         <DashboardPanel
-          projects={projects}
-          cards={cards}
+          projects={dashboardProjects}
+          cards={dashboardCards}
           leads={leads}
-          invoices={invoices}
+          invoices={dashboardInvoices}
+          expenses={studioScoped && !canSeeFinance ? [] : expenses}
           settings={settings}
           fxRates={fxRates}
           onOpenProject={openProject}
-          onGoToProjects={() => setWorkspace("projects")}
-          onGoToPayments={() => setWorkspace("payments")}
-          onGoToFinance={() => setWorkspace("finance")}
+          onGoToProjects={() => { if (visibleWorkspaces.includes("projects")) setWorkspace("projects"); }}
+          onGoToPayments={() => { if (visibleWorkspaces.includes("payments")) setWorkspace("payments"); }}
+          onGoToFinance={() => { if (visibleWorkspaces.includes("finance")) setWorkspace("finance"); }}
           onOpenLead={(lead) => setEditingLead(lead)}
           onOpenShot={(card) => { openProject(card.projectId); setEditingCard(card); }}
           onOpenContact={() => { setWorkspace("leads"); setCrmTab("contacts"); }}
@@ -6001,6 +6343,7 @@ export default function ShotTracker() {
       )}
       {view === "projects" && workspace === "teams" && hasProAccess && (
         <TeamsPanel
+          userId={userId}
           teamMembers={teamMembers}
           cards={cards}
           projects={projects}
@@ -6009,6 +6352,9 @@ export default function ShotTracker() {
           onNew={() => setEditingTeamMember(emptyTeamMember())}
           loadError={teamsLoadError}
           onBackfillAssignment={handleBackfillShotAssignment}
+          activeOrganizationId={activeStudioOrganizationId}
+          studioAccess={studioAccess}
+          canManageRoster={studioAccess === null || (studioAccess?.is_member === true && studioAccess.role === "master_user")}
         />
       )}
 
@@ -6624,8 +6970,10 @@ function ProjectCard({
   );
 }
 
-function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loadError, onBackfillAssignment }) {
+function TeamsPanel({ userId, teamMembers, cards, projects, settings, onEdit, onNew, loadError, onBackfillAssignment, activeOrganizationId, studioAccess, canManageRoster = false }) {
   const cur = settings.currencySymbol || "$";
+  const teamAccess = useTeamAccess({ activeOrganizationId, studioAccess });
+  const [showDepartments, setShowDepartments] = useState(false);
   const [includeArchived, setIncludeArchived] = useState(false);
   const archivedCount = teamMembers.filter((m) => m.status === "archived").length;
   const statusFilteredMembers = includeArchived
@@ -6708,10 +7056,10 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
         <div style={styles.projectsEmpty}>
           <div style={styles.projectsEmptyIcon}><TeamIcon /></div>
           <p style={styles.projectsEmptyText}>No team members yet</p>
-          <button style={styles.newButton} onClick={onNew}>
+          {canManageRoster && <button style={styles.newButton} onClick={onNew}>
             <PlusIcon />
             New member
-          </button>
+          </button>}
         </div>
       </div>
     );
@@ -6719,6 +7067,7 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
 
   return (
     <div className="kf-content-wrap" style={styles.invoicesWrap}>
+      <AccessFeedback access={teamAccess} />
       {loadError && (
         <p style={{ ...styles.fieldHint, color: "#FF4D4D" }} role="alert">
           Team data couldn't be loaded: {loadError}
@@ -6781,6 +7130,7 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
           <option value="none">All members</option>
           <option value="department">Group by department</option>
         </select>
+        {teamAccess.canManage && <button type="button" style={styles.tabButton} onClick={() => setShowDepartments(true)}>Departments</button>}
       </div>
       {archivedCount > 0 && (
         <label style={{ ...styles.fieldHint, display: "flex", alignItems: "center", gap: 6, marginBottom: 8, cursor: "pointer" }}>
@@ -6792,7 +7142,7 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
           Include archived ({archivedCount})
         </label>
       )}
-      {legacyReviewCount > 0 && (
+      {canManageRoster && legacyReviewCount > 0 && (
         <div style={{ marginBottom: 12 }}>
           <button
             type="button"
@@ -6830,16 +7180,16 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
               key={member.id}
               className="kf-card"
               style={{ ...styles.invoiceCard, borderRadius: 10, padding: "10px 12px", gap: 4, opacity: isArchived ? 0.6 : 1 }}
-              onClick={() => onEdit(member)}
-              role="button"
-              tabIndex={0}
-              aria-label={`Edit ${member.name || "team member"}`}
-              onKeyDown={(e) => {
+              onClick={canManageRoster ? () => onEdit(member) : undefined}
+              role={canManageRoster ? "button" : undefined}
+              tabIndex={canManageRoster ? 0 : undefined}
+              aria-label={canManageRoster ? `Edit ${member.name || "team member"}` : `${member.name || "Team member"}`}
+              onKeyDown={canManageRoster ? (e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   onEdit(member);
                 }
-              }}
+              } : undefined}
             >
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
                 <span style={{ ...styles.invoiceNumber, ...ellipsis }} title={disambiguatedMemberLabel(member, duplicateNames)}>
@@ -6881,6 +7231,7 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
                 <span style={{ ...styles.fieldHint, color: "#F2A65A", ...ellipsis }}>Pending {formatCurrencyTotals(pendingByCurrency) || `${cur}0.00`}</span>
                 <span style={{ ...styles.fieldHint, color: "#3DDC84", ...ellipsis }}>Paid {formatCurrencyTotals(paidByCurrency) || `${cur}0.00`}</span>
               </div>
+              <MemberAccessRow member={member} access={teamAccess} />
             </div>
           );
         };
@@ -6900,6 +7251,7 @@ function TeamsPanel({ teamMembers, cards, projects, settings, onEdit, onNew, loa
       {visibleMembers.length === 0 && (search || activeFilterCount > 0) && (
         <p style={styles.fieldHint}>No team members match your search/filters.</p>
       )}
+      {showDepartments && teamAccess.canManage && <DepartmentsDrawer access={teamAccess} onClose={() => setShowDepartments(false)} />}
     </div>
   );
 }

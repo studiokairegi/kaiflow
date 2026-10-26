@@ -1,0 +1,33 @@
+/* Teams access: per-person control on each roster card + Departments drawer.
+   Uses the same palette as the rest of the app (teal accent on dark surfaces). */
+.kf-access-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px;padding-top:8px;border-top:1px solid #263034;cursor:default;font-family:Inter,ui-sans-serif,sans-serif}
+.kf-access-row select,.kf-access-link{min-width:0;flex:1 1 130px;max-width:100%;background:#1b2427;color:#EDEAE3;border:1px solid #354247;border-radius:8px;padding:6px 8px;font:11px Inter,ui-sans-serif,sans-serif;outline:none}
+.kf-access-row select:focus,.kf-access-link:focus{border-color:#2FBFA6;box-shadow:0 0 0 2px rgba(47,191,166,.14)}
+.kf-access-link{flex-basis:100%}
+.kf-access-btn{flex:0 0 auto;border:1px solid #354247;border-radius:8px;padding:6px 10px;background:transparent;color:#c2cecb;font:650 11px Inter,ui-sans-serif,sans-serif;cursor:pointer}
+.kf-access-btn:hover:not(:disabled){border-color:#2FBFA6;color:#2FBFA6}
+.kf-access-btn.primary{background:#2FBFA6;border-color:#2FBFA6;color:#09231e}
+.kf-access-btn.primary:hover:not(:disabled){filter:brightness(1.08);color:#09231e}
+.kf-access-btn:disabled,.kf-access-row select:disabled{opacity:.5;cursor:not-allowed}
+.kf-access-chip{flex:1 1 auto;min-width:0;border-radius:99px;padding:4px 9px;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kf-access-chip.active{background:rgba(47,191,166,.13);color:#69dcc5}
+.kf-access-chip.pending{background:rgba(242,166,90,.13);color:#efbb83}
+.kf-access-chip.paused{background:#293236;color:#9ba9a6}
+.kf-access-feedback{margin:0 0 8px;padding:8px 11px;border-radius:8px;font:11px/1.5 Inter,ui-sans-serif,sans-serif}
+.kf-access-feedback.ok{border:1px solid rgba(47,191,166,.35);background:rgba(47,191,166,.08);color:#78dfcb}
+.kf-access-feedback.error{border:1px solid #7d4247;background:rgba(176,63,71,.12);color:#ffb0b5}
+.kf-dept-overlay{position:fixed;inset:0;z-index:1200;display:flex;justify-content:flex-end;background:rgba(5,9,10,.55)}
+.kf-dept-drawer{width:min(380px,100%);height:100%;overflow:auto;padding:18px;background:#171d20;border-left:1px solid #2a3338;color:#EDEAE3;font-family:Inter,ui-sans-serif,sans-serif;display:flex;flex-direction:column;gap:12px}
+.kf-dept-drawer header{display:flex;align-items:center;justify-content:space-between}
+.kf-dept-drawer header strong{font:700 15px "Space Grotesk",Inter,sans-serif}
+.kf-dept-drawer header button{border:0;background:transparent;color:#94a4a0;font-size:22px;cursor:pointer;line-height:1}
+.kf-dept-hint{margin:0;color:#93a29f;font-size:11px;line-height:1.55}
+.kf-dept-tabs{display:flex;flex-wrap:wrap;gap:6px}
+.kf-dept-tabs button{border:1px solid #354247;border-radius:99px;padding:5px 12px;background:transparent;color:#aab8b4;font:650 11px Inter,sans-serif;cursor:pointer}
+.kf-dept-tabs button.on{background:rgba(47,191,166,.14);border-color:#2FBFA6;color:#2FBFA6}
+.kf-dept-module{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid #293538;border-radius:10px;background:#182124;font-size:12px}
+.kf-dept-module select{background:#1b2427;color:#EDEAE3;border:1px solid #354247;border-radius:8px;padding:6px 8px;font:11px Inter,sans-serif}
+.kf-dept-new{display:flex;gap:7px;margin-top:auto}
+.kf-dept-new input{flex:1;min-width:0;padding:9px 10px;border:1px solid #354247;border-radius:8px;background:#1b2427;color:#EDEAE3;font:11px Inter,sans-serif}
+.kf-dept-new button{border:1px solid #2FBFA6;border-radius:8px;padding:8px 14px;background:#2FBFA6;color:#09231e;font:700 11px Inter,sans-serif;cursor:pointer}
+.kf-dept-new button:disabled{opacity:.45;cursor:not-allowed}

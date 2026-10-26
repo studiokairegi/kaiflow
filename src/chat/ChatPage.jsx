@@ -10,25 +10,6 @@ const ROLE_LABELS = {
   master_user: "Master User", department_admin: "Department administrator",
   staff: "Staff", freelancer: "Freelancer", client: "Client",
 };
-const EVENT_LABELS = {
-  conversation_created: "Conversation created", conversation_updated: "Conversation settings changed",
-  member_added: "Member added", member_removed: "Member removed", member_left: "Member left",
-  message_sent: "Message sent", message_edited: "Message edited", message_deleted: "Message deleted",
-  reaction_added: "Reaction added", reaction_removed: "Reaction removed", message_pinned: "Message pinned",
-  message_unpinned: "Message unpinned", attachment_uploaded: "Attachment uploaded", message_read: "Conversation read",
-  studio_member_added: "Studio member added", studio_member_suspended: "Studio member suspended",
-  studio_member_activated: "Studio member activated", department_created: "Department created",
-  department_member_assigned: "Department member assigned", member_role_changed: "Member role changed",
-};
-const APP_PERMISSION_OPTIONS = [
-  ["crm.read", "Read CRM leads"], ["crm.write", "Edit CRM leads"],
-  ["contacts.read", "Read contacts"], ["contacts.write", "Edit contacts"],
-  ["projects.read", "Read projects"], ["projects.write", "Edit projects"],
-  ["shots.read", "Read shots"], ["shots.write", "Edit shots"],
-  ["teams.read", "Read Teams roster"], ["teams.write", "Edit Teams roster"],
-  ["activity.read", "Read activity history"], ["invoices.read", "Read invoices (no financial writes)"],
-  ["expenses.read", "Read expenses (no financial writes)"],
-];
 const NOOP = () => {};
 const errorText = (error) => {
   const message = String(error?.message || "");
@@ -42,22 +23,11 @@ const errorText = (error) => {
   return message || "Something went wrong. Please try again.";
 };
 
-export default function ChatPage({ userId, initialConversationId = null, initialMessageId = null, onConversationChange = NOOP, onUnreadCountChange = NOOP }) {
+export default function ChatPage({ userId, initialConversationId = null, initialMessageId = null, activeOrganizationId = "", onOrganizationChange = NOOP, onConversationChange = NOOP, onUnreadCountChange = NOOP, onClose = NOOP }) {
   const [memberships, setMemberships] = useState([]);
-  const [organizationId, setOrganizationId] = useState("");
+  const [organizationId, setOrganizationId] = useState(activeOrganizationId || "");
   const [directory, setDirectory] = useState([]);
   const [departments, setDepartments] = useState([]);
-  const [studioMembers, setStudioMembers] = useState([]);
-  const [workspaceSharing, setWorkspaceSharing] = useState([]);
-  const [manageableProjects, setManageableProjects] = useState([]);
-  const [projectAccessRows, setProjectAccessRows] = useState([]);
-  const [selectedAccessProject, setSelectedAccessProject] = useState("");
-  const [selectedAccessUser, setSelectedAccessUser] = useState("");
-  const [selectedAccessLevel, setSelectedAccessLevel] = useState("contributor");
-  const [permissionDepartmentId, setPermissionDepartmentId] = useState("");
-  const [departmentPermissionRows, setDepartmentPermissionRows] = useState([]);
-  const [businessAuditEvents, setBusinessAuditEvents] = useState([]);
-  const [shareNewMemberWorkspace, setShareNewMemberWorkspace] = useState(false);
   const [projects, setProjects] = useState([]);
   const [conversations, setConversations] = useState([]);
   const [members, setMembers] = useState([]);
@@ -79,7 +49,6 @@ export default function ChatPage({ userId, initialConversationId = null, initial
   const [editHistory, setEditHistory] = useState(null);
   const [busyMessageId, setBusyMessageId] = useState(null);
   const [sideMode, setSideMode] = useState("recent");
-  const [conversationFilter, setConversationFilter] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -96,17 +65,6 @@ export default function ChatPage({ userId, initialConversationId = null, initial
   const [newDepartmentId, setNewDepartmentId] = useState("");
   const [newProjectId, setNewProjectId] = useState("");
   const [addingMemberId, setAddingMemberId] = useState("");
-  const [newMemberEmail, setNewMemberEmail] = useState("");
-  const [newMemberName, setNewMemberName] = useState("");
-  const [newMemberRole, setNewMemberRole] = useState("staff");
-  const [newMemberDepartment, setNewMemberDepartment] = useState("");
-  const [newDepartmentName, setNewDepartmentName] = useState("");
-  const [assignDepartmentId, setAssignDepartmentId] = useState("");
-  const [assignDepartmentUserId, setAssignDepartmentUserId] = useState("");
-  const [assignDepartmentRole, setAssignDepartmentRole] = useState("member");
-  const [adminView, setAdminView] = useState(false);
-  const [auditEvents, setAuditEvents] = useState([]);
-  const [adminBusy, setAdminBusy] = useState(false);
   const [downloadBusyId, setDownloadBusyId] = useState(null);
   const [jumpMessageId, setJumpMessageId] = useState(null);
 
@@ -121,10 +79,10 @@ export default function ChatPage({ userId, initialConversationId = null, initial
     return lookup;
   }, [directory, activeMembership, userId]);
   const filteredConversations = useMemo(() => {
-    const query = conversationFilter.trim().toLowerCase();
+    const query = searchQuery.trim().toLowerCase();
     if (!query) return conversations;
     return conversations.filter((item) => `${item.title || ""} ${item.last_message_body || ""}`.toLowerCase().includes(query));
-  }, [conversations, conversationFilter]);
+  }, [conversations, searchQuery]);
   const filteredDirectory = useMemo(() => {
     const q = peopleFilter.trim().toLowerCase();
     return directory.filter((item) => !q || `${item.display_name} ${ROLE_LABELS[item.role] || item.role} ${(item.department_names || []).join(" ")}`.toLowerCase().includes(q));
@@ -140,6 +98,16 @@ export default function ChatPage({ userId, initialConversationId = null, initial
   const messagesRef = useRef(messages);
   const pendingSendRef = useRef(null);
   messagesRef.current = messages;
+
+  useEffect(() => {
+    if (!activeOrganizationId || activeOrganizationId === organizationId) return;
+    if (!memberships.some((membership) => membership.organization_id === activeOrganizationId)) return;
+    setOrganizationId(activeOrganizationId);
+    setSelectedId(null);
+    setMessages([]);
+    setConversations([]);
+    onConversationChange(null);
+  }, [activeOrganizationId, organizationId, memberships, onConversationChange]);
 
   useEffect(() => {
     // A notification may target a conversation while the chat view is already mounted.
@@ -202,29 +170,8 @@ export default function ChatPage({ userId, initialConversationId = null, initial
         chatApi.directory(organizationId), chatApi.departments(organizationId), chatApi.projectOptions(organizationId), chatApi.conversations(organizationId),
       ]);
       if (peopleResult.status === "fulfilled") setDirectory(peopleResult.value); else throw peopleResult.reason;
-      if (departmentsResult.status === "fulfilled") {
-        setDepartments(departmentsResult.value);
-        setPermissionDepartmentId((current) => departmentsResult.value.some((row) => row.department_id === current)
-          ? current : (departmentsResult.value[0]?.department_id || ""));
-      }
+      if (departmentsResult.status === "fulfilled") setDepartments(departmentsResult.value);
       if (projectsResult.status === "fulfilled") setProjects(projectsResult.value);
-      if (activeMembership?.role === "master_user") {
-        const [membersResult, sharingResult, manageableResult, auditResult] = await Promise.allSettled([
-          chatApi.studioMembers(organizationId), chatApi.workspaceSharing(organizationId),
-          chatApi.manageableProjects(organizationId), chatApi.applicationAuditEvents(organizationId, 100),
-        ]);
-        if (membersResult.status === "fulfilled") setStudioMembers(membersResult.value); else setActionError(errorText(membersResult.reason));
-        if (sharingResult.status === "fulfilled") setWorkspaceSharing(sharingResult.value); else setActionError(errorText(sharingResult.reason));
-        if (manageableResult.status === "fulfilled") {
-          setManageableProjects(manageableResult.value);
-          setSelectedAccessProject((current) => manageableResult.value.some((row) => row.project_id === current)
-            ? current : (manageableResult.value[0]?.project_id || ""));
-        } else setActionError(errorText(manageableResult.reason));
-        if (auditResult.status === "fulfilled") setBusinessAuditEvents(auditResult.value); else setBusinessAuditEvents([]);
-      } else {
-        setStudioMembers([]); setWorkspaceSharing([]); setManageableProjects([]);
-        setBusinessAuditEvents([]); setDepartmentPermissionRows([]); setProjectAccessRows([]);
-      }
       if (conversationsResult.status === "fulfilled") setConversations(conversationsResult.value); else throw conversationsResult.reason;
       setLoadError("");
     } catch (error) {
@@ -235,30 +182,6 @@ export default function ChatPage({ userId, initialConversationId = null, initial
   }, [organizationId, activeMembership]);
 
   useEffect(() => { refreshWorkspace(); }, [refreshWorkspace]);
-
-  useEffect(() => {
-    if (!adminView || !isMaster || !organizationId || !permissionDepartmentId) {
-      setDepartmentPermissionRows([]);
-      return undefined;
-    }
-    let current = true;
-    chatApi.departmentPermissions(organizationId, permissionDepartmentId)
-      .then((rows) => { if (current) setDepartmentPermissionRows(rows); })
-      .catch((error) => { if (current) setActionError(errorText(error)); });
-    return () => { current = false; };
-  }, [adminView, isMaster, organizationId, permissionDepartmentId]);
-
-  useEffect(() => {
-    if (!adminView || !isMaster || !organizationId || !selectedAccessProject) {
-      setProjectAccessRows([]);
-      return undefined;
-    }
-    let current = true;
-    chatApi.projectAccess(organizationId, selectedAccessProject)
-      .then((rows) => { if (current) setProjectAccessRows(rows); })
-      .catch((error) => { if (current) setActionError(errorText(error)); });
-    return () => { current = false; };
-  }, [adminView, isMaster, organizationId, selectedAccessProject]);
 
   const loadMembers = useCallback(async (conversationId = selectedId) => {
     if (!conversationId || !organizationId) { setMembers([]); return; }
@@ -572,125 +495,6 @@ export default function ChatPage({ userId, initialConversationId = null, initial
     finally { setDownloadBusyId(null); }
   };
 
-  const openAdmin = async () => {
-    setAdminView((value) => !value);
-    if (!isMaster) return;
-    try { setAuditEvents(await chatApi.auditEvents(organizationId, 100)); }
-    catch (error) { setActionError(errorText(error)); }
-    await refreshWorkspace();
-    try {
-      const [chatAudit, appAudit] = await Promise.all([
-        chatApi.auditEvents(organizationId, 100), chatApi.applicationAuditEvents(organizationId, 100),
-      ]);
-      setAuditEvents(chatAudit); setBusinessAuditEvents(appAudit);
-    } catch (error) { setActionError(errorText(error)); }
-  };
-
-  const addStudioMember = async (event) => {
-    event.preventDefault();
-    setAdminBusy(true); setActionError("");
-    try {
-      await chatApi.addStudioMember(organizationId, newMemberEmail.trim(), newMemberName.trim(), newMemberRole, newMemberDepartment || null, shareNewMemberWorkspace);
-      setNewMemberEmail(""); setNewMemberName(""); setNewMemberRole("staff"); setNewMemberDepartment(""); setShareNewMemberWorkspace(false);
-      await refreshWorkspace();
-      setNotice(shareNewMemberWorkspace
-        ? "Studio membership saved. Existing records owned by this account are now in the studio sharing scope, subject to role and department permissions."
-        : "Studio membership saved for chat. Existing business records remain private until workspace sharing is enabled.");
-    } catch (error) { setActionError(errorText(error)); }
-    finally { setAdminBusy(false); }
-  };
-
-  const changeStudioMemberStatus = async (member) => {
-    if (!isMaster || member.role === "master_user") return;
-    const next = member.status === "active" ? "suspended" : "active";
-    if (!window.confirm(`${next === "suspended" ? "Suspend" : "Reactivate"} ${member.display_name}'s studio chat access?`)) return;
-    setAdminBusy(true); setActionError("");
-    try {
-      await chatApi.setMemberStatus(organizationId, member.user_id, next);
-      setStudioMembers(await chatApi.studioMembers(organizationId));
-      await refreshWorkspace();
-      setNotice(`Studio membership ${next === "suspended" ? "suspended" : "reactivated"}.`);
-    } catch (error) { setActionError(errorText(error)); }
-    finally { setAdminBusy(false); }
-  };
-
-  const toggleWorkspaceSharing = async (member) => {
-    if (!isMaster || member.role === "master_user" || member.role === "client") return;
-    const current = workspaceSharing.find((item) => item.user_id === member.user_id)?.workspace_shared === true;
-    const next = !current;
-    const message = next
-      ? `Share ${member.display_name}'s existing business records with the studio? Access will follow this member's role, department permissions, and project assignments.`
-      : `Stop sharing ${member.display_name}'s existing business records with the studio? Project assignments and other members' project-chat memberships will be revoked.`;
-    if (!window.confirm(message)) return;
-    setAdminBusy(true); setActionError("");
-    try {
-      await chatApi.setWorkspaceSharing(organizationId, member.user_id, next);
-      await refreshWorkspace();
-      setNotice(next ? "Workspace sharing enabled." : "Workspace sharing disabled and project access revoked.");
-    } catch (error) { setActionError(errorText(error)); }
-    finally { setAdminBusy(false); }
-  };
-
-  const assignProjectAccess = async (event) => {
-    event.preventDefault();
-    if (!selectedAccessProject || !selectedAccessUser) return;
-    setAdminBusy(true); setActionError("");
-    try {
-      await chatApi.assignProjectAccess(organizationId, selectedAccessProject, selectedAccessUser, selectedAccessLevel);
-      setProjectAccessRows(await chatApi.projectAccess(organizationId, selectedAccessProject));
-      setSelectedAccessUser("");
-      await refreshWorkspace();
-      setNotice("Project access assigned. Existing project chat membership was updated as well.");
-    } catch (error) { setActionError(errorText(error)); }
-    finally { setAdminBusy(false); }
-  };
-
-  const revokeProjectAccess = async (member) => {
-    if (!window.confirm(`Revoke ${member.display_name}'s access to this project and its project conversation?`)) return;
-    setAdminBusy(true); setActionError("");
-    try {
-      await chatApi.revokeProjectAccess(organizationId, selectedAccessProject, member.user_id);
-      setProjectAccessRows(await chatApi.projectAccess(organizationId, selectedAccessProject));
-      await refreshWorkspace();
-      setNotice("Project access revoked.");
-    } catch (error) { setActionError(errorText(error)); }
-    finally { setAdminBusy(false); }
-  };
-
-  const toggleDepartmentPermission = async (permissionKey, enabled) => {
-    if (!permissionDepartmentId) return;
-    setAdminBusy(true); setActionError("");
-    try {
-      await chatApi.setDepartmentPermission(organizationId, permissionDepartmentId, permissionKey, enabled);
-      setDepartmentPermissionRows(await chatApi.departmentPermissions(organizationId, permissionDepartmentId));
-      setNotice(`Department permission ${enabled ? "enabled" : "disabled"}.`);
-    } catch (error) { setActionError(errorText(error)); }
-    finally { setAdminBusy(false); }
-  };
-
-  const createDepartment = async (event) => {
-    event.preventDefault();
-    setAdminBusy(true); setActionError("");
-    try {
-      await chatApi.createDepartment(organizationId, newDepartmentName.trim());
-      setNewDepartmentName(""); setDepartments(await chatApi.departments(organizationId));
-      setNotice("Department created.");
-    } catch (error) { setActionError(errorText(error)); }
-    finally { setAdminBusy(false); }
-  };
-
-  const assignDepartment = async (event) => {
-    event.preventDefault();
-    if (!assignDepartmentId || !assignDepartmentUserId) return;
-    setAdminBusy(true); setActionError("");
-    try {
-      await chatApi.assignDepartmentMember(organizationId, assignDepartmentId, assignDepartmentUserId, assignDepartmentRole);
-      setDepartments(await chatApi.departments(organizationId));
-      setNotice("Department membership updated.");
-    } catch (error) { setActionError(errorText(error)); }
-    finally { setAdminBusy(false); }
-  };
-
   const addConversationMember = async () => {
     if (!selectedId || !addingMemberId) return;
     setActionError("");
@@ -730,39 +534,37 @@ export default function ChatPage({ userId, initialConversationId = null, initial
   };
 
   if (loadingWorkspace && !memberships.length) {
-    return <div className="chat-state-card"><div className="chat-spinner" aria-hidden="true" /><h2>Opening chat</h2><p>Checking your studio access…</p></div>;
+    return <div className="chat-state-card"><button type="button" className="chat-state-close" onClick={onClose} aria-label="Close chat">×</button><div className="chat-spinner" aria-hidden="true" /><h2>Opening chat</h2><p>Checking your studio access…</p></div>;
   }
   if (loadError && !memberships.length) {
-    return <div className="chat-state-card"><h2>Chat couldn't load</h2><p>{loadError}</p><button className="chat-button primary" onClick={loadMemberships}>Retry</button></div>;
+    return <div className="chat-state-card"><button type="button" className="chat-state-close" onClick={onClose} aria-label="Close chat">×</button><h2>Chat couldn't load</h2><p>{loadError}</p><button className="chat-button primary" onClick={loadMemberships}>Retry</button></div>;
   }
   if (!memberships.length) {
-    return <div className="chat-state-card"><div className="chat-state-icon" aria-hidden="true">✦</div><h2>Chat needs studio access</h2><p>This login hasn't been added to a KairFlow studio yet. A trusted studio administrator must provision the Master User and studio memberships before chats can be created. Chat never grants access based on an email address or a guessed conversation ID.</p><p className="chat-muted">Once your studio membership is configured, reload this page to open direct messages and conversations.</p><button className="chat-button secondary" onClick={loadMemberships}>Check access again</button></div>;
+    return <div className="chat-state-card"><button type="button" className="chat-state-close" onClick={onClose} aria-label="Close chat">×</button><div className="chat-state-icon" aria-hidden="true">✦</div><h2>Chat needs studio access</h2><p>This login isn't linked to a KairFlow studio yet. Ask the Studio Kairegi owner to invite you from Teams. Access is linked to your authenticated account, never guessed from a name or email.</p><p className="chat-muted">Existing freelancers can keep using the freelancer portal until they accept a studio invite.</p><button className="chat-button secondary" onClick={loadMemberships}>Check access again</button></div>;
   }
   if (isClient) {
-    return <div className="chat-state-card"><div className="chat-state-icon" aria-hidden="true">🔒</div><h2>Internal chat is not available to client accounts</h2><p>Client access stays within the existing client portal and cut-review workflows. A client login cannot read staff direct messages, internal groups, or private attachments.</p></div>;
+    return <div className="chat-state-card"><button type="button" className="chat-state-close" onClick={onClose} aria-label="Close chat">×</button><div className="chat-state-icon" aria-hidden="true">🔒</div><h2>Internal chat is not available to client accounts</h2><p>Client access stays within the existing client portal and cut-review workflows. A client login cannot read staff direct messages, internal groups, or private attachments.</p></div>;
   }
 
   return (
     <section className={`chat-page${selectedId ? " has-active-conversation" : ""}`} data-conversation-open={selectedId ? "true" : "false"} aria-label="Studio chat">
       <aside className="chat-sidebar">
         <div className="chat-sidebar-top">
-          <div className="chat-heading-block"><span className="chat-eyebrow">STUDIO COLLABORATION</span><h2>Chat</h2><p>Internal conversations</p></div>
-          {memberships.length > 1 && <label className="chat-org-select-label"><span>Studio</span><select value={organizationId} onChange={(e) => { setOrganizationId(e.target.value); setSelectedId(null); onConversationChange(null); }} aria-label="Choose studio">
+          <div className="chat-topbar"><h2>Messages</h2><div className="chat-topbar-actions"><button type="button" className="chat-icon-button" onClick={() => setShowNewConversation(true)} aria-label="New conversation" title="New conversation">✎</button><button type="button" className="chat-icon-button chat-close-button" onClick={onClose} aria-label="Close chat" title="Close chat">×</button></div></div>
+          {memberships.length > 1 && <label className="chat-org-select-label"><span>Studio</span><select value={organizationId} onChange={(e) => { const nextOrganizationId = e.target.value; setOrganizationId(nextOrganizationId); setSelectedId(null); setMessages([]); onConversationChange(null); onOrganizationChange(nextOrganizationId); }} aria-label="Choose studio">
             {memberships.map((item) => <option key={item.organization_id} value={item.organization_id}>{item.organization_name}</option>)}
           </select></label>}
-          <div className="chat-sidebar-actions"><button className="chat-button primary" onClick={() => setShowNewConversation(true)}>＋ New conversation</button>{isMaster && <button className={`chat-icon-button${adminView ? " selected" : ""}`} aria-label="Studio chat administration" title="Studio administration and audit" onClick={openAdmin}>⚙</button>}</div>
-          <form className="chat-search-form" onSubmit={runSearch}><span aria-hidden="true">⌕</span><input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search messages" aria-label="Search messages" /><button type="submit" disabled={searching} aria-label="Search">{searching ? "…" : "↵"}</button></form>
+          <form className="chat-search-form" onSubmit={runSearch}><span aria-hidden="true">⌕</span><input value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); if (sideMode === "search") setSideMode("recent"); }} placeholder="Search chats — press Enter to search messages" aria-label="Search chats and messages" /><button type="submit" disabled={searching} aria-label="Search messages">{searching ? "…" : "↵"}</button></form>
           <div className="chat-sidebar-tabs" role="tablist" aria-label="Chat sidebar views">
-            <button type="button" role="tab" aria-selected={sideMode === "recent"} className={sideMode === "recent" ? "active" : ""} onClick={() => setSideMode("recent")}>Recent</button>
+            <button type="button" role="tab" aria-selected={sideMode === "recent"} className={sideMode === "recent" ? "active" : ""} onClick={() => setSideMode("recent")}>Chats</button>
             <button type="button" role="tab" aria-selected={sideMode === "people"} className={sideMode === "people" ? "active" : ""} onClick={() => setSideMode("people")}>People</button>
             {searchResults.length > 0 && <button type="button" role="tab" aria-selected={sideMode === "search"} className={sideMode === "search" ? "active" : ""} onClick={() => setSideMode("search")}>Results</button>}
           </div>
         </div>
         <div className="chat-sidebar-list">
           {sideMode === "recent" && <>
-            <input className="chat-inline-filter" value={conversationFilter} onChange={(e) => setConversationFilter(e.target.value)} placeholder="Filter conversations…" aria-label="Filter conversations" />
             {loadingWorkspace && <p className="chat-muted chat-list-note">Refreshing conversations…</p>}
-            {!filteredConversations.length && <div className="chat-empty-list"><span aria-hidden="true">◌</span><strong>No conversations yet</strong><p>Start a direct message or create a group for your studio.</p></div>}
+            {!filteredConversations.length && <div className="chat-empty-list"><span aria-hidden="true">◌</span><strong>No conversations yet</strong><p>Tap ✎ to message a teammate or start a group.</p></div>}
             {filteredConversations.map((item) => <button type="button" key={item.conversation_id} className={`chat-conversation-row${selectedId === item.conversation_id ? " active" : ""}`} onClick={() => chooseConversation(item.conversation_id)}>
               <span className={`chat-avatar ${item.kind === "group" ? "group" : item.kind === "project" ? "project" : ""}`} aria-hidden="true">{item.kind === "group" ? "◎" : item.kind === "project" ? "▧" : (item.title || "?").slice(0, 1).toUpperCase()}</span>
               <span className="chat-conversation-copy"><span className="chat-conversation-title">{item.title || "Conversation"}</span><span className="chat-conversation-preview">{item.last_message_body ? item.last_message_body : item.kind === "project" ? "Project conversation" : item.kind === "group" ? "Group conversation" : "Start a conversation"}</span><span className="chat-conversation-time">{formatChatTime(item.last_message_at || item.updated_at)}</span></span>
@@ -779,74 +581,10 @@ export default function ChatPage({ userId, initialConversationId = null, initial
             {!searchResults.length && <div className="chat-empty-list"><strong>No matching messages</strong><p>Try another search phrase.</p></div>}
           </>}
         </div>
-        <div className="chat-sidebar-footer"><span className="chat-status-dot" /> Signed in as <strong>{currentDisplayName}</strong><span className="chat-internal-pill">Internal</span></div>
       </aside>
 
       <main className="chat-main">
-        {adminView && isMaster ? <div className="chat-admin-view">
-          <div className="chat-main-heading"><div><span className="chat-eyebrow">MASTER USER</span><h2>Studio administration</h2><p>Manage authenticated membership, department permissions, project access, workspace sharing, and audit history.</p></div><button className="chat-icon-button" onClick={() => setAdminView(false)} aria-label="Close administration">×</button></div>
-          {actionError && <div className="chat-inline-alert error" role="alert"><span>{actionError}</span><button onClick={() => setActionError("")} aria-label="Dismiss error">×</button></div>}
-          {notice && <div className="chat-inline-alert success" role="status"><span>{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss notice">×</button></div>}
-          <div className="chat-admin-grid">
-            <section className="chat-panel-card">
-              <h3>Add authenticated member</h3>
-              <p className="chat-muted">The person must already have a KairFlow login. Freelancers without logins remain valid Teams records, but cannot sign in to chat.</p>
-              <form className="chat-admin-form" onSubmit={addStudioMember}>
-                <label>Email<input type="email" required value={newMemberEmail} onChange={(e) => setNewMemberEmail(e.target.value)} placeholder="teammate@example.com" /></label>
-                <label>Display name<input required maxLength={80} value={newMemberName} onChange={(e) => setNewMemberName(e.target.value)} placeholder="Team member name" /></label>
-                <label>Role<select value={newMemberRole} onChange={(e) => setNewMemberRole(e.target.value)}><option value="staff">Staff</option><option value="freelancer">Freelancer with account</option><option value="department_admin">Department administrator</option></select></label>
-                {(newMemberRole === "department_admin" || newMemberDepartment) && <label>Department<select required value={newMemberDepartment} onChange={(e) => setNewMemberDepartment(e.target.value)}><option value="">Select a department</option>{departments.map((department) => <option key={department.department_id} value={department.department_id}>{department.name}</option>)}</select></label>}
-                <label className="chat-admin-check"><input type="checkbox" checked={shareNewMemberWorkspace} onChange={(e) => setShareNewMemberWorkspace(e.target.checked)} /> Share this account's existing business records with the studio</label>
-                <p className="chat-muted">Unchecked is safer for an existing account: chat membership alone will not expose the account's old records. You can enable sharing later. Shared records remain subject to the role, department, and project rules below.</p>
-                <button className="chat-button primary" disabled={adminBusy}>{adminBusy ? "Saving…" : "Add member"}</button>
-              </form>
-            </section>
-            <section className="chat-panel-card">
-              <h3>Departments</h3><p className="chat-muted">Departments organize work and limit department-admin permissions. Department membership does not automatically grant access to every project.</p>
-              <form className="chat-admin-inline" onSubmit={createDepartment}><input required maxLength={80} value={newDepartmentName} onChange={(e) => setNewDepartmentName(e.target.value)} placeholder="Department name" aria-label="New department name" /><button className="chat-button secondary" disabled={adminBusy}>Create</button></form>
-              <div className="chat-department-list">{departments.map((department) => <div className="chat-department-row" key={department.department_id}><span><strong>{department.name}</strong><small>{department.member_count} members</small></span><span className="chat-muted">{department.is_admin ? "Administrator" : "Department"}</span></div>)}</div>
-              <form className="chat-admin-form chat-assign-form" onSubmit={assignDepartment}>
-                <label>Member<select required value={assignDepartmentUserId} onChange={(e) => setAssignDepartmentUserId(e.target.value)}><option value="">Select a member</option>{directory.map((person) => <option key={person.user_id} value={person.user_id}>{person.display_name}</option>)}</select></label>
-                <label>Department<select required value={assignDepartmentId} onChange={(e) => setAssignDepartmentId(e.target.value)}><option value="">Select a department</option>{departments.map((department) => <option key={department.department_id} value={department.department_id}>{department.name}</option>)}</select></label>
-                <label>Department role<select value={assignDepartmentRole} onChange={(e) => setAssignDepartmentRole(e.target.value)}><option value="member">Member</option><option value="admin" disabled={directory.find((person) => person.user_id === assignDepartmentUserId)?.role !== "department_admin"}>Department admin (set role first)</option></select></label>
-                <button className="chat-button secondary" disabled={adminBusy}>Assign member</button>
-              </form>
-            </section>
-          </div>
-          <section className="chat-panel-card">
-            <div className="chat-panel-heading"><h3>Studio access and workspace sharing</h3><span className="chat-muted">{studioMembers.length} accounts</span></div>
-            <p className="chat-muted">Sharing an account's workspace enables scoped access to its existing records. It is separate from chat membership. Finance document access is read-only in this phase; ledger writes remain protected by existing Finance RPCs.</p>
-            <div className="chat-members-list">{studioMembers.map((member) => {
-              const shared = workspaceSharing.find((item) => item.user_id === member.user_id)?.workspace_shared === true;
-              return <div className="chat-member-row" key={member.user_id}>
-                <span className="chat-avatar" aria-hidden="true">{safeDisplayName(member.display_name).slice(0,1).toUpperCase()}</span>
-                <span><strong>{member.display_name}</strong><small>{member.email} · {ROLE_LABELS[member.role] || member.role} · {member.status} · {shared ? "Workspace shared" : "Workspace private"}</small></span>
-                {member.role !== "master_user" && member.role !== "client" && <button className={`chat-button ${shared ? "secondary" : "quiet"}`} disabled={adminBusy || member.status !== "active"} onClick={() => toggleWorkspaceSharing(member)}>{shared ? "Stop sharing" : "Share workspace"}</button>}
-                <button className={`chat-button ${member.status === "active" ? "danger" : "secondary"}`} disabled={adminBusy || member.role === "master_user"} onClick={() => changeStudioMemberStatus(member)}>{member.status === "active" ? "Suspend" : "Reactivate"}</button>
-              </div>;
-            })}{!studioMembers.length && <p className="chat-muted">No studio accounts are registered yet.</p>}</div>
-          </section>
-          <section className="chat-panel-card">
-            <h3>Department permissions</h3><p className="chat-muted">These switches apply to records owned by members of the selected department. They do not grant organization-wide access. Invoice and expense permissions are read-only.</p>
-            <label className="chat-admin-field">Department<select value={permissionDepartmentId} onChange={(e) => setPermissionDepartmentId(e.target.value)}><option value="">Select a department</option>{departments.map((department) => <option key={department.department_id} value={department.department_id}>{department.name}</option>)}</select></label>
-            {permissionDepartmentId ? <div className="chat-permission-grid">{APP_PERMISSION_OPTIONS.map(([key, label]) => <label className="chat-admin-check" key={key}><input type="checkbox" checked={departmentPermissionRows.some((row) => row.permission_key === key)} disabled={adminBusy} onChange={(e) => toggleDepartmentPermission(key, e.target.checked)} />{label}</label>)}</div> : <p className="chat-muted">Create a department before configuring permissions.</p>}
-          </section>
-          <section className="chat-panel-card">
-            <h3>Project access</h3><p className="chat-muted">Only projects from explicitly shared workspaces appear here. Assigning a person grants access to the project and synchronizes existing project-chat membership. Removing access closes both.</p>
-            <form className="chat-admin-form chat-assign-form" onSubmit={assignProjectAccess}>
-              <label>Project<select value={selectedAccessProject} onChange={(e) => setSelectedAccessProject(e.target.value)} required><option value="">Select a project</option>{manageableProjects.map((project) => <option key={project.project_id} value={project.project_id}>{project.project_name}</option>)}</select></label>
-              <label>Member<select value={selectedAccessUser} onChange={(e) => setSelectedAccessUser(e.target.value)} required><option value="">Select a member</option>{studioMembers.filter((member) => member.status === "active" && member.role !== "master_user" && member.role !== "client" && member.user_id !== manageableProjects.find((project) => project.project_id === selectedAccessProject)?.owner_user_id).map((member) => <option key={member.user_id} value={member.user_id}>{member.display_name} · {ROLE_LABELS[member.role] || member.role}</option>)}</select></label>
-              <label>Access level<select value={selectedAccessLevel} onChange={(e) => setSelectedAccessLevel(e.target.value)}><option value="viewer">Viewer</option><option value="contributor">Contributor</option><option value="editor">Editor</option></select></label>
-              <button className="chat-button primary" disabled={adminBusy || !selectedAccessProject || !selectedAccessUser}>{adminBusy ? "Saving…" : "Assign access"}</button>
-            </form>
-            {selectedAccessProject && projectAccessRows.length ? <div className="chat-members-list">{projectAccessRows.map((member) => <div className="chat-member-row" key={member.user_id}><span><strong>{member.display_name}</strong><small>{member.email} · {member.access_level} · {member.status}</small></span>{member.status === "active" && <button className="chat-button danger" disabled={adminBusy || member.user_id === manageableProjects.find((project) => project.project_id === selectedAccessProject)?.owner_user_id} onClick={() => revokeProjectAccess(member)}>Revoke</button>}</div>)}</div> : <p className="chat-muted">{selectedAccessProject ? "No explicit assignments yet." : "No project can be assigned until its owner's workspace is shared with this studio."}</p>}
-          </section>
-          <section className="chat-panel-card chat-audit-card"><div className="chat-panel-heading"><h3>Recent business audit events</h3><button className="chat-button quiet" onClick={() => chatApi.applicationAuditEvents(organizationId, 100).then(setBusinessAuditEvents).catch((error) => setActionError(errorText(error)))}>Refresh</button></div>
-            {businessAuditEvents.length ? <div className="chat-audit-list">{businessAuditEvents.map((event) => <div key={event.id} className="chat-audit-row"><span className="chat-audit-type">{event.action} · {event.entity_type}</span><span>{memberById.get(event.actor_user_id)?.display_name || (event.actor_user_id === userId ? "You" : "Account or former member")}</span><time>{formatChatTime(event.created_at)}</time><small>{event.entity_id ? `Record ${String(event.entity_id).slice(0,8)}…` : "Studio event"}{event.metadata?.changedColumns?.length ? ` · changed: ${event.metadata.changedColumns.join(", ")}` : ""}</small></div>)}</div> : <p className="chat-muted">No business audit events yet, or no shared record changes have been recorded.</p>}
-          </section>
-          <section className="chat-panel-card chat-audit-card"><div className="chat-panel-heading"><h3>Recent chat audit events</h3><button className="chat-button quiet" onClick={() => chatApi.auditEvents(organizationId, 100).then(setAuditEvents).catch((error) => setActionError(errorText(error)))}>Refresh</button></div>{auditEvents.length ? <div className="chat-audit-list">{auditEvents.map((event) => <div key={event.id} className="chat-audit-row"><span className="chat-audit-type">{EVENT_LABELS[event.event_type] || event.event_type}</span><span>{memberById.get(event.actor_user_id)?.display_name || (event.actor_user_id === userId ? "You" : "Account or former member")}</span><time>{formatChatTime(event.created_at)}</time><small>{event.conversation_id ? `Conversation ${event.conversation_id.slice(0,8)}…` : "Studio event"}</small></div>)}</div> : <p className="chat-muted">No chat audit events yet.</p>}</section>
-          <p className="chat-privacy-note">Master User access to internal groups and project chats is global for administrative purposes; private direct-message content stays limited to its participants. Department administrators never receive Master User privileges. Business audit events store record IDs and changed column names, not business content.</p>
-        </div> : selectedConversation ? <>
+        {selectedConversation ? <>
           <header className="chat-conversation-header"><button className="chat-mobile-back" onClick={() => chooseConversation(null)} aria-label="Back to conversations">←</button><span className={`chat-avatar ${selectedConversation.kind === "group" ? "group" : selectedConversation.kind === "project" ? "project" : ""}`} aria-hidden="true">{selectedConversation.kind === "group" ? "◎" : selectedConversation.kind === "project" ? "▧" : (selectedConversation.title || "?").slice(0, 1).toUpperCase()}</span><div className="chat-header-copy"><h2>{conversationLabel(selectedConversation, userId, members)}</h2><p>{selectedConversation.kind === "direct" ? "Direct message" : selectedConversation.kind === "project" ? "Internal project discussion" : `${members.filter((member) => member.status === "active").length} members · Group conversation`}{onlineUsers.length ? ` · ${onlineUsers.length} online` : ""}</p></div><div className="chat-header-actions"><span className={`chat-connection-indicator ${realtimeStatus === "connected" ? "connected" : ""}`} title={`Realtime: ${realtimeStatus}`}><span />{realtimeStatus === "connected" ? "Live" : realtimeStatus === "joining" ? "Connecting" : "Reconnecting"}</span><button className={`chat-icon-button${showPins ? " selected" : ""}`} title="Pinned messages" aria-label="Pinned messages" onClick={() => setShowPins((value) => !value)}>⌑</button><button className={`chat-icon-button${showMembers ? " selected" : ""}`} title="Conversation members" aria-label="Conversation members" onClick={() => { setShowMembers((value) => !value); loadMembers(selectedId); }}>♙</button></div></header>
           <div className="chat-conversation-body">
             <section ref={scrollerRef} className="chat-message-area" aria-label="Messages">

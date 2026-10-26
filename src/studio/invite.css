@@ -1,0 +1,8 @@
+/* This stylesheet is imported by App itself so invite onboarding is styled
+   before the lazy-loaded authenticated chat bundle has been downloaded. */
+.kf-auth-invite-banner{display:flex;align-items:flex-start;gap:11px;width:min(100%,420px);margin:0 auto 16px;padding:13px;border:1px solid rgba(47,191,166,.28);border-radius:12px;background:rgba(47,191,166,.07);text-align:left;color:#EDEAE3;font-family:Inter,ui-sans-serif,sans-serif}
+.kf-auth-invite-mark{display:grid;place-items:center;flex:0 0 32px;width:32px;height:32px;border-radius:9px;background:rgba(47,191,166,.14);color:#2FBFA6;font-size:17px}
+.kf-auth-invite-banner>div{display:grid;gap:4px;min-width:0}
+.kf-auth-invite-banner strong{font:700 13px "Space Grotesk",Inter,sans-serif}
+.kf-auth-invite-banner p{margin:0;color:#9de4d6;font-size:11px;text-transform:capitalize}
+.kf-auth-invite-banner small{color:#91a09d;font-size:10px;line-height:1.5}

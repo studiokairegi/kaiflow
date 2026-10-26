@@ -57,7 +57,7 @@ function AddRow({ placeholder, onAdd, label = "Add" }) {
 }
 
 // ---------------------------------------------------------------- General
-function GeneralTab({ form, set, errors }) {
+function GeneralTab({ form, set, errors, personalOnly = false }){
   const zones = useMemo(() => {
     try { return Intl.supportedValuesOf("timeZone"); } catch { return ["UTC", "Africa/Nairobi", "Europe/London", "America/New_York", "Asia/Tokyo"]; }
   }, []);
@@ -65,6 +65,7 @@ function GeneralTab({ form, set, errors }) {
   const toggleDay = (d) => set({ workweek: { ...ww, days: ww.days.includes(d) ? ww.days.filter((x) => x !== d) : [...ww.days, d] } });
   return (
     <>
+      {!personalOnly && <>
       <Section title="Studio" hint="Shown across the app and on generated documents.">
         <div style={S.grid(240)}>
           <Field label="Studio name"><input style={S.input} value={form.studioName} onChange={(e) => set({ studioName: e.target.value })} /><Err msg={errors.studioName} /></Field>
@@ -79,6 +80,7 @@ function GeneralTab({ form, set, errors }) {
           </div>
         </Field>
       </Section>
+      </>}
       <Section title="Region & time">
         <div style={S.grid(240)}>
           <Field label="Timezone" hint="Decides what 'today' means for due dates and Finance."><select style={S.input} value={form.timezone} onChange={(e) => set({ timezone: e.target.value })}><option value="">Follow my browser</option>{zones.map((z) => <option key={z}>{z}</option>)}</select><Err msg={errors.timezone} /></Field>
@@ -328,6 +330,22 @@ function AlertsTab({ form, set, periodOptions, onEnableNotifications, hiddenCoun
   );
 }
 
+// Employees get their own account/support controls, not destructive owner-account
+// actions or studio-wide integration settings.
+function PersonalAccountTab({ email, onSignOut, onOpenSupport, onReplayTutorial }) {
+  return (
+    <>
+      <Section title="My account" hint="Your sign-in is linked to your Teams roster entry.">
+        <Field label="Email"><span style={{ fontSize: 14 }}>{email}</span></Field>
+        <div style={S.row}><Btn onClick={onSignOut}>Sign out</Btn></div>
+      </Section>
+      <Section title="Help & support">
+        <div style={S.row}><Btn onClick={onReplayTutorial}>Replay the tutorial</Btn><Btn onClick={onOpenSupport}>Report a problem or ask a question</Btn></div>
+      </Section>
+    </>
+  );
+}
+
 // ---------------------------------------------------------------- Integrations & account
 function AccountTab({ settings, email, drive, patreon, onReplayTutorial, onOpenSupport, onExport, onSignOut, onAccountAction, links }) {
   const [msg, setMsg] = useState("");
@@ -413,6 +431,17 @@ function AccountTab({ settings, email, drive, patreon, onReplayTutorial, onOpenS
 // ---------------------------------------------------------------- Page
 export default function SettingsPage(props) {
   const { settings, onSave, onClose, userId } = props;
+  const studioScoped = props.studioScoped === true;
+  const workspaceAccess = Array.isArray(props.workspaceAccess) ? props.workspaceAccess : [];
+  const settingsTabs = useMemo(() => {
+    if (!studioScoped) return TABS;
+    const visible = new Set(["general", "alerts", "account"]);
+    if (workspaceAccess.includes("leads")) visible.add("crm");
+    if (workspaceAccess.includes("projects")) visible.add("production");
+    if (workspaceAccess.includes("teams")) visible.add("teams");
+    if (workspaceAccess.includes("finance")) visible.add("finance");
+    return TABS.filter(([id]) => visible.has(id));
+  }, [studioScoped, workspaceAccess]);
   const [form, setForm] = useState(settings);
   const [tab, setTab] = useState("general");
   const [status, setStatus] = useState("idle"); // idle | saving | saved | failed
@@ -422,6 +451,10 @@ export default function SettingsPage(props) {
   const errCount = Object.keys(errors).length;
   const isDirty = dirty.size > 0;
   const set = (patch) => { setStatus("idle"); setForm((f) => ({ ...f, ...patch })); };
+
+  useEffect(() => {
+    if (!settingsTabs.some(([id]) => id === tab)) setTab(settingsTabs[0]?.[0] || "general");
+  }, [settingsTabs, tab]);
 
   useEffect(() => {
     if (!isDirty) return undefined;
@@ -442,18 +475,20 @@ export default function SettingsPage(props) {
   return (
     <div style={{ ...S.page, paddingBottom: 110 }}>
       <div style={{ ...S.row, justifyContent: "space-between" }}>
-        <div><h2 style={S.h2}>Settings</h2><p style={S.sub}>Studio and account preferences.</p></div>
+        <div><h2 style={S.h2}>{studioScoped ? "My settings" : "Settings"}</h2><p style={S.sub}>{studioScoped ? "Personal preferences for your KairFlow account." : "Studio and account preferences."}</p></div>
         <Btn onClick={close}>Close</Btn>
       </div>
-      <Tabs value={tab} onChange={setTab} tabs={TABS.map(([id, label]) => ({ id, label, badge: bad.has(id) ? "!" : dirty.has(id) ? "\u2022" : "" }))} />
-      {tab === "general" && <GeneralTab {...common} />}
-      {tab === "crm" && <CrmTab {...common} reasonDefaults={props.reasonDefaults} />}
-      {tab === "production" && <ProductionTab {...common} pipelineLibrary={props.pipelineLibrary} />}
-      {tab === "teams" && <TeamsTab {...common} />}
-      {tab === "finance" && <FinanceTab {...common} userId={userId} onPrivacy={props.onPrivacy} />}
+      <Tabs value={tab} onChange={setTab} tabs={settingsTabs.map(([id, label]) => ({ id, label: studioScoped && id === "general" ? "My preferences" : label, badge: bad.has(id) ? "!" : dirty.has(id) ? "\u2022" : "" }))} />
+      {tab === "general" && <GeneralTab {...common} personalOnly={studioScoped} />}
+      {tab === "crm" && settingsTabs.some(([id]) => id === "crm") && <CrmTab {...common} reasonDefaults={props.reasonDefaults} />}
+      {tab === "production" && settingsTabs.some(([id]) => id === "production") && <ProductionTab {...common} pipelineLibrary={props.pipelineLibrary} />}
+      {tab === "teams" && settingsTabs.some(([id]) => id === "teams") && <TeamsTab {...common} />}
+      {tab === "finance" && settingsTabs.some(([id]) => id === "finance") && <FinanceTab {...common} userId={userId} onPrivacy={props.onPrivacy} />}
       {tab === "alerts" && <AlertsTab {...common} periodOptions={props.periodOptions} onEnableNotifications={props.onEnableNotifications} hiddenCount={form.dashboardHiddenChannels.length} />}
-      {tab === "account" && <AccountTab settings={settings} email={props.email} drive={props.drive} patreon={props.patreon} links={props.links}
-        onReplayTutorial={props.onReplayTutorial} onOpenSupport={props.onOpenSupport} onExport={props.onExport} onSignOut={props.onSignOut} onAccountAction={props.onAccountAction} />}
+      {tab === "account" && (studioScoped
+        ? <PersonalAccountTab email={props.email} onReplayTutorial={props.onReplayTutorial} onOpenSupport={props.onOpenSupport} onSignOut={props.onSignOut} />
+        : <AccountTab settings={settings} email={props.email} drive={props.drive} patreon={props.patreon} links={props.links}
+          onReplayTutorial={props.onReplayTutorial} onOpenSupport={props.onOpenSupport} onExport={props.onExport} onSignOut={props.onSignOut} onAccountAction={props.onAccountAction} />)}
 
       <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 20, background: "rgba(14,20,22,0.96)", borderTop: `1px solid ${T.border}`, backdropFilter: "blur(8px)" }}>
         <div style={{ maxWidth: 1180, margin: "0 auto", padding: "12px 28px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
