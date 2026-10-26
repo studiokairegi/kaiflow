@@ -1331,7 +1331,7 @@ drop policy if exists chat_attachment_object_select on storage.objects;
 create policy chat_attachment_object_select on storage.objects for select to authenticated
 using (bucket_id='chat-attachments' and (storage.foldername(name))[1] ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
   and public.chat_can_read_conversation(((storage.foldername(name))[1])::uuid)
-  and exists (select 1 from public.chat_attachments a where a.object_path=storage.objects.name
+  and exists (select 1 from public.chat_attachments a where a.object_path=name
     and a.message_id is not null and exists (select 1 from public.chat_messages m where m.id=a.message_id and m.deleted_at is null)));
 drop policy if exists chat_attachment_object_insert on storage.objects;
 create policy chat_attachment_object_insert on storage.objects for insert to authenticated
@@ -1343,10 +1343,10 @@ create policy chat_attachment_object_delete on storage.objects for delete to aut
 using (bucket_id='chat-attachments' and (storage.foldername(name))[1] ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
   and public.chat_can_read_conversation(((storage.foldername(name))[1])::uuid)
   and (
-    coalesce(to_jsonb(storage.objects)->>'owner_id', to_jsonb(storage.objects)->>'owner') = auth.uid()::text
-    or exists (select 1 from public.chat_attachments a where a.object_path=storage.objects.name and a.uploaded_by=auth.uid() and a.message_id is null)
+    owner_id = auth.uid()::text
+    or exists (select 1 from public.chat_attachments a where a.object_path=name and a.uploaded_by=auth.uid() and a.message_id is null)
     or exists (select 1 from public.chat_attachments a join public.chat_messages m on m.id=a.message_id
-      where a.object_path=storage.objects.name and m.deleted_at is not null
+      where a.object_path=name and m.deleted_at is not null
         and (a.uploaded_by=auth.uid() or public.chat_can_manage_conversation(a.conversation_id)))
   ));
 

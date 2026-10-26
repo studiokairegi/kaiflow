@@ -854,6 +854,7 @@ end;
 $$;
 
 -- RPC hardening / grants. Direct table writes are never given to clients.
+revoke all on function public.chat_user_can_access_project(uuid, uuid, uuid) from public, anon, authenticated;
 revoke all on function public.studio_user_has_app_permission(text,uuid,uuid,text,uuid) from public, anon;
 grant execute on function public.studio_user_has_app_permission(text,uuid,uuid,text,uuid) to authenticated;
 revoke all on function public.studio_is_member_of_org(uuid) from public, anon;
