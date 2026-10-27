@@ -91,3 +91,53 @@ test('unread count does not suppress same-timestamp messages when the read curso
   const rows = [{ id: 'm-1', sender_user_id: 'other', created_at: '2026-10-24T10:00:00.000Z' }];
   assert.equal(unreadCountFromMessages(rows, 'me', '2026-10-24T10:00:00.000Z', null), 1);
 });
+
+import { parseMessageBody, parseInline, safeHttpUrl, isGroupedWith, composerHeight, isNearBottom, chatErrorText, dayLabel } from "./logic.js";
+
+test("message bodies become a safe tree: html stays text, only http(s) links become anchors", () => {
+  const blocks = parseMessageBody('<img src=x onerror=alert(1)> see https://example.com/a?b=1, and javascript:alert(1)');
+  const flat = JSON.stringify(blocks);
+  assert.ok(flat.includes("<img src=x onerror=alert(1)>"), "markup is kept as literal text");
+  const tokens = blocks[0].lines[0];
+  assert.deepEqual(tokens.filter((t) => t.t === "link").map((t) => t.href), ["https://example.com/a?b=1"]);
+  assert.equal(safeHttpUrl("javascript:alert(1)"), null);
+  assert.equal(safeHttpUrl("data:text/html,hi"), null);
+});
+
+test("trailing punctuation is not part of a link and long URLs stay one token", () => {
+  const long = `https://example.com/${"a".repeat(300)}`;
+  const tokens = parseInline(`(${long}).`);
+  assert.equal(tokens.filter((t) => t.t === "link").length, 1);
+  assert.equal(tokens.find((t) => t.t === "link").v, long);
+});
+
+test("paragraphs, line breaks, lists and fenced code are preserved", () => {
+  const blocks = parseMessageBody("First line\nsecond line\n\nNext paragraph\n- one\n- two\n1. a\n2. b\n```\nconst x = 1;\n```");
+  assert.deepEqual(blocks.map((b) => b.type), ["p", "p", "ul", "ol", "code"]);
+  assert.equal(blocks[0].lines.length, 2, "an intentional line break stays inside the paragraph");
+  assert.equal(blocks[2].items.length, 2);
+  assert.equal(blocks[4].text, "const x = 1;");
+});
+
+test("inline emphasis and code are recognized without swallowing snake_case words", () => {
+  const types = parseInline("a **bold** and *it* and `code` and snake_case_word").map((t) => t.t);
+  assert.deepEqual(types, ["text", "bold", "text", "em", "text", "code", "text"]);
+  assert.equal(parseInline("snake_case_word").length, 1);
+});
+
+test("grouping, composer height, scroll proximity and day labels", () => {
+  const a = { sender_user_id: "u1", created_at: "2026-10-27T08:00:00Z" };
+  assert.equal(isGroupedWith(a, { sender_user_id: "u1", created_at: "2026-10-27T08:02:00Z" }), true);
+  assert.equal(isGroupedWith(a, { sender_user_id: "u2", created_at: "2026-10-27T08:02:00Z" }), false);
+  assert.equal(isGroupedWith(a, { sender_user_id: "u1", created_at: "2026-10-27T08:10:00Z" }), false);
+  assert.equal(composerHeight(500), 160);
+  assert.equal(composerHeight(10), 40);
+  assert.equal(isNearBottom({ scrollHeight: 1000, scrollTop: 800, clientHeight: 150 }), true);
+  assert.equal(isNearBottom({ scrollHeight: 1000, scrollTop: 100, clientHeight: 150 }), false);
+  assert.equal(dayLabel("2026-10-27T08:00:00Z", Date.parse("2026-10-27T12:00:00Z")), "Today");
+});
+
+test("permission errors explain how to get access instead of showing database codes", () => {
+  assert.match(chatErrorText({ message: "group_creation_not_permitted" }), /studio owner/);
+  assert.match(chatErrorText({ message: "target_not_visible" }), /already chat with/);
+});

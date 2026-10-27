@@ -2,6 +2,9 @@ import React, { useState, useEffect } from "react";
 import { supabase, functionUrl } from "./supabaseClient";
 import { buildPipeline, projectProgress as pipelineProjectProgress } from "./pipeline.js";
 import ClientCutReview from "./ClientCutReview.jsx";
+import { lazyWithSuspense } from "./lazy.jsx";
+// Chat is secondary to the portal: load it on demand so the portal itself stays light.
+const ClientPortalChat = lazyWithSuspense(() => import("./chat/ClientPortalChat.jsx"), { label: "Loading chat…" });
 import { startAutoRefresh } from "./autoRefresh.js";
 import { getFreelancerReview } from "./cutWorkflowApi.js";
 import { workflowLabel } from "./cutWorkflow.js";
@@ -227,6 +230,9 @@ export function ClientPortalView({ token }) {
         )}
 
         <ClientCutReview token={token} />
+
+        <h3 style={{ margin: "28px 0 10px", fontSize: 15 }}>Message the studio</h3>
+        <ClientPortalChat token={token} />
       </div>
     </div>
   );

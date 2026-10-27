@@ -1,22 +1,43 @@
 export const STUDIO_MODULES = Object.freeze(["dashboard", "leads", "planner", "projects", "teams", "finance", "payments"]);
 
+// Effective module read: an explicit Master override beats the department default. Overrides only
+// ever touch CRM/contacts/teams data; Projects stays tied to project assignment, and Finance and
+// Payments stay Master-only. The database enforces the same rules; this only shapes the navigation.
+export function hasModulePermission(access, key) {
+  if (access?.role === "master_user" || access?.is_master === true) return true;
+  const override = access?.member_overrides?.[key];
+  if (override === "deny") return false;
+  if (override === "allow") return true;
+  return Array.isArray(access?.department_permission_keys) && access.department_permission_keys.includes(key);
+}
+
 export function allowedWorkspaceKeys(access, { legacyFallback = true } = {}) {
   // `null` means the access RPC is unavailable (legacy single-user installs may
   // fall back); an explicit is_member:false is a real authorization result and
   // must never expose the full workspace set.
   if (access == null) return legacyFallback ? [...STUDIO_MODULES] : ["dashboard"];
   if (access.is_member !== true) return ["dashboard"];
-  if (access.role === "master_user" || access.is_master === true) return [...STUDIO_MODULES];
   const permissions = new Set(Array.isArray(access.department_permission_keys) ? access.department_permission_keys : []);
   const projectsAssigned = Number(access.assigned_project_count || 0) > 0;
   const allowed = ["dashboard"];
-  if (permissions.has("crm.read") || permissions.has("contacts.read")) allowed.push("leads");
-  if (permissions.has("projects.read") || permissions.has("shots.read") || projectsAssigned) allowed.push("projects");
-  if (permissions.has("teams.read")) allowed.push("teams");
-  // The accounting ledger and payment RPCs remain owner-scoped. Invoice/expense
-  // read permission alone must not mount that full ledger while acting in another studio.
+  if (hasModulePermission(access, "crm.read") || hasModulePermission(access, "contacts.read")) allowed.push("leads");
+  if (access.role === "master_user" || access.is_master === true) allowed.push("planner");
+  // Sales and other non-production departments get Projects only through an explicit project
+  // assignment (or a department that was deliberately given the module). Never by default.
+  if (permissions.has("projects.read") || permissions.has("shots.read") || projectsAssigned || access.role === "master_user" || access.is_master === true) allowed.push("projects");
+  if (hasModulePermission(access, "teams.read")) allowed.push("teams");
+  // Finance and Payments are Master-only; no override or department can open them.
   if (access.role === "master_user" || access.is_master === true) allowed.push("finance");
+  if (access.role === "master_user" || access.is_master === true) allowed.push("payments");
   return allowed;
+}
+
+export function canViewDirectory(access) {
+  return access?.role === "master_user" || access?.is_master === true || access?.can_view_directory === true;
+}
+
+export function canCreateGroups(access) {
+  return access?.role === "master_user" || access?.is_master === true || access?.can_create_groups === true;
 }
 
 export function createInviteToken(cryptoObject = globalThis.crypto) {

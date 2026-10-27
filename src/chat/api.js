@@ -1,4 +1,4 @@
-import { supabase } from "../supabaseClient";
+import { supabase, functionUrl } from "../supabaseClient";
 import { ALLOWED_ATTACHMENT_TYPES, CHAT_PAGE_SIZE, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, safeObjectFileName, validateMessage } from "./logic.js";
 
 const throwIfError = (result, fallback = "Chat request failed.") => {
@@ -72,16 +72,85 @@ export const chatApi = {
       ? rpc("studio_get_app_access_context_for_org", { p_organization_id: organizationId })
       : rpc("studio_get_my_app_access_context");
   },
+  // Minimum identity only (display names): the roster itself stays private to the Master User
+  // and to members who were explicitly granted directory access.
+  async conversationPeople(conversationId) {
+    return (await rpc("chat_conversation_people", { p_conversation_id: conversationId })) || [];
+  },
   async conversationMembers(conversationId, organizationId) {
     const { data, error } = await supabase.from("chat_conversation_members")
       .select("id, organization_id, conversation_id, user_id, role, status, joined_at, left_at, removed_at")
       .eq("organization_id", organizationId).eq("conversation_id", conversationId)
       .order("joined_at", { ascending: true }).limit(200);
     if (error) throw new Error(error.message || "Conversation members could not be loaded.");
-    const active = await this.directory(organizationId);
-    const names = new Map(active.map((member) => [member.user_id, member.display_name]));
+    let names = new Map();
+    try { names = new Map((await this.conversationPeople(conversationId)).map((person) => [person.user_id, person.display_name])); }
+    catch { /* identities degrade to generic labels rather than failing the thread */ }
     return (data || []).map((member) => ({ ...member, display_name: names.get(member.user_id) || (member.status === "active" ? "Team member" : "Former member") }));
   },
+  // ---- Master-managed grants (every call is re-checked by the database) ----
+  async memberLogins(organizationId) {
+    return (await rpc("studio_list_member_logins", { p_organization_id: organizationId })) || [];
+  },
+  async memberOverrides(organizationId, userId = null) {
+    return (await rpc("studio_list_member_overrides", { p_organization_id: organizationId, p_user_id: userId })) || [];
+  },
+  async setMemberOverride(organizationId, userId, permissionKey, effect, reason = null) {
+    return rpc("studio_set_member_override", {
+      p_organization_id: organizationId, p_user_id: userId, p_permission_key: permissionKey, p_effect: effect, p_reason: reason,
+    });
+  },
+  async effectivePermissions(organizationId, userId) {
+    return rpc("studio_member_effective_permissions", { p_organization_id: organizationId, p_user_id: userId });
+  },
+  // ---- Client Portal and freelancer guest conversations (staff side) ----
+  async portalThreads(organizationId) {
+    return (await rpc("portal_staff_list_threads", { p_organization_id: organizationId })) || [];
+  },
+  async portalMessages(threadId, limit = 100) {
+    return (await rpc("portal_staff_messages", { p_thread_id: threadId, p_limit: limit })) || [];
+  },
+  async portalSendText(threadId, body, idempotencyKey) {
+    return rpc("portal_staff_send", { p_thread_id: threadId, p_body: body, p_idempotency_key: idempotencyKey, p_attachments: [] });
+  },
+  // Attachments go through the gateway so files are validated and stored server-side.
+  async portalSendWithFiles(threadId, body, idempotencyKey, files) {
+    const { data: { session } } = await supabase.auth.getSession();
+    const form = new FormData();
+    form.append("mode", "staff"); form.append("action", "send"); form.append("thread_id", threadId);
+    form.append("body", body); form.append("idempotency_key", idempotencyKey);
+    for (const file of files) form.append("files", file);
+    const response = await fetch(functionUrl("portal-chat"), { method: "POST", headers: { Authorization: `Bearer ${session?.access_token || ""}` }, body: form });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || result.error) throw new Error(result.error || "portal_send_failed");
+    return result.message_id;
+  },
+  async portalDownloadUrl(attachmentId) {
+    const { data: { session } } = await supabase.auth.getSession();
+    const response = await fetch(functionUrl("portal-chat"), {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token || ""}` },
+      body: JSON.stringify({ mode: "staff", action: "download", attachment_id: attachmentId }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.url) throw new Error(result.error || "not_found");
+    return result.url;
+  },
+  async portalMarkRead(threadId) { return rpc("portal_staff_mark_read", { p_thread_id: threadId }); },
+  async portalEnsureClientThread(organizationId, projectId) {
+    return rpc("portal_staff_ensure_client_thread", { p_organization_id: organizationId, p_project_id: projectId });
+  },
+  async portalNotes(threadId) { return (await rpc("portal_staff_notes", { p_thread_id: threadId })) || []; },
+  async portalAddNote(threadId, body) { return rpc("portal_staff_add_note", { p_thread_id: threadId, p_body: body }); },
+  async portalGuestInvites(organizationId, projectId = null) {
+    return (await rpc("portal_staff_list_guest_invites", { p_organization_id: organizationId, p_project_id: projectId })) || [];
+  },
+  async portalCreateGuestInvite({ organizationId, projectId, label, token, threadId = null }) {
+    const rows = await rpc("portal_staff_create_guest_invite", {
+      p_organization_id: organizationId, p_project_id: projectId, p_label: label, p_token: token, p_thread_id: threadId,
+    });
+    return Array.isArray(rows) ? rows[0] : rows;
+  },
+  async portalRevokeGuestInvite(inviteId) { return rpc("portal_staff_revoke_guest_invite", { p_invite_id: inviteId }); },
   async messages(conversationId, before = null, limit = CHAT_PAGE_SIZE) {
     let q = supabase.from("chat_messages")
       .select(MESSAGE_COLUMNS)

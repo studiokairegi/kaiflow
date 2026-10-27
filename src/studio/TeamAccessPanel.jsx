@@ -118,6 +118,7 @@ export function useTeamAccess({ activeOrganizationId = "", studioAccess = null }
 // Compact per-person control rendered inside each Teams roster card.
 export function MemberAccessRow({ member, access }) {
   const [departmentId, setDepartmentId] = useState("");
+  const [showPerms, setShowPerms] = useState(false);
   if (!access?.canManage || member.status === "archived") return null;
   const row = access.byMember.get(String(member.id));
   const state = row?.state || "none";
@@ -151,6 +152,8 @@ export function MemberAccessRow({ member, access }) {
         <span className="kf-access-chip paused">Access paused</span>
         <button type="button" className="kf-access-btn primary" disabled={busy} onClick={() => access.setActive(member, true)}>Restore</button>
       </>}
+      {(state === "active" || state === "paused") && <button type="button" className="kf-access-btn" onClick={() => setShowPerms(true)}>Permissions</button>}
+      {showPerms && <PermissionsDrawer access={access} member={member} onClose={() => setShowPerms(false)} />}
       {shown && <input className="kf-access-link" readOnly aria-label="Invite link" value={shown} onFocus={(event) => event.target.select()} />}
     </div>
   );
@@ -232,6 +235,84 @@ export function DepartmentsDrawer({ access, onClose }) {
           <input aria-label="New department name" value={name} onChange={(event) => setName(event.target.value)} placeholder="New department…" maxLength={80} />
           <button type="submit" disabled={busy || !name.trim()}>Add</button>
         </form>
+      </div>
+    </div>
+  );
+}
+
+const PERMISSION_LABELS = {
+  "crm.read": "View CRM / leads", "crm.write": "Edit CRM / leads", "contacts.read": "View contacts", "contacts.write": "Edit contacts",
+  "teams.read": "View Teams roster", "teams.write": "Edit Teams roster", "invoices.read": "View invoices (Master only)", "expenses.read": "View expenses (Master only)",
+  "activity.read": "View activity log", "projects.read": "Open Projects", "shots.read": "View shots",
+  "directory.view": "See the company directory", "chat.create_groups": "Create group chats",
+};
+const SOURCE_LABELS = {
+  master: "Master User", override_allow: "Granted by you", override_deny: "Blocked by you", department: "Department", role_default: "Role default",
+  project_assignment: "Project assignment", department_module_only: "Department (module only)", none: "Not granted",
+};
+// Keys a Master may override per person. Everything else (finance, payments, projects data) is not overridable here.
+const OVERRIDABLE = ["directory.view", "chat.create_groups", "crm.read", "crm.write", "contacts.read", "contacts.write", "teams.read", "teams.write"];
+const ALLOW_ONLY = new Set(["directory.view", "chat.create_groups"]);
+
+// Per-person grants and an inspector that shows each effective permission and where it comes from.
+export function PermissionsDrawer({ access, member, onClose }) {
+  const [userId, setUserId] = useState("");
+  const [effective, setEffective] = useState(null);
+  const [busyKey, setBusyKey] = useState("");
+  const [error, setError] = useState("");
+  const [reason, setReason] = useState("");
+  const orgId = access.organizationId;
+
+  const load = useCallback(async (id) => {
+    try { setEffective(await chatApi.effectivePermissions(orgId, id)); setError(""); } catch (e) { setError(readableError(e)); }
+  }, [orgId]);
+
+  useEffect(() => {
+    let active = true;
+    chatApi.memberLogins(orgId).then((rows) => {
+      if (!active) return;
+      const match = (rows || []).find((r) => String(r.team_member_id) === String(member.id));
+      if (!match) { setError("This person has not accepted their invite yet, so there is nothing to override."); return; }
+      setUserId(match.user_id); load(match.user_id);
+    }).catch((e) => active && setError(readableError(e)));
+    return () => { active = false; };
+  }, [orgId, member.id, load]);
+
+  const change = async (key, value) => {
+    setBusyKey(key); setError("");
+    try {
+      await chatApi.setMemberOverride(orgId, userId, key, value, reason.trim() || null);
+      await load(userId);
+    } catch (e) { setError(readableError(e)); } finally { setBusyKey(""); }
+  };
+  const items = new Map((effective?.items || []).map((item) => [item.key, item]));
+
+  return (
+    <div className="kf-dept-overlay" role="presentation" onClick={onClose}>
+      <div className="kf-dept-drawer" role="dialog" aria-modal="true" aria-label={`Permissions for ${member.name}`} onClick={(event) => event.stopPropagation()}>
+        <header><strong>{member.name} — permissions</strong><button type="button" aria-label="Close" onClick={onClose}>×</button></header>
+        <p className="kf-dept-hint">Department and role set the baseline. Use these switches to grant or block something for just this person. Every change is recorded in the audit log. Finance and Payments always stay Master-only, and Projects data always needs a project assignment.</p>
+        {error && <p className="kf-access-feedback error" role="alert">{error}</p>}
+        {effective && <p className="kf-dept-hint">Role: {effective.role}{effective.departments?.length ? ` · ${effective.departments.join(", ")}` : " · no department"} · {effective.assigned_project_count} assigned project(s)</p>}
+        <label className="kf-dept-module"><span>Reason (optional, saved to audit)</span><input value={reason} maxLength={200} onChange={(event) => setReason(event.target.value)} /></label>
+        {OVERRIDABLE.map((key) => {
+          const item = items.get(key);
+          const current = item?.override || "inherit";
+          return (
+            <label key={key} className="kf-dept-module">
+              <span>{PERMISSION_LABELS[key]}<small style={{ display: "block", opacity: 0.7 }}>{item ? `${item.effective ? "Allowed" : "Not allowed"} · ${SOURCE_LABELS[item.source] || item.source}${item.detail ? ` (${item.detail})` : ""}` : "…"}</small></span>
+              <select value={current} disabled={!userId || busyKey === key} onChange={(event) => change(key, event.target.value)}>
+                <option value="inherit">{ALLOW_ONLY.has(key) ? "Off (default)" : "Use default"}</option>
+                <option value="allow">Allow</option>
+                {!ALLOW_ONLY.has(key) && <option value="deny">Block</option>}
+              </select>
+            </label>
+          );
+        })}
+        <p className="kf-dept-hint" style={{ marginTop: 8 }}>Read-only view of everything else</p>
+        {(effective?.items || []).filter((item) => !OVERRIDABLE.includes(item.key)).map((item) => (
+          <div key={item.key} className="kf-dept-module"><span>{PERMISSION_LABELS[item.key] || item.key}</span><span>{item.effective ? "Yes" : "No"} · {SOURCE_LABELS[item.source] || item.source}</span></div>
+        ))}
       </div>
     </div>
   );

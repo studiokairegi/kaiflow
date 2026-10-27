@@ -8,6 +8,7 @@ import { lazyWithSuspense } from "./lazy.jsx";
 const NdaSignPage = lazyWithSuspense(() => import("./NdaSignPage.jsx"));
 const ContractSignPage = lazyWithSuspense(() => import("./ContractSignPage.jsx"));
 const PayCheckoutPage = lazyWithSuspense(() => import("./payments/PayCheckoutPage.jsx"));
+const GuestChatPage = lazyWithSuspense(() => import("./chat/GuestChatPage.jsx"));
 const PortfolioPage = lazyWithSuspense(() => import("./portfolio/PortfolioPage.jsx"));
 import { parsePayPath } from "./payments/providers.js";
 import { tokenFromPortfolioPath } from "./portfolio/logic.js";
@@ -42,6 +43,9 @@ if (portfolioToken) {
 } else if (payRoute) {
   // Public client checkout: /pay/{secure-token}. Needs a host rewrite of /pay/* to index.html.
   content = <PayCheckoutPage token={payRoute.token} view={payRoute.view} />;
+} else if (params.get("guest-chat") === "1") {
+  // Freelancer guest chat: the one-time invite lives in the URL fragment, never the query string.
+  content = <GuestChatPage />;
 } else if (shareType === "project" && shareToken) {
   content = <ClientPortalView token={shareToken} />;
 } else if (shareType === "shot" && shareToken) {
