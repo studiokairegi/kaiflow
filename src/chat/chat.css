@@ -3,15 +3,18 @@
 .chat-root {
   --c-bg: #101719; --c-panel: #151d20; --c-raise: #1b2528; --c-field: #20292d; --c-hover: #232f33;
   --c-line: #2a3539; --c-line-strong: #3a484d; --c-ink: #edeae3; --c-ink-2: #b4c0bc; --c-mute: #8a9a96;
-  --c-accent: #2fbfa6; --c-accent-ink: #0d211d; --c-accent-soft: rgba(47,191,166,.13); --c-accent-line: rgba(47,191,166,.32);
-  --c-mine: #1f4a43; --c-mine-ink: #eaf8f4; --c-theirs: #1e282b; --c-theirs-ink: #edeae3;
+  --c-accent: #38b6ff; --c-accent-ink: #06324d; --c-accent-soft: rgba(56,182,255,.14); --c-accent-line: rgba(56,182,255,.38);
+  /* Dashboard palette: Projects (sky) for icons/actions, Finance (violet) for sent, Payments (royal) for received, logo teal for type. */
+  --g-icon: linear-gradient(135deg, #38B6FF 0%, #9ADCFF 100%); --c-icon: #2b9be0; --c-brand: #2fbfa6;
+  --g-sent: linear-gradient(135deg, #6A47F2 0%, #9174FB 100%); --g-recv: linear-gradient(135deg, #3B74F4 0%, #77A1FF 100%);
+  --c-mine: #6A47F2; --c-mine-ink: #fff; --c-theirs: #3B74F4; --c-theirs-ink: #fff;
   --c-danger: #f08a90; --c-danger-soft: rgba(224,96,106,.14); --c-ok: #6fd3a8; --c-warn: #e8c070; --c-pin: #e8b64f;
   --c-shadow: 0 18px 50px rgba(0,0,0,.5); --c-focus: 0 0 0 2px rgba(47,191,166,.55);
   --r-lg: 16px; --r-md: 12px; --r-sm: 8px; --vv-h: 100dvh;
   color: var(--c-ink); font: 14px/1.45 Inter, ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing: antialiased;
 }
-.chat-root.chat-theme-light { --c-bg:#f6f7f9; --c-panel:#fff; --c-raise:#fff; --c-field:#eef1f4; --c-hover:#eef1f4; --c-line:#e1e5ea; --c-line-strong:#c9d0d8; --c-ink:#18212a; --c-ink-2:#46525e; --c-mute:#6b7782; --c-accent:#0f8f7b; --c-accent-ink:#fff; --c-accent-soft:rgba(15,143,123,.1); --c-accent-line:rgba(15,143,123,.35); --c-mine:#0f8f7b; --c-mine-ink:#fff; --c-theirs:#eceff3; --c-theirs-ink:#18212a; --c-danger:#c2323f; --c-danger-soft:rgba(194,50,63,.09); --c-ok:#1d7c58; --c-warn:#8a6200; --c-pin:#b7791f; --c-shadow:0 14px 40px rgba(20,30,40,.18); --c-focus:0 0 0 2px rgba(15,143,123,.45); }
-@media (prefers-color-scheme: light) { .chat-root.chat-theme-auto { --c-bg:#f6f7f9; --c-panel:#fff; --c-raise:#fff; --c-field:#eef1f4; --c-hover:#eef1f4; --c-line:#e1e5ea; --c-line-strong:#c9d0d8; --c-ink:#18212a; --c-ink-2:#46525e; --c-mute:#6b7782; --c-accent:#0f8f7b; --c-accent-ink:#fff; --c-accent-soft:rgba(15,143,123,.1); --c-accent-line:rgba(15,143,123,.35); --c-mine:#0f8f7b; --c-mine-ink:#fff; --c-theirs:#eceff3; --c-theirs-ink:#18212a; --c-danger:#c2323f; --c-danger-soft:rgba(194,50,63,.09); --c-ok:#1d7c58; --c-warn:#8a6200; --c-pin:#b7791f; --c-shadow:0 14px 40px rgba(20,30,40,.18); --c-focus:0 0 0 2px rgba(15,143,123,.45); } }
+.chat-root.chat-theme-light { --c-bg:#f6f7f9; --c-panel:#fff; --c-raise:#fff; --c-field:#eef1f4; --c-hover:#eef1f4; --c-line:#e1e5ea; --c-line-strong:#c9d0d8; --c-ink:#18212a; --c-ink-2:#46525e; --c-mute:#6b7782; --c-accent:#1b8fd0; --c-accent-ink:#06324d; --c-accent-soft:rgba(43,155,224,.12); --c-accent-line:rgba(43,155,224,.4); --c-icon:#1b8fd0; --c-brand:#0f8f7b; --c-mine:#6A47F2; --c-mine-ink:#fff; --c-theirs:#3B74F4; --c-theirs-ink:#fff; --c-danger:#c2323f; --c-danger-soft:rgba(194,50,63,.09); --c-ok:#1d7c58; --c-warn:#8a6200; --c-pin:#b7791f; --c-shadow:0 14px 40px rgba(20,30,40,.18); --c-focus:0 0 0 2px rgba(43,155,224,.5); }
+@media (prefers-color-scheme: light) { .chat-root.chat-theme-auto { --c-bg:#f6f7f9; --c-panel:#fff; --c-raise:#fff; --c-field:#eef1f4; --c-hover:#eef1f4; --c-line:#e1e5ea; --c-line-strong:#c9d0d8; --c-ink:#18212a; --c-ink-2:#46525e; --c-mute:#6b7782; --c-accent:#1b8fd0; --c-accent-ink:#06324d; --c-accent-soft:rgba(43,155,224,.12); --c-accent-line:rgba(43,155,224,.4); --c-icon:#1b8fd0; --c-brand:#0f8f7b; --c-mine:#6A47F2; --c-mine-ink:#fff; --c-theirs:#3B74F4; --c-theirs-ink:#fff; --c-danger:#c2323f; --c-danger-soft:rgba(194,50,63,.09); --c-ok:#1d7c58; --c-warn:#8a6200; --c-pin:#b7791f; --c-shadow:0 14px 40px rgba(20,30,40,.18); --c-focus:0 0 0 2px rgba(43,155,224,.5); } }
 .chat-root *, .chat-root *::before, .chat-root *::after { box-sizing: border-box; }
 .chat-root button, .chat-root input, .chat-root textarea, .chat-root select { font: inherit; color: inherit; }
 .chat-root button { cursor: pointer; }
@@ -306,3 +309,45 @@
 .kf-auth-invite-banner strong { font: 700 13px "Space Grotesk", Inter, sans-serif; }
 .kf-auth-invite-banner p { margin: 0; color: #9de4d6; font-size: 11px; text-transform: capitalize; }
 .kf-auth-invite-banner small { color: #91a09d; font-size: 10px; line-height: 1.5; }
+
+
+/* ======================= Dashboard palette overrides ======================= */
+/* Icons: Projects gradient. Plain icon buttons use its icon blue; primary tiles use the gradient itself. */
+.chat-icon-btn { color: var(--c-icon); }
+.chat-icon-btn:hover:not(:disabled) { color: var(--c-icon); background: var(--c-accent-soft); }
+.chat-icon-btn.solid, .chat-send, .chat-button.primary { background: var(--g-icon); border-color: transparent; color: var(--c-accent-ink); box-shadow: 0 3px 10px rgba(56,182,255,.32); }
+.chat-icon-btn.solid:hover:not(:disabled), .chat-send:hover:not(:disabled) { filter: brightness(1.06); }
+.chat-send:disabled { background: var(--c-line); box-shadow: none; color: var(--c-mute); }
+.chat-avatar, .chat-msg-avatar { background: var(--g-icon); color: var(--c-accent-ink); border-color: transparent; }
+.chat-avatar.group, .chat-avatar.project, .chat-avatar.client, .chat-avatar.guest { background: var(--g-icon); }
+.chat-msg.grouped .chat-msg-avatar { background: transparent; }
+.chat-tool, .chat-link-btn, .chat-empty .glyph, .chat-welcome .glyph { color: var(--c-icon); }
+.chat-empty .glyph, .chat-welcome .glyph { background: var(--c-accent-soft); }
+.chat-tool.on, .chat-icon-btn.on { color: var(--c-icon); background: var(--c-accent-soft); border-color: var(--c-accent-line); }
+.chat-pin-flag { color: var(--c-icon); }
+.chat-kind-tabs button.active { color: var(--c-icon); }
+.chat-tabs .dot, .chat-unread { background: var(--g-icon); color: var(--c-accent-ink); }
+.chat-jump-bottom.has-new { background: var(--g-icon); border-color: transparent; color: var(--c-accent-ink); }
+.chat-icon-btn .count { background: var(--g-icon); color: var(--c-accent-ink); }
+.chat-spinner { border-top-color: var(--c-icon); }
+.chat-live.on i { background: var(--c-brand); }
+
+/* Bubbles: Finance gradient for sent, Payments gradient for received. Squared-off, tail-free cards. */
+.chat-bubble { border-radius: 14px; border-bottom-left-radius: 14px; border-bottom-right-radius: 14px; font-weight: 500; text-shadow: 0 1px 1px rgba(10,14,40,.28); box-shadow: 0 2px 10px rgba(10,14,40,.18); }
+.chat-msg.theirs:not(.grouped) .chat-bubble, .chat-msg.mine:not(.grouped) .chat-bubble { border-radius: 14px; }
+.chat-msg.theirs .chat-bubble { background: var(--g-recv); color: var(--c-theirs-ink); }
+.chat-msg.mine .chat-bubble { background: var(--g-sent); color: var(--c-mine-ink); }
+.chat-msg .chat-bubble.deleted { background: transparent; box-shadow: none; text-shadow: none; border: 1px dashed var(--c-line-strong); color: var(--c-mute); }
+.chat-msg.theirs .chat-body-text code { background: rgba(0,0,0,.2); }
+.chat-msg-avatar { box-shadow: 0 2px 6px rgba(56,182,255,.25); }
+.chat-quote { background: var(--c-accent-soft); border-left-color: var(--c-icon); }
+.chat-quote strong { color: var(--c-brand); }
+
+/* Type: the logo's teal for titles, names and brand text; body text stays high-contrast. */
+.chat-topbar h2, .chat-header-copy h2, .chat-welcome h2, .chat-state-card h2, .chat-drawer-head h3, .chat-modal-head h2,
+.chat-row-title strong, .chat-msg-meta strong, .chat-section-label, .chat-pin-item small, .chat-gate h1, .chat-notes h3 { color: var(--c-brand); }
+.chat-tabs button.active { color: var(--c-brand); }
+.chat-day span { color: var(--c-brand); }
+.chat-row.active { background: var(--c-accent-soft); }
+.chat-badge { background: var(--c-accent-soft); color: var(--c-brand); }
+.chat-msg.theirs .chat-attachment-icon, .chat-msg.mine .chat-attachment-icon { background: rgba(255,255,255,.2); }
