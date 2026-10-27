@@ -8,6 +8,7 @@
 //   mode "guest"   guest_claim {invite_token, display_name}  -> {session, thread, ...}
 //                  list | send | download   with {session}
 //   mode "client"  list | send | download   with {share_token}   (the project's portal link)
+//   mode "freelancer" list | send | download with {share_token}  (the freelancer's existing per-shot link)
 //   mode "staff"   send (with attachments) | download   with Authorization: Bearer <user JWT>
 //
 // JSON for everything; `send` may be multipart/form-data (fields + up to 5 `files`).
@@ -89,7 +90,7 @@ Deno.serve(async (req) => {
     }
     const action = String(fields.action || "");
     const mode = String(fields.mode || "");
-    if (!["guest", "client", "staff"].includes(mode)) throw new HttpError(400, "invalid_request");
+    if (!["guest", "client", "freelancer", "staff"].includes(mode)) throw new HttpError(400, "invalid_request");
 
     // Per-network ceiling, then a stop for anyone who keeps presenting bad credentials.
     const forwarded = req.headers.get("cf-connecting-ip") || (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "unknown";
@@ -144,6 +145,15 @@ Deno.serve(async (req) => {
       const row = Array.isArray(data) ? data[0] : data;
       if (!row) return await fail("session_invalid");
       threadId = row.thread_id; sessionId = row.session_id; label = row.display_name; rateSubject = sessionHash;
+    } else if (mode === "freelancer") {
+      // The freelancer's existing per-shot share link is the credential. One private thread per shot.
+      const share = String(fields.share_token || "").trim();
+      if (share.length < 16 || share.length > 200) return await fail("share_malformed");
+      const { data } = await admin.rpc("portal_freelancer_resolve", { p_share_token: share });
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row) return await fail("share_invalid");
+      threadId = row.thread_id; rateSubject = await sha256Hex(`freelancer:${share}`);
+      label = String(fields.display_name || "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 60) || "Freelancer";
     } else if (mode === "client") {
       const share = String(fields.share_token || "").trim();
       if (share.length < 16 || share.length > 200) return await fail("share_malformed");

@@ -83,3 +83,11 @@ export function validatePortalFiles(files) {
   }
   return "";
 }
+
+// The freelancer's existing per-shot link is the credential (one private thread per shot).
+export const freelancerApi = {
+  list: (shareToken, after = null) => call({ mode: "freelancer", action: "list", share_token: shareToken, after }),
+  send: (shareToken, displayName, body, idempotencyKey, files = []) =>
+    call({ mode: "freelancer", action: "send", share_token: shareToken, display_name: displayName, body, idempotency_key: idempotencyKey }, files),
+  download: (shareToken, attachmentId) => call({ mode: "freelancer", action: "download", share_token: shareToken, attachment_id: attachmentId }),
+};

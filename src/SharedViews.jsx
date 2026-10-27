@@ -499,6 +499,9 @@ export function FreelancerView({ token }) {
           <p style={{ fontSize: 12.5, color: "#3DDC84", marginTop: 8 }}>Uploaded, thanks!</p>
         )}
         {uploadError && <p style={{ fontSize: 12.5, color: "#FF4D4D", marginTop: 8 }}>{uploadError}</p>}
+
+        <h3 style={{ margin: "28px 0 10px", fontSize: 15 }}>Chat with the studio</h3>
+        <ClientPortalChat token={token} kind="freelancer" />
       </div>
     </div>
   );

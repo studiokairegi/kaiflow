@@ -10,10 +10,11 @@ supabase db push
 ```
 
 `db push` applies only migrations that are not yet recorded as applied. Already-applied
-`20261031090000`, `20261031100000` and `20261101090000` are untouched. The new ones are:
+`20261031090000`, `20261031100000` and `20261101090000` are untouched. The new ones are (applied in filename order):
 
 1. `20261102090000_access_overrides_directory_privacy.sql` — per-member overrides, private directory, Master-only group creation.
 2. `20261102100000_portal_guest_client_chat.sql` — portal tables, private `portal-attachments` bucket, staff and gateway functions.
+3. `20261102110000_portal_freelancer_shot_chat.sql` — chat on the existing per-shot freelancer link (one private thread per shot).
 
 Both are idempotent (tested by applying twice). If `db push` complains about history, use
 `supabase migration list` first; do not edit applied migrations.
@@ -44,7 +45,8 @@ Build and deploy as you normally do (`npm run build`, then your host). New publi
 1. As Master: Teams → a member with a login → **Permissions** → confirm sources shown; turn **Create group chats** on, check it appears for them; turn it off.
 2. As a Sales member: no Projects tab unless assigned to a project; People tab shows only people they already chat with.
 3. As Master: Chat → Clients → open a client thread, add an internal note, create a freelancer guest link; open it in a private window, join, send a file; confirm the note is not visible there; revoke and confirm the guest is cut off within one poll.
-4. Open a project's client portal link: the "Message the studio" box works; staff reply is visible.
+4. Open a freelancer's shot link: the "Chat with the studio" box at the bottom works, the thread shows up under Chat → Clients for staff, and a different shot's link cannot see it.
+5. Open a project's client portal link: the "Message the studio" box works; staff reply is visible.
 
 ## Rollback
 

@@ -91,3 +91,13 @@ test("the guest invite token travels in the URL fragment and is stripped", () =>
   assert.ok(/location\.hash/.test(page) && /replaceState/.test(page));
   assert.ok(!/searchParams\.get\(["']t["']\)/.test(page));
 });
+
+test("freelancer shot-link chat is service-only and isolated per shot", () => {
+  const sql = read("supabase/migrations/20261102110000_portal_freelancer_shot_chat.sql");
+  assert.ok(/grant execute on function public\.portal_freelancer_resolve\(text\) to service_role/i.test(sql));
+  assert.ok(/revoke all on function public\.portal_freelancer_resolve\(text\) from public, anon, authenticated/i.test(sql));
+  assert.ok(/portal_threads_one_shot_thread_idx/.test(sql) && /shot_id/.test(sql));
+  assert.ok(!/to\s+anon\b/i.test(sql.replace(/revoke[^;]*;/gi, "")));
+  assert.ok(/mode === "freelancer"/.test(edge) && /portal_freelancer_resolve/.test(edge));
+  assert.ok(/ClientPortalChat token=\{token\} kind="freelancer"/.test(read("src/SharedViews.jsx")));
+});

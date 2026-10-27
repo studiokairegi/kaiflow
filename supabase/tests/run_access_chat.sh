@@ -21,17 +21,17 @@ run "$root/supabase/migrations/20261012120000_contacts_clients.sql"
 for m in 20261029090000_chat_collaboration 20261030090000_studio_multiuser_core \
          20261031090000_studio_team_invites_and_bootstrap 20261031100000_multi_organization_memberships \
          20261101090000_frictionless_team_invites 20261102090000_access_overrides_directory_privacy \
-         20261102100000_portal_guest_client_chat; do
+         20261102100000_portal_guest_client_chat 20261102110000_portal_freelancer_shot_chat; do
   [ -f "$root/supabase/migrations/$m.sql" ] || continue
   run "$root/supabase/migrations/$m.sql"
 done
 # The two new migrations must be safe to run again.
-for m in 20261102090000_access_overrides_directory_privacy 20261102100000_portal_guest_client_chat; do
+for m in 20261102090000_access_overrides_directory_privacy 20261102100000_portal_guest_client_chat 20261102110000_portal_freelancer_shot_chat; do
   [ -f "$root/supabase/migrations/$m.sql" ] && run "$root/supabase/migrations/$m.sql"
 done
 echo "migrations applied (new migrations applied twice)"
 status=0
-for t in "$here"/access_directory_groups.test.sql "$here"/portal_guest_client.test.sql; do
+for t in "$here"/access_directory_groups.test.sql "$here"/portal_guest_client.test.sql "$here"/portal_freelancer_shot.test.sql; do
   [ -f "$t" ] || continue
   out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$t" 2>&1)"; code=$?
   echo "$out" | grep -E "PASS|FAIL|ERROR" | sed 's/^psql:[^ ]* //'
