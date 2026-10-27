@@ -3677,7 +3677,9 @@ export default function ShotTracker() {
         const { data: memberships, error: membershipError } = await supabase.rpc("chat_get_my_memberships");
         if (membershipError || !active) return;
         const currentMemberships = Array.isArray(memberships) ? memberships : [];
-        setStudioMemberships(currentMemberships);
+        // Keep the previous reference when nothing changed: a new array/object on every tab focus
+        // (for example when a file picker closes) would re-trigger the full data reload below.
+        setStudioMemberships((previous) => (sameJson(previous, currentMemberships) ? previous : currentMemberships));
         let targetOrganizationId = activeStudioOrganizationId;
         if (!currentMemberships.some((item) => item.organization_id === targetOrganizationId)) {
           targetOrganizationId = currentMemberships.find((item) => item.role === "master_user")?.organization_id
@@ -3701,7 +3703,8 @@ export default function ShotTracker() {
         }
         const { data: nextAccess, error } = await supabase.rpc("studio_get_app_access_context_for_org", { p_organization_id: targetOrganizationId });
         if (error || !active) return;
-        setStudioAccess(nextAccess || { is_member: false });
+        const resolvedAccess = nextAccess || { is_member: false };
+        setStudioAccess((previous) => (sameJson(previous, resolvedAccess) ? previous : resolvedAccess));
         // loadData is memoized against the active access context. Updating it here
         // triggers the normal data-loading effect with the new organization scope;
         // calling the current closure would load the previous studio's rows once.
@@ -7771,6 +7774,12 @@ function savePomodoroState(state) {
   } catch {
     // best-effort only
   }
+}
+
+// Structural equality for small JSON-like values (access contexts, membership lists).
+function sameJson(a, b) {
+  if (a === b) return true;
+  try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
 }
 
 // Browser desktop notifications. Permission (like Pomodoro's config) is a

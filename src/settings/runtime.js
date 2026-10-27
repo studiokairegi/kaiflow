@@ -80,6 +80,7 @@ export function playNotificationSound(prefs = state.notifications.sound) {
   const def = SOUNDS.find((s) => s.id === prefs.id) || SOUNDS[0];
   try {
     const a = audioCache[def.id] || (audioCache[def.id] = new Audio(def.src));
+    a.muted = false;
     a.volume = Math.min(1, Math.max(0, Number(prefs.volume) || 0.6));
     a.currentTime = 0;
     const p = a.play();
@@ -88,6 +89,27 @@ export function playNotificationSound(prefs = state.notifications.sound) {
   } catch {
     return Promise.resolve("blocked"); // a missed chime is not worth an error
   }
+}
+
+// Browsers refuse to start audio until the page has had a user gesture. After a reload that would
+// silence every chime until the next click, so the first click/key press "unlocks" the chimes
+// by starting each one muted for an instant. Nothing audible plays.
+let audioPrimed = false;
+function primeNotificationAudio() {
+  if (audioPrimed || typeof Audio === "undefined") return;
+  audioPrimed = true;
+  for (const def of SOUNDS) {
+    try {
+      const a = audioCache[def.id] || (audioCache[def.id] = new Audio(def.src));
+      a.muted = true;
+      const p = a.play();
+      const restore = () => { try { a.pause(); a.currentTime = 0; a.muted = false; } catch { /* ignore */ } };
+      if (p && p.then) p.then(restore, restore); else restore();
+    } catch { /* a missed unlock only means the OS sound is used instead */ }
+  }
+}
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  for (const type of ["pointerdown", "keydown", "touchstart"]) window.addEventListener(type, primeNotificationAudio, { once: true, passive: true });
 }
 
 // The app's chime is the only sound, so the desktop notification is made silent, with one
