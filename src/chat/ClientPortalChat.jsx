@@ -36,7 +36,7 @@ export default function ClientPortalChat({ token, defaultName = "", kind = "clie
   }
   return (
     <div className="chat-root chat-theme-auto chat-embed">
-      <PortalChatSurface {...api} selfKind={isFreelancer ? "guest" : "client"} selfLabel={label} title={isFreelancer ? "Chat with the studio" : "Studio chat"} subtitle={`Writing as ${label}`} onInvalid={() => setExpired(true)}
+      <PortalChatSurface {...api} selfKind={isFreelancer ? "guest" : "client"} selfLabel={label} title={isFreelancer ? "Chat with the studio" : "Studio chat"} subtitle={`Writing as ${label}`} onInvalid={() => setExpired(true)} pushWho={{ audience: isFreelancer ? "freelancer" : "client", share_token: token }}
         placeholder="Write to the studio…" footerNote="Visible to the studio team" />
     </div>
   );

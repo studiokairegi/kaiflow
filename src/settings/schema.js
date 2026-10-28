@@ -48,6 +48,7 @@ export const NOTIFICATION_CATEGORIES = [
   { id: "focus", label: "Focus timer breaks", hint: "Start and end of focus and break sessions." },
   { id: "freelancerUploads", label: "Freelancer uploads", hint: "A freelancer uploads a file to a project." },
   { id: "cutReview", label: "Client feedback on cuts", hint: "A client comments on, requests revisions to, or approves a released cut." },
+  { id: "messages", label: "Chat and portal messages", hint: "Alerts for new chat messages while KairFlow is closed. Open tabs use the message tone instead." },
 ];
 
 // Short chimes supplied with the app. Browsers cannot control the OS notification
@@ -61,7 +62,7 @@ import { DEFAULT_MESSAGE_SOUND } from "./tones.js";
 
 export const DEFAULT_USER_PREFS = {
   dashboardPeriod: "all",
-  notifyCategories: { followups: true, hotLeads: true, proposals: true, deadlines: true, focus: true, freelancerUploads: true, cutReview: true },
+  notifyCategories: { followups: true, hotLeads: true, proposals: true, deadlines: true, focus: true, freelancerUploads: true, cutReview: true, messages: true },
   sound: { enabled: false, id: "glass", volume: 0.6 },
   messageSound: { ...DEFAULT_MESSAGE_SOUND },
   focusTimer: DEFAULT_FOCUS_TIMER,

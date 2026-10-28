@@ -14,6 +14,8 @@ import {
   DEFAULT_SETTINGS, DEFAULT_LEAD_CHANNELS, MILESTONE_DEFAULTS, DEFAULT_FOLLOWUP_SCHEDULE, DEFAULT_ARCHIVE_DAYS,
   settingsFromRow, settingsToRow,
 } from "./settings/schema.js";
+import { DIGEST_KEY, POMODORO_KEY, digestAlert, pomodoroAlert } from "./push/jobs.js";
+import { cancelPush, schedulePush, syncPushPrefs } from "./push/pushClient.js";
 import { runtime, applyRuntimeSettings, categoryAllowed, playNotificationSound, playMessageTone, desktopNotificationSilent, workdayTargetSeconds, isWorkday, reasonsFor, todayInZone } from "./settings/runtime.js";
 import { emptyEmailSlots, normalizeEmailSlots, nextScheduledIndex, lastScheduledIndex, followupCountLabel, sendingTriggersNoResponse, visibleSlotCount, emailsSentSummary, isManualFollowupDue, manualFollowupState } from "./settings/followups.js";
 import { usePayments } from "./payments/usePayments.js";
@@ -3384,6 +3386,7 @@ export default function ShotTracker() {
   // five minutes.
   useEffect(() => {
     if (!userId || !notificationsSupported() || Notification.permission !== "granted") return;
+    let lastDigestSig = null;
     const checkNeedsAttention = () => {
       const schedule = settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE;
       const counts = computeNeedsAttentionCounts(leads, schedule);
@@ -3393,6 +3396,10 @@ export default function ShotTracker() {
       if (!categoryAllowed("proposals")) counts.proposalsAwaitingResponse = 0;
       if (!categoryAllowed("deadlines")) counts.approachingDeadline = 0;
       const total = counts.followupsDueToday + counts.hotAwaitingResponse + counts.proposalsAwaitingResponse + counts.approachingDeadline;
+      // Tomorrow-morning digest for when no tab is open. Only talks to the server when it changes.
+      const digest = digestAlert(counts);
+      const digestSig = digest ? `${digest.due_at}|${digest.body}` : "";
+      if (digestSig !== lastDigestSig) { lastDigestSig = digestSig; if (digest) schedulePush([digest]); else cancelPush([DIGEST_KEY]); }
       if (total === 0) return;
       const todayStr = new Date().toDateString();
       const signature = `${todayStr}:${counts.followupsDueToday}:${counts.hotAwaitingResponse}:${counts.proposalsAwaitingResponse}:${counts.approachingDeadline}`;
@@ -3722,6 +3729,13 @@ export default function ShotTracker() {
       document.removeEventListener("visibilitychange", refreshAccessOnReturn);
     };
   }, [userId, loadData, activeStudioOrganizationId]);
+
+  // Keep the server's per-device alert switches in step with Settings > Alerts & display.
+  const pushCategoriesKey = JSON.stringify(settings.userPrefs?.notifyCategories || {});
+  useEffect(() => {
+    if (!userId) return;
+    syncPushPrefs({ enabled: settings.notificationsEnabled !== false, categories: JSON.parse(pushCategoriesKey) });
+  }, [userId, settings.notificationsEnabled, pushCategoriesKey]);
 
   useEffect(() => {
     if (!userId) return;
@@ -8401,6 +8415,22 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   useEffect(() => {
     savePomodoroConfig(pomodoroConfig);
   }, [pomodoroConfig]);
+
+  // Hand the end of the running phase to the server so the alert still arrives if the tab is closed.
+  const pomoRounds = pomodoroSession.cyclesBeforeLongBreak;
+  const pomoWork = pomodoroSession.workMinutes;
+  const pomoBreak = pomodoroSession.breakMinutes;
+  const pomoLong = pomodoroSession.longBreakMinutes;
+  useEffect(() => {
+    if (!pomodoroPhase || !phaseEndsAt || pausedRemaining != null || !categoryAllowed("focus")) { cancelPush([POMODORO_KEY]); return; }
+    const plan = planPomodoroBreaks({ ...pomodoroSession, cyclesBeforeLongBreak: pomoRounds, workMinutes: pomoWork })[pomodoroCycle - 1];
+    const alert = pomodoroAlert({
+      phase: pomodoroPhase, endsAt: phaseEndsAt, cycle: pomodoroCycle, rounds: pomoRounds,
+      nextBreak: plan, nextBreakMinutes: plan === "longBreak" ? pomoLong : pomoBreak,
+    });
+    if (alert) schedulePush([alert]); else cancelPush([POMODORO_KEY]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pomodoroPhase, phaseEndsAt, pausedRemaining, pomodoroCycle, pomoRounds, pomoWork, pomoBreak, pomoLong]);
 
   // Mirror the live phase/countdown/cycle to localStorage so it survives a
   // remount; cleared automatically whenever there's no active phase (a

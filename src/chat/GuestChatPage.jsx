@@ -64,7 +64,7 @@ export default function GuestChatPage() {
       <div className="chat-root chat-theme-auto chat-standalone-wrap">
         <div className="chat-standalone">
           <PortalChatSurface {...api} selfKind="guest" selfLabel={session.display_name} title={session.project_name || "Project chat"}
-            subtitle={`Chatting as ${session.display_name} · private to this project`} onInvalid={onInvalid} footerNote="Only the studio can see this conversation" />
+            subtitle={`Chatting as ${session.display_name} · private to this project`} onInvalid={onInvalid} pushWho={{ audience: "guest", session: sessionToken }} footerNote="Only the studio can see this conversation" />
           <div className="chat-composer-foot" style={{ justifyContent: "center", background: "var(--c-panel)", paddingBottom: 8 }}><button type="button" className="chat-link-btn" onClick={leave}>Leave this chat on this device</button></div>
         </div>
       </div>

@@ -29,6 +29,11 @@ class StartupErrorBoundary extends React.Component {
   }
 }
 
+// Lets the browser show alerts when no tab is open (see src/push). The worker caches nothing.
+if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => { navigator.serviceWorker.register("/sw.js").catch(() => {}); });
+}
+
 const params = new URLSearchParams(window.location.search);
 const shareType = params.get("share");
 const shareToken = params.get("token");

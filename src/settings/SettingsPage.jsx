@@ -4,6 +4,7 @@ import { supabase } from "../supabaseClient";
 import { rpc, savePrivacy } from "../finance/api.js";
 import { playNotificationSound, playMessageTone } from "./runtime.js";
 import { MESSAGE_TONES } from "./tones.js";
+import { currentSubscription, disablePush, enablePush, pushEnabledLocally, pushSupported, sendTestPush } from "../push/pushClient.js";
 import {
   validateSettings, errorTabs, dirtyTabs, followupScheduleFor, MAX_FOLLOWUPS, NOTIFICATION_CATEGORIES, SOUNDS,
   DATE_FORMATS, LANDING_TABS, SUPPORTED_CURRENCY_SYMBOLS, DEFAULT_LEAD_CHANNELS, DEFAULT_ARCHIVE_DAYS,
@@ -296,6 +297,31 @@ function AlertsTab({ form, set, periodOptions, onEnableNotifications, hiddenCoun
   const setPrefs = (patch) => set({ userPrefs: { ...prefs, ...patch } });
   const snd = prefs.sound;
   const msg = prefs.messageSound;
+  const pushOk = pushSupported();
+  const [pushOn, setPushOn] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushNote, setPushNote] = useState("");
+  useEffect(() => {
+    let live = true;
+    if (pushOk) currentSubscription().then((sub) => { if (live) setPushOn(Boolean(sub) && pushEnabledLocally()); });
+    return () => { live = false; };
+  }, [pushOk]);
+  const togglePush = async () => {
+    setPushBusy(true); setPushNote("");
+    try {
+      if (pushOn) { await disablePush("user"); setPushOn(false); setPerm(Notification.permission); return; }
+      const result = await enablePush("user", { enabled: form.notificationsEnabled, categories: prefs.notifyCategories });
+      setPerm(Notification.permission);
+      if (result.ok) setPushOn(true);
+      else setPushNote(result.reason === "denied" ? "Blocked in your browser. Re-enable notifications for this site in the browser's site settings." : result.reason === "not_configured" ? "Closed-browser alerts aren't set up on this server yet (see the deploy guide)." : "Couldn't turn this on. Try again in a moment.");
+    } finally { setPushBusy(false); }
+  };
+  const sendTest = async () => {
+    setPushBusy(true); setPushNote("");
+    const result = await sendTestPush();
+    setPushNote(result.ok ? "Test alert sent. Close this tab to see it arrive on its own." : "Couldn't send the test alert.");
+    setPushBusy(false);
+  };
   return (
     <>
       <Section title="Desktop notifications">
@@ -304,6 +330,17 @@ function AlertsTab({ form, set, periodOptions, onEnableNotifications, hiddenCoun
           : perm === "granted" ? <Pill tone="ok">Browser permission granted</Pill>
           : perm === "denied" ? <span style={S.sub}>Blocked in your browser. Re-enable notifications for this site in the browser's site settings.</span>
           : <div><Btn onClick={async () => setPerm(await onEnableNotifications())}>Allow notifications in this browser</Btn></div>}
+      </Section>
+      <Section title="Alerts when KairFlow is closed" hint="Get chat messages, client and freelancer activity, focus-timer breaks and a morning follow-up digest even with no tab open. The device plays its own notification sound; the app's custom tones only play while a tab is open.">
+        {!pushOk ? <span style={S.sub}>This browser doesn't support closed-browser alerts. On iPhone or iPad, add KairFlow to the Home Screen first.</span> : (
+          <div style={S.row}>
+            <Btn disabled={pushBusy} onClick={togglePush}>{pushOn ? "Turn off alerts on this device" : "Turn on alerts on this device"}</Btn>
+            {pushOn && <Btn kind="link" disabled={pushBusy} onClick={sendTest}>Send a test alert</Btn>}
+            {pushOn && <Pill tone="ok">On for this device</Pill>}
+          </div>
+        )}
+        {pushNote && <span style={S.sub} role="status">{pushNote}</span>}
+        <span style={S.sub}>Desktop browsers must be running in the background (many keep running after the window is closed). Phones and tablets deliver alerts even when the browser app is closed.</span>
       </Section>
       <Section title="What to be notified about">
         {NOTIFICATION_CATEGORIES.map((c) => (

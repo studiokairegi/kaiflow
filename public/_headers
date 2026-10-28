@@ -1,2 +1,6 @@
 /.well-known/apple-developer-merchantid-domain-association
   Content-Type: application/text
+
+/sw.js
+  Cache-Control: no-cache
+  Service-Worker-Allowed: /

@@ -5,6 +5,7 @@ import { initials, outboxToMessages, useOutbox, usePolling } from "./hooks.js";
 import { normalizeMessageBody } from "./logic.js";
 import { PORTAL_ACCEPT, portalErrorText, validatePortalFiles } from "./portalApi.js";
 import { IconBell, IconBellOff, IconClose, IconLock } from "./icons.jsx";
+import { currentSubscription, enablePush, pushSupported } from "../push/pushClient.js";
 import {
   findIncoming, notificationPermission, playIncomingTone, previewBody, readSoundPreference, requestNotificationPermission,
   showDesktopNotification, unlockAudioOnGesture, writeSoundPreference,
@@ -12,7 +13,7 @@ import {
 
 // Shared thread UI for the two token-based audiences. It never receives internal notes (they are a
 // separate table the gateway cannot read) and shows only sender labels, never ids or emails.
-export default function PortalChatSurface({ list, send, download, selfKind, selfLabel, title, subtitle, onInvalid, placeholder = "Write a message…", footerNote = "" }) {
+export default function PortalChatSurface({ list, send, download, selfKind, selfLabel, title, subtitle, onInvalid, placeholder = "Write a message…", footerNote = "", pushWho = null }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
@@ -23,6 +24,22 @@ export default function PortalChatSurface({ list, send, download, selfKind, self
   const [soundOn, setSoundOn] = useState(() => readSoundPreference());
   const [permission, setPermission] = useState(() => notificationPermission());
   const [unreadWhileAway, setUnreadWhileAway] = useState(0);
+  const [pushOn, setPushOn] = useState(null); // null = not checked yet
+  const [pushNote, setPushNote] = useState("");
+  const pushCanRun = Boolean(pushWho) && pushSupported();
+  useEffect(() => {
+    let live = true;
+    if (!pushCanRun) return undefined;
+    currentSubscription().then((sub) => { if (live) setPushOn(Boolean(sub) && notificationPermission() === "granted"); });
+    return () => { live = false; };
+  }, [pushCanRun]);
+  const turnOnPush = async () => {
+    setPushNote("");
+    const result = await enablePush(pushWho, { enabled: true });
+    setPermission(notificationPermission());
+    if (result.ok) setPushOn(true);
+    else setPushNote(result.reason === "denied" ? "Alerts are blocked in your browser settings for this site." : "Couldn't turn on alerts here. Try again later.");
+  };
   const textareaRef = useRef(null);
   const aliveRef = useRef(true);
   const seenRef = useRef(null); // ids already shown; null until the first load so history never rings
@@ -120,12 +137,18 @@ export default function PortalChatSurface({ list, send, download, selfKind, self
         <button type="button" className={`chat-icon-btn${soundOn ? " on" : ""}`} aria-pressed={soundOn} aria-label={soundOn ? "Mute message sounds" : "Turn on message sounds"} title={soundOn ? "Sound on" : "Sound off"}
           onClick={() => { const next = !soundOn; setSoundOn(next); writeSoundPreference(next); if (next) playIncomingTone(); }}>{soundOn ? <IconBell /> : <IconBellOff />}</button>
       </header>
-      {permission === "default" && (
+      {pushCanRun && pushOn === false && permission !== "denied" ? (
+        <div className="chat-alert info" style={{ margin: "8px 12px 0" }} role="status">
+          <span>Get an alert when the studio replies, even after you close this page.</span>
+          <button type="button" className="chat-link-btn" onClick={turnOnPush}>Turn on alerts</button>
+        </div>
+      ) : !pushCanRun && permission === "default" ? (
         <div className="chat-alert info" style={{ margin: "8px 12px 0" }} role="status">
           <span>Get a desktop alert when the studio replies while this tab is in the background.</span>
           <button type="button" className="chat-link-btn" onClick={async () => setPermission(await requestNotificationPermission())}>Turn on alerts</button>
         </div>
-      )}
+      ) : null}
+      {pushNote && <div className="chat-alert error" style={{ margin: "8px 12px 0" }} role="alert"><span>{pushNote}</span><button type="button" onClick={() => setPushNote("")} aria-label="Dismiss"><IconClose size={14} /></button></div>}
       <div className="chat-body">
         <MessageList conversationKey="portal" messages={messages} outbox={pending} loading={loading} actions={actions} downloadBusyId={downloadBusy}
           notices={error ? <div className="chat-alert error" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="Dismiss"><IconClose size={14} /></button></div> : null}
