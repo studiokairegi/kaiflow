@@ -41,3 +41,6 @@ export const IconLink = make(<><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7
 export const IconCheck = make(<path d="m5 12.5 4.5 4.5L19 7.5" />);
 export const IconUserPlus = make(<><circle cx="9.5" cy="8.5" r="3.4" /><path d="M3.5 19.2c.5-3.4 3-5.2 6-5.2s5.5 1.8 6 5.2M18 8v6M15 11h6" /></>);
 export const IconDirect = make(<><path d="M4 5.5h16v10H12.5L8 19.5v-4H4v-10Z" /></>);
+
+export const IconBell = make(<><path d="M6 16.5V11a6 6 0 1 1 12 0v5.5l1.5 2h-15L6 16.5Z" /><path d="M10 21a2.2 2.2 0 0 0 4 0" /></>);
+export const IconBellOff = make(<><path d="M6 16.5V11c0-1 .2-1.900.6-2.700M9 5.600A6 6 0 0 1 18 11v5.500l1.500 2h-11" /><path d="M10 21a2.200 2.200 0 0 0 4 0M4 4l16 16" /></>);

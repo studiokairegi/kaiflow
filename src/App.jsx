@@ -14,7 +14,7 @@ import {
   DEFAULT_SETTINGS, DEFAULT_LEAD_CHANNELS, MILESTONE_DEFAULTS, DEFAULT_FOLLOWUP_SCHEDULE, DEFAULT_ARCHIVE_DAYS,
   settingsFromRow, settingsToRow,
 } from "./settings/schema.js";
-import { runtime, applyRuntimeSettings, categoryAllowed, playNotificationSound, desktopNotificationSilent, workdayTargetSeconds, isWorkday, reasonsFor, todayInZone } from "./settings/runtime.js";
+import { runtime, applyRuntimeSettings, categoryAllowed, playNotificationSound, playMessageTone, desktopNotificationSilent, workdayTargetSeconds, isWorkday, reasonsFor, todayInZone } from "./settings/runtime.js";
 import { emptyEmailSlots, normalizeEmailSlots, nextScheduledIndex, lastScheduledIndex, followupCountLabel, sendingTriggersNoResponse, visibleSlotCount, emailsSentSummary, isManualFollowupDue, manualFollowupState } from "./settings/followups.js";
 import { usePayments } from "./payments/usePayments.js";
 import { canAccessPayments, PAYMENTS_RESTRICTED_BODY, PAYMENTS_RESTRICTED_TITLE } from "./payments/access.js";
@@ -5577,6 +5577,7 @@ export default function ShotTracker() {
             initialMessageId={chatTargetMessageId}
             onConversationChange={handleChatConversationChange}
             onUnreadCountChange={setChatUnreadCount}
+            onIncomingMessage={() => { playMessageTone(); }}
             activeOrganizationId={activeStudioOrganizationId}
             onOrganizationChange={handleSwitchStudio}
             onClose={() => setChatOpen(false)}

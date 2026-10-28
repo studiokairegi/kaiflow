@@ -27,7 +27,7 @@ function ConversationAvatar({ item, className = "" }) {
 
 export default function ChatPage({
   userId, initialConversationId = null, initialMessageId = null, activeOrganizationId = "", theme = "dark",
-  onOrganizationChange = NOOP, onConversationChange = NOOP, onUnreadCountChange = NOOP, onClose = NOOP,
+  onOrganizationChange = NOOP, onConversationChange = NOOP, onUnreadCountChange = NOOP, onIncomingMessage = NOOP, onClose = NOOP,
 }) {
   useVisualViewport();
   const [memberships, setMemberships] = useState([]);
@@ -47,6 +47,7 @@ export default function ChatPage({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingWorkspace, setLoadingWorkspace] = useState(true);
+  const [toneBaselineReady, setToneBaselineReady] = useState(false); // true once conversations + portal threads have loaded
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
   const [notice, setNotice] = useState("");
@@ -111,6 +112,9 @@ export default function ChatPage({
   const subscriptionRef = useRef(null);
   const typingLastSentRef = useRef(0);
   const messagesRef = useRef(messages);
+  const toneStateRef = useRef({ unread: null, playedAt: 0, selected: null });
+  const incomingRef = useRef(onIncomingMessage);
+  incomingRef.current = onIncomingMessage;
   const textareaRef = useRef(null);
   const lastConversationRef = useRef(null);
   const pendingTargetRef = useRef(null);
@@ -144,6 +148,14 @@ export default function ChatPage({
   }, [organizationId]);
   useEffect(() => { loadMemberships(); }, [loadMemberships, userId]);
 
+  // One tone per burst: realtime and background polling can both notice the same message.
+  const playIncoming = useCallback(() => {
+    const now = Date.now();
+    if (now - toneStateRef.current.playedAt < 1200) return;
+    toneStateRef.current.playedAt = now;
+    incomingRef.current();
+  }, []);
+
   const refreshConversations = useCallback(async () => {
     if (!organizationId || !activeMembership || activeMembership.role === "client") return;
     try {
@@ -162,7 +174,7 @@ export default function ChatPage({
 
   const refreshWorkspace = useCallback(async () => {
     if (!organizationId || !activeMembership || activeMembership.role === "client") { setDirectory([]); setProjects([]); setDepartments([]); setConversations([]); setPortalThreads([]); return; }
-    setLoadingWorkspace(true); setLoadError("");
+    setLoadingWorkspace(true); setLoadError(""); setToneBaselineReady(false);
     try {
       const [people, depts, projs, convs, access] = await Promise.allSettled([
         chatApi.directory(organizationId), chatApi.departments(organizationId), chatApi.projectOptions(organizationId),
@@ -173,11 +185,13 @@ export default function ChatPage({
       if (projs.status === "fulfilled") setProjects(projs.value);
       if (convs.status === "fulfilled") setConversations(convs.value); else throw convs.reason;
       if (access.status === "fulfilled") setCaps({ createGroups: accessCanCreateGroups(access.value), viewDirectory: accessCanViewDirectory(access.value) });
-      refreshPortal();
+      await refreshPortal();
+      toneStateRef.current.unread = null; // the next effect pass records the baseline silently
+      setToneBaselineReady(true);
     } catch (error) { setLoadError(chatErrorText(error)); } finally { setLoadingWorkspace(false); }
   }, [organizationId, activeMembership, refreshPortal]);
   useEffect(() => { refreshWorkspace(); }, [refreshWorkspace]);
-  usePolling(refreshPortal, 30000, Boolean(organizationId) && !isClient);
+  usePolling(refreshPortal, 30000, Boolean(organizationId) && !isClient, { hidden: true });
 
   // ---- members, pins, messages ----
   const loadMembers = useCallback(async (conversationId = selectedId) => {
@@ -253,6 +267,7 @@ export default function ChatPage({
           const updated = await chatApi.messageById(row.id);
           if (!active || !updated) return;
           setMessages((cur) => mergeMessages(cur, [updated]));
+          if (payload?.eventType === "INSERT" && updated.sender_user_id !== userId) playIncoming();
           if (updated.sender_user_id !== userId) chatApi.markRead(selectedId, updated.id).then(refreshConversations).catch(() => {});
         } catch { /* the next durable refresh reconciles */ }
       },
@@ -280,7 +295,20 @@ export default function ChatPage({
       if (subscriptionRef.current === subscription) subscriptionRef.current = null;
       setRealtimeStatus("offline"); setTypingUsers({}); setOnlineCount(0);
     };
-  }, [selectedId, userId, activeMembership, isClient, currentDisplayName, loadMembers, refreshConversations]);
+  }, [selectedId, userId, activeMembership, isClient, currentDisplayName, loadMembers, refreshConversations, playIncoming]);
+
+  // Messages in conversations that are not open arrive via polling: a rise in unread plays the tone.
+  usePolling(refreshConversations, 20000, Boolean(organizationId) && !isClient, { hidden: true });
+  useEffect(() => {
+    const total = conversations.filter((c) => c.conversation_id !== selectedId).reduce((n, c) => n + Math.max(0, Number(c.unread_count) || 0), 0)
+      + portalThreads.reduce((n, t) => n + Math.max(0, Number(t.unread_count) || 0), 0);
+    if (!toneBaselineReady) return;
+    const previous = toneStateRef.current.unread;
+    const sameView = toneStateRef.current.selected === selectedId;
+    toneStateRef.current.unread = total;
+    toneStateRef.current.selected = selectedId;
+    if (sameView && previous !== null && total > previous) playIncoming(); // switching chats only moves the baseline
+  }, [conversations, portalThreads, selectedId, playIncoming, toneBaselineReady]);
 
   useEffect(() => {
     if (!Object.keys(typingUsers).length) return undefined;

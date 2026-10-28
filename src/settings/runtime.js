@@ -5,6 +5,7 @@
 // Rather than thread a prop through ~20 call sites, the settings page and the app
 // shell push the current values here and those helpers read them. This is the same
 // pattern the app already used for the notifications on/off flag.
+import { toneById, scheduleTone } from "./tones.js";
 import { DEFAULT_SETTINGS, DEFAULT_INVOICE_PREFIXES, DEFAULT_PLANNER_DEFAULTS, DEFAULT_WORKWEEK, DEFAULT_FOCUS_TIMER, DEFAULT_USER_PREFS, DEFAULT_FOLLOWUP_SCHEDULE, SOUNDS } from "./schema.js";
 
 const state = {
@@ -18,7 +19,7 @@ const state = {
   paymentTermsDays: 0,
   timezone: "",
   dateFormat: "",
-  notifications: { enabled: true, categories: DEFAULT_USER_PREFS.notifyCategories, sound: DEFAULT_USER_PREFS.sound },
+  notifications: { enabled: true, categories: DEFAULT_USER_PREFS.notifyCategories, sound: DEFAULT_USER_PREFS.sound, messageSound: DEFAULT_USER_PREFS.messageSound },
   outcomeReasons: DEFAULT_SETTINGS.outcomeReasons,
 };
 
@@ -36,7 +37,7 @@ export function applyRuntimeSettings(s) {
   state.timezone = s.timezone;
   state.dateFormat = s.dateFormat;
   state.outcomeReasons = s.outcomeReasons;
-  state.notifications = { enabled: s.notificationsEnabled !== false, categories: s.userPrefs.notifyCategories, sound: s.userPrefs.sound };
+  state.notifications = { enabled: s.notificationsEnabled !== false, categories: s.userPrefs.notifyCategories, sound: s.userPrefs.sound, messageSound: s.userPrefs.messageSound };
 }
 
 // --- dates ------------------------------------------------------------------
@@ -98,6 +99,7 @@ let audioPrimed = false;
 function primeNotificationAudio() {
   if (audioPrimed || typeof Audio === "undefined") return;
   audioPrimed = true;
+  try { const Ctor = window.AudioContext || window.webkitAudioContext; if (Ctor) { if (!toneContext) toneContext = new Ctor(); toneContext.resume?.(); } } catch { /* tones then stay blocked until a later gesture */ }
   for (const def of SOUNDS) {
     try {
       const a = audioCache[def.id] || (audioCache[def.id] = new Audio(def.src));
@@ -110,6 +112,24 @@ function primeNotificationAudio() {
 }
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
   for (const type of ["pointerdown", "keydown", "touchstart"]) window.addEventListener(type, primeNotificationAudio, { once: true, passive: true });
+}
+
+// Chat message tone. Separate from the notification chime so messages can have a familiar
+// messaging-app sound while everything else keeps its own. Never throws or rejects.
+let toneContext = null;
+export function playMessageTone(prefs = state.notifications.messageSound) {
+  if (!prefs || !prefs.enabled) return Promise.resolve("off");
+  const Ctor = typeof window !== "undefined" ? (window.AudioContext || window.webkitAudioContext) : null;
+  if (!Ctor) return Promise.resolve("blocked");
+  try {
+    if (!toneContext) toneContext = new Ctor();
+    const ctx = toneContext;
+    const run = () => { scheduleTone(ctx, toneById(prefs.id), prefs.volume); return "played"; };
+    if (ctx.state === "suspended") return ctx.resume().then(() => (ctx.state === "running" ? run() : "blocked"), () => "blocked");
+    return Promise.resolve(run());
+  } catch {
+    return Promise.resolve("blocked");
+  }
 }
 
 // The app's chime is the only sound, so the desktop notification is made silent, with one

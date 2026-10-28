@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, Tabs } from "../finance/ui.jsx";
 import { supabase } from "../supabaseClient";
 import { rpc, savePrivacy } from "../finance/api.js";
-import { playNotificationSound } from "./runtime.js";
+import { playNotificationSound, playMessageTone } from "./runtime.js";
+import { MESSAGE_TONES } from "./tones.js";
 import {
   validateSettings, errorTabs, dirtyTabs, followupScheduleFor, MAX_FOLLOWUPS, NOTIFICATION_CATEGORIES, SOUNDS,
   DATE_FORMATS, LANDING_TABS, SUPPORTED_CURRENCY_SYMBOLS, DEFAULT_LEAD_CHANNELS, DEFAULT_ARCHIVE_DAYS,
@@ -294,6 +295,7 @@ function AlertsTab({ form, set, periodOptions, onEnableNotifications, hiddenCoun
   const prefs = form.userPrefs;
   const setPrefs = (patch) => set({ userPrefs: { ...prefs, ...patch } });
   const snd = prefs.sound;
+  const msg = prefs.messageSound;
   return (
     <>
       <Section title="Desktop notifications">
@@ -321,6 +323,18 @@ function AlertsTab({ form, set, periodOptions, onEnableNotifications, hiddenCoun
           ))}
         </div>
         <Field label="Volume"><input type="range" min="0.1" max="1" step="0.1" value={snd.volume} disabled={!snd.enabled} onChange={(e) => setPrefs({ sound: { ...snd, volume: Number(e.target.value) } })} style={{ maxWidth: 240 }} /></Field>
+      </Section>
+      <Section title="Message tone" hint="Plays when a chat message arrives from someone else, while a Kairil tab is open. Separate from the notification sound above.">
+        <Switch checked={msg.enabled} onChange={(v) => setPrefs({ messageSound: { ...msg, enabled: v } })} label="Play a tone for new messages" />
+        <div style={{ ...S.row, opacity: msg.enabled ? 1 : 0.5 }}>
+          {MESSAGE_TONES.map((t) => (
+            <label key={t.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13.5, border: `1px solid ${msg.id === t.id ? T.accent : T.border}`, borderRadius: 8, padding: "6px 12px" }}>
+              <input type="radio" name="msgtone" disabled={!msg.enabled} checked={msg.id === t.id} onChange={() => { setPrefs({ messageSound: { ...msg, id: t.id } }); playMessageTone({ ...msg, enabled: true, id: t.id }); }} />{t.label}
+              <Btn small kind="link" disabled={!msg.enabled} onClick={() => playMessageTone({ ...msg, enabled: true, id: t.id })}>Preview</Btn>
+            </label>
+          ))}
+        </div>
+        <Field label="Volume"><input type="range" min="0.1" max="1" step="0.1" value={msg.volume} disabled={!msg.enabled} onChange={(e) => setPrefs({ messageSound: { ...msg, volume: Number(e.target.value) } })} style={{ maxWidth: 240 }} /></Field>
       </Section>
       <Section title="Dashboard">
         <Field label="Default period" hint="The period the dashboard's outreach card opens with."><select style={{ ...S.input, maxWidth: 240 }} value={prefs.dashboardPeriod} onChange={(e) => setPrefs({ dashboardPeriod: e.target.value })}>{periodOptions.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}</select></Field>

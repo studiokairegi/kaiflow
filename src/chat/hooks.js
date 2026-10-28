@@ -50,15 +50,16 @@ export function useOutbox({ send, onSent, errorText }) {
 }
 
 // Poll while the tab is visible and the surface is mounted. Used by the portal chats (no realtime).
-export function usePolling(callback, intervalMs, enabled = true) {
+// `hidden: true` keeps polling while the tab is in the background so notifications still arrive.
+export function usePolling(callback, intervalMs, enabled = true, { hidden = false } = {}) {
   const ref = useRef(callback); ref.current = callback;
   useEffect(() => {
     if (!enabled) return undefined;
-    const tick = () => { if (document.visibilityState === "visible") ref.current(); };
+    const tick = () => { if (hidden || document.visibilityState === "visible") ref.current(); };
     const timer = window.setInterval(tick, intervalMs);
     document.addEventListener("visibilitychange", tick);
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", tick); };
-  }, [intervalMs, enabled]);
+  }, [intervalMs, enabled, hidden]);
 }
 
 export function initials(name) {

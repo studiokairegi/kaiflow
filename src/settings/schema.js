@@ -57,10 +57,13 @@ export const SOUNDS = [
   { id: "water", label: "Water droplet", src: "/sounds/water-drop.mp3" },
 ];
 
+import { DEFAULT_MESSAGE_SOUND } from "./tones.js";
+
 export const DEFAULT_USER_PREFS = {
   dashboardPeriod: "all",
   notifyCategories: { followups: true, hotLeads: true, proposals: true, deadlines: true, focus: true, freelancerUploads: true, cutReview: true },
   sound: { enabled: false, id: "glass", volume: 0.6 },
+  messageSound: { ...DEFAULT_MESSAGE_SOUND },
   focusTimer: DEFAULT_FOCUS_TIMER,
 };
 
@@ -156,6 +159,7 @@ function mergePrefs(raw) {
     dashboardPeriod: typeof p.dashboardPeriod === "string" ? p.dashboardPeriod : DEFAULT_USER_PREFS.dashboardPeriod,
     notifyCategories: { ...DEFAULT_USER_PREFS.notifyCategories, ...(isObj(p.notifyCategories) ? p.notifyCategories : {}) },
     sound: { ...DEFAULT_USER_PREFS.sound, ...(isObj(p.sound) ? p.sound : {}) },
+    messageSound: { ...DEFAULT_USER_PREFS.messageSound, ...(isObj(p.messageSound) ? p.messageSound : {}) },
     focusTimer: { ...DEFAULT_FOCUS_TIMER, ...(isObj(p.focusTimer) ? p.focusTimer : {}) },
   };
 }
