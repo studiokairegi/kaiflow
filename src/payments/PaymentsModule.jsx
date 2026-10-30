@@ -20,9 +20,18 @@ const money = (c, n, priv) => (priv ? "••••" : formatMoney(c, n));
 const StatusPill = ({ map, status }) => <Pill tone={map[status]?.tone || "muted"}>{map[status]?.label || status}</Pill>;
 
 // Headline figure as a dashboard-style gradient card.
-function Kpi({ label, totals, privacy, sub, tone, card = "sky", icon = "card" }) {
+function Kpi({ label, totals, privacy, sub, tone, card = "sky", icon = "card", flat = false }) {
   const t = CARD_TONES[card] || CARD_TONES.sky;
   const value = typeof totals === "number" ? (privacy ? "\u2022\u2022\u2022" : totals) : <Totals totals={totals} privacy={privacy} />;
+  if (flat) {
+    return (
+      <div style={{ ...S.card, gap: 4, borderLeft: `3px solid ${tone === "bad" ? T.bad : t.icon}` }}>
+        <span style={S.sub}>{label}</span>
+        <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, letterSpacing: "-0.01em", fontVariantNumeric: "tabular-nums" }}>{value}</span>
+        {sub ? <span style={S.sub}>{sub}</span> : null}
+      </div>
+    );
+  }
   return <ActivityCard gradient={t.gradient} iconColor={t.icon} icon={icon} title={label} badge={tone === "bad" ? "ACTION" : undefined} value={value} label={sub || ""} />;
 }
 
@@ -41,22 +50,24 @@ function Overview({ ctx }) {
   const activity = recentActivity(data);
   return (
     <>
-      <div style={S.grid(200)}>
+      <div style={S.grid(260)}>
         <Kpi card="mint" icon="wallet" label="Client payments received" totals={s.receivedGross} privacy={privacy} sub={"Verified KairFlow payments"} />
-        <Kpi card="sky" icon="clock" label="Received today" totals={s.receivedToday} privacy={privacy} />
-        <Kpi card="violet" icon="percent" label="Transaction fees (actual)" totals={s.fees} privacy={privacy} sub="As reported by Paystack" />
         <Kpi card="royal" icon="trend" label="Net after fees" totals={s.net} privacy={privacy} sub="Gross minus actual fees" />
-        <Kpi card="violet" icon="undo" label="Refunds" totals={s.refunds} privacy={privacy} />
         <Kpi card="sky" icon="invoice" label="Outstanding client invoices" totals={s.outstandingInvoices} privacy={privacy} sub={`${s.outstandingInvoiceCount} open`} />
+      </div>
+      <div style={{ ...S.grid(200), marginTop: 12 }}>
+        <Kpi card="sky" icon="clock" label="Received today" flat totals={s.receivedToday} privacy={privacy} />
+        <Kpi card="violet" icon="percent" label="Transaction fees (actual)" flat totals={s.fees} privacy={privacy} sub="As reported by Paystack" />
+        <Kpi card="violet" icon="undo" label="Refunds" flat totals={s.refunds} privacy={privacy} />
       </div>
       <div style={S.card}>
         <div style={{ ...S.row, justifyContent: "space-between", marginBottom: 12 }}><div><h3 style={S.h3}>Paystack Live gateway</h3><p style={S.sub}>Direct provider data. This is separate from KairFlow’s accounting ledger.</p></div><Pill tone={gateway?.available ? "ok" : "bad"}>{gateway?.available ? "Synced" : "Unavailable"}</Pill></div>
         {!gateway?.available ? <Banner tone="bad">Paystack live data is unavailable{gateway?.error ? `: ${gateway.error}` : "."} No stale or hardcoded gateway values are shown.</Banner> : <div style={S.grid(210)}>
-          <Kpi card="royal" icon="wallet" label="Available balance" totals={Object.fromEntries((gateway.balance?.balances || []).map((b) => [b.currency, b.balance]))} privacy={privacy} sub="Reported by Paystack" />
-          <Kpi card="sky" icon="trend" label="Live transaction volume" totals={Object.fromEntries(liveVolume.map((x) => [x.currency, x.amount]))} privacy={privacy} sub={`${gateway.totals?.totalTransactions || 0} transactions`} />
-          <Kpi card="violet" icon="percent" label="Actual gateway fees" totals={feeByCurrency} privacy={privacy} sub="From Paystack transaction records" />
-          <Kpi card="mint" icon="clock" label="Pending settlement" totals={pendingSettlement} privacy={privacy} sub="Pending / processing settlements" />
-          <Kpi card="violet" icon="undo" label="Processed refunds" totals={refundByCurrency} privacy={privacy} sub="From Paystack refund records" />
+          <Kpi card="royal" icon="wallet" label="Available balance" flat totals={Object.fromEntries((gateway.balance?.balances || []).map((b) => [b.currency, b.balance]))} privacy={privacy} sub="Reported by Paystack" />
+          <Kpi card="sky" icon="trend" label="Live transaction volume" flat totals={Object.fromEntries(liveVolume.map((x) => [x.currency, x.amount]))} privacy={privacy} sub={`${gateway.totals?.totalTransactions || 0} transactions`} />
+          <Kpi card="violet" icon="percent" label="Actual gateway fees" flat totals={feeByCurrency} privacy={privacy} sub="From Paystack transaction records" />
+          <Kpi card="mint" icon="clock" label="Pending settlement" flat totals={pendingSettlement} privacy={privacy} sub="Pending / processing settlements" />
+          <Kpi card="violet" icon="undo" label="Processed refunds" flat totals={refundByCurrency} privacy={privacy} sub="From Paystack refund records" />
         </div>}
         {gateway?.fetchedAt && <p style={{ ...S.sub, marginTop: 12 }}>Last synchronized {fmtDateTime(gateway.fetchedAt)} · Paystack Live API.</p>}
         {gateway?.available && <div style={{ marginTop: 18 }}>
@@ -71,12 +82,12 @@ function Overview({ ctx }) {
           ]} />
         </div>}
       </div>
-      <div style={S.grid(200)}>
-        <Kpi card="sky" icon="clock" label="Pending / successful" totals={`${s.counts.pending} / ${s.counts.successful}`} privacy={false} sub={`${s.counts.failed} failed or abandoned · ${s.counts.refunded} refunded`} />
-        <Kpi card="violet" icon="users" label="Owed to freelancers" totals={s.freelancerOwed} privacy={privacy} sub="Outstanding bills in Finance" />
-        <Kpi card="royal" icon="send" label="Approved, awaiting payment" totals={s.approvedPayoutsAwaiting} privacy={privacy} sub={`${formatTotalsByCurrency(s.pendingApprovalPayouts)} pending approval`} />
-        <Kpi card="mint" icon="zap" label="Freelancer payouts simulated" totals={s.simulatedPaid} privacy={privacy} sub={SIMULATED_NOTICE} />
-        <Kpi card="royal" icon="alert" label="Unreconciled" totals={s.unreconciledCount + s.unreconciledPayoutCount} privacy={false} sub="Payments + simulated payouts" tone={s.unreconciledCount ? "bad" : undefined} />
+      <div style={{ ...S.grid(200), marginTop: 12 }}>
+        <Kpi card="sky" icon="clock" label="Pending / successful" flat totals={`${s.counts.pending} / ${s.counts.successful}`} privacy={false} sub={`${s.counts.failed} failed or abandoned · ${s.counts.refunded} refunded`} />
+        <Kpi card="violet" icon="users" label="Owed to freelancers" flat totals={s.freelancerOwed} privacy={privacy} sub="Outstanding bills in Finance" />
+        <Kpi card="royal" icon="send" label="Approved, awaiting payment" flat totals={s.approvedPayoutsAwaiting} privacy={privacy} sub={`${formatTotalsByCurrency(s.pendingApprovalPayouts)} pending approval`} />
+        <Kpi card="mint" icon="zap" label="Freelancer payouts simulated" flat totals={s.simulatedPaid} privacy={privacy} sub={SIMULATED_NOTICE} />
+        <Kpi card="royal" icon="alert" label="Unreconciled" flat totals={s.unreconciledCount + s.unreconciledPayoutCount} privacy={false} sub="Payments + simulated payouts" tone={s.unreconciledCount ? "bad" : undefined} />
       </div>
       <div style={S.card}>
         <div style={{ ...S.row, justifyContent: "space-between" }}><h3 style={S.h3}>Recent payment activity</h3><Btn small kind="link" onClick={() => setTab("transactions")}>All transactions</Btn></div>
@@ -399,9 +410,9 @@ export default function PaymentsModule({ userId, projects, invoices, teamMembers
   const ctx = { data: viewData, summary, privacy, invoices, projects, teamMembers, cards, reload: async () => { await reload(); }, refreshApp, onOpenProject, onGoFinance, onGoTeams, setTab };
   return (
     <div style={S.page}>
-      <div style={{ ...S.card, marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
-        <div><strong style={{ color: T.text }}>Paystack Live</strong><div style={S.sub}>Production payment data only. Historical sandbox records remain auditable but are excluded from these totals.</div></div>
-        <Pill tone="ok">LIVE · REAL PAYMENTS</Pill>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "14px 0 10px" }}>
+        <Pill tone="ok">Live</Pill>
+        <span style={S.sub}><strong style={{ color: T.text, fontWeight: 600 }}>Paystack</strong> · real payments only. Sandbox history stays auditable but is excluded from totals.</span>
       </div>
       <div style={{ ...S.row, justifyContent: "space-between" }}>
         <Tabs value={tab} onChange={setTab} tabs={TABS.map(([id, label]) => ({ id, label, badge: id === "reconciliation" && attention ? `• ${attention}` : "" }))} />

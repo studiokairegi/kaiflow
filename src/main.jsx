@@ -1,5 +1,6 @@
 import React from "react";
 import "./responsive.css";
+import "./refine.css";
 import ReactDOM from "react-dom/client";
 import App from "./App.jsx";
 import { ClientPortalView, FreelancerView } from "./SharedViews.jsx";

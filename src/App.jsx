@@ -206,10 +206,16 @@ function isToday(dateStr, now = new Date()) {
 }
 
 const LEAD_PRIORITIES = [
-  { id: "hot", label: "Hot", icon: "\u{1F525}" },
-  { id: "warm", label: "Warm", icon: "\u{1F7E1}" },
-  { id: "cold", label: "Cold", icon: "\u26AA" },
+  { id: "hot", label: "Hot", color: "#FF6B6B" },
+  { id: "warm", label: "Warm", color: "#F2A65A" },
+  { id: "cold", label: "Cold", color: "#7C93A6" },
 ];
+
+// A small coloured marker instead of an emoji; the label always sits next to it, so colour is never the only cue.
+function PriorityMark({ meta, tight }) {
+  if (!meta) return null;
+  return <span aria-hidden="true" style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: meta.color, marginRight: tight ? 0 : 7, flexShrink: 0, verticalAlign: "middle" }} />;
+}
 
 
 
@@ -5661,17 +5667,7 @@ export default function ShotTracker() {
                 ? selectedProject?.name || "Project"
                 : view === "settings"
                 ? "Settings"
-                : workspace === "leads"
-                ? "Leads"
-                : workspace === "dashboard"
-                ? "Dashboard"
-                : workspace === "finance"
-                ? "Finance"
-                : workspace === "payments"
-                ? "Payments"
-                : workspace === "teams"
-                ? "Teams"
-                : "Kairil"}
+                : settings.studioName || "Kairil"}
             </h1>
             <p style={styles.subtitle}>
               {view === "board"
@@ -5720,7 +5716,7 @@ export default function ShotTracker() {
           </button>
           {view === "settings" ? null : view === "board" && boardTab === "invoices" ? (
             <button
-              style={styles.newButton}
+              className="kf-header-primary" style={styles.newButton}
               onClick={() =>
                 setEditingInvoice(
                   emptyInvoice(
@@ -5736,7 +5732,7 @@ export default function ShotTracker() {
             </button>
           ) : view === "board" && boardTab === "activity" ? null : view === "board" && studioAccess?.is_member === true && studioAccess.role !== "master_user" && Number(studioAccess.editable_project_count || 0) === 0 ? null : view === "board" ? (
             <button
-              style={styles.newButton}
+              className="kf-header-primary" style={styles.newButton}
               onClick={() =>
                 setEditingCard(
                   emptyCard(
@@ -5751,24 +5747,24 @@ export default function ShotTracker() {
               New shot
             </button>
           ) : workspace === "leads" && (studioAccess === null || (studioAccess?.is_member === true && (studioAccess.role === "master_user" || studioAccess.department_permission_keys?.includes("crm.write")))) ? (
-            <button style={styles.newButton} onClick={() => setEditingLead(emptyLead())}>
+            <button className="kf-header-primary" style={styles.newButton} onClick={() => setEditingLead(emptyLead())}>
               <PlusIcon />
               New lead
             </button>
           ) : workspace === "leads" ? null : workspace === "finance" && (!studioAccess?.is_member || studioAccess.role === "master_user") ? (
-            <button style={styles.newButton} onClick={() => setEditingExpense(emptyExpense())}>
+            <button className="kf-header-primary" style={styles.newButton} onClick={() => setEditingExpense(emptyExpense())}>
               <PlusIcon />
               New expense
             </button>
           ) : workspace === "teams" && (studioAccess === null || (studioAccess?.is_member === true && studioAccess.role === "master_user")) ? (
-            <button style={styles.newButton} onClick={() => setEditingTeamMember(emptyTeamMember())}>
+            <button className="kf-header-primary" style={styles.newButton} onClick={() => setEditingTeamMember(emptyTeamMember())}>
               <PlusIcon />
               New member
             </button>
           ) : workspace === "teams" ? null : workspace === "planner" && !editingBudgetPlanner ? (
             <>
               <button
-                style={styles.newButton}
+                className="kf-header-primary" style={styles.newButton}
                 onClick={() => setEditingBudgetPlanner(emptyBudgetPlanner({ currency: settings.currencySymbol }))}
                 disabled={atBudgetPlannerLimit}
                 title={
@@ -5826,7 +5822,7 @@ export default function ShotTracker() {
             </button>
           ) : workspace === "dashboard" || workspace === "payments" ? null : (
             <button
-              style={styles.newButton}
+              className="kf-header-primary" style={styles.newButton}
               onClick={() => setEditingProject(emptyProject({ currency: settings.currencySymbol }))}
               disabled={atProjectLimit}
               title={atProjectLimit ? `Free plan is limited to ${FREE_PROJECT_LIMIT} active projects. Archive one or upgrade to Pro.` : undefined}
@@ -5904,11 +5900,11 @@ export default function ShotTracker() {
               type="button"
               aria-disabled="true"
               title="Coming Soon"
-              style={{ ...styles.tabButton, opacity: 0.5, cursor: "not-allowed", display: "inline-flex", flexDirection: "column", alignItems: "center", lineHeight: 1.15 }}
+              style={{ ...styles.tabButton, opacity: 0.5, cursor: "not-allowed", display: "inline-flex", alignItems: "center", gap: 8 }}
               onClick={() => setShowPaymentsLocked(true)}
             >
-              <span>{"\uD83D\uDD12"} Payments</span>
-              <span style={{ fontSize: 10, letterSpacing: "0.04em" }}>Coming Soon</span>
+              <span>Payments</span>
+              <span style={{ fontSize: 10, fontWeight: 600, padding: "1px 7px", borderRadius: 99, border: "1px solid currentColor" }}>Soon</span>
             </button>
           ))}
         </div>
@@ -6065,7 +6061,7 @@ export default function ShotTracker() {
       )}
 
       {view === "projects" && workspace === "leads" && (
-        <div style={{ display: "flex", gap: 8, marginBottom: 12 }} role="tablist" aria-label="CRM sections">
+        <div className="kf-secondary-tabs" style={styles.subTabRow} role="tablist" aria-label="CRM sections">
           {[["pipeline", "Pipeline"], ["contacts", "Contacts"], ["portfolio", "Portfolio"]].map(([id, label]) => (
             <button
               key={id}
@@ -6099,7 +6095,7 @@ export default function ShotTracker() {
       {view === "projects" && workspace === "leads" && crmTab === "portfolio" && <PortfolioTab driveEmail={driveEmail} onConnectDrive={handleConnectDrive} />}
 
       {view === "projects" && workspace === "leads" && crmTab === "pipeline" && (
-        <>
+        <div className="kf-page-gutter">
           <div className="kf-field-row" style={styles.fieldRow}>
             <input
               style={styles.input}
@@ -6184,7 +6180,7 @@ export default function ShotTracker() {
                 }}
                 onClick={() => setLeadPriorityFilter(p.id)}
               >
-                {p.icon} {p.label}
+                <PriorityMark meta={p} tight />{p.label}
               </button>
             ))}
             <span style={{ width: 1, background: border, margin: "0 4px" }} />
@@ -6272,7 +6268,7 @@ export default function ShotTracker() {
                           >
                             <div style={styles.cardTop}>
                               <span style={styles.cardTitle}>
-                                {priorityMeta ? `${priorityMeta.icon} ` : ""}
+                                <PriorityMark meta={priorityMeta} />
                                 {lead.companyName || "Untitled lead"}
                               </span>
                             </div>
@@ -6304,7 +6300,7 @@ export default function ShotTracker() {
               })}
             </div>
           )}
-        </>
+        </div>
       )}
 
       {view === "projects" && workspace === "finance" && (
@@ -6912,6 +6908,7 @@ function ProjectCard({
 }) {
   const projectCards = cards.filter((c) => c.projectId === project.id);
   const { delivered, percent } = projectProgressFor(project, projectCards);
+  const overdue = Boolean(project.deadline) && !archived && percent !== 100 && String(project.deadline).slice(0, 10) < todayInZone();
   const drive = useDriveFolderAction({
     project,
     driveEmail,
@@ -6927,7 +6924,14 @@ function ProjectCard({
       onClick={() => onOpen(project.id)}
     >
       <div style={styles.projectCardTop}>
-        <div style={styles.projectIconMark}><FolderIcon /></div>
+        <div style={styles.projectCardMeta}>
+          {project.priority === "rush" && <span style={{ ...styles.cardTag, color: PRIORITY_COLORS.rush, background: "rgba(242,166,90,0.12)" }}>Rush</span>}
+          {project.deadline && (
+            <span style={{ fontSize: 12, color: overdue ? "#FF6B6B" : textMuted, fontWeight: overdue ? 600 : 400, whiteSpace: "nowrap" }}>
+              {overdue ? "Overdue" : "Due"} {formatShortDate(project.deadline)}
+            </span>
+          )}
+        </div>
         <div style={styles.projectCardActions}>
           <button
             style={{
@@ -6942,7 +6946,7 @@ function ProjectCard({
           >
             {drive.creatingFolders ? <SpinnerIcon /> : <FolderIcon />}
           </button>
-          <button type="button" style={{ ...styles.addRevisionButton, marginLeft: 4 }} onClick={(e) => { e.stopPropagation(); drive.syncFolders(); }} disabled={drive.creatingFolders} title="Sync Google Drive folders">{drive.creatingFolders ? "Syncing..." : "Sync"}</button>
+          <button type="button" style={{ ...styles.addRevisionButton, marginLeft: 2, padding: "4px 9px", fontSize: 12 }} onClick={(e) => { e.stopPropagation(); drive.syncFolders(); }} disabled={drive.creatingFolders} title="Sync Google Drive folders">{drive.creatingFolders ? "Syncing..." : "Sync"}</button>
           <button
             style={styles.iconButton}
             onClick={(e) => {
@@ -7100,7 +7104,7 @@ function TeamsPanel({ userId, teamMembers, cards, projects, settings, onEdit, on
           aria-label="Search team members"
         />
         <div style={{ position: "relative" }}>
-          <button type="button" style={styles.tabButton} onClick={() => setShowFilters((v) => !v)}>
+          <button type="button" style={styles.secondaryButton} onClick={() => setShowFilters((v) => !v)}>
             Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
           </button>
           {showFilters && (
@@ -7135,7 +7139,7 @@ function TeamsPanel({ userId, teamMembers, cards, projects, settings, onEdit, on
               {activeFilterCount > 0 && (
                 <button
                   type="button"
-                  style={styles.tabButton}
+                  style={styles.secondaryButton}
                   onClick={() => setFilters({ department: "", role: "", availability: "", memberType: "", skill: "" })}
                 >
                   Clear filters
@@ -7148,7 +7152,7 @@ function TeamsPanel({ userId, teamMembers, cards, projects, settings, onEdit, on
           <option value="none">All members</option>
           <option value="department">Group by department</option>
         </select>
-        {teamAccess.canManage && <button type="button" style={styles.tabButton} onClick={() => setShowDepartments(true)}>Departments</button>}
+        {teamAccess.canManage && <button type="button" style={styles.secondaryButton} onClick={() => setShowDepartments(true)}>Departments</button>}
       </div>
       {archivedCount > 0 && (
         <label style={{ ...styles.fieldHint, display: "flex", alignItems: "center", gap: 6, marginBottom: 8, cursor: "pointer" }}>
@@ -7164,7 +7168,7 @@ function TeamsPanel({ userId, teamMembers, cards, projects, settings, onEdit, on
         <div style={{ marginBottom: 12 }}>
           <button
             type="button"
-            style={styles.tabButton}
+            style={styles.secondaryButton}
             onClick={() => setShowLegacyReview((v) => !v)}
           >
             {showLegacyReview ? "Hide" : "Review"} legacy assignments ({legacyReviewCount})
@@ -7186,7 +7190,7 @@ function TeamsPanel({ userId, teamMembers, cards, projects, settings, onEdit, on
               return acc;
             }, [])
           : [{ key: null, members: orderedMembers }];
-        const tileGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: 10 };
+        const tileGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 };
         const renderTile = (member) => {
           const { shots, pendingByCurrency, paidByCurrency } = computeMemberShots(member, cards, projects, teamMembers);
           const dependability = dependabilityTier(member.dependabilityScore ?? 80);
@@ -7210,7 +7214,7 @@ function TeamsPanel({ userId, teamMembers, cards, projects, settings, onEdit, on
               } : undefined}
             >
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                <span style={{ ...styles.invoiceNumber, ...ellipsis }} title={disambiguatedMemberLabel(member, duplicateNames)}>
+                <span style={{ fontSize: 14, fontWeight: 600, ...ellipsis }} title={disambiguatedMemberLabel(member, duplicateNames)}>
                   {disambiguatedMemberLabel(member, duplicateNames)}
                 </span>
                 <span
@@ -7258,7 +7262,7 @@ function TeamsPanel({ userId, teamMembers, cards, projects, settings, onEdit, on
             {groups.map((g, gi) => (
               <div key={g.key ?? "all"} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {g.key !== null && (
-                  <div style={{ ...styles.fieldDivider, marginTop: gi === 0 ? 0 : 4 }}>{g.key} ({g.members.length})</div>
+                  <div className="kf-group-heading" style={{ ...styles.fieldDivider, marginTop: gi === 0 ? 0 : 4 }}><span>{g.key}</span><span className="kf-group-count">{g.members.length}</span></div>
                 )}
                 <div style={tileGrid}>{g.members.map(renderTile)}</div>
               </div>
@@ -7313,7 +7317,7 @@ function LegacyAssignmentReview({ matches, onLink }) {
               {matches.unique.length} shot{matches.unique.length === 1 ? "" : "s"} match exactly one roster member by
               name &mdash; safe to link.
             </p>
-            <button type="button" style={styles.tabButton} disabled={linkingAll} onClick={linkAllUnique}>
+            <button type="button" style={styles.secondaryButton} disabled={linkingAll} onClick={linkAllUnique}>
               {linkingAll ? "Linking..." : "Link all"}
             </button>
           </div>
@@ -7325,7 +7329,7 @@ function LegacyAssignmentReview({ matches, onLink }) {
               </span>
               <button
                 type="button"
-                style={styles.tabButton}
+                style={styles.secondaryButton}
                 disabled={linking === card.id}
                 onClick={() => link(card.id, member.id)}
               >
@@ -7361,7 +7365,7 @@ function LegacyAssignmentReview({ matches, onLink }) {
               </select>
               <button
                 type="button"
-                style={styles.tabButton}
+                style={styles.secondaryButton}
                 disabled={!picks[card.id] || linking === card.id}
                 onClick={() => link(card.id, picks[card.id])}
               >
@@ -7427,7 +7431,7 @@ function PlannerDashboard({ plans, settings, onOpen, onNew, atLimit, hasProAcces
         </div>
       </div>
 
-      <div style={styles.dashboardGrid}>
+      <div className="kf-planner-stats" style={styles.dashboardGrid}>
         <PlannerStatCard label="Total planned" value={`${cur}${formatMoney(analytics.totalPlannedValue)}`} />
         <PlannerStatCard label="Avg. production budget" value={`${cur}${formatMoney(analytics.averageProductionCost)}`} />
         <PlannerStatCard label="Avg. target profit" value={`${analytics.averageMargin.toFixed(1)}%`} />
@@ -7458,7 +7462,7 @@ function PlannerDashboard({ plans, settings, onOpen, onNew, atLimit, hasProAcces
         <div style={{ flex: 1 }} />
         <button
           type="button"
-          style={styles.tabButton}
+          style={styles.secondaryButton}
           disabled={atLimit}
           onClick={() => setShowTemplatePicker((v) => !v)}
         >
@@ -7876,7 +7880,7 @@ function DashboardGreeting({ user, compact = false }) {
     return (
       <div style={styles.dashboardGreetingCompact}>
         <span style={styles.dashboardGreetingCompactTitle}>
-          {greeting}{name ? `, ${name}` : ""} <span aria-hidden="true">👋</span>
+          {greeting}{name ? `, ${name}` : ""}
         </span>
         <span style={styles.dashboardGreetingCompactDate}>{dateLabel}</span>
       </div>
@@ -7890,9 +7894,7 @@ function DashboardGreeting({ user, compact = false }) {
           {greeting}
           {name ? `, ${name}` : ""}
         </span>
-        <span aria-hidden="true">👋</span>
       </h2>
-      <p style={styles.fieldHint}>Ready to get some work done?</p>
     </div>
   );
 }
@@ -8189,7 +8191,7 @@ function StudioTimeSummaryModal({ userId, onClose }) {
   }));
 
   return (
-    <div className="kf-modal-overlay" style={styles.overlay} onClick={onClose}>
+    <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay} onClick={onClose}>
       <div className="kf-modal" style={{ ...styles.modal, maxWidth: 600, gap: 18 }} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <h3 style={styles.modalTitle}>Studio Time Summary</h3>
@@ -9382,7 +9384,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   const qualifiedRate = coldEmailsSentTotal > 0 ? (qualifiedTotal / coldEmailsSentTotal) * 100 : 0;
 
   return (
-    <div style={styles.dashboardShell}>
+    <div className="kf-dash-shell" style={styles.dashboardShell}>
       <div style={styles.dashboardTopStrip}>
         <DashboardGreeting user={user} compact />
         {fin.data && <PrivacyToggle privacy={fin.privacy} onChange={fin.setPrivacy} compact />}
@@ -9588,7 +9590,7 @@ function SupportModal({ email, onSubmit, onCancel }) {
   };
 
   return (
-    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+    <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay} onClick={onCancel}>
       <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{sent ? "Message sent" : "Report a problem"}</span>
@@ -9646,7 +9648,7 @@ function TutorialModal({ onComplete, onStepChange }) {
   }, [step]);
 
   return (
-    <div className="kf-modal-overlay" style={styles.overlay}>
+    <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay}>
       <div className="kf-modal" style={{ ...styles.modal, maxWidth: 440 }} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{current.title}</span>
@@ -10060,7 +10062,7 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
   };
 
   return (
-    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+    <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay} onClick={onCancel}>
       <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{isNew ? "New project" : "Edit project"}</span>
@@ -10631,7 +10633,7 @@ function PipelineMigrationDialog({ project, projectCards, pipelineLibrary, onCan
   };
 
   return (
-    <div className="kf-modal-overlay" style={{ ...styles.overlay, zIndex: 60 }} onClick={onCancel}>
+    <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={{ ...styles.overlay, zIndex: 60 }} onClick={onCancel}>
       <div className="kf-modal" style={{ ...styles.modal, maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>Move to the new pipeline</span>
@@ -10918,7 +10920,7 @@ function LeadEditor({
   const stageMeta = ALL_LEAD_STAGES.find((s) => s.id === form.stage);
 
   return (
-    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+    <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay} onClick={onCancel}>
       <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>
@@ -10950,7 +10952,7 @@ function LeadEditor({
           <>
             <div style={styles.badgeRow}>
               <span style={styles.cardTag}>
-                {priorityMeta.icon} {priorityMeta.label}
+                <PriorityMark meta={priorityMeta} />{priorityMeta.label}
               </span>
               <span style={styles.cardTag}>{stageMeta ? stageMeta.label : form.stage}</span>
               {form.channel && <span style={styles.cardTag}>{form.channel}</span>}
@@ -11116,7 +11118,7 @@ function LeadEditor({
                 <label style={styles.label}>Email</label>
                 <div style={{ ...styles.fileNameRow, gap: 6 }}>
                   <input
-                    style={styles.input}
+                    style={{ ...styles.input, flex: 1, minWidth: 0 }}
                     value={form.email}
                     onChange={set("email")}
                     placeholder="jamie@studio.com"
@@ -11201,7 +11203,7 @@ function LeadEditor({
                       }}
                       onClick={() => setForm({ ...form, priority: p.id })}
                     >
-                      {p.icon} {p.label}
+                      <PriorityMark meta={p} tight />{p.label}
                     </button>
                   ))}
                 </div>
@@ -11660,7 +11662,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
   };
 
   return (
-    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+    <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay} onClick={onCancel}>
       <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{isNew ? "New shot" : "Edit shot"}</span>
@@ -12004,7 +12006,7 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
 
   return (
-    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+    <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay} onClick={onCancel}>
       <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{isNew ? "New expense" : "Edit expense"}</span>
@@ -12296,7 +12298,7 @@ function PlannerPersonCard({ person, cur, onChange, onRemove, teamMembers }) {
               {showStale && staleness.diffs.map((d) => (
                 <div key={d.field} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <span style={styles.fieldHint}>{`${d.label}: plan has "${String(person[d.field] ?? "")}", roster now says "${String(d.newValue)}"`}</span>
-                  <button type="button" style={styles.tabButton} onClick={() => onChange(d.field, d.newValue)}>Use roster value</button>
+                  <button type="button" style={styles.secondaryButton} onClick={() => onChange(d.field, d.newValue)}>Use roster value</button>
                 </div>
               ))}
             </div>
@@ -12439,7 +12441,7 @@ function PlannerWorkspace({
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                   <input style={{ ...styles.input, width: 90 }} inputMode="decimal" value={form.contingencyPercent} onChange={set("contingencyPercent")} />
                   {Number(form.contingencyPercent) !== summary.recommendedReservePercent && (
-                    <button type="button" style={styles.tabButton} onClick={() => setForm({ ...form, contingencyPercent: summary.recommendedReservePercent })}>
+                    <button type="button" style={styles.secondaryButton} onClick={() => setForm({ ...form, contingencyPercent: summary.recommendedReservePercent })}>
                       {`Use ${summary.recommendedReservePercent}%`}
                     </button>
                   )}
@@ -12543,7 +12545,7 @@ function PlannerWorkspace({
               <span aria-hidden="true" style={{ display: "inline-block", width: 10 }}>{editSplit ? "\u25BE" : "\u25B8"}</span>
               {editSplit ? "Done adjusting" : "Adjust split"}
             </button>
-            {editSplit && <button type="button" style={styles.tabButton} onClick={resetSplit}>Reset to recommended</button>}
+            {editSplit && <button type="button" style={styles.secondaryButton} onClick={resetSplit}>Reset to recommended</button>}
           </div>
         </div>
       )}
@@ -12571,7 +12573,7 @@ function PlannerWorkspace({
                 />
               ))}
               <div style={ui.footerRow}>
-                <button type="button" style={styles.tabButton} onClick={addCrewMember}><PlusIcon /> Add person</button>
+                <button type="button" style={styles.secondaryButton} onClick={addCrewMember}><PlusIcon /> Add person</button>
                 {(teamMembers || []).length > 0 && (
                   <select
                     style={{ ...styles.input, maxWidth: 240 }}
@@ -12696,7 +12698,7 @@ function PlannerWorkspace({
           {!isNew && (
             hasProAccess ? (
               <button
-                style={styles.tabButton}
+                style={styles.secondaryButton}
                 disabled={!!form.convertedProjectId}
                 onClick={async () => {
                   if (form.convertedProjectId) {
@@ -12714,7 +12716,7 @@ function PlannerWorkspace({
                 {showProBadge && <> <span style={styles.proBadge}>PRO</span></>}
               </button>
             ) : (
-              <button style={styles.tabButton} disabled title="Pro feature">
+              <button style={styles.secondaryButton} disabled title="Pro feature">
                 Convert to Project <span style={styles.proBadge}>PRO</span>
               </button>
             )
@@ -12725,11 +12727,11 @@ function PlannerWorkspace({
         {!isNew && (
           <PlannerExpander label="More actions">
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-              <button style={styles.tabButton} onClick={() => onDuplicate(form)}>Duplicate</button>
+              <button style={styles.secondaryButton} onClick={() => onDuplicate(form)}>Duplicate</button>
               {hasProAccess ? (
-                <button style={styles.tabButton} onClick={() => onSaveAsTemplate(form)}>Save as Template{showProBadge && <> <span style={styles.proBadge}>PRO</span></>}</button>
+                <button style={styles.secondaryButton} onClick={() => onSaveAsTemplate(form)}>Save as Template{showProBadge && <> <span style={styles.proBadge}>PRO</span></>}</button>
               ) : (
-                <button style={styles.tabButton} disabled title="Pro feature">Save as Template <span style={styles.proBadge}>PRO</span></button>
+                <button style={styles.secondaryButton} disabled title="Pro feature">Save as Template <span style={styles.proBadge}>PRO</span></button>
               )}
               <div style={{ flex: 1 }} />
               <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>Delete plan</button>
@@ -12907,7 +12909,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
   const dependability = dependabilityTier(form.dependabilityScore ?? 80);
 
   return (
-    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+    <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay} onClick={onCancel}>
       <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>{isNew ? "New team member" : "Edit team member"}</span>
@@ -13237,7 +13239,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                   <span style={styles.input}>
                     {paymentDetails.paymentDetails ? maskPaymentDetails(paymentDetails.paymentDetails) : "Not set"}
                   </span>
-                  <button type="button" style={styles.tabButton} onClick={() => setRevealPaymentDetails(true)}>
+                  <button type="button" style={styles.secondaryButton} onClick={() => setRevealPaymentDetails(true)}>
                     {paymentDetails.paymentDetails ? "Edit" : "Add"}
                   </button>
                 </div>
@@ -13248,7 +13250,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
               </p>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button type="button" style={styles.tabButton} onClick={savePaymentDetails} disabled={paymentSaveState === "saving"}>
+              <button type="button" style={styles.secondaryButton} onClick={savePaymentDetails} disabled={paymentSaveState === "saving"}>
                 {paymentSaveState === "saving" ? "Saving\u2026" : "Save payment details"}
               </button>
               {paymentSaveState === "saved" && <span style={styles.fieldHint}>Saved.</span>}
@@ -13458,7 +13460,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                     </>
                   ) : null}
                 </span>
-                <button type="button" style={styles.tabButton} onClick={() => deletePortfolioItem(item.id)}>
+                <button type="button" style={styles.secondaryButton} onClick={() => deletePortfolioItem(item.id)}>
                   Remove
                 </button>
               </div>
@@ -13512,7 +13514,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-                  <button type="button" style={styles.tabButton} onClick={() => setAddingPortfolioItem(false)}>
+                  <button type="button" style={styles.secondaryButton} onClick={() => setAddingPortfolioItem(false)}>
                     Cancel
                   </button>
                   <button type="button" style={styles.saveButton} onClick={savePortfolioItem}>
@@ -13521,7 +13523,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                 </div>
               </div>
             ) : (
-              <button type="button" style={styles.tabButton} onClick={() => setAddingPortfolioItem(true)}>
+              <button type="button" style={styles.secondaryButton} onClick={() => setAddingPortfolioItem(true)}>
                 <PlusIcon /> Add portfolio item
               </button>
             )}
@@ -13547,7 +13549,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                   {r.reviewer ? ` \u00b7 ${r.reviewer}` : ""}
                   {r.reviewText ? ` \u00b7 ${r.reviewText}` : ""}
                 </span>
-                <button type="button" style={styles.tabButton} onClick={() => deleteReview(r.id)}>
+                <button type="button" style={styles.secondaryButton} onClick={() => deleteReview(r.id)}>
                   Remove
                 </button>
               </div>
@@ -13586,7 +13588,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                   />
                 </div>
                 <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-                  <button type="button" style={styles.tabButton} onClick={() => setAddingReview(false)}>
+                  <button type="button" style={styles.secondaryButton} onClick={() => setAddingReview(false)}>
                     Cancel
                   </button>
                   <button type="button" style={styles.saveButton} onClick={saveReview}>
@@ -13595,7 +13597,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                 </div>
               </div>
             ) : (
-              <button type="button" style={styles.tabButton} onClick={() => setAddingReview(true)}>
+              <button type="button" style={styles.secondaryButton} onClick={() => setAddingReview(true)}>
                 <PlusIcon /> Add review
               </button>
             )}
@@ -13693,7 +13695,7 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
   };
 
   return (
-    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+    <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay} onClick={onCancel}>
       <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>
@@ -14008,7 +14010,7 @@ function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, c
   };
 
   return (
-    <div className="kf-modal-overlay" style={styles.overlay} onClick={onCancel}>
+    <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay} onClick={onCancel}>
       <div className="kf-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>Set up milestone payments</span>
@@ -14064,7 +14066,7 @@ function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, c
 }
 
 const fontImport = `
-@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
 * {
   box-sizing: border-box;
@@ -14134,13 +14136,13 @@ a:hover {
 .kf-clock-pill button { color: #fff; }
 #kf-clock-slot:empty { display: none; }
 .kf-clock-pill .kf-clock-btn:first-of-type { margin-left: auto; }
-.kf-clock-btn { border: none !important; font-weight: 800 !important; letter-spacing: 0.01em; box-shadow: 0 3px 10px rgba(0,0,0,0.25); }
-.kf-clock-in { background: linear-gradient(135deg, #16A34A 0%, #4ADE80 100%) !important; color: #fff !important; }
-.kf-clock-out { background: linear-gradient(135deg, #DC2626 0%, #F87171 100%) !important; color: #fff !important; }
+.kf-clock-btn { border: none !important; font-weight: 700 !important; letter-spacing: 0.01em; border-radius: 8px !important; }
+.kf-clock-in { background: #16A34A !important; color: #fff !important; }
+.kf-clock-out { background: #DC2626 !important; color: #fff !important; }
 .kf-clock-pause { background: #fff !important; color: #5b3de0 !important; }
-.kf-focus-link { background: linear-gradient(135deg, #38B6FF 0%, #9ADCFF 100%) !important; color: #06324d !important; border: none !important; border-radius: 10px !important; padding: 5px 11px !important; font-weight: 800 !important; box-shadow: 0 3px 10px rgba(56,182,255,0.4); cursor: pointer; }
-.kf-focus-link:hover { filter: brightness(1.08); }
-.kf-focus-input { background: rgba(255,255,255,0.05); border: 1px solid #2a3338; border-radius: 12px; color: #EDEAE3; font-family: 'Nunito', 'Space Grotesk', sans-serif; font-weight: 800; font-size: 20px; width: 100%; box-sizing: border-box; padding: 4px 0; text-align: left; background: transparent; border: none; outline: none; }
+.kf-focus-link { background: #2FBFA6 !important; color: #14191c !important; border: none !important; border-radius: 8px !important; padding: 5px 11px !important; font-weight: 700 !important; cursor: pointer; }
+.kf-focus-link:hover { filter: brightness(1.06); }
+.kf-focus-input { background: rgba(255,255,255,0.05); border: 1px solid #2a3338; border-radius: 12px; color: #EDEAE3; font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 20px; width: 100%; box-sizing: border-box; padding: 4px 0; text-align: left; background: transparent; border: none; outline: none; }
 .kf-focus-input:focus { color: #fff; }
 .kf-dash-two {
   display: grid;
@@ -14303,7 +14305,7 @@ const styles = {
   dividerText: {
     fontSize: 11.5,
     color: textMuted,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
   },
   switchModeButton: {
     background: "transparent",
@@ -14317,9 +14319,8 @@ const styles = {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: "20px 28px",
+    padding: "16px 28px",
     borderBottom: `1px solid ${border}`,
-    boxShadow: "0 1px 0 rgba(0,0,0,0.3)",
     flexWrap: "wrap",
     gap: 12,
   },
@@ -14334,7 +14335,6 @@ const styles = {
     borderRadius: 10,
     background: "rgba(47,191,166,0.14)",
     border: "1px solid rgba(47,191,166,0.3)",
-    boxShadow: "0 0 16px rgba(47,191,166,0.18)",
     color: teal,
     display: "flex",
     alignItems: "center",
@@ -14365,7 +14365,7 @@ const styles = {
     fontSize: 12.5,
     color: textMuted,
     margin: "2px 0 0",
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
   },
   headerRight: {
     display: "flex",
@@ -14375,7 +14375,7 @@ const styles = {
   saveIndicator: {
     fontSize: 12,
     color: textMuted,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
     minWidth: 60,
     textAlign: "right",
   },
@@ -14386,18 +14386,17 @@ const styles = {
     background: teal,
     color: ink,
     border: "none",
-    borderRadius: 999,
-    padding: "10px 18px",
+    borderRadius: 8,
+    padding: "9px 16px",
     fontSize: 13.5,
     fontWeight: 600,
     fontFamily: "'Inter', sans-serif",
     cursor: "pointer",
-    boxShadow: shadowGlow,
   },
   iconButtonGhost: {
     width: 36,
     height: 36,
-    borderRadius: 999,
+    borderRadius: 8,
     background: "rgba(255,255,255,0.05)",
     border: `1px solid ${border}`,
     color: paper,
@@ -14415,7 +14414,7 @@ const styles = {
     borderRadius: 10,
     padding: "10px 14px",
     fontSize: 12.5,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
   },
   progressBar: {
     padding: "0 28px 18px",
@@ -14434,7 +14433,7 @@ const styles = {
   },
   progressPercent: {
     fontSize: 13,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
     color: teal,
     fontWeight: 500,
   },
@@ -14483,14 +14482,12 @@ const styles = {
   projectCard: {
     background: inkSoft,
     border: `1px solid ${border}`,
-    borderRadius: 16,
-    padding: 18,
+    borderRadius: 12,
+    padding: 16,
     display: "flex",
     flexDirection: "column",
     gap: 10,
     cursor: "pointer",
-    boxShadow: shadowSoft,
-    transition: "transform 0.15s ease, box-shadow 0.15s ease",
   },
   projectCardArchived: {
     opacity: 0.6,
@@ -14500,10 +14497,19 @@ const styles = {
     justifyContent: "space-between",
     alignItems: "center",
   },
+  projectCardMeta: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    minWidth: 0,
+    flexWrap: "nowrap",
+    overflow: "hidden",
+  },
   projectCardActions: {
     display: "flex",
     gap: 4,
-    flexWrap: "wrap",
+    alignItems: "center",
+    flexShrink: 0,
     justifyContent: "flex-end",
   },
   archiveSection: {
@@ -14641,7 +14647,7 @@ const styles = {
     boxShadow: "0 10px 26px rgba(0,0,0,0.28)",
   },
   pomodoroSetupTitle: {
-    fontFamily: "'Nunito', 'Space Grotesk', sans-serif",
+    fontFamily: "'Space Grotesk', sans-serif",
     fontSize: 15,
     fontWeight: 800,
     color: paper,
@@ -14666,7 +14672,7 @@ const styles = {
     fontSize: 11.5,
     fontWeight: 700,
     color: "rgba(255,255,255,0.92)",
-    fontFamily: "'Nunito', 'Space Grotesk', sans-serif",
+    fontFamily: "'Space Grotesk', sans-serif",
   },
   pomodoroStartButton: {
     display: "flex",
@@ -14678,7 +14684,7 @@ const styles = {
     padding: "10px 14px",
     fontSize: 13,
     fontWeight: 800,
-    fontFamily: "'Nunito', 'Space Grotesk', sans-serif",
+    fontFamily: "'Space Grotesk', sans-serif",
     color: "#fff",
     background: "linear-gradient(135deg, #6A47F2 0%, #9174FB 100%)",
     cursor: "pointer",
@@ -14743,7 +14749,7 @@ const styles = {
     padding: "4px 11px",
     fontSize: 11.5,
     fontWeight: 800,
-    fontFamily: "'Nunito', 'Inter', sans-serif",
+    fontFamily: "'Inter', sans-serif",
     boxShadow: "0 3px 10px rgba(0,0,0,0.25)",
     cursor: "pointer",
   },
@@ -14755,7 +14761,7 @@ const styles = {
     padding: "4px 11px",
     fontSize: 11.5,
     fontWeight: 800,
-    fontFamily: "'Nunito', 'Inter', sans-serif",
+    fontFamily: "'Inter', sans-serif",
     boxShadow: "0 3px 10px rgba(0,0,0,0.25)",
     cursor: "pointer",
   },
@@ -14973,7 +14979,7 @@ const styles = {
   },
   dashboardGroupGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
     gap: 14,
     flexShrink: 0,
     alignItems: "stretch",
@@ -15125,7 +15131,7 @@ const styles = {
     flexShrink: 0,
   },
   dashboardTodayLabel: {
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
     fontSize: 10,
     fontWeight: 700,
     letterSpacing: 0.3,
@@ -15220,7 +15226,7 @@ const styles = {
     gap: 10,
   },
   plannerPageTitle: {
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Space Grotesk', sans-serif",
     fontSize: 20,
     fontWeight: 600,
     color: "#EAF6F4",
@@ -15259,7 +15265,7 @@ const styles = {
     background: "rgba(20,32,34,0.4)",
   },
   plannerSectionTitle: {
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
     fontSize: 13,
     fontWeight: 600,
     letterSpacing: 0.4,
@@ -15316,13 +15322,13 @@ const styles = {
   },
   proBadge: {
     fontSize: 10.5,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
     fontWeight: 600,
     color: tealLight,
     background: "rgba(47,191,166,0.14)",
     border: "1px solid rgba(47,191,166,0.32)",
-    borderRadius: 999,
-    padding: "2px 8px",
+    borderRadius: 4,
+    padding: "1px 6px",
     letterSpacing: "0.04em",
   },
   dashboardChartsRow: {
@@ -15349,7 +15355,7 @@ const styles = {
     alignItems: "center",
     gap: 3,
     fontSize: 11.5,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
     fontWeight: 500,
   },
   budgetStat: {
@@ -15400,7 +15406,7 @@ const styles = {
     border: "1px solid",
     borderRadius: 999,
     padding: "2px 10px",
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
   },
   docTypeTag: {
     fontSize: 10,
@@ -15455,7 +15461,7 @@ const styles = {
   board: {
     display: "flex",
     gap: 10,
-    padding: "0 20px 32px",
+    padding: "0 0 32px",
     overflowX: "auto",
     flex: 1,
     userSelect: "none",
@@ -15463,9 +15469,9 @@ const styles = {
   },
   column: {
     background: inkSoft,
-    borderRadius: 16,
+    borderRadius: 12,
     flex: "1 1 0",
-    minWidth: 168,
+    minWidth: 160,
     maxWidth: 280,
     display: "flex",
     flexDirection: "column",
@@ -15491,10 +15497,10 @@ const styles = {
   columnCount: {
     fontSize: 11,
     color: textMuted,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
     background: "rgba(255,255,255,0.04)",
-    borderRadius: 999,
-    padding: "2px 8px",
+    borderRadius: 6,
+    padding: "2px 7px",
   },
   columnBody: {
     padding: 8,
@@ -15583,11 +15589,13 @@ const styles = {
   },
   cardTag: {
     fontSize: 10.5,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
+    fontWeight: 500,
     color: tealLight,
     background: "rgba(47,191,166,0.1)",
-    borderRadius: 999,
-    padding: "3px 8px",
+    borderRadius: 6,
+    padding: "2px 7px",
+    lineHeight: 1.4,
   },
   needsAttentionBox: {
     border: "1px solid rgba(242,166,90,0.35)",
@@ -15620,7 +15628,7 @@ const styles = {
   },
   successRateValue: {
     fontSize: 32,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
     color: teal,
   },
   readOnlyValue: {
@@ -15688,7 +15696,7 @@ const styles = {
   },
   timelineDate: {
     color: textMuted,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
     fontSize: 11.5,
     minWidth: 52,
   },
@@ -15779,10 +15787,11 @@ const styles = {
   iconButton: {
     background: "transparent",
     border: "none",
+    borderRadius: 6,
     color: textMuted,
     cursor: "pointer",
     display: "flex",
-    padding: 4,
+    padding: 6,
   },
   field: {
     display: "flex",
@@ -15793,13 +15802,13 @@ const styles = {
   fieldRow: {
     display: "flex",
     gap: 12,
+    minWidth: 0,
   },
   label: {
-    fontSize: 11.5,
+    fontSize: 12,
     color: textMuted,
-    fontFamily: "'IBM Plex Mono', monospace",
-    textTransform: "uppercase",
-    letterSpacing: "0.04em",
+    fontFamily: "'Inter', sans-serif",
+    fontWeight: 500,
   },
   fieldHint: {
     fontSize: 11.5,
@@ -15807,10 +15816,22 @@ const styles = {
     margin: "2px 0 0",
     lineHeight: 1.4,
   },
+  subTabRow: {
+    display: "flex",
+    gap: 4,
+    padding: "0 28px",
+    marginBottom: 12,
+    overflowX: "auto",
+    scrollbarWidth: "none",
+  },
   tabRow: {
     display: "flex",
-    gap: 8,
-    padding: "0 28px 16px",
+    gap: 4,
+    padding: "0 28px",
+    borderBottom: `1px solid ${border}`,
+    marginBottom: 16,
+    overflowX: "auto",
+    scrollbarWidth: "none",
   },
   tabRow2: {
     display: "flex",
@@ -15831,7 +15852,7 @@ const styles = {
   miniChartLabel: {
     fontSize: 11.5,
     color: textMuted,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
   },
   miniChartTrack: {
     height: 8,
@@ -15846,30 +15867,42 @@ const styles = {
   miniChartValue: {
     fontSize: 11.5,
     color: paper,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
     textAlign: "right",
   },
   tabButton: {
     background: "transparent",
-    border: `1px solid ${border}`,
-    borderRadius: 999,
+    border: "none",
+    borderRadius: 0,
     color: textMuted,
+    fontSize: 13.5,
+    fontWeight: 500,
+    padding: "10px 14px",
+    marginBottom: -1,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+    flexShrink: 0,
+    fontFamily: "'Inter', sans-serif",
+  },
+  secondaryButton: {
+    background: "transparent",
+    border: `1px solid ${border}`,
+    borderRadius: 8,
+    color: paper,
     fontSize: 13,
     fontWeight: 500,
-    padding: "8px 16px",
+    padding: "8px 14px",
     cursor: "pointer",
     fontFamily: "'Inter', sans-serif",
   },
   tabButtonActive: {
-    background: "rgba(47,191,166,0.14)",
-    borderColor: teal,
-    color: tealLight,
+    boxShadow: `inset 0 -2px 0 ${teal}`,
+    color: paper,
     fontWeight: 600,
-    boxShadow: "0 0 0 1px rgba(47,191,166,0.25)",
   },
   fieldDivider: {
     fontSize: 11.5,
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
     color: teal,
     textTransform: "uppercase",
     letterSpacing: "0.06em",
@@ -15902,7 +15935,7 @@ const styles = {
     color: textMuted,
     fontSize: 11,
     padding: "3px 9px",
-    fontFamily: "'IBM Plex Mono', monospace",
+    fontFamily: "'Inter', sans-serif",
   },
   skillChipActive: {
     border: `1px solid ${teal}`,
@@ -15965,7 +15998,7 @@ const styles = {
     alignItems: "center",
     gap: 7,
     border: "1px solid",
-    borderRadius: 999,
+    borderRadius: 8,
     fontSize: 12.5,
     padding: "7px 13px",
     cursor: "pointer",
@@ -15978,7 +16011,7 @@ const styles = {
     alignSelf: "flex-start",
     background: "transparent",
     border: `1px dashed ${border}`,
-    borderRadius: 999,
+    borderRadius: 8,
     color: teal,
     fontSize: 12.5,
     padding: "8px 14px",
@@ -15988,12 +16021,12 @@ const styles = {
   input: {
     background: "#171d20",
     border: `1px solid ${border}`,
-    borderRadius: 10,
-    padding: "10px 12px",
+    borderRadius: 8,
+    padding: "9px 12px",
+    minHeight: 38,
     color: paper,
     fontSize: 13.5,
     fontFamily: "'Inter', sans-serif",
-    outline: "none",
   },
   textarea: {
     background: "#171d20",
@@ -16026,7 +16059,7 @@ const styles = {
   cancelButton: {
     background: "transparent",
     border: `1px solid ${border}`,
-    borderRadius: 999,
+    borderRadius: 8,
     color: paper,
     fontSize: 13,
     padding: "9px 16px",

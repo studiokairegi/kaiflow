@@ -524,9 +524,9 @@ export default function SettingsPage(props) {
   const common = { form, set, errors };
 
   return (
-    <div style={{ ...S.page, paddingBottom: 110 }}>
-      <div style={{ ...S.row, justifyContent: "space-between" }}>
-        <div><h2 style={S.h2}>{studioScoped ? "My settings" : "Settings"}</h2><p style={S.sub}>{studioScoped ? "Personal preferences for your KairFlow account." : "Studio and account preferences."}</p></div>
+    <div className="kf-settings-root" style={{ ...S.page, padding: "0 0 110px" }}>
+      <div className="kf-settings-head" style={{ ...S.row, justifyContent: "space-between" }}>
+        <div className="kf-settings-title"><h2 style={S.h2}>{studioScoped ? "My settings" : "Settings"}</h2><p style={S.sub}>{studioScoped ? "Personal preferences for your KairFlow account." : "Studio and account preferences."}</p></div>
         <Btn onClick={close}>Close</Btn>
       </div>
       <Tabs value={tab} onChange={setTab} tabs={settingsTabs.map(([id, label]) => ({ id, label: studioScoped && id === "general" ? "My preferences" : label, badge: bad.has(id) ? "!" : dirty.has(id) ? "\u2022" : "" }))} />
@@ -542,7 +542,7 @@ export default function SettingsPage(props) {
           onReplayTutorial={props.onReplayTutorial} onOpenSupport={props.onOpenSupport} onExport={props.onExport} onSignOut={props.onSignOut} onAccountAction={props.onAccountAction} />)}
 
       <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 20, background: "rgba(14,20,22,0.96)", borderTop: `1px solid ${T.border}`, backdropFilter: "blur(8px)" }}>
-        <div style={{ maxWidth: 1180, margin: "0 auto", padding: "12px 28px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div className="kf-savebar-inner" style={{ maxWidth: 1384, margin: "0 auto", padding: "12px var(--kf-gutter, 28px)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <span style={{ fontSize: 13.5, color: errCount ? T.bad : status === "failed" ? T.bad : isDirty ? T.warn : T.muted }}>
             {errCount ? `Fix ${errCount} issue${errCount === 1 ? "" : "s"} (${[...bad].map((t) => TAB_LABEL[t]).join(", ")}) before saving.`
               : status === "failed" ? "Couldn't save. Your changes are still here; try again."

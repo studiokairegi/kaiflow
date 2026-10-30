@@ -18,10 +18,20 @@ export { PrivacyToggle }; // kept for existing imports
 const today = () => todayLocal();
 
 // Headline figure as a dashboard-style gradient card (white icon tile, big number, detail line).
-function Kpi({ label, base, mode, baseAmount, native, privacy, sub, tone, onClick, card = "sky", icon = "wallet" }) {
+// `flat` renders a quiet tile for secondary figures so only the headline numbers carry colour.
+function Kpi({ label, base, mode, baseAmount, native, privacy, sub, tone, onClick, card = "sky", icon = "wallet", flat = false }) {
   const t = CARD_TONES[card] || CARD_TONES.sky;
   const value = mode === "native" && native ? <Totals totals={native} privacy={privacy} /> : <Money code={base} amount={baseAmount} privacy={privacy} />;
   const detail = mode === "both" && native ? <Totals totals={native} privacy={privacy} /> : null;
+  if (flat) {
+    return (
+      <div onClick={onClick} style={{ ...S.card, gap: 4, cursor: onClick ? "pointer" : "default", borderLeft: `3px solid ${t.icon}` }}>
+        <span style={S.sub}>{label}</span>
+        <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700, letterSpacing: "-0.01em", fontVariantNumeric: "tabular-nums" }}>{value}</span>
+        {(detail || sub) && <span style={S.sub}>{detail}{detail && sub ? " \u00b7 " : ""}{sub}</span>}
+      </div>
+    );
+  }
   return (
     <ActivityCard gradient={t.gradient} iconColor={t.icon} icon={icon} title={label} badge={tone === "bad" ? "LOSS" : undefined}
       value={value} label={<>{detail}{detail && sub ? " \u00b7 " : ""}{sub}</>} onClick={onClick} />
@@ -60,9 +70,9 @@ function Overview({ ctx, go }) {
         <Kpi card="royal" icon="trend" label="Net profit (year to date)" base={base} mode={mode} baseAmount={s.netProfitYtd} native={null} privacy={privacy} tone={s.netProfitYtd < 0 ? "bad" : undefined} onClick={() => go("reports")} />
       </div>
       <div style={S.grid(210)}>
-        <Kpi card="mint" icon="trend" label="Revenue (year to date)" base={base} mode={mode} baseAmount={s.revenueYtd} native={s.revenueYtdNative} privacy={privacy} />
-        <Kpi card="violet" icon="card" label="Expenses (year to date)" base={base} mode={mode} baseAmount={s.expensesYtd} native={null} privacy={privacy} />
-        <Kpi card="sky" icon="calendar" label="Revenue this month" base={base} mode={mode} baseAmount={s.revenueMonth} native={null} privacy={privacy} />
+        <Kpi flat card="mint" icon="trend" label="Revenue (year to date)" base={base} mode={mode} baseAmount={s.revenueYtd} native={s.revenueYtdNative} privacy={privacy} />
+        <Kpi flat card="violet" icon="card" label="Expenses (year to date)" base={base} mode={mode} baseAmount={s.expensesYtd} native={null} privacy={privacy} />
+        <Kpi flat card="sky" icon="calendar" label="Revenue this month" base={base} mode={mode} baseAmount={s.revenueMonth} native={null} privacy={privacy} />
       </div>
       <div style={S.grid(320)}>
         <div style={S.card}>

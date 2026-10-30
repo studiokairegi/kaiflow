@@ -20,10 +20,10 @@ const C = { ink: "#14191c", inkSoft: "#1c2327", paper: "#EDEAE3", teal: "#38B6FF
 const PRIORITY_COLOR = { low: C.muted, normal: C.teal, high: C.amber, urgent: C.red };
 const GRAD = { sky: "linear-gradient(135deg, #38B6FF 0%, #9ADCFF 100%)", mint: "linear-gradient(135deg, #34D8A0 0%, #6FE8C2 100%)", violet: "linear-gradient(135deg, #6A47F2 0%, #9174FB 100%)", royal: "linear-gradient(135deg, #3B74F4 0%, #77A1FF 100%)" };
 const CARD = { background: "rgba(255,255,255,0.035)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 16 };
-const HEAD = "'Nunito', 'Space Grotesk', sans-serif";
+const HEAD = "'Space Grotesk', sans-serif";
 const field = { width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.04)", color: C.paper, border: `1px solid ${C.border}`, borderRadius: 12, padding: "8px 12px", fontSize: 13, fontFamily: "inherit", outline: "none" };
 const small = { background: "rgba(255,255,255,0.05)", color: C.paper, border: `1px solid ${C.border}`, borderRadius: 999, padding: "3px 8px", fontSize: 11.5, fontFamily: "inherit" };
-const primary = (disabled) => ({ border: "none", cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.55 : 1, fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: "#fff", background: GRAD.sky, borderRadius: 999, padding: "7px 16px", whiteSpace: "nowrap", boxShadow: disabled ? "none" : "0 4px 12px rgba(56,182,255,0.3)" });
+const primary = (disabled) => ({ border: "none", cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.55 : 1, fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: "#14191c", background: "#2FBFA6", borderRadius: 8, padding: "7px 14px", whiteSpace: "nowrap" });
 const btn = (color, disabled) => ({ padding: "6px 11px", borderRadius: 999, border: `1px solid ${disabled ? C.border : color}`, background: disabled ? "transparent" : `${color}22`, color: disabled ? C.muted : color, fontSize: 12.5, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.6 : 1, fontFamily: "inherit" });
 const iconBtn = (active, color = C.amber) => ({ background: "transparent", border: "none", cursor: "pointer", color: active ? color : C.muted, fontSize: 15, lineHeight: 1, padding: "2px 4px", fontFamily: "inherit" });
 const VIEWS = [["today", "Today"], ["tomorrow", "Tomorrow"], ["week", "This week"], ["upcoming", "Upcoming"], ["completed", "Completed"], ["recurring", "Recurring"]];
@@ -175,8 +175,8 @@ export default function TasksPanel({ getToday, leads = [], projects = [], shots 
   return (
     <div className="kf-card kf-tasks-card" style={{ background: C.inkSoft, border: `1px solid ${C.border}`, borderRadius: 22, padding: "14px 16px", flexShrink: 0, display: "flex", flexDirection: "column", gap: 6, color: C.paper, minWidth: 0, overflow: "hidden" }} aria-label="Tasks">
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <span style={{ fontFamily: "'Nunito', 'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 800, letterSpacing: "-0.01em" }}>Tasks</span>
-        <button type="button" style={{ border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, color: "#fff", background: "linear-gradient(135deg, #38B6FF 0%, #9ADCFF 100%)", borderRadius: 999, padding: "6px 14px" }} onClick={() => openNew()}>+ New task</button>
+        <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 800, letterSpacing: "-0.01em" }}>Tasks</span>
+        <button type="button" style={{ border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, color: "#14191c", background: "#2FBFA6", borderRadius: 8, padding: "6px 12px" }} onClick={() => openNew()}>New task</button>
       </div>
       {phase === "ready" && (
         <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
@@ -189,7 +189,7 @@ export default function TasksPanel({ getToday, leads = [], projects = [], shots 
       <div role="tablist" aria-label="Task views" style={{ display: "flex", gap: 2, flexWrap: "wrap", background: "rgba(255,255,255,0.04)", borderRadius: 18, padding: 3 }}>
         {VIEWS.map(([id, label]) => (
           <button key={id} type="button" role="tab" aria-selected={view === id} onClick={() => chooseView(id)}
-            style={{ border: "none", cursor: "pointer", fontFamily: "inherit", fontWeight: view === id ? 800 : 600, color: view === id ? "#fff" : C.muted, background: view === id ? GRAD.sky : "transparent", boxShadow: view === id ? "0 4px 10px rgba(56,182,255,0.3)" : "none", borderRadius: 999, padding: "4px 9px", fontSize: 11.5 }}>
+            style={{ border: "none", cursor: "pointer", fontFamily: "inherit", fontWeight: view === id ? 700 : 500, color: view === id ? "#EDEAE3" : C.muted, background: view === id ? "rgba(47,191,166,0.16)" : "transparent", borderRadius: 6, padding: "4px 9px", fontSize: 12 }}>
             {label}
           </button>
         ))}

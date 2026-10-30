@@ -1,0 +1,86 @@
+/* KairFlow refinement layer: tokens, focus, motion and layout fixes that the inline styles cannot express.
+   Loaded after responsive.css. Nothing here changes behaviour. */
+
+:root {
+  /* spacing scale (4px base) */
+  --kf-space-1: 4px; --kf-space-2: 8px; --kf-space-3: 12px; --kf-space-4: 16px; --kf-space-5: 24px; --kf-space-6: 32px;
+  /* radii: controls, groups, overlays */
+  --kf-radius-sm: 6px; --kf-radius-md: 8px; --kf-radius-lg: 12px; --kf-radius-xl: 14px;
+  /* page gutter shared by header, tabs and content */
+  --kf-gutter: 28px;
+  --kf-focus: #7FE0D0;
+}
+@media (max-width: 768px) { :root { --kf-gutter: 16px; } }
+
+body { font-family: 'Inter', system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+
+/* One visible keyboard focus treatment. Inline `outline: none` on inputs is overridden on purpose. */
+.kf-app-shell :where(button, a, input, select, textarea, summary, [role="tab"], [tabindex]):focus-visible,
+:where(button, a, input, select, textarea, [role="tab"]):focus-visible {
+  outline: 2px solid var(--kf-focus) !important;
+  outline-offset: 2px;
+}
+.kf-app-shell :where(input, select, textarea):focus-visible { outline-offset: 0; border-color: var(--kf-focus) !important; }
+
+/* Page gutter: content that sits directly in the shell lines up with the header and tabs. */
+.kf-page-gutter { padding-inline: var(--kf-gutter); display: flex; flex-direction: column; gap: var(--kf-space-3); }
+.kf-primary-tabs, .kf-secondary-tabs { padding-inline: var(--kf-gutter) !important; }
+.kf-secondary-tabs { border-bottom: 0 !important; margin-bottom: var(--kf-space-2) !important; }
+.kf-primary-tabs::-webkit-scrollbar, .kf-secondary-tabs::-webkit-scrollbar { display: none; }
+.kf-app-shell > header { padding-inline: var(--kf-gutter) !important; }
+
+/* Decorative hover lift removed: cards only change on hover when they are clickable. */
+.kf-card:hover { transform: none !important; box-shadow: none !important; }
+.kf-card { box-shadow: none !important; }
+
+/* Dashboard: the page scrolls, not an inner box. */
+.kf-dash-shell { height: auto !important; overflow-y: visible !important; min-height: calc(100vh - 130px); }
+
+/* Dashboard: let the overview grow with its content. The fixed-height shell made rows shrink and
+   overlap below 1500px wide; the Tasks column now stays in view while the page scrolls. */
+.kf-dash-two { grid-auto-rows: max-content; align-content: start; flex: 0 0 auto; }
+@media (min-width: 1181px) {
+  .kf-dash-body { flex: 0 0 auto; align-items: flex-start; }
+  .kf-dash-tasks { position: sticky; top: 0; align-self: flex-start; height: auto; max-height: calc(100vh - 190px); min-height: 420px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
+}
+
+/* Mobile header: title and utility icons share one row; the primary action drops below at full width. */
+@media (max-width: 600px) {
+  .kf-app-header { flex-wrap: wrap !important; align-items: center; row-gap: var(--kf-space-3); padding-block: var(--kf-space-3) !important; }
+  .kf-app-header-left { order: 0; flex: 1 1 0; min-width: 0; }
+  .kf-app-header-left h1, .kf-app-header-left p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kf-app-header-right { display: contents !important; }
+  .kf-app-header-right > * { order: 1; }
+  .kf-app-header-right > .kf-header-primary { order: 5; flex: 1 0 100%; justify-content: center; min-height: 44px; }
+}
+
+/* Chat launcher must never cover a modal's actions or the settings save bar on small screens. */
+@media (max-width: 768px) {
+  body:has([role="dialog"][aria-modal="true"]:not(.kf-chat-widget *)) .kf-chat-launcher { display: none !important; }
+}
+.kf-savebar-inner { padding-right: calc(var(--kf-gutter, 28px) + 72px) !important; }
+
+/* Modals: bound to the dynamic viewport so footers stay reachable on mobile browsers. */
+.kf-modal-overlay > div { max-height: calc(100dvh - 40px) !important; }
+.kf-modal-overlay [style*="grid"] > * { min-width: 0 !important; }
+.kf-modal-overlay input, .kf-modal-overlay select, .kf-modal-overlay textarea { max-width: 100% !important; box-sizing: border-box !important; }
+.kf-field-row > * { min-width: 0 !important; flex: 1 1 0; }
+
+/* Teams group headings: title-case label + count chip, hairline rule */
+.kf-group-heading { display: flex !important; align-items: center; gap: 8px; text-transform: none !important; letter-spacing: 0 !important; font: 600 14px/1.2 Inter, sans-serif !important; color: #e6ecea !important; border-top: 0 !important; padding: 10px 0 2px !important; }
+.kf-group-heading .kf-group-count { font: 600 11px Inter, sans-serif; color: #9fb0ac; background: #1d272b; border: 1px solid #2a3338; border-radius: 99px; padding: 1px 8px; }
+/* Planner KPI tiles: equal columns */
+.kf-planner-stats { display: grid !important; grid-template-columns: repeat(5, minmax(0, 1fr)) !important; gap: 12px !important; }
+@media (max-width: 1024px) { .kf-planner-stats { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; } }
+/* Invite link: secondary weight; reserve teal for the page's primary action */
+.kf-access-btn.primary { background: transparent !important; color: #2FBFA6 !important; border-color: rgba(47,191,166,.5) !important; }
+.kf-access-btn.primary:hover:not(:disabled) { background: rgba(47,191,166,.12) !important; color: #2FBFA6 !important; }
+
+/* Settings: the app header already carries the page title */
+.kf-settings-title { display: none; }
+.kf-settings-head { justify-content: flex-end !important; padding-top: 14px; }
+@media (max-width: 768px) { .kf-settings-root { padding-left: 16px !important; padding-right: 16px !important; } }

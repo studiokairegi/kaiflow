@@ -50,7 +50,7 @@ const INK = "#EDEAE3";
 const MUTED = "#8b9a98";
 const PANEL = "#1c2327";
 const LINE = "#2a3338";
-const FONT = "'Nunito', 'Space Grotesk', sans-serif";
+const FONT = "'Space Grotesk', sans-serif";
 
 export function PanelTitle({ children, right }) {
   return (
@@ -63,7 +63,7 @@ export function PanelTitle({ children, right }) {
 
 export function Panel({ children, style, onClick }) {
   return (
-    <div onClick={onClick} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 22, padding: "16px 18px", minWidth: 0, display: "flex", flexDirection: "column", cursor: onClick ? "pointer" : "default", ...style }}>
+    <div onClick={onClick} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "16px 18px", minWidth: 0, display: "flex", flexDirection: "column", cursor: onClick ? "pointer" : "default", ...style }}>
       {children}
     </div>
   );
@@ -80,10 +80,9 @@ export function ActivityCard({ gradient, icon, iconColor, title, badge, value, l
     wave = <svg viewBox="0 0 120 34" width="120" height="34" style={{ position: "absolute", right: 18, top: 14, opacity: 0.5 }} aria-hidden="true"><path d={d} fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg>;
   }
   return (
-    <div onClick={onClick} className="kf-card" style={{ position: "relative", overflow: "hidden", borderRadius: 24, padding: "16px 18px 14px", background: gradient, color: "#fff", cursor: onClick ? "pointer" : "default", display: "flex", flexDirection: "column", gap: 10, minWidth: 0, boxShadow: "0 10px 26px rgba(0,0,0,0.28)" }}>
-      <div aria-hidden="true" style={{ position: "absolute", right: -40, top: -50, width: 150, height: 150, borderRadius: "50%", background: "rgba(255,255,255,0.12)" }} />
+    <div onClick={onClick} className="kf-card" style={{ position: "relative", overflow: "hidden", borderRadius: 12, padding: "16px 18px 14px", background: gradient, color: "#fff", cursor: onClick ? "pointer" : "default", display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, position: "relative" }}>
-        <span style={{ width: 40, height: 40, borderRadius: 13, background: W, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <span style={{ width: 36, height: 36, borderRadius: 9, background: W, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
           <Icon name={icon} size={20} color={iconColor} stroke={1.8} />
         </span>
         <span style={{ fontFamily: FONT, fontWeight: 700, fontSize: 13.5, opacity: 0.95 }}>{title}</span>
@@ -111,7 +110,7 @@ export function ActivityCard({ gradient, icon, iconColor, title, badge, value, l
                 <span style={{ opacity: 0.85, fontSize: 10.5 }}>{c.label}</span>
               </>
             );
-            const st = { display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 9px", borderRadius: 999, border: "none", background: c.tone === "bad" ? "rgba(120,10,30,0.35)" : "rgba(255,255,255,0.2)", color: "#fff", fontFamily: "inherit", fontSize: 11.5, opacity: c.dim ? 0.6 : 1, cursor: c.onClick ? "pointer" : "default", whiteSpace: "nowrap" };
+            const st = { display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px", borderRadius: 6, border: "none", background: c.tone === "bad" ? "rgba(120,10,30,0.35)" : "rgba(255,255,255,0.2)", color: "#fff", fontFamily: "inherit", fontSize: 11.5, opacity: c.dim ? 0.6 : 1, cursor: c.onClick ? "pointer" : "default", whiteSpace: "nowrap" };
             const t = `${c.label}: ${c.value}`;
             return c.onClick
               ? <button key={c.label} type="button" title={t} onClick={c.onClick} style={st}>{inner}</button>
@@ -199,6 +198,6 @@ export function OutreachArea({ data, a = "Cold Emails", b = "Responded", height 
 
 export function ActionButton({ children, onClick }) {
   return (
-    <button type="button" onClick={onClick} style={{ border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, color: "#fff", background: GRADIENTS.sky, borderRadius: 12, padding: "6px 14px", whiteSpace: "nowrap" }}>{children}</button>
+    <button type="button" onClick={onClick} style={{ border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, color: "#14191c", background: "#2FBFA6", borderRadius: 8, padding: "6px 12px", whiteSpace: "nowrap" }}>{children}</button>
   );
 }
