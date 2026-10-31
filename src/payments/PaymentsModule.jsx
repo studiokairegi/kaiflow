@@ -411,10 +411,6 @@ export default function PaymentsModule({ userId, projects, invoices, teamMembers
   const ctx = { data: viewData, summary, privacy, invoices, projects, teamMembers, cards, reload: async () => { await reload(); }, refreshApp, onOpenProject, onGoFinance, onGoTeams, setTab };
   return (
     <div style={S.page}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "14px 0 10px" }}>
-        <Pill tone="ok">Live</Pill>
-        <span style={S.sub}><strong style={{ color: T.text, fontWeight: 600 }}>Paystack</strong> · real payments only. Sandbox history stays auditable but is excluded from totals.</span>
-      </div>
       <div style={{ ...S.row, justifyContent: "space-between" }}>
         <Tabs value={tab} onChange={setTab} tabs={TABS.map(([id, label]) => ({ id, label, badge: id === "reconciliation" && attention ? `• ${attention}` : "" }))} />
         <span style={S.row}>

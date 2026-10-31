@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { useInvoiceRefs } from "../invoiceRefs.js";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, Money, Totals, useBusy, fmtDate } from "./ui.jsx";
 import { symbolToCode, formatMoney, todayLocal } from "./currency.js";
 import { rpc } from "./api.js";
@@ -26,6 +27,7 @@ export function AgingCard({ title, report, privacy, base }) {
 }
 
 function PaymentModal({ ctx, invoice, outstanding, onClose }) {
+  const refOf = useInvoiceRefs();
   const { data, base } = ctx;
   const code = symbolToCode(invoice.currency);
   const banks = data.bankAccounts.filter((b) => !b.archived && b.currency === code);
@@ -40,7 +42,7 @@ function PaymentModal({ ctx, invoice, outstanding, onClose }) {
     await ctx.reload(); await ctx.refreshApp(); onClose();
   });
   return (
-    <Modal title={`Record payment \u00b7 ${invoice.invoiceNumber}`} onClose={onClose}
+    <Modal title={refOf(invoice) ? `Record payment \u00b7 ${refOf(invoice)}` : "Record payment"} onClose={onClose}
       footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !bank || !(Number(amount) > 0)} onClick={submit}>{busy ? "Recording..." : "Record payment"}</Btn></>}>
       <p style={S.sub}>Outstanding: <strong>{formatMoney(code, outstanding)}</strong>. Each payment is its own record; the invoice status follows from them.</p>
       {banks.length === 0 && <Banner tone="warn">There is no {code} bank or cash account yet. Add one under Banking first, then record the payment.</Banner>}
@@ -61,6 +63,7 @@ function PaymentModal({ ctx, invoice, outstanding, onClose }) {
 
 export function Sales({ ctx }) {
   const { data, postings, privacy, base, invoices, projects } = ctx;
+  const refOf = useInvoiceRefs(invoices.map((i) => `${i.id}${i.status}`).join());
   const [payFor, setPayFor] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const { error, run } = useBusy();
@@ -90,7 +93,7 @@ export function Sales({ ctx }) {
       <div style={S.card}>
         <h3 style={S.h3}>Invoices</h3>
         <Table rowKey={(r) => r.inv.id} empty="No invoices yet." rows={rows} columns={[
-          { key: "n", label: "Invoice Ref.", render: (r) => <><strong style={{ whiteSpace: "nowrap" }}>{r.inv.invoiceNumber}</strong>{r.inv.docType && r.inv.docType !== "invoice" ? <span style={{ color: T.muted }}> {"\u00b7"} {r.inv.docType}</span> : null}</> },
+          { key: "n", label: "Payment ref.", render: (r) => <><strong style={{ whiteSpace: "nowrap" }}>{refOf(r.inv) || "\u2014"}</strong>{r.inv.docType && r.inv.docType !== "invoice" ? <span style={{ color: T.muted }}> {"\u00b7"} {r.inv.docType}</span> : null}</> },
           { key: "c", label: "Client / project", render: (r) => <>{projectBy.get(r.inv.projectId)?.client || "-"}<div style={{ fontSize: 12, color: T.muted }}>{projectBy.get(r.inv.projectId)?.name}</div></> },
           { key: "d", label: "Issued", render: (r) => <span style={{ whiteSpace: "nowrap" }}>{r.inv.issueDate ? fmtDate(r.inv.issueDate) : "-"}</span> },
           { key: "due", label: "Due", render: (r) => <span style={{ whiteSpace: "nowrap" }}>{r.inv.dueDate ? fmtDate(r.inv.dueDate) : "-"}</span> },

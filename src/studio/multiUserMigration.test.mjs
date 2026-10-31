@@ -77,12 +77,14 @@ test('multi-user migration does not broaden protected finance ledger writes', ()
   assert.ok(!compact.includes('grant insert, update, delete on public.journal_entries'));
 });
 
-test('invoice references are labelled as references in invoice-facing UI and PDFs', () => {
+test('invoice-facing UI and PDFs show the Paystack payment reference instead of the invoice number', () => {
   const app = readFileSync(resolve(root, 'src/App.jsx'), 'utf8');
   const sales = readFileSync(resolve(root, 'src/finance/Sales.jsx'), 'utf8');
   const payments = readFileSync(resolve(root, 'src/payments/PaymentsModule.jsx'), 'utf8');
-  assert.ok(app.includes('"Invoice Ref. No."'));
-  assert.ok(app.includes('doc.text(`${referenceLabel}: ${invoice.invoiceNumber || "—"}`'));
-  assert.ok(sales.includes('label: "Invoice Ref."'));
+  assert.ok(app.includes('"Payment ref."'));
+  assert.ok(app.includes('doc.text(`${referenceLabel}: ${paystackRef}`'));
+  assert.ok(!app.includes('doc.text(`${referenceLabel}: ${invoice.invoiceNumber'));
+  assert.ok(sales.includes('label: "Payment ref."'));
+  assert.ok(sales.includes('refOf(r.inv)'));
   assert.ok(payments.includes('label: "Invoice Ref."'));
 });

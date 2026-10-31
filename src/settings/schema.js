@@ -247,7 +247,8 @@ export function settingsToRow(s, userId) {
     planner_defaults: s.plannerDefaults || DEFAULT_PLANNER_DEFAULTS,
     invoice_prefixes: s.invoicePrefixes || DEFAULT_INVOICE_PREFIXES,
     default_payment_terms_days: Math.round(Number(s.defaultPaymentTermsDays) || 0),
-    user_prefs: { ...(s.userPrefs || DEFAULT_USER_PREFS), displayName: String(s.displayName || "").trim().slice(0, 60) },
+    // displayName is only written once set, so databases whose user_prefs key check predates it keep saving.
+    user_prefs: { ...(s.userPrefs || DEFAULT_USER_PREFS), ...(String(s.displayName || "").trim() ? { displayName: String(s.displayName).trim().slice(0, 60) } : {}) },
   };
 }
 

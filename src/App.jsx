@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { createPortal } from "react-dom";
 import { supabase, functionUrl } from "./supabaseClient";
 import { lazyWithSuspense } from "./lazy.jsx";
+import { useInvoiceRefs, invoiceRefFor } from "./invoiceRefs.js";
 import { createAuthBootstrap } from "./authBootstrap.js";
 import { genShareToken } from "./SharedViews.jsx";
 import { PrivacyToggle } from "./finance/PrivacyToggle.jsx";
@@ -2025,8 +2026,9 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
   y += 6;
   doc.setFontSize(10);
   doc.setTextColor(70);
-  const referenceLabel = docType === "invoice" ? "Invoice Ref. No." : `${documentTitle} Ref. No.`;
-  doc.text(`${referenceLabel}: ${invoice.invoiceNumber || "—"}`, left, y);
+  const referenceLabel = docType === "invoice" ? "Payment ref." : `${documentTitle} payment ref.`;
+  const paystackRef = invoiceRefFor(invoice);
+  if (paystackRef) doc.text(`${referenceLabel}: ${paystackRef}`, left, y);
   const detailsTop = y + 8;
 
   // --- Left column: issue/due date and status ---
@@ -2138,7 +2140,7 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
     doc.text("Secure online payment. Amounts are shown in the invoice currency; any currency conversion is explained before you pay.", left, btnY + 17);
   }
 
-  doc.save(`${invoice.invoiceNumber || "invoice"}.pdf`);
+  doc.save(`${invoiceRefFor(invoice) || "invoice"}.pdf`);
 }
 
 
@@ -3132,7 +3134,7 @@ export default function ShotTracker() {
       timer = setTimeout(async () => {
         const cur = settingsRef.current;
         if (JSON.stringify(cur.userPrefs.focusTimer) === JSON.stringify(cfg)) return;
-        const prefs = { ...cur.userPrefs, focusTimer: cfg, displayName: cur.displayName || "" };
+        const prefs = { ...cur.userPrefs, focusTimer: cfg, ...(cur.displayName ? { displayName: cur.displayName } : {}) };
         setSettings({ ...cur, userPrefs: prefs });
         const { error } = await supabase.from("user_settings").update({ user_prefs: prefs }).eq("user_id", userId);
         if (error) console.error("Saving focus timer failed:", error);
@@ -9789,6 +9791,7 @@ function InvoicesPanel({
   fxRates,
 }) {
   const cur = currencySymbol || "$";
+  const refOf = useInvoiceRefs(invoices.map((i) => `${i.id}${i.status}`).join());
   if (!project) return null;
   const { totalBudget, amountPaid, outstanding } = projectBudgetSummary(project, projectCards, invoices, fxRates);
   // Whether a receipt/invoice has already been generated from a given
@@ -9857,7 +9860,7 @@ function InvoicesPanel({
             return (
               <div key={inv.id} className="kf-card" style={styles.invoiceCard} onClick={() => onEdit(inv)}>
                 <div style={styles.invoiceCardTop}>
-                  <span style={styles.invoiceNumber}>{inv.invoiceNumber}</span>
+                  <span style={styles.invoiceNumber}>{refOf(inv)}</span>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={styles.docTypeTag}>{docTypeLabel}</span>
                     <span

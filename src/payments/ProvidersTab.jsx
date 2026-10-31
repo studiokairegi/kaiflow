@@ -50,7 +50,7 @@ function ManageDialog({ provider, row, onClose, onChanged }) {
     <Modal title={`${provider.name}${provider.subtitle ? ` · ${provider.subtitle}` : ""}`} onClose={onClose} width={560} footer={<Btn onClick={onClose}>Close</Btn>}>
       {error && <Banner tone="bad">{error}</Banner>}
       {status && (status.ok && env === "live"
-        ? <Banner tone="ok">Paystack Live is configured. Client payment links use real Paystack checkout; sandbox transactions remain historical and are excluded from production reporting.</Banner>
+        ? <Banner tone="ok">Paystack Live is configured. Client payment links use real Paystack checkout.</Banner>
         : <Banner tone="bad">{status.ok ? "Production Payments requires Paystack Live mode." : status.message}</Banner>)}
       <div style={S.row}>
         <Pill tone={provider.enabled ? "ok" : "muted"}>{provider.enabled ? "✓ Enabled" : "Disabled"}</Pill>
