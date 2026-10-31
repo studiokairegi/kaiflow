@@ -2233,6 +2233,10 @@ function normalizeEmails(emails, scheduleLength = runtime.followupSchedule.lengt
   return normalizeEmailSlots(emails, scheduleLength);
 }
 
+// Where the conversation with a lead is happening (separate from `channel`, which is where the lead came from).
+const CONTACT_CHANNELS = ["Email", "X", "Discord", "Instagram", "LinkedIn", "WhatsApp", "Telegram", "Other"];
+const DEFAULT_CONTACT_CHANNEL = "Email";
+
 function emptyLead(stage = "pool", channel = "") {
   return {
     companyName: "",
@@ -2245,7 +2249,8 @@ function emptyLead(stage = "pool", channel = "") {
     notes: "",
     stage,
     channel,
-    priority: "warm",
+    contactedVia: DEFAULT_CONTACT_CHANNEL,
+    priority: "cold",
     needsFollowup: false,
     followupDate: "",
     lastContactedAt: null,
@@ -2276,6 +2281,8 @@ function leadFromRow(row) {
     notes: row.notes,
     stage: row.stage,
     channel: row.channel || "",
+    contactedVia: row.contacted_via || DEFAULT_CONTACT_CHANNEL,
+    contactedViaSaved: row.contacted_via !== undefined, // true once the lead_contact_channel migration has run
     priority: row.priority || "warm",
     needsFollowup: row.needs_followup || false,
     followupDate: row.followup_date || "",
@@ -2310,6 +2317,10 @@ function leadToRow(lead, userId) {
     notes: lead.notes,
     stage: lead.stage,
     channel: lead.channel || "",
+    // Only written when it differs from the DB default (or the column is known to exist), so saves keep
+    // working on a database that has not run the lead_contact_channel migration yet.
+    ...((lead.contactedVia && lead.contactedVia !== DEFAULT_CONTACT_CHANNEL) || lead.contactedViaSaved
+      ? { contacted_via: lead.contactedVia || DEFAULT_CONTACT_CHANNEL } : {}),
     priority: lead.priority || "warm",
     needs_followup: !!lead.needsFollowup,
     followup_date: lead.needsFollowup ? (lead.followupDate || null) : null,
@@ -6280,6 +6291,7 @@ export default function ShotTracker() {
                               <div style={styles.cardMeta}>{lead.contactPerson}</div>
                             )}
                             <div style={styles.cardFooter}>
+                              <span style={styles.cardTag} title="Where this lead is being contacted">via {lead.contactedVia || DEFAULT_CONTACT_CHANNEL}</span>
                               {lead.channel && (
                                 <span style={styles.cardTag}>{lead.channel}</span>
                               )}
@@ -10965,6 +10977,7 @@ function LeadEditor({
                 <PriorityMark meta={priorityMeta} />{priorityMeta.label}
               </span>
               <span style={styles.cardTag}>{stageMeta ? stageMeta.label : form.stage}</span>
+              <span style={styles.cardTag}>via {form.contactedVia || DEFAULT_CONTACT_CHANNEL}</span>
               {form.channel && <span style={styles.cardTag}>{form.channel}</span>}
               {form.needsFollowup && <span style={{ ...styles.cardTag, color: followupTagColor(form) }}>Needs follow-up{form.followupDate ? ` \u00b7 ${formatShortDate(form.followupDate)}` : ""}</span>}
             </div>
@@ -11305,7 +11318,30 @@ function LeadEditor({
             )}
 
             <div style={styles.field}>
-              <label style={styles.label}>Channel</label>
+              <label style={styles.label}>Contacted via</label>
+              <div style={styles.lostReasonGrid}>
+                {CONTACT_CHANNELS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    aria-pressed={(form.contactedVia || DEFAULT_CONTACT_CHANNEL) === c}
+                    style={{
+                      ...styles.reviewStatusButton,
+                      borderColor: (form.contactedVia || DEFAULT_CONTACT_CHANNEL) === c ? teal : border,
+                      color: (form.contactedVia || DEFAULT_CONTACT_CHANNEL) === c ? tealLight : textMuted,
+                      background: (form.contactedVia || DEFAULT_CONTACT_CHANNEL) === c ? "rgba(47,191,166,0.1)" : "transparent",
+                    }}
+                    onClick={() => setForm({ ...form, contactedVia: c })}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+              <p style={styles.fieldHint}>Where the conversation with this lead is happening. Email unless you choose otherwise.</p>
+            </div>
+
+            <div style={styles.field}>
+              <label style={styles.label}>Lead source</label>
               <div style={styles.lostReasonGrid}>
                 {leadChannels.map((channel) => (
                   <button
