@@ -110,6 +110,7 @@ export const DEFAULT_SETTINGS = {
   invoicePrefixes: DEFAULT_INVOICE_PREFIXES,
   defaultPaymentTermsDays: 0,
   userPrefs: DEFAULT_USER_PREFS,
+  displayName: "", // personal; stored inside user_prefs JSON, so no migration is needed
   // Privileged / account state. Read from the row, NEVER written by the settings form.
   hasSeenTutorial: false,
   plan: "free",
@@ -119,7 +120,7 @@ export const DEFAULT_SETTINGS = {
 // --- field registry: scope + which tab owns it (drives the unsaved-changes dots) ---
 export const SETTING_REGISTRY = {
   studioName: ["studio", "general"], studioTagline: ["studio", "general"], studioLegalName: ["studio", "general"],
-  studioAddress: ["studio", "general"], logoUrl: ["studio", "general"], defaultLandingTab: ["user", "general"],
+  displayName: ["user", "general"], studioAddress: ["studio", "general"], logoUrl: ["studio", "general"], defaultLandingTab: ["user", "general"],
   timezone: ["user", "general"], dateFormat: ["user", "general"], workweek: ["user", "general"],
   leadChannels: ["studio", "crm"], dashboardHiddenChannels: ["user", "crm"], followupSchedule: ["studio", "crm"],
   autoNoResponse: ["studio", "crm"], archiveDays: ["studio", "crm"], outcomeReasons: ["studio", "crm"],
@@ -205,6 +206,7 @@ export function settingsFromRow(row) {
     invoicePrefixes: { ...DEFAULT_INVOICE_PREFIXES, ...(isObj(row.invoice_prefixes) ? row.invoice_prefixes : {}) },
     defaultPaymentTermsDays: num(row.default_payment_terms_days, 0),
     userPrefs: mergePrefs(row.user_prefs),
+    displayName: isObj(row.user_prefs) && typeof row.user_prefs.displayName === "string" ? row.user_prefs.displayName : "",
     hasSeenTutorial: row.has_seen_tutorial || false,
     plan: row.plan || "free",
     isAdmin: row.is_admin || false,
@@ -245,7 +247,7 @@ export function settingsToRow(s, userId) {
     planner_defaults: s.plannerDefaults || DEFAULT_PLANNER_DEFAULTS,
     invoice_prefixes: s.invoicePrefixes || DEFAULT_INVOICE_PREFIXES,
     default_payment_terms_days: Math.round(Number(s.defaultPaymentTermsDays) || 0),
-    user_prefs: s.userPrefs || DEFAULT_USER_PREFS,
+    user_prefs: { ...(s.userPrefs || DEFAULT_USER_PREFS), displayName: String(s.displayName || "").trim().slice(0, 60) },
   };
 }
 

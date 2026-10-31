@@ -71,6 +71,7 @@ function GeneralTab({ form, set, errors, personalOnly = false }){
       <Section title="Studio" hint="Shown across the app and on generated documents.">
         <div style={S.grid(240)}>
           <Field label="Studio name"><input style={S.input} value={form.studioName} onChange={(e) => set({ studioName: e.target.value })} /><Err msg={errors.studioName} /></Field>
+          <Field label="Display name" hint="How you're greeted on the dashboard. Personal to you."><input style={S.input} maxLength={60} value={form.displayName || ""} onChange={(e) => set({ displayName: e.target.value })} placeholder="e.g. John" /></Field>
           <Field label="Tagline" hint="Shown on generated invoice PDFs."><input style={S.input} value={form.studioTagline} onChange={(e) => set({ studioTagline: e.target.value })} /></Field>
           <Field label="Legal name (optional)" hint="Used on invoices instead of the studio name when set."><input style={S.input} value={form.studioLegalName} onChange={(e) => set({ studioLegalName: e.target.value })} /></Field>
           <Field label="Address (optional)"><input style={S.input} value={form.studioAddress} onChange={(e) => set({ studioAddress: e.target.value })} /></Field>
@@ -83,6 +84,7 @@ function GeneralTab({ form, set, errors, personalOnly = false }){
         </Field>
       </Section>
       </>}
+      {personalOnly && <Section title="Profile"><div style={S.grid(240)}><Field label="Display name" hint="How you're greeted on the dashboard. Personal to you."><input style={S.input} maxLength={60} value={form.displayName || ""} onChange={(e) => set({ displayName: e.target.value })} placeholder="e.g. John" /></Field></div></Section>}
       <Section title="Region & time">
         <div style={S.grid(240)}>
           <Field label="Timezone" hint="Decides what 'today' means for due dates and Finance."><select style={S.input} value={form.timezone} onChange={(e) => set({ timezone: e.target.value })}><option value="">Follow my browser</option>{zones.map((z) => <option key={z}>{z}</option>)}</select><Err msg={errors.timezone} /></Field>

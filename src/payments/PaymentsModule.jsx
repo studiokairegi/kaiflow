@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, Tabs, Totals, CARD_TONES, useBusy } from "../finance/ui.jsx";
+import LogoLoader from "../LogoLoader.jsx";
 import { ActivityCard } from "../DashboardKit.jsx";
 import { formatMoney, formatTotalsByCurrency, symbolToCode } from "../finance/currency.js";
 import { PrivacyToggle } from "../finance/PrivacyToggle.jsx";
@@ -403,7 +404,7 @@ export default function PaymentsModule({ userId, projects, invoices, teamMembers
   const [privacy, setPrivacy] = useState(false);
   const viewData = useMemo(() => data ? { ...data, transactions: (data.transactions || []).filter((t) => t.environment === "live"), invoicePayments: (data.invoicePayments || []).filter((p) => p.method === "Paystack") } : null, [data]);
   const summary = useMemo(() => (viewData ? summarizePayments({ ...viewData, invoices, period }) : null), [viewData, invoices, period]);
-  if (loading) return <div style={{ ...S.page, color: T.muted }}>Loading Payments…</div>;
+  if (loading) return <LogoLoader label="Loading Payments" />;
   if (error || !data) return <div style={S.page}><Banner tone="bad" action={<Btn small onClick={reload}>Retry</Btn>}>Payments couldn't load: {error || "no data"}. Apply the payment migrations, including the live-only Apple Pay migration.</Banner></div>;
 
   const attention = needsAttention(viewData.transactions).length;

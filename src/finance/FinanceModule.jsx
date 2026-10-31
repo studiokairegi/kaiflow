@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import LogoLoader from "../LogoLoader.jsx";
 import { S, T, Btn, Pill, Banner, Field, Table, Money, Totals, Tabs, CARD_TONES, useBusy } from "./ui.jsx";
 import { ActivityCard } from "../DashboardKit.jsx";
 import { FINANCE_CURRENCIES, formatMoney, r2, todayLocal } from "./currency.js";
@@ -187,7 +188,7 @@ export default function FinanceModule({ userId, projects, invoices, expenses, ca
     if (first.current) { first.current = false; return; }
     ledger.reload();
   }, [invoices, expenses]);
-  if (ledger.loading) return <div style={{ ...S.page, color: T.muted }}>Loading Finance...</div>;
+  if (ledger.loading) return <LogoLoader label="Loading Finance" />;
   if (ledger.error || !ledger.data) {
     return <div style={S.page}><Banner tone="bad" action={<Btn small onClick={ledger.reload}>Retry</Btn>}>Finance couldn't load: {ledger.error || "no data"}. If this is the first run, apply migration_finance_v2.sql in Supabase.</Banner></div>;
   }

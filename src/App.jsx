@@ -54,9 +54,9 @@ const ContactsPage = lazyWithSuspense(() => import("./ContactsPage.jsx"), { labe
 const TasksPanel = lazyWithSuspense(() => import("./TasksPanel.jsx"), { label: "Loading tasks…" });
 const NdaTab = lazyWithSuspense(() => import("./NdaTab.jsx"));
 const SettingsPage = lazyWithSuspense(() => import("./settings/SettingsPage.jsx"), { label: "Loading settings…" });
-const FinanceModule = lazyWithSuspense(() => import("./finance/FinanceModule.jsx"), { label: "Loading finance…" });
+const FinanceModule = lazyWithSuspense(() => import("./finance/FinanceModule.jsx"), { label: "Loading finance…", logo: true });
 const PortfolioTab = lazyWithSuspense(() => import("./portfolio/PortfolioTab.jsx"), { label: "Loading portfolio…" });
-const PaymentsModule = lazyWithSuspense(() => import("./payments/PaymentsModule.jsx"), { label: "Loading payments…" });
+const PaymentsModule = lazyWithSuspense(() => import("./payments/PaymentsModule.jsx"), { label: "Loading payments…", logo: true });
 const ChatPage = lazyWithSuspense(() => import("./chat/ChatPage.jsx"), { label: "Loading studio chat…" });
 const DonutBreakdown = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "DonutBreakdown", label: "" });
 const HoursTrendChart = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "HoursTrendChart", label: "" });
@@ -3132,7 +3132,7 @@ export default function ShotTracker() {
       timer = setTimeout(async () => {
         const cur = settingsRef.current;
         if (JSON.stringify(cur.userPrefs.focusTimer) === JSON.stringify(cfg)) return;
-        const prefs = { ...cur.userPrefs, focusTimer: cfg };
+        const prefs = { ...cur.userPrefs, focusTimer: cfg, displayName: cur.displayName || "" };
         setSettings({ ...cur, userPrefs: prefs });
         const { error } = await supabase.from("user_settings").update({ user_prefs: prefs }).eq("user_id", userId);
         if (error) console.error("Saving focus timer failed:", error);
@@ -6549,7 +6549,7 @@ export default function ShotTracker() {
       )}
 
       {view === "board" && boardTab === "invoices" && (
-        <InvoicesPanel
+        <div className="kf-centered"><InvoicesPanel
           project={selectedProject}
           projectCards={projectCards}
           invoices={invoices.filter((inv) => inv.projectId === selectedProjectId)}
@@ -6571,16 +6571,16 @@ export default function ShotTracker() {
           currencySymbol={selectedProject?.currency || settings.currencySymbol}
           hasProAccess={hasProAccess}
           fxRates={fxRates}
-        />
+        /></div>
       )}
 
       {view === "board" && boardTab === "activity" && (
-        <ActivityPanel
+        <div className="kf-centered"><ActivityPanel
           entries={activity.filter((a) => a.projectId === selectedProjectId)}
           cards={cards}
           onRefresh={loadData}
           onOpenActivity={handleOpenActivity}
-        />
+        /></div>
       )}
 
       {showMilestoneModal && (
@@ -7884,7 +7884,7 @@ function markNeedsAttentionNotified(signature) {
   }
 }
 
-function DashboardGreeting({ user, compact = false }) {
+function DashboardGreeting({ user, displayName = "", compact = false }) {
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
@@ -7892,7 +7892,7 @@ function DashboardGreeting({ user, compact = false }) {
     return () => clearInterval(id);
   }, []);
 
-  const name = getDisplayName(user);
+  const name = String(displayName || "").trim() || getDisplayName(user);
   const greeting = getGreeting(now);
   const dateLabel = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
 
@@ -9406,7 +9406,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   return (
     <div className="kf-dash-shell" style={styles.dashboardShell}>
       <div style={styles.dashboardTopStrip}>
-        <DashboardGreeting user={user} compact />
+        <DashboardGreeting user={user} displayName={settings.displayName} compact />
         {fin.data && <PrivacyToggle privacy={fin.privacy} onChange={fin.setPrivacy} compact />}
       </div>
 
