@@ -141,7 +141,7 @@ body { font-family: 'Inter', system-ui, sans-serif; font-variant-numeric: tabula
 .kf-clock-pill .kf-clock-label { color: #fff !important; font-weight: 600 !important; opacity: 1 !important; }
 .kf-clock-pill button:not(.kf-clock-btn):not(.kf-focus-link) { color: #fff !important; opacity: 1 !important; }
 
-/* Studio Time label and timer turn red while the timer is paused or stopped; white while it is running. */
+/* Studio Time label and timer turn red only while paused/stopped with under 60% of the day's working hours clocked. */
 .kf-clock-pill.kf-clock-halted .kf-clock-label,
 .kf-clock-pill.kf-clock-halted .kf-clock-label + span { color: #FF7A7A !important; }
 .kf-clock-pill.kf-clock-halted .kf-clock-label { font-weight: 700 !important; }

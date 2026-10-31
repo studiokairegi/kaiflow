@@ -8999,6 +8999,9 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
     ? "Studio Time"
     : "Today's studio time";
   const compactBusy = clockingIn || clockingOut;
+  // Red only while the timer is paused/stopped AND less than 60% of today's working hours are clocked.
+  const dayTarget = scheduledSecondsForDay(new Date());
+  const behindOnHours = dayTarget > 0 && (todaySeconds + elapsedSecondsToday) < dayTarget * 0.6;
   // On the dashboard the clock card is placed directly above the Calendar (#kf-clock-slot).
   const [slot, setSlot] = useState(null);
   useEffect(() => {
@@ -9014,7 +9017,7 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   }, [visible]);
   const clockPill = (
       <div style={slot ? styles.studioTimeCompactWrapInline : styles.studioTimeCompactWrap}>
-      <div className={`kf-clock-pill${pomodoroPaused || (!activeSession && !pomodoroPhase) ? " kf-clock-halted" : ""}`} style={{ ...styles.studioTimeCompact, ...(slot ? styles.studioTimeCompactCard : {}), ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
+      <div className={`kf-clock-pill${(pomodoroPaused || (!activeSession && !pomodoroPhase)) && behindOnHours ? " kf-clock-halted" : ""}`} style={{ ...styles.studioTimeCompact, ...(slot ? styles.studioTimeCompactCard : {}), ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
         {(activeSession || pomodoroPhase) && <span style={styles.studioTimeStatusDot} />}
         <span className="kf-clock-label" style={styles.dashboardGreetingCompactDate}>{compactLabel}</span>
         <span style={styles.studioTimeCompactValue}>{displayValue}</span>
