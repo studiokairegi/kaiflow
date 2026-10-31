@@ -133,3 +133,15 @@ body { font-family: 'Inter', system-ui, sans-serif; font-variant-numeric: tabula
   .kf-logo-loader { opacity: 1 !important; animation: none !important; }
   .kf-logo-loader-img { animation: none !important; transform: none; opacity: 1; }
 }
+
+/* Clock In uses the brand teal; its icon and label follow the dark text colour. */
+.kf-clock-pill .kf-clock-in, .kf-clock-pill .kf-clock-in span, .kf-clock-pill .kf-clock-in svg { color: #0b2a25 !important; }
+
+/* "Studio Time" label on the purple pill: full white, slightly heavier, so it reads clearly. */
+.kf-clock-pill .kf-clock-label { color: #fff !important; font-weight: 600 !important; opacity: 1 !important; }
+.kf-clock-pill button:not(.kf-clock-btn):not(.kf-focus-link) { color: #fff !important; opacity: 1 !important; }
+
+/* Studio Time label and timer turn red while the timer is paused or stopped; white while it is running. */
+.kf-clock-pill.kf-clock-halted .kf-clock-label,
+.kf-clock-pill.kf-clock-halted .kf-clock-label + span { color: #FF7A7A !important; }
+.kf-clock-pill.kf-clock-halted .kf-clock-label { font-weight: 700 !important; }

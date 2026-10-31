@@ -9012,9 +9012,9 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   }, [visible]);
   const clockPill = (
       <div style={slot ? styles.studioTimeCompactWrapInline : styles.studioTimeCompactWrap}>
-      <div className="kf-clock-pill" style={{ ...styles.studioTimeCompact, ...(slot ? styles.studioTimeCompactCard : {}), ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
+      <div className={`kf-clock-pill${pomodoroPaused || (!activeSession && !pomodoroPhase) ? " kf-clock-halted" : ""}`} style={{ ...styles.studioTimeCompact, ...(slot ? styles.studioTimeCompactCard : {}), ...((activeSession || pomodoroPhase) ? styles.studioTimeCompactActive : {}) }}>
         {(activeSession || pomodoroPhase) && <span style={styles.studioTimeStatusDot} />}
-        <span style={styles.dashboardGreetingCompactDate}>{compactLabel}</span>
+        <span className="kf-clock-label" style={styles.dashboardGreetingCompactDate}>{compactLabel}</span>
         <span style={styles.studioTimeCompactValue}>{displayValue}</span>
         {pomodoroPhase ? (
           <>
@@ -14183,7 +14183,7 @@ a:hover {
 #kf-clock-slot:empty { display: none; }
 .kf-clock-pill .kf-clock-btn:first-of-type { margin-left: auto; }
 .kf-clock-btn { border: none !important; font-weight: 700 !important; letter-spacing: 0.01em; border-radius: 8px !important; }
-.kf-clock-in { background: #16A34A !important; color: #fff !important; }
+.kf-clock-in { background: #2FBFA6 !important; color: #0b2a25 !important; }
 .kf-clock-out { background: #DC2626 !important; color: #fff !important; }
 .kf-clock-pause { background: #fff !important; color: #5b3de0 !important; }
 .kf-focus-link { background: #2FBFA6 !important; color: #14191c !important; border: none !important; border-radius: 8px !important; padding: 5px 11px !important; font-weight: 700 !important; cursor: pointer; }
