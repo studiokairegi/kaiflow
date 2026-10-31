@@ -33,15 +33,26 @@ body { font-family: 'Inter', system-ui, sans-serif; font-variant-numeric: tabula
 .kf-card:hover { transform: none !important; box-shadow: none !important; }
 .kf-card { box-shadow: none !important; }
 
-/* Dashboard: the page scrolls, not an inner box. */
-.kf-dash-shell { height: auto !important; overflow-y: visible !important; min-height: calc(100vh - 130px); }
-
-/* Dashboard: let the overview grow with its content. The fixed-height shell made rows shrink and
-   overlap below 1500px wide; the Tasks column now stays in view while the page scrolls. */
-.kf-dash-two { grid-auto-rows: max-content; align-content: start; flex: 0 0 auto; }
+/* Dashboard (desktop): fits the viewport without scrolling. The shell has a fixed height, the Tasks card
+   fills its column to the bottom, and spacing is tightened. Two columns are kept down to 1181px wide. */
 @media (min-width: 1181px) {
-  .kf-dash-body { flex: 0 0 auto; align-items: flex-start; }
-  .kf-dash-tasks { position: sticky; top: 0; align-self: flex-start; height: auto; max-height: calc(100vh - 190px); min-height: 420px; }
+  .kf-dash-shell { height: calc(100vh - 125px) !important; min-height: 0 !important; overflow: hidden !important; padding: 10px var(--kf-gutter) 12px !important; gap: 8px !important; }
+  .kf-dash-body { flex: 1 1 auto !important; min-height: 0 !important; align-items: stretch !important; gap: 12px !important; }
+  .kf-dash-tasks { position: relative !important; height: auto !important; min-height: 0 !important; max-height: none !important; }
+  .kf-dash-tasks .kf-tasks-card { position: absolute !important; inset: 0 !important; }
+  .kf-dash-two { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) !important; gap: 12px !important; min-height: 0; align-items: stretch !important; grid-auto-rows: minmax(0, 1fr); }
+  .kf-dash-two > div { min-height: 0; gap: 8px !important; overflow: hidden; }
+  .kf-dash-shell .kf-card { padding: 10px 14px 9px !important; gap: 6px !important; }
+  .kf-dash-shell .kf-dpanel { padding: 10px 14px !important; }
+  .kf-dash-shell .kf-card div[style*="font-size: 30px"], .kf-dash-shell .kf-card div[style*="font-size:30px"] { font-size: 24px !important; }
+  .kf-dash-shell h2, .kf-dash-shell h3 { margin: 0 !important; }
+  .kf-dash-shell .kf-dash-chart { height: clamp(80px, 13vh, 170px) !important; }
+  .kf-dash-shell .kf-prow-icon { width: 28px !important; height: 28px !important; border-radius: 9px !important; }
+  .kf-dash-shell .kf-card span[style*="border-radius: 6px"], .kf-dash-shell .kf-card span[style*="border-radius: 8px"] { padding-block: 2px !important; font-size: 11px !important; }
+  .kf-dash-shell [style*="flex-direction: column"][style*="gap: 14px"] { gap: 8px !important; }
+}
+@media (max-width: 1180px) {
+  .kf-dash-shell { height: auto !important; overflow: visible !important; min-height: 0 !important; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -84,3 +95,22 @@ body { font-family: 'Inter', system-ui, sans-serif; font-variant-numeric: tabula
 .kf-settings-title { display: none; }
 .kf-settings-head { justify-content: flex-end !important; padding-top: 14px; }
 @media (max-width: 768px) { .kf-settings-root { padding-left: 16px !important; padding-right: 16px !important; } }
+
+/* Centered modules (Projects list, Teams, Planner): same measure as Finance/Payments/Settings.
+   Dashboard, Leads and the project board stay full width. */
+.kf-centered { max-width: 1440px; width: 100%; margin-inline: auto; box-sizing: border-box; }
+
+/* Stacked dashboard (narrow screens): the clock and the calendar come first, then Tasks, then the rest. */
+@media (max-width: 1180px) {
+  .kf-dash-two > div { display: contents !important; }
+  .kf-dash-clockcal { order: -1; display: flex !important; }
+  .kf-dash-body { display: flex !important; flex-direction: column; }
+  .kf-dash-two { display: contents !important; }
+  .kf-dash-clockcal { order: -3; }
+  .kf-dash-tasks { order: -2; }
+}
+
+/* Short desktop viewports: scale the overview so it still fits without scrolling. */
+@media (min-width: 1181px) and (max-height: 860px) { .kf-dash-two { zoom: 0.84; } }
+@media (min-width: 1181px) and (max-height: 780px) { .kf-dash-two { zoom: 0.74; } }
+@media (min-width: 1181px) and (max-height: 660px) { .kf-dash-two { zoom: 0.68; } }

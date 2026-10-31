@@ -5703,6 +5703,7 @@ export default function ShotTracker() {
             {saveState === "error" && "Save failed"}
           </span>
           <NotificationCenter notifications={notifications} onNavigate={handleOpenNotification} buttonStyle={styles.iconButtonGhost} />
+          {view !== "settings" && (
           <button
             className={tutorialHighlightTarget === "settings" ? "kf-tutorial-highlight" : undefined}
             style={styles.iconButtonGhost}
@@ -5714,6 +5715,7 @@ export default function ShotTracker() {
           >
             <GearIcon />
           </button>
+          )}
           {view === "settings" ? null : view === "board" && boardTab === "invoices" ? (
             <button
               className="kf-header-primary" style={styles.newButton}
@@ -6046,6 +6048,7 @@ export default function ShotTracker() {
       )}
 
       {view === "projects" && workspace === "projects" && (
+        <div className="kf-centered">
         <ProjectsGrid
           projects={projects}
           cards={cards}
@@ -6058,6 +6061,7 @@ export default function ShotTracker() {
           onRequestDriveConnect={() => setDriveConnectPrompt(true)}
           onDriveError={setDriveNotice}
         />
+        </div>
       )}
 
       {view === "projects" && workspace === "leads" && (
@@ -6356,6 +6360,7 @@ export default function ShotTracker() {
         <ProUpgradePrompt feature="Teams" />
       )}
       {view === "projects" && workspace === "teams" && hasProAccess && (
+        <div className="kf-centered">
         <TeamsPanel
           userId={userId}
           teamMembers={teamMembers}
@@ -6370,9 +6375,11 @@ export default function ShotTracker() {
           studioAccess={studioAccess}
           canManageRoster={studioAccess === null || (studioAccess?.is_member === true && studioAccess.role === "master_user")}
         />
+        </div>
       )}
 
       {view === "projects" && workspace === "planner" && !editingBudgetPlanner && (
+        <div className="kf-centered">
         <PlannerDashboard
           plans={budgetPlanners}
           settings={settings}
@@ -6383,6 +6390,7 @@ export default function ShotTracker() {
           templates={plannerTemplates}
           onDeleteTemplate={handleDeleteTemplate}
         />
+        </div>
       )}
 
       {view === "projects" && workspace === "planner" && editingBudgetPlanner && (
@@ -9460,6 +9468,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
 
         {/* Right: Calendar, Outreach trend, Needs attention */}
         <div style={styles.dashboardCol}>
+<div className="kf-dash-clockcal" style={styles.dashboardCol}>
           <div id="kf-clock-slot" />
           <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>{weekDays[0].key.slice(0, 7)} {"\u00b7"} next 7 days</span>}>Calendar</PanelTitle>
           <Panel>
@@ -9476,6 +9485,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
               ))}
             </div>
           </Panel>
+          </div>
 
           <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>6 months</span>}>Outreach performance</PanelTitle>
           <Panel>
@@ -14979,7 +14989,7 @@ const styles = {
   },
   dashboardGroupGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
     gap: 14,
     flexShrink: 0,
     alignItems: "stretch",

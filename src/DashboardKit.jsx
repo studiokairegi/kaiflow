@@ -63,7 +63,7 @@ export function PanelTitle({ children, right }) {
 
 export function Panel({ children, style, onClick }) {
   return (
-    <div onClick={onClick} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "16px 18px", minWidth: 0, display: "flex", flexDirection: "column", cursor: onClick ? "pointer" : "default", ...style }}>
+    <div onClick={onClick} className="kf-dpanel" style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "16px 18px", minWidth: 0, display: "flex", flexDirection: "column", cursor: onClick ? "pointer" : "default", ...style }}>
       {children}
     </div>
   );
@@ -82,7 +82,7 @@ export function ActivityCard({ gradient, icon, iconColor, title, badge, value, l
   return (
     <div onClick={onClick} className="kf-card" style={{ position: "relative", overflow: "hidden", borderRadius: 12, padding: "16px 18px 14px", background: gradient, color: "#fff", cursor: onClick ? "pointer" : "default", display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, position: "relative" }}>
-        <span style={{ width: 36, height: 36, borderRadius: 9, background: W, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <span style={{ width: 40, height: 40, borderRadius: 11, background: W, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
           <Icon name={icon} size={20} color={iconColor} stroke={1.8} />
         </span>
         <span style={{ fontFamily: FONT, fontWeight: 700, fontSize: 13.5, opacity: 0.95 }}>{title}</span>
@@ -110,7 +110,7 @@ export function ActivityCard({ gradient, icon, iconColor, title, badge, value, l
                 <span style={{ opacity: 0.85, fontSize: 10.5 }}>{c.label}</span>
               </>
             );
-            const st = { display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px", borderRadius: 6, border: "none", background: c.tone === "bad" ? "rgba(120,10,30,0.35)" : "rgba(255,255,255,0.2)", color: "#fff", fontFamily: "inherit", fontSize: 11.5, opacity: c.dim ? 0.6 : 1, cursor: c.onClick ? "pointer" : "default", whiteSpace: "nowrap" };
+            const st = { display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 9px", borderRadius: 8, border: "none", background: c.tone === "bad" ? "rgba(120,10,30,0.35)" : "rgba(255,255,255,0.2)", color: "#fff", fontFamily: "inherit", fontSize: 11.5, opacity: c.dim ? 0.6 : 1, cursor: c.onClick ? "pointer" : "default", whiteSpace: "nowrap" };
             const t = `${c.label}: ${c.value}`;
             return c.onClick
               ? <button key={c.label} type="button" title={t} onClick={c.onClick} style={st}>{inner}</button>
@@ -125,7 +125,7 @@ export function ActivityCard({ gradient, icon, iconColor, title, badge, value, l
 export function ProgressRow({ label, value, pct, color = SKY, icon, sub }) {
   const w = Math.max(0, Math.min(100, pct || 0));
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+    <div className="kf-prow" style={{ display: "flex", alignItems: "center", gap: 12 }}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: INK, marginBottom: 6 }}>
           <span>{label}{sub && <span style={{ color: MUTED, marginLeft: 6, fontSize: 11 }}>{sub}</span>}</span>
@@ -136,7 +136,7 @@ export function ProgressRow({ label, value, pct, color = SKY, icon, sub }) {
         </div>
       </div>
       {icon && (
-        <span style={{ width: 38, height: 38, borderRadius: 13, background: `${color}22`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <span className="kf-prow-icon" style={{ width: 38, height: 38, borderRadius: 13, background: `${color}22`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
           <Icon name={icon} size={18} color={color} />
         </span>
       )}
@@ -177,7 +177,7 @@ function AreaTip({ active, payload, label }) {
 // Smooth two-series area chart in the template's sky + mint.
 export function OutreachArea({ data, a = "Cold Emails", b = "Responded", height = 190 }) {
   return (
-    <div style={{ width: "100%", height }}>
+    <div className="kf-dash-chart" style={{ width: "100%", height }}>
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data} margin={{ top: 8, right: 8, left: -24, bottom: 0 }}>
           <defs>
