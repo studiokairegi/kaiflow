@@ -1,5 +1,5 @@
 import { supabase, functionUrl } from "../supabaseClient";
-import { ALLOWED_ATTACHMENT_TYPES, CHAT_PAGE_SIZE, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, safeObjectFileName, validateMessage } from "./logic.js";
+import { ALLOWED_ATTACHMENT_TYPES, CHAT_PAGE_SIZE, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, validateMessage } from "./logic.js";
 
 const throwIfError = (result, fallback = "Chat request failed.") => {
   if (result?.error) {
@@ -9,6 +9,19 @@ const throwIfError = (result, fallback = "Chat request failed.") => {
   }
   return result?.data;
 };
+
+const ATTACHMENT_ERRORS = {
+  unsupported_file_type: "That file type isn't supported.",
+  file_too_large: "A file is too large (20 MB limit).",
+  file_content_mismatch: "A file doesn't match its type and was rejected.",
+  too_many_attachments: `Attach up to ${MAX_ATTACHMENTS} files at a time.`,
+  drive_not_connected: "The studio's Google Drive isn't connected, so files can't be sent. Ask the studio owner to connect Drive.",
+  drive_not_configured: "File storage isn't set up for this studio yet.",
+  not_authorized: "You don't have permission to do that.",
+  not_found: "That attachment is no longer available.",
+  drive_download_failed: "The file couldn't be fetched from Drive. Try again shortly.",
+};
+const attachmentErrorText = (code) => ATTACHMENT_ERRORS[code] || "Attachments could not be sent. Please try again.";
 
 const rpc = async (name, args) => throwIfError(await supabase.rpc(name, args), "Chat request failed.");
 const MESSAGE_COLUMNS = "id, conversation_id, sender_user_id, body, reply_to_id, created_at, edited_at, deleted_at, chat_attachments(id, file_name, content_type, size_bytes, object_path, uploaded_by, created_at), chat_reactions(id, user_id, reaction, created_at), chat_pins(id, pinned_by, pinned_at)";
@@ -226,90 +239,66 @@ export const chatApi = {
     if (!validation.ok) throw new Error(validation.error);
     if (!idempotencyKey) throw new Error("Message request key is missing. Please try again.");
     if (files.length > MAX_ATTACHMENTS) throw new Error(`Attach up to ${MAX_ATTACHMENTS} files at a time.`);
-    const attachmentIds = [];
-    const uploadedPaths = [];
-    try {
-      for (const file of files) {
-        if (file.size > MAX_ATTACHMENT_BYTES || !ALLOWED_ATTACHMENT_TYPES.has(String(file.type || "").toLowerCase())) {
-          throw new Error(`Unsupported attachment: ${file.name || "file"}.`);
-        }
-        const uploadId = crypto.randomUUID();
-        const objectPath = `${conversationId}/${uploadId}/${safeObjectFileName(file.name)}`;
-        const { error: uploadError } = await supabase.storage.from("chat-attachments").upload(objectPath, file, {
-          cacheControl: "3600", contentType: file.type, upsert: false,
-        });
-        if (uploadError) throw new Error(uploadError.message || `Could not upload ${file.name}.`);
-        uploadedPaths.push(objectPath);
-        const attachmentId = await rpc("chat_register_attachment_upload", {
-          p_conversation_id: conversationId, p_object_path: objectPath,
-          p_file_name: String(file.name || "attachment").slice(0, 255),
-          p_content_type: file.type, p_size_bytes: file.size,
-        });
-        attachmentIds.push(attachmentId);
+    for (const file of files) {
+      if (file.size > MAX_ATTACHMENT_BYTES || !ALLOWED_ATTACHMENT_TYPES.has(String(file.type || "").toLowerCase())) {
+        throw new Error(`Unsupported attachment: ${file.name || "file"}.`);
       }
-      const messageId = await rpc("chat_send_message", {
-        p_conversation_id: conversationId, p_body: validation.body,
-        p_idempotency_key: idempotencyKey, p_reply_to_id: replyToId,
-        p_attachment_ids: attachmentIds,
-      });
-      // An idempotent retry may return the first persisted message after the client lost the
-      // original response. Remove the retry's unused uploads only after confirming which IDs were
-      // actually attached, so the first successful send cannot lose its files.
-      if (attachmentIds.length) {
-        try {
-          const persisted = await this.messageById(messageId);
-          if (persisted) {
-            const linked = new Set((persisted.chat_attachments || []).map((item) => item.id));
-            const orphanIds = attachmentIds.filter((id) => !linked.has(id));
-            const orphanPaths = orphanIds.map((id) => uploadedPaths[attachmentIds.indexOf(id)]).filter(Boolean);
-            let objectsRemoved = orphanPaths.length === 0;
-            if (orphanPaths.length) {
-              const { error: removeError } = await supabase.storage.from("chat-attachments").remove(orphanPaths);
-              objectsRemoved = !removeError;
-            }
-            // Keep metadata if Storage cleanup failed so the unlinked upload remains discoverable
-            // for a later retry instead of becoming an untracked private object.
-            if (objectsRemoved) {
-              for (const id of orphanIds) {
-                try { await rpc("chat_cancel_attachment_upload", { p_attachment_id: id }); } catch { /* retry cleanup can be repeated safely */ }
-              }
-            }
-          }
-        } catch { /* Never roll back a persisted send because cleanup metadata could not load. */ }
-      }
-      return messageId;
-    } catch (error) {
-      // Best-effort cleanup for files that have not been attached to a persisted message.
-      let objectsRemoved = uploadedPaths.length === 0;
-      if (uploadedPaths.length) {
-        try {
-          const { error: removeError } = await supabase.storage.from("chat-attachments").remove(uploadedPaths);
-          objectsRemoved = !removeError;
-        } catch { objectsRemoved = false; /* keep metadata for a later cleanup attempt */ }
-      }
-      if (objectsRemoved) {
-        for (const attachmentId of attachmentIds) {
-          try { await rpc("chat_cancel_attachment_upload", { p_attachment_id: attachmentId }); } catch { /* an already-linked upload is retained */ }
-        }
-      }
-      throw error;
     }
+    // Text-only messages keep the direct database path.
+    if (!files.length) {
+      try {
+        return await rpc("chat_send_message", {
+          p_conversation_id: conversationId, p_body: validation.body,
+          p_idempotency_key: idempotencyKey, p_reply_to_id: replyToId, p_attachment_ids: [],
+        });
+      } catch (sendError) {
+        if (!sendError?.code) sendError.sendOutcomeUnknown = true;
+        throw sendError;
+      }
+    }
+    // Attachments are validated, stored in the studio's private Google Drive and linked to the message
+    // atomically by the chat-attachments gateway. It also trashes uploads from a failed or duplicate
+    // send, so the browser has no storage objects to clean up.
+    const { data: { session } } = await supabase.auth.getSession();
+    const form = new FormData();
+    form.append("action", "send"); form.append("conversation_id", conversationId);
+    form.append("body", validation.body); form.append("idempotency_key", idempotencyKey);
+    if (replyToId) form.append("reply_to_id", replyToId);
+    for (const file of files) form.append("files", file);
+    let response;
+    try {
+      response = await fetch(functionUrl("chat-attachments"), { method: "POST", headers: { Authorization: `Bearer ${session?.access_token || ""}` }, body: form });
+    } catch (networkError) {
+      // No response: the gateway may have saved the message. The retry reuses the idempotency key.
+      networkError.sendOutcomeUnknown = true;
+      throw networkError;
+    }
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || result.error || !result.message_id) {
+      const err = new Error(attachmentErrorText(result.error));
+      err.code = String(result.error || response.status); // a received error response means the send did not persist
+      throw err;
+    }
+    return result.message_id;
   },
   async editMessage(messageId, body) {
     return rpc("chat_edit_message", { p_message_id: messageId, p_new_body: String(body ?? "") });
   },
   async deleteMessage(messageId) {
-    const objectPaths = (await rpc("chat_delete_message", { p_message_id: messageId })) || [];
-    if (!objectPaths.length) return { cleanupWarning: false };
-    const { error } = await supabase.storage.from("chat-attachments").remove(objectPaths);
-    if (error) return { cleanupWarning: true };
-    try {
-      await rpc("chat_finalize_deleted_attachments", { p_message_id: messageId, p_object_paths: objectPaths });
-      return { cleanupWarning: false };
-    } catch {
-      // Files have been removed; any remaining metadata is invisible for a deleted message.
-      return { cleanupWarning: true };
+    // The gateway authorizes the delete, moves the Drive files to the studio's Drive trash and
+    // finalizes the attachment rows. Messages without attachments still go through the same call.
+    const { data: { session } } = await supabase.auth.getSession();
+    const response = await fetch(functionUrl("chat-attachments"), {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token || ""}` },
+      body: JSON.stringify({ action: "delete", message_id: messageId }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || result.error) {
+      const err = new Error(attachmentErrorText(result.error));
+      err.code = String(result.error || response.status);
+      throw err;
     }
+    return { cleanupWarning: !!result.cleanupWarning };
   },
   async setReaction(messageId, reaction, active) {
     return rpc("chat_set_reaction", { p_message_id: messageId, p_reaction: reaction, p_active: !!active });
@@ -405,10 +394,25 @@ export const chatApi = {
     if (error) throw new Error(error.message || "Message history could not be loaded.");
     return data || [];
   },
+  // The file streams through the chat-attachments gateway only after the database confirms this user
+  // can read the conversation. The caller's row is looked up under the user's own JWT (RLS), so an
+  // object path alone never grants access.
   async signedAttachmentUrl(objectPath) {
-    const { data, error } = await supabase.storage.from("chat-attachments").createSignedUrl(objectPath, 60);
-    if (error) throw new Error(error.message || "That attachment is not available.");
-    return data?.signedUrl;
+    const { data: row, error } = await supabase.from("chat_attachments").select("id").eq("object_path", objectPath).maybeSingle();
+    if (error || !row) throw new Error("That attachment is not available.");
+    const { data: { session } } = await supabase.auth.getSession();
+    const response = await fetch(functionUrl("chat-attachments"), {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token || ""}` },
+      body: JSON.stringify({ action: "download", attachment_id: row.id }),
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(attachmentErrorText(result.error) || "That attachment is not available.");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+    return url;
   },
   subscribeConversation({ conversationId, userId, displayName, onMessage, onChange, onTyping, onPresence }) {
     const channel = supabase.channel(`kf-chat:${conversationId}`, {

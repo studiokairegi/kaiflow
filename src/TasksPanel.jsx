@@ -582,7 +582,7 @@ function TaskEditor({ editor, today, leads, projects, shots, onClose, onSwitchTo
       if (isSeriesEdit) { await tasksApi.updateSeries(editor.series, input, today); await onSeriesChanged(); }
       else if (wantsSeries) { await tasksApi.createSeries(input, today); await onSaved(true); }
       else if (mode === "new") { const { task } = await tasksApi.create(form, { requestKey: keyRef.current }); onTaskSaved(task); }
-      else { onTaskSaved(await tasksApi.update(editor.task.id, form)); }
+      else { onTaskSaved(await tasksApi.update(editor.task.id, form.status === "completed" && editor.task.status !== "completed" ? { ...form, completedOn: today } : form)); }
     } catch (e) {
       setError(e.message); if (e.validation) setErrors(e.validation);
       savingRef.current = false; setSaving(false);

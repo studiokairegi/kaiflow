@@ -268,6 +268,13 @@ function CheckoutView({ token }) {
     return () => { live = false; };
   }, [token]);
 
+  // Coming back from Paystack with the browser's Back button restores this page frozen mid-"Opening Paystack…".
+  useEffect(() => {
+    const onShow = (e) => { if (e.persisted) { inflight.current = false; setBusy(""); setNow(Date.now()); } };
+    window.addEventListener("pageshow", onShow);
+    return () => window.removeEventListener("pageshow", onShow);
+  }, []);
+
   useEffect(() => {
     let mounted = true;
     (async () => {

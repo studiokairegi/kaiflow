@@ -19,8 +19,15 @@ export const CONTRACT_STATUS = {
 export const CONTRACT_CONSENT_TEXT =
   "I have read this agreement and agree to sign it electronically. I understand my typed name and signature are legally binding to the same extent as a handwritten signature.";
 
-export const MILESTONE_LABELS = ["Upfront payment", "Mid-project payment", "Delivery payment"];
-export const DEFAULT_MILESTONE_PERCENTS = [50, 25, 25];
+export const MILESTONE_MIN = 2;
+export const MILESTONE_MAX = 6;
+// First is the deposit, last is delivery; anything between is numbered (exactly three keeps "Mid-project").
+export function milestoneLabel(i, n) {
+  if (i === 0) return "Upfront payment";
+  if (i === n - 1) return "Delivery payment";
+  return n === 3 ? "Mid-project payment" : `Milestone ${i + 1} payment`;
+}
+export const DEFAULT_MILESTONE_PERCENTS = [50, 50];
 export const DEFAULT_REVISION_ROUNDS = 2;
 
 // Starting point only. Have a lawyer review it for your jurisdiction.
@@ -98,11 +105,11 @@ export function formatContractDate(value) {
 }
 
 export function validateMilestonePercents(percents) {
-  if (!Array.isArray(percents) || percents.length !== 3) return { ok: false, error: "Enter three payment percentages." };
+  if (!Array.isArray(percents) || percents.length < MILESTONE_MIN || percents.length > MILESTONE_MAX) return { ok: false, error: `Use between ${MILESTONE_MIN} and ${MILESTONE_MAX} payments.` };
   const nums = percents.map((p) => (p === "" || p === null || p === undefined ? NaN : Number(p)));
   if (nums.some((n) => !Number.isFinite(n) || n < 0 || n > 100)) return { ok: false, error: "Each percentage must be between 0 and 100." };
   const sum = nums.reduce((a, b) => a + b, 0);
-  if (Math.abs(sum - 100) > 0.001) return { ok: false, error: `The three payments add up to ${sum}%, they need to add up to 100%.` };
+  if (Math.abs(sum - 100) > 0.001) return { ok: false, error: `The payments add up to ${sum}%, they need to add up to 100%.` };
   return { ok: true, value: nums };
 }
 
@@ -117,12 +124,12 @@ export function buildContractTerms({ project, cards = [], contact = {}, studio =
   const autoTotal = projectCards.reduce((s, c) => s + parseMoney(c.rate), 0);
   const total = round2(project.budgetMode === "auto" ? autoTotal : parseMoney(project.budget));
 
-  const pcts = (milestonePercents && milestonePercents.length === 3 ? milestonePercents : DEFAULT_MILESTONE_PERCENTS).map(Number);
+  const pcts = (milestonePercents && milestonePercents.length >= MILESTONE_MIN && milestonePercents.length <= MILESTONE_MAX ? milestonePercents : DEFAULT_MILESTONE_PERCENTS).map(Number);
   let allocated = 0;
   const milestones = pcts.map((percent, i) => {
     const amount = i === pcts.length - 1 ? round2(total - allocated) : round2((total * percent) / 100);
     allocated = round2(allocated + amount);
-    return { label: MILESTONE_LABELS[i], percent, amount };
+    return { label: milestoneLabel(i, pcts.length), percent, amount };
   });
 
   const stages = (project.pipelineStages || [])

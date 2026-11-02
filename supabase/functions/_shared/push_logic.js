@@ -1,7 +1,7 @@
 // Pure helpers for the `push` Edge Function. Plain JavaScript so the Node test suite can import it
 // directly; the function imports the same file under Deno.
 
-export const SCHEDULE_PREFIXES = ["pomo", "digest"];
+export const SCHEDULE_PREFIXES = ["pomo", "digest", "snooze"];
 export const MAX_SCHEDULE_AHEAD_MS = 7 * 24 * 3600 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

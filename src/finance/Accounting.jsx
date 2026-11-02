@@ -1,12 +1,12 @@
 import React, { useMemo, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, Money, Tabs, useBusy } from "./ui.jsx";
-import { FINANCE_CURRENCIES, formatMoney, r2, todayLocal } from "./currency.js";
+import { FINANCE_CURRENCIES, formatMoney, parseAmount, r2, todayLocal } from "./currency.js";
 import { rpc, addAccount } from "./api.js";
 import { validateEntry } from "./ledger.js";
 import { trialBalance, generalLedger } from "./reports.js";
 
 const today = () => todayLocal();
-const num = (v) => Number(v) || 0;
+const num = (v) => { const n = parseAmount(v); return Number.isFinite(n) ? n : 0; };
 const TYPE_LABEL = { asset: "Assets", liability: "Liabilities", equity: "Equity", revenue: "Revenue", cogs: "Direct production costs", expense: "Operating expenses" };
 
 function Chart({ ctx }) {

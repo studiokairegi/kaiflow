@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { displayMoney, formatTotalsByCurrency, MASK } from "./currency.js";
 import { formatIsoDate } from "../settings/runtime.js";
 import { GRADIENTS } from "../DashboardKit.jsx";
@@ -130,9 +130,12 @@ export function Tabs({ tabs, value, onChange }) {
 export function useBusy() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const inFlight = useRef(false); // a fast double-click must not post a payment twice
   const run = async (fn) => {
+    if (inFlight.current) return false;
+    inFlight.current = true;
     setBusy(true); setError("");
-    try { await fn(); return true; } catch (e) { setError(e?.message || "Something went wrong."); return false; } finally { setBusy(false); }
+    try { await fn(); return true; } catch (e) { setError(e?.message || "Something went wrong."); return false; } finally { inFlight.current = false; setBusy(false); }
   };
   return { busy, error, run, setError };
 }

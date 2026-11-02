@@ -36,6 +36,15 @@ export function roundMoney(n, code = "USD") {
   return Math.round((Number(n) || 0) * f + Number.EPSILON * Math.sign(n || 0)) / f;
 }
 
+// Parses what a person types into an amount field: "1,250.50" and "1 250" work. "" -> 0, junk -> NaN
+// (so callers can refuse it instead of silently treating a typo as zero).
+export function parseAmount(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : NaN;
+  const s = String(v ?? "").replace(/[,\s]/g, "");
+  if (s === "") return 0;
+  return /^-?\d*\.?\d+$|^-?\d+\.$/.test(s) ? Number(s) : NaN;
+}
+
 export const r2 = (n) => Math.round((Number(n) || 0) * 100 + Number.EPSILON * Math.sign(n || 0)) / 100;
 
 // "KSh 1,250.00", "\u20ac1,000.00", "\u00a55,000". Always states the currency: symbol for known

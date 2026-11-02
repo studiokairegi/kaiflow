@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chatApi } from "./api.js";
 import {
-  CHAT_PAGE_SIZE, chatErrorText, conversationLabel, formatChatTime, groupReactions,
+  CHAT_PAGE_SIZE, chatErrorText, conversationLabel, formatChatTime,
   mergeMessages, messageCursor, normalizeMessageBody, safeDisplayName, validateMessage,
 } from "./logic.js";
 import { canCreateGroups as accessCanCreateGroups, canViewDirectory as accessCanViewDirectory } from "../studio/access.js";
@@ -117,6 +117,7 @@ export default function ChatPage({
   incomingRef.current = onIncomingMessage;
   const textareaRef = useRef(null);
   const lastConversationRef = useRef(null);
+  const knownConversationsRef = useRef(new Set());
   const pendingTargetRef = useRef(null);
   messagesRef.current = messages;
 
@@ -124,7 +125,7 @@ export default function ChatPage({
   useEffect(() => {
     if (!activeOrganizationId || activeOrganizationId === organizationId) return;
     if (!memberships.some((m) => m.organization_id === activeOrganizationId)) return;
-    setOrganizationId(activeOrganizationId); setSelectedId(null); setMessages([]); setConversations([]); setPortalSelected(null);
+    knownConversationsRef.current = new Set(); setOrganizationId(activeOrganizationId); setSelectedId(null); setMessages([]); setConversations([]); setPortalSelected(null);
     onConversationChange(null);
   }, [activeOrganizationId, organizationId, memberships, onConversationChange]);
 
@@ -161,8 +162,12 @@ export default function ChatPage({
     try {
       const rows = await chatApi.conversations(organizationId);
       setConversations(rows);
-      if (selectedId && !rows.some((r) => r.conversation_id === selectedId)) {
-        setSelectedId(null); onConversationChange(null); setMessages([]); // lost access while open: close it
+      rows.forEach((r) => knownConversationsRef.current.add(r.conversation_id));
+      // Close only a conversation that WAS in the list and has now disappeared (access removed). One that
+      // was just opened (e.g. from a notification) before the list caught up must not be closed.
+      if (selectedId && knownConversationsRef.current.has(selectedId) && !rows.some((r) => r.conversation_id === selectedId)) {
+        knownConversationsRef.current.delete(selectedId);
+        setSelectedId(null); onConversationChange(null); setMessages([]);
       }
     } catch (error) { setActionError(chatErrorText(error)); }
   }, [organizationId, activeMembership, selectedId, onConversationChange]);
@@ -386,7 +391,6 @@ export default function ChatPage({
   };
   const actions = useMemo(() => ({
     reply: (m) => { setReplyTo({ id: m.id, senderName: m.mine ? "yourself" : m.senderName, preview: (m.body || "Attachment").slice(0, 160) }); textareaRef.current?.focus(); },
-    react: (m, reaction, reacted) => guarded(m, async () => { await chatApi.setReaction(m.id, reaction, !reacted); await refreshOne(m.id); })(),
     pin: (m, active) => guarded(m, async () => { await chatApi.togglePin(m.id, active); await refreshOne(m.id); loadPins(); })(),
     edit: (m) => setEditing({ id: m.id, body: m.body }),
     history: async (m) => { try { setEditHistory({ rows: await chatApi.messageHistory(m.id) }); } catch (error) { setActionError(chatErrorText(error)); } },
@@ -431,7 +435,7 @@ export default function ChatPage({
       canEdit: mine && !row.deleted_at && Date.now() - Date.parse(row.created_at) < 15 * 60 * 1000,
       canDelete: mine || (isMaster && selectedConversation?.kind !== "direct"),
       attachments: row.chat_attachments || [],
-      reactions: groupReactions(row.chat_reactions || [], userId).map((g) => ({ reaction: g.reaction, count: g.count, reactedByMe: g.reactedByMe, names: g.users.map(nameOf) })),
+      reactions: [], canReact: false,
       replyTo: row.reply_to_id ? { id: row.reply_to_id, name: parent ? (parent.sender_user_id === userId ? "You" : nameOf(parent.sender_user_id)) : "Earlier message", preview: parent ? (parent.deleted_at ? "Deleted message" : (parent.body || "Attachment").slice(0, 120)) : "Message not loaded" } : null,
     };
   }), [messages, userId, nameOf, isMaster, selectedConversation]);

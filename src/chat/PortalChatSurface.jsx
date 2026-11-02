@@ -76,7 +76,10 @@ export default function PortalChatSurface({ list, send, download, selfKind, self
     textareaRef.current?.focus();
   };
 
-  const isMine = useCallback((row) => row.sender_kind === selfKind && (selfKind === "client" || row.sender_label === selfLabel), [selfKind, selfLabel]);
+  const isMine = useCallback((row) => {
+    if (typeof row.mine === "boolean") return row.mine; // guests: decided by the server from their session
+    return row.sender_kind === selfKind && (selfKind === "client" || row.sender_label === selfLabel);
+  }, [selfKind, selfLabel]);
 
   // Notify when someone else writes: a tone, a desktop notification if the tab is in the background,
   // and an unread count in the tab title. The first load only records history.

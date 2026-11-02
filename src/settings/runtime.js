@@ -62,8 +62,17 @@ export function formatIsoDate(iso, fmt = state.dateFormat) {
 }
 
 // --- workweek ---------------------------------------------------------------
+const WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+// Day of week (0 = Sunday) on the studio calendar, so the workweek follows the chosen timezone.
+function weekdayInZone(date, timeZone = state.timezone) {
+  if (!timeZone) return date.getDay();
+  try {
+    const name = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short" }).format(date);
+    return WEEKDAY_INDEX[name] ?? date.getDay();
+  } catch { return date.getDay(); }
+}
 export function isWorkday(date, ww = state.workweek) {
-  return (ww.days || []).includes(date.getDay());
+  return (ww.days || []).includes(weekdayInZone(date));
 }
 export function workdayTargetSeconds(date, ww = state.workweek) {
   return isWorkday(date, ww) ? Math.round(Number(ww.hoursPerDay) * 3600) : 0;

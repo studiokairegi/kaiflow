@@ -2,9 +2,11 @@ import React, { useEffect, useMemo, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, Tabs, Totals, CARD_TONES, useBusy } from "../finance/ui.jsx";
 import LogoLoader from "../LogoLoader.jsx";
 import { ActivityCard } from "../DashboardKit.jsx";
-import { formatMoney, formatTotalsByCurrency, symbolToCode } from "../finance/currency.js";
+import { formatMoney, formatTotalsByCurrency, parseAmount, symbolToCode } from "../finance/currency.js";
+import { todayInZone } from "../settings/runtime.js";
 import { PrivacyToggle } from "../finance/PrivacyToggle.jsx";
 import { usePayments } from "./usePayments.js";
+import { supabase } from "../supabaseClient";
 import ProvidersTab from "./ProvidersTab.jsx";
 import { ManualTransfersTab } from "./ManualTransfers.jsx";
 import * as api from "./api.js";
@@ -15,7 +17,14 @@ import {
 
 const TABS = [["overview", "Overview"], ["providers", "Providers"], ["wise", "Wise transfers"], ["incoming", "Incoming payments"], ["outgoing", "Outgoing payments"], ["payouts", "Freelancer payouts"], ["transactions", "Transactions"], ["settlements", "Settlements"], ["reconciliation", "Reconciliation"], ["settings", "Settings"]];
 const fmtDateTime = (iso) => (iso ? new Date(iso).toLocaleString() : "-");
-const fmtDay = (iso) => (iso ? String(iso).slice(0, 10) : "-");
+// Plain dates (YYYY-MM-DD) pass through; full timestamps are shown on the studio calendar, not the UTC one.
+const fmtDay = (iso) => {
+  if (!iso) return "-";
+  const s = String(iso);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? s.slice(0, 10) : todayInZone(d);
+};
 const money = (c, n, priv) => (priv ? "••••" : formatMoney(c, n));
 
 const StatusPill = ({ map, status }) => <Pill tone={map[status]?.tone || "muted"}>{map[status]?.label || status}</Pill>;
@@ -23,7 +32,8 @@ const StatusPill = ({ map, status }) => <Pill tone={map[status]?.tone || "muted"
 // Headline figure as a dashboard-style gradient card.
 function Kpi({ label, totals, privacy, sub, tone, card = "sky", icon = "card", flat = false }) {
   const t = CARD_TONES[card] || CARD_TONES.sky;
-  const value = typeof totals === "number" ? (privacy ? "\u2022\u2022\u2022" : totals) : <Totals totals={totals} privacy={privacy} />;
+  // numbers and ready-made strings ("3 / 5") are shown as they are; only {CODE: amount} maps go through Totals
+  const value = typeof totals === "number" || typeof totals === "string" ? (privacy ? "\u2022\u2022\u2022" : totals) : <Totals totals={totals} privacy={privacy} />;
   if (flat) {
     return (
       <div style={{ ...S.card, gap: 4, borderLeft: `3px solid ${tone === "bad" ? T.bad : t.icon}` }}>
@@ -162,7 +172,7 @@ function RequestForm({ row, ctx, onClose }) {
   const [note, setNote] = useState("");
   const { busy, error, run } = useBusy();
   useEffect(() => { if (bill) setAmount(String(bill.available)); }, [billId]);
-  const amt = Number(amount);
+  const amt = parseAmount(amount);
   const ok = bill && amt > 0 && amt <= bill.available + 0.005;
   return (
     <Modal title={`Payment request — ${row.member.name}`} onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !ok} onClick={() => run(async () => { await api.createPayoutRequest(billId, amt, note); await ctx.reload(); onClose(); })}>Create request</Btn></>}>
@@ -402,6 +412,14 @@ export default function PaymentsModule({ userId, projects, invoices, teamMembers
   const [tab, setTab] = useState("overview");
   const [period, setPeriod] = useState(PAYMENT_PERIODS.some((p) => p.id === defaultPeriod) ? defaultPeriod : "all");
   const [privacy, setPrivacy] = useState(false);
+  // Start from the same privacy choice Finance saves, so amounts hidden there aren't shown here.
+  useEffect(() => {
+    let alive = true;
+    if (!userId) return undefined;
+    supabase.from("finance_settings").select("privacy_mode").eq("user_id", userId).maybeSingle()
+      .then(({ data: row }) => { if (alive && row?.privacy_mode) setPrivacy(true); }, () => {});
+    return () => { alive = false; };
+  }, [userId]);
   const viewData = useMemo(() => data ? { ...data, transactions: (data.transactions || []).filter((t) => t.environment === "live"), invoicePayments: (data.invoicePayments || []).filter((p) => p.method === "Paystack") } : null, [data]);
   const summary = useMemo(() => (viewData ? summarizePayments({ ...viewData, invoices, period }) : null), [viewData, invoices, period]);
   if (loading) return <LogoLoader label="Loading Payments" />;

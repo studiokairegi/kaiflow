@@ -281,3 +281,16 @@ test("tax summary separates deductible costs and is not a legal determination", 
   const t = R.taxSummary(post(L), {});
   assert.equal(t.revenue, 1000); assert.equal(t.deductibleExpenses, 200); assert.equal(t.indicativeTaxableProfit, 800);
 });
+
+import { parseAmount as _pa } from "./currency.js";
+import { toCsv as _csv } from "./reports.js";
+import { test as _t2 } from "node:test";
+import _a2 from "node:assert/strict";
+_t2("parseAmount accepts separators and rejects junk", () => {
+  _a2.equal(_pa("1,250.50"), 1250.5); _a2.equal(_pa(" 1 000 "), 1000); _a2.equal(_pa(""), 0);
+  _a2.ok(Number.isNaN(_pa("12abc"))); _a2.ok(Number.isNaN(_pa("1.2.3")));
+});
+_t2("toCsv neutralises spreadsheet formulas in text but not numbers", () => {
+  const out = _csv([{ memo: "=HYPERLINK(\"x\")", n: -5, c: "-" }]).split("\n")[1];
+  _a2.ok(out.startsWith("\"'=HYPERLINK")); _a2.ok(out.includes(",-5,"));
+});

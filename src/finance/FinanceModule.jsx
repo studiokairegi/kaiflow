@@ -189,7 +189,7 @@ export default function FinanceModule({ userId, projects, invoices, expenses, ca
     ledger.reload();
   }, [invoices, expenses]);
   if (ledger.loading) return <LogoLoader label="Loading Finance" />;
-  if (ledger.error || !ledger.data) {
+  if (!ledger.data) {
     return <div style={S.page}><Banner tone="bad" action={<Btn small onClick={ledger.reload}>Retry</Btn>}>Finance couldn't load: {ledger.error || "no data"}. If this is the first run, apply migration_finance_v2.sql in Supabase.</Banner></div>;
   }
   const ctx = {
@@ -200,6 +200,7 @@ export default function FinanceModule({ userId, projects, invoices, expenses, ca
   const issues = fxIssues(ledger.data).length;
   return (
     <div style={S.page}>
+      {ledger.error && <Banner tone="warn" action={<Btn small onClick={ledger.reload}>Retry</Btn>}>Couldn't refresh Finance ({ledger.error}). Figures below may be out of date.</Banner>}
       <Tabs value={tab} onChange={setTab} tabs={TABS.map(([id, label]) => ({ id, label, badge: id === "settings" && issues ? `\u2022 ${issues}` : "" }))} />
       {tab === "overview" && <Overview ctx={ctx} go={setTab} />}
       {tab === "sales" && <Sales ctx={ctx} />}

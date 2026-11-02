@@ -8,8 +8,8 @@ const iso = (d) => d.toISOString().slice(0, 10);
 const todayStr = () => todayLocal();
 
 export function periodRange(id, custom) {
-  const now = new Date();
-  const y = now.getUTCFullYear(), m = now.getUTCMonth();
+  const [ty, tm] = todayStr().split("-").map(Number); // studio time zone, same as "Year to date"
+  const y = ty, m = tm - 1;
   const eom = (yy, mm) => iso(new Date(Date.UTC(yy, mm + 1, 0)));
   switch (id) {
     case "month": return { from: iso(new Date(Date.UTC(y, m, 1))), to: eom(y, m), label: "This month" };
@@ -124,10 +124,10 @@ export function buildPackageHtml(ctx, range, today) {
   const f = (a) => formatMoney(base, a);
   const pl = R.profitAndLoss(ctx.postings, range), bs = R.balanceSheet(ctx.postings, { asOf: range.to || today }), cf = R.cashFlow(ctx.postings, range);
   const arRep = buildReport("ar", ctx, range, today).ag, apRep = buildReport("ap", ctx, range, today).ag;
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const tr = (l, a, b) => `<tr${b ? ' class="t"' : ""}><td>${l}</td><td class="n">${f(a)}</td></tr>`;
-  const rows = (rs) => rs.map((r) => tr(`${r.code ? r.code + " " : ""}${r.name}`, r.amount)).join("");
-  const agRows = (ag) => ag.buckets.map((b) => tr(`${b.label} (${b.count})`, b.base)).join("");
-  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const rows = (rs) => rs.map((r) => tr(esc(`${r.code ? r.code + " " : ""}${r.name}`), r.amount)).join("");
+  const agRows = (ag) => ag.buckets.map((b) => tr(esc(`${b.label} (${b.count})`), b.base)).join("");
   return `<!doctype html><html><head><meta charset="utf-8"><title>Financial package</title><style>body{font:14px/1.5 system-ui,sans-serif;max-width:760px;margin:32px auto;color:#111}h1{font-size:22px}h2{font-size:16px;margin:28px 0 6px;border-bottom:1px solid #999}table{width:100%;border-collapse:collapse}td{padding:4px 6px}td.n{text-align:right;font-variant-numeric:tabular-nums}tr.t td{font-weight:700;border-top:1px solid #999}small{color:#555}</style></head><body>
 <h1>Financial package</h1><small>Period: ${esc(range.label)} ${range.from || ""} ${range.to ? "to " + range.to : ""} &middot; Reported in ${base} &middot; Generated ${today}. Amounts are converted using the exchange rate stored with each transaction. Transactions without a rate are excluded and listed in the transaction export.</small>
 <h2>Profit &amp; Loss</h2><table>${rows(pl.revenue)}${tr("Total revenue", pl.totalRevenue, 1)}${rows(pl.cogs)}${tr("Gross profit", pl.grossProfit, 1)}${rows(pl.opex)}${tr("Net profit", pl.netProfit, 1)}</table>

@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { useInvoiceRefs } from "../invoiceRefs.js";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, Money, Totals, useBusy, fmtDate } from "./ui.jsx";
-import { symbolToCode, formatMoney, todayLocal } from "./currency.js";
+import { symbolToCode, formatMoney, parseAmount, todayLocal } from "./currency.js";
 import { rpc } from "./api.js";
 import { aging, documentPositions, expensesByCategory } from "./reports.js";
 
@@ -38,12 +38,12 @@ function PaymentModal({ ctx, invoice, outstanding, onClose }) {
   const [reference, setReference] = useState("");
   const { busy, error, run } = useBusy();
   const submit = () => run(async () => {
-    await rpc("finance_record_invoice_payment", { p_invoice: invoice.id, p_amount: Number(amount), p_date: date, p_bank_account: bank, p_method: method, p_reference: reference });
+    await rpc("finance_record_invoice_payment", { p_invoice: invoice.id, p_amount: parseAmount(amount), p_date: date, p_bank_account: bank, p_method: method, p_reference: reference });
     await ctx.reload(); await ctx.refreshApp(); onClose();
   });
   return (
     <Modal title={refOf(invoice) ? `Record payment \u00b7 ${refOf(invoice)}` : "Record payment"} onClose={onClose}
-      footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !bank || !(Number(amount) > 0)} onClick={submit}>{busy ? "Recording..." : "Record payment"}</Btn></>}>
+      footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !bank || !(parseAmount(amount) > 0) || parseAmount(amount) > outstanding + 0.005} onClick={submit}>{busy ? "Recording..." : "Record payment"}</Btn></>}>
       <p style={S.sub}>Outstanding: <strong>{formatMoney(code, outstanding)}</strong>. Each payment is its own record; the invoice status follows from them.</p>
       {banks.length === 0 && <Banner tone="warn">There is no {code} bank or cash account yet. Add one under Banking first, then record the payment.</Banner>}
       <div style={S.grid(160)}>
@@ -56,6 +56,7 @@ function PaymentModal({ ctx, invoice, outstanding, onClose }) {
       </div>
       <Field label="Reference"><input style={S.input} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Transaction ID, optional" /></Field>
       {code !== base && <p style={S.sub}>This is a {code} invoice and your base currency is {base}. The payment is converted at the rate for the payment date; any difference from the invoice-date value is booked as realized FX gain/loss. If no rate exists for that date it is flagged for you to resolve, never assumed.</p>}
+      {parseAmount(amount) > outstanding + 0.005 && <Banner tone="warn">That is more than the {formatMoney(code, outstanding)} still outstanding.</Banner>}
       {error && <Banner tone="bad">{error}</Banner>}
     </Modal>
   );

@@ -12,12 +12,24 @@
 //   mode "staff"   send (with attachments) | download   with Authorization: Bearer <user JWT>
 //
 // JSON for everything; `send` may be multipart/form-data (fields + up to 5 `files`).
-// Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY (defaults), PORTAL_HASH_PEPPER (optional).
+// Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY (defaults), PORTAL_HASH_PEPPER (optional),
+//      DRIVE_TOKEN_ENCRYPTION_KEY, DOWNLOAD_SIGNING_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.
+//
+// Attachment bytes never touch Supabase Storage. They live in the studio's own Google Drive under
+//   KairFlow / Chat Attachments
+// and stay private (no "anyone with the link" sharing). portal_attachments.object_path stores
+// `drive://<driveFileId>`. Downloads: `download` authorizes the caller and returns a 60-second signed
+// ticket URL back to this function; GET ?ticket= re-checks the attachment and streams it from Drive.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
+import { decryptText } from "../_shared/crypto.ts";
+import { createDriveFolder, fetchDriveFileStream, findChildFolder, findRootFolder, getAccessToken, trashDriveFile, uploadFileToDrive } from "../_shared/google.ts";
+import { signTicket, verifyTicket } from "../_shared/download_ticket.ts";
 
-const BUCKET = "portal-attachments";
+const TICKET_TTL_SECONDS = 60;
+const TICKET_SCOPE = "portal:"; // keeps these tickets unusable by client-final-download, which shares the signing key
+const DRIVE_PATH = /^drive:\/\/([A-Za-z0-9_-]{10,200})$/;
 const MAX_FILES = 5;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const ALLOWED_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain"]);
@@ -65,16 +77,83 @@ class HttpError extends Error {
   constructor(public status: number, public code: string) { super(code); }
 }
 
+// The studio's Drive: the organization's creator holds the encrypted connection (same rule the internal
+// chat-attachments gateway uses). Folder ids are cached in chat_drive_folders and re-created if missing.
+async function getDriveForThread(admin: ReturnType<typeof createClient>, threadId: string) {
+  const { data: thread } = await admin.from("portal_threads").select("organization_id").eq("id", threadId).maybeSingle();
+  if (!thread?.organization_id) throw new HttpError(404, "not_found");
+  const { data: org } = await admin.from("studio_organizations").select("created_by").eq("id", thread.organization_id).maybeSingle();
+  if (!org?.created_by) throw new HttpError(400, "drive_not_configured");
+  const { data: connection } = await admin.from("google_drive_connections").select("refresh_token_encrypted").eq("user_id", org.created_by).maybeSingle();
+  if (!connection?.refresh_token_encrypted) throw new HttpError(400, "drive_not_connected");
+  const encryptionKey = Deno.env.get("DRIVE_TOKEN_ENCRYPTION_KEY");
+  if (!encryptionKey) throw new HttpError(500, "drive_not_configured");
+  const accessToken = await getAccessToken(await decryptText(connection.refresh_token_encrypted, encryptionKey));
+
+  await admin.from("chat_drive_folders").upsert({ user_id: org.created_by }, { onConflict: "user_id", ignoreDuplicates: true });
+  const { data: state } = await admin.from("chat_drive_folders").select("*").eq("user_id", org.created_by).maybeSingle();
+  let rootId = state?.kairflow_root_folder_id || null;
+  if (!rootId) {
+    const root = await findRootFolder(accessToken, "KairFlow");
+    rootId = root ? root.id : (await createDriveFolder(accessToken, "KairFlow")).id;
+    await admin.from("chat_drive_folders").update({ kairflow_root_folder_id: rootId, updated_at: new Date().toISOString() }).eq("user_id", org.created_by);
+  }
+  let folderId = state?.chat_attachments_folder_id || null;
+  if (!folderId) {
+    const found = await findChildFolder(accessToken, rootId, "Chat Attachments");
+    folderId = found ? found.id : (await createDriveFolder(accessToken, "Chat Attachments", rootId)).id;
+    await admin.from("chat_drive_folders").update({ chat_attachments_folder_id: folderId, updated_at: new Date().toISOString() }).eq("user_id", org.created_by);
+  }
+  return { accessToken, folderId };
+}
+
+// GET ?ticket=... : the ticket was minted by an authorized `download`. The attachment is re-read from the
+// database (must still exist on that thread) before a single byte is streamed from Drive.
+async function streamTicket(req: Request, admin: ReturnType<typeof createClient>): Promise<Response> {
+  const signingKey = Deno.env.get("DOWNLOAD_SIGNING_KEY");
+  if (!signingKey) return json({ error: "downloads_not_configured" }, 503);
+  const payload = await verifyTicket(new URL(req.url).searchParams.get("ticket") || "", signingKey);
+  if (!payload || !payload.s.startsWith(TICKET_SCOPE)) return json({ error: "invalid_ticket" }, 403);
+  const threadId = payload.s.slice(TICKET_SCOPE.length);
+  if (!UUID.test(threadId) || !UUID.test(payload.v)) return json({ error: "invalid_ticket" }, 403);
+  const { data: row } = await admin.from("portal_attachments").select("object_path, file_name, content_type")
+    .eq("id", payload.v).eq("thread_id", threadId).maybeSingle();
+  const match = String(row?.object_path || "").match(DRIVE_PATH);
+  if (!row || !match) return json({ error: "not_found" }, 404);
+  const { accessToken } = await getDriveForThread(admin, threadId);
+  const drive = await fetchDriveFileStream(accessToken, match[1]);
+  if (!drive.ok || !drive.body) return json({ error: drive.status === 404 ? "not_found" : "drive_download_failed" }, drive.status === 404 ? 404 : 502);
+  const name = safeName(row.file_name);
+  const headers: Record<string, string> = {
+    ...corsHeaders,
+    "Content-Type": row.content_type || "application/octet-stream",
+    "Content-Disposition": `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff",
+  };
+  const len = drive.headers.get("Content-Length");
+  if (len) headers["Content-Length"] = len;
+  return new Response(drive.body, { status: 200, headers });
+}
+
 Deno.serve(async (req) => {
   const opt = handleOptions(req);
   if (opt) return opt;
-  if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
-
   const url = Deno.env.get("SUPABASE_URL")!;
   const admin = createClient(url, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
-  const uploaded: string[] = [];
+  if (req.method === "GET") {
+    try { return await streamTicket(req, admin); }
+    catch (error) {
+      if (error instanceof HttpError) return json({ error: error.code }, error.status);
+      console.error("portal-chat download error", error);
+      return json({ error: "unexpected_error" }, 500);
+    }
+  }
+  if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  const uploaded: string[] = []; // Drive file ids uploaded by this request and not yet persisted
+  let driveToken = "";
 
   try {
     const contentType = req.headers.get("content-type") || "";
@@ -184,9 +263,11 @@ Deno.serve(async (req) => {
       if (await limited(`portal_list_${mode}`, rateSubject, 240, 60)) throw new HttpError(429, "rate_limited");
       if (mode === "staff") throw new HttpError(400, "invalid_request");
       const after = fields.after ? new Date(String(fields.after)) : null;
-      const { data, error } = await admin.rpc("portal_thread_messages", {
-        p_thread_id: threadId, p_after: after && !isNaN(+after) ? after.toISOString() : null, p_limit: 100,
-      });
+      const afterIso = after && !isNaN(+after) ? after.toISOString() : null;
+      // Guests also get an explicit `mine` flag (from their session) so same-named guests are never confused.
+      const { data, error } = mode === "guest" && sessionId
+        ? await admin.rpc("portal_guest_messages", { p_thread_id: threadId, p_session_id: sessionId, p_after: afterIso, p_limit: 100 })
+        : await admin.rpc("portal_thread_messages", { p_thread_id: threadId, p_after: afterIso, p_limit: 100 });
       if (error) throw new HttpError(500, "unexpected_error");
       return json({ ok: true, messages: data || [], display_name: label });
     }
@@ -200,17 +281,20 @@ Deno.serve(async (req) => {
       if (files.length > MAX_FILES) throw new HttpError(400, "too_many_attachments");
       if (files.length && await limited(`portal_upload_${mode}`, rateSubject, 10, 600)) throw new HttpError(429, "rate_limited");
       const attachments: Array<Record<string, unknown>> = [];
+      let driveFolderId = "";
+      if (files.length) ({ accessToken: driveToken, folderId: driveFolderId } = await getDriveForThread(admin, threadId));
       for (const file of files) {
         const type = (file.type || "").toLowerCase();
         if (!ALLOWED_TYPES.has(type)) throw new HttpError(415, "unsupported_file_type");
         if (file.size < 1 || file.size > MAX_FILE_BYTES) throw new HttpError(413, "file_too_large");
         const bytes = new Uint8Array(await file.arrayBuffer());
         if (!sniffMatches(type, bytes.slice(0, 16))) throw new HttpError(415, "file_content_mismatch");
-        const path = `${threadId}/${crypto.randomUUID()}/${safeName(file.name)}`;
-        const { error } = await admin.storage.from(BUCKET).upload(path, bytes, { contentType: type, upsert: false });
-        if (error) throw new HttpError(500, "upload_failed");
-        uploaded.push(path);
-        attachments.push({ object_path: path, file_name: safeName(file.name), content_type: type, size_bytes: file.size });
+        // Private upload (shareWithAnyoneLink = false): only this gateway can ever read the file.
+        let driveFile: { id: string };
+        try { driveFile = await uploadFileToDrive(driveToken, driveFolderId, safeName(file.name), bytes, type, false); }
+        catch (driveError) { console.error("portal-chat Drive upload failed", driveError); throw new HttpError(502, "upload_failed"); }
+        uploaded.push(driveFile.id);
+        attachments.push({ object_path: `drive://${driveFile.id}`, file_name: safeName(file.name), content_type: type, size_bytes: file.size });
       }
       let result;
       if (mode === "staff") {
@@ -237,12 +321,12 @@ Deno.serve(async (req) => {
       return json({ ok: true, message_id: result.data });
     }
 
-    // ---- download: authorize, then a 60-second signed URL ----
+    // ---- download: authorize, then a 60-second signed ticket URL back to this function ----
     if (action === "download") {
       if (await limited(`portal_download_${mode}`, rateSubject, 60, 60)) throw new HttpError(429, "rate_limited");
       const attachmentId = String(fields.attachment_id || "");
       if (!UUID.test(attachmentId)) throw new HttpError(400, "invalid_request");
-      let row: { object_path: string; file_name: string } | undefined;
+      let row: { thread_id?: string; object_path: string; file_name: string } | undefined;
       if (mode === "staff") {
         const { data, error } = await staffClient!.rpc("portal_staff_attachment", { p_attachment_id: attachmentId });
         if (error) throw new HttpError(403, "not_authorized");
@@ -251,15 +335,21 @@ Deno.serve(async (req) => {
         const { data } = await admin.rpc("portal_get_attachment", { p_thread_id: threadId, p_attachment_id: attachmentId });
         row = Array.isArray(data) ? data[0] : data;
       }
-      if (!row) throw new HttpError(404, "not_found");
-      const { data: signed, error } = await admin.storage.from(BUCKET).createSignedUrl(row.object_path, 60, { download: row.file_name });
-      if (error || !signed?.signedUrl) throw new HttpError(404, "not_found");
-      return json({ ok: true, url: signed.signedUrl });
+      if (!row || !DRIVE_PATH.test(String(row.object_path || ""))) throw new HttpError(404, "not_found");
+      // The thread comes from the authorized lookup, never from the request, for every mode.
+      const ticketThread = mode === "staff" ? String(row.thread_id || "") : threadId;
+      if (!UUID.test(ticketThread)) throw new HttpError(404, "not_found");
+      const signingKey = Deno.env.get("DOWNLOAD_SIGNING_KEY");
+      if (!signingKey) throw new HttpError(503, "downloads_not_configured");
+      const exp = Math.floor(Date.now() / 1000) + TICKET_TTL_SECONDS;
+      const ticket = await signTicket({ v: attachmentId, s: `${TICKET_SCOPE}${ticketThread}`, exp }, signingKey);
+      return json({ ok: true, url: `${url}/functions/v1/portal-chat?ticket=${encodeURIComponent(ticket)}` });
     }
 
     throw new HttpError(400, "invalid_request");
   } catch (error) {
-    if (uploaded.length) await admin.storage.from(BUCKET).remove(uploaded).catch(() => {});
+    // Files uploaded for a send that never persisted go to the studio's Drive trash.
+    if (uploaded.length && driveToken) await Promise.all(uploaded.map((id) => trashDriveFile(driveToken, id)));
     if (error instanceof HttpError) return json({ error: error.code }, error.status, error.status === 429 ? { "Retry-After": "60" } : {});
     return json({ error: "unexpected_error" }, 500);
   }

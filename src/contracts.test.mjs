@@ -32,12 +32,17 @@ test("milestones: split by percent and the last one absorbs rounding", () => {
   const t = buildContractTerms({ project: { ...project, budget: "100" }, cards: [], contact, milestonePercents: [33.33, 33.33, 33.34] });
   assert.equal(t.milestones.reduce((s, m) => s + m.amount, 0).toFixed(2), "100.00");
   const d = buildContractTerms({ project, cards, contact });
-  assert.deepEqual(d.milestones.map((m) => m.amount), [75000, 37500, 37500]);
+  assert.deepEqual(d.milestones.map((m) => m.amount), [75000, 75000]); // two payments by default
+  const f = buildContractTerms({ project, cards, contact, milestonePercents: [40, 20, 20, 20] });
+  assert.deepEqual(f.milestones.map((m) => m.label), ["Upfront payment", "Milestone 2 payment", "Milestone 3 payment", "Delivery payment"]);
+  assert.equal(f.milestones.reduce((s, m) => s + m.amount, 0), 150000);
 });
 
 test("percent validation", () => {
   assert.equal(validateMilestonePercents([50, 25, 25]).ok, true);
   assert.equal(validateMilestonePercents([50, 25, 20]).ok, false);
+  assert.equal(validateMilestonePercents([60, 40]).ok, true);
+  assert.equal(validateMilestonePercents([100]).ok, false);
   assert.equal(validateMilestonePercents(["", 50, 50]).ok, false);
   assert.equal(validateMilestonePercents([110, -5, -5]).ok, false);
 });

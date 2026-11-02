@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { S, T, Btn, Banner, Field, Modal, useBusy } from "../finance/ui.jsx";
-import { formatMoney, symbolToCode } from "../finance/currency.js";
+import { formatMoney, parseAmount, symbolToCode } from "../finance/currency.js";
 import { outstandingOf, payableInvoices } from "./logic.js";
 import { checkoutUrl } from "./providers.js";
 import { createCheckoutSession } from "./api.js";
@@ -16,7 +16,7 @@ export default function GeneratePaymentLinkDialog({ invoice, onClose, onChanged 
   const [link, setLink] = useState(null);
   const [copied, setCopied] = useState(false);
   const { busy, error, run } = useBusy();
-  const amt = Number(amount);
+  const amt = parseAmount(amount);
   const amountOk = Number.isFinite(amt) && amt > 0 && amt <= outstanding + 0.005;
   const daysOk = Number.isInteger(Number(days)) && Number(days) >= 1 && Number(days) <= 90;
   const blocked = !payableInvoices([invoice]).length ? "Nothing is outstanding on this document." : "";

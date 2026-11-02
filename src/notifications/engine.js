@@ -138,8 +138,11 @@ export function createNotificationEngine({
       const before = oldestMs();
       // The cursor is inclusive (so same-timestamp rows are never skipped), which re-fetches the rows
       // we already hold at that timestamp. Ask for that many extra so "is there more?" stays correct.
-      const overlap = [...items.values()].filter((n) => n.createdMs === before).length;
-      const rows = await api.fetchPage({ afterMs: baselineMs, beforeIso: new Date(before).toISOString(), limit: pageSize + 1 + overlap });
+      // Postgres keeps microseconds but JS dates keep milliseconds, so the cursor is the END of that
+      // millisecond; otherwise a row created in the same ms with higher microseconds would be skipped.
+      const cursor = before + 1;
+      const overlap = [...items.values()].filter((n) => n.createdMs <= cursor).length;
+      const rows = await api.fetchPage({ afterMs: baselineMs, beforeIso: new Date(cursor).toISOString(), limit: pageSize + 1 + overlap });
       const mapped = (rows || []).map(toNotification).filter(Boolean);
       const fresh = sortNewest(mapped).filter((n) => !items.has(n.id));
       const page = fresh.slice(0, pageSize);
@@ -209,6 +212,7 @@ export function createNotificationEngine({
   /** A single notification was clicked through. */
   async function openItem(id) {
     if (!items.has(id)) return;
+    try { Promise.resolve(api.cancelPushReminder && api.cancelPushReminder(id)).catch(() => {}); } catch { /* best effort */ }
     await ackIds([id], true);
   }
 
@@ -219,6 +223,8 @@ export function createNotificationEngine({
       if (!until) { actionError = "That item is no longer available."; emit(); return null; }
       const ms = typeof until === "number" ? until : Date.parse(until);
       states.set(id, mergeState(states.get(id), { snoozedUntil: ms })); // a new cycle: see openedSinceSnooze
+      // Also queue a server-side push for when the snooze ends, so it rings with no tab open.
+      try { Promise.resolve(api.schedulePushReminder && api.schedulePushReminder(items.get(id), ms)).catch(() => {}); } catch { /* best effort */ }
       actionError = null;
     } catch (e) {
       actionError = "Couldn't snooze that. Try again.";

@@ -499,21 +499,25 @@ test("ensureMaterialized calls the database only for series that need it, and on
   assert.deepEqual(again, { inserted: 0, failed: 0 });
 });
 
-test("editing a series: content-only edit syncs without regenerating; schedule edit regenerates and re-materializes", async () => {
+test("editing a series: one atomic RPC; content-only edit does not regenerate, schedule edit regenerates and re-materializes", async () => {
   const before = series({ id: "s1", recurrence: "weekly", weekdays: [1], start_date: TODAY });
   const input = { title: "Renamed", recurrence: "weekly", weekdays: [1], startDate: TODAY };
-  const sb = fakeClient({ "studio_task_series.update": { data: srow({ title: "Renamed", recurrence: "weekly", weekdays: [1] }), error: null } });
+  const sb = fakeClient({ "rpc.studio_task_series_update": { data: srow({ title: "Renamed", recurrence: "weekly", weekdays: [1] }), error: null } });
   await makeTasksApi(sb).updateSeries(before, input, TODAY);
-  assert.deepEqual(sb.calls.find((c) => c.rpc === "studio_task_series_sync").args, { p_series_id: "s1", p_today: TODAY, p_regenerate: false });
+  const call = sb.calls.find((c) => c.rpc === "studio_task_series_update");
+  assert.equal(call.args.p_series_id, "s1");
+  assert.equal(call.args.p_today, TODAY);
+  assert.equal(call.args.p_regenerate, false);
+  assert.equal(sb.calls.some((c) => c.table === "studio_task_series" || c.rpc === "studio_task_series_sync"), false); // no separate writes
   assert.equal(sb.calls.some((c) => c.rpc === "studio_task_materialize"), false);
 
   const sb2 = fakeClient({
-    "studio_task_series.update": { data: srow({ recurrence: "weekly", weekdays: [2] }), error: null },
+    "rpc.studio_task_series_update": { data: srow({ recurrence: "weekly", weekdays: [2] }), error: null },
     "studio_task_series.select": { data: srow({ recurrence: "weekly", weekdays: [2], materialized_through: "2026-10-11" }), error: null },
   });
   await makeTasksApi(sb2).updateSeries(before, { ...input, weekdays: [2] }, TODAY);
   const names = sb2.calls.filter((c) => c.rpc).map((c) => `${c.rpc}:${c.args.p_regenerate ?? ""}`);
-  assert.deepEqual(names, ["studio_task_series_sync:true", "studio_task_materialize:"]);
+  assert.deepEqual(names, ["studio_task_series_update:true", "studio_task_materialize:"]);
 });
 
 test("pause / resume / end go through one status RPC; resume then top-ups, pause and end do not", async () => {

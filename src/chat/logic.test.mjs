@@ -141,3 +141,26 @@ test("permission errors explain how to get access instead of showing database co
   assert.match(chatErrorText({ message: "group_creation_not_permitted" }), /studio owner/);
   assert.match(chatErrorText({ message: "target_not_visible" }), /already chat with/);
 });
+
+import { pushRecentEmoji, sanitizeRecentEmoji, insertAtCaret as _ins, loadRecentEmoji as _load, saveRecentEmoji as _save, RECENT_EMOJI_MAX } from "./logic.js";
+import { test as _t } from "node:test";
+import _assert from "node:assert/strict";
+_t("recent emoji: newest first, deduped, capped, sanitized", () => {
+  assert_(pushRecentEmoji(["😀", "👍"], "👍"), ["👍", "😀"]);
+  const many = Array.from({ length: 40 }, (_, i) => `e${i}`);
+  _assert.equal(sanitizeRecentEmoji(many).length, RECENT_EMOJI_MAX);
+  assert_(sanitizeRecentEmoji(["ok", 5, "", "a\u0000b", "x".repeat(40), null]), ["ok"]);
+});
+_t("recent emoji storage tolerates bad data and throwing storage", () => {
+  const mem = { v: "{bad", getItem() { return this.v; }, setItem(k, v) { this.v = v; } };
+  assert_(_load(mem), []);
+  _save(["🎉"], mem); assert_(_load(mem), ["🎉"]);
+  const broken = { getItem() { throw new Error("x"); }, setItem() { throw new Error("x"); } };
+  assert_(_load(broken), []); _save(["🎉"], broken);
+});
+_t("insertAtCaret inserts, replaces selection and honours maxLength", () => {
+  assert_(_ins("hello", 2, 2, "😀"), { value: "he😀llo", caret: 4 });
+  assert_(_ins("hello", 1, 4, "!"), { value: "h!o", caret: 2 });
+  assert_(_ins("abc", 3, 3, "😀", 4), { value: "abc", caret: 3 });
+});
+function assert_(a, b) { _assert.deepEqual(a, b); }

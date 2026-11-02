@@ -1,6 +1,7 @@
-import React, { useLayoutEffect, useRef } from "react";
-import { composerHeight } from "./logic.js";
-import { IconClose, IconPaperclip, IconSend } from "./icons.jsx";
+import React, { useLayoutEffect, useRef, useState } from "react";
+import { composerHeight, insertAtCaret } from "./logic.js";
+import EmojiPanel from "./EmojiPanel.jsx";
+import { IconClose, IconPaperclip, IconSend, IconSmile } from "./icons.jsx";
 
 // Bottom composer: a self-contained, bottom-anchored row (attach · growing textarea · send).
 // Enter sends, Shift+Enter inserts a line break, IME composition is respected. The textarea grows
@@ -12,6 +13,7 @@ export default function Composer({
 }) {
   const localRef = useRef(null);
   const fileInputRef = useRef(null);
+  const [emojiOpen, setEmojiOpen] = useState(false);
   const ref = textareaRef || localRef;
 
   useLayoutEffect(() => {
@@ -23,6 +25,13 @@ export default function Composer({
     el.style.overflowY = el.scrollHeight > next ? "auto" : "hidden";
   }, [value, ref]);
 
+  const insertEmoji = (emoji) => {
+    const el = ref.current;
+    const { value: next, caret } = insertAtCaret(value, el?.selectionStart, el?.selectionEnd, emoji, maxLength);
+    if (next === value) return;
+    onChange(next);
+    requestAnimationFrame(() => { if (el) { el.focus(); el.setSelectionRange(caret, caret); } });
+  };
   const empty = !value.trim() && files.length === 0;
   const nearLimit = value.length > maxLength * 0.8;
 
@@ -50,6 +59,10 @@ export default function Composer({
           <button type="button" className="chat-icon-btn" aria-label="Attach a file" title="Attach a file" onClick={() => fileInputRef.current?.click()} disabled={sending}><IconPaperclip /></button>
           <input ref={fileInputRef} className="chat-file-input" type="file" multiple accept={accept} tabIndex={-1} onChange={(event) => { onFilesChange([...files, ...Array.from(event.target.files || [])].slice(0, 10)); event.target.value = ""; }} />
         </>}
+        <div className="chat-emoji-anchor">
+          <button type="button" data-emoji-toggle className={`chat-icon-btn${emojiOpen ? " on" : ""}`} aria-label="Insert emoji" aria-expanded={emojiOpen} title="Emoji" onClick={() => setEmojiOpen((o) => !o)} disabled={sending}><IconSmile /></button>
+          {emojiOpen && <EmojiPanel keepOpen onPick={insertEmoji} onClose={() => setEmojiOpen(false)} className="up" />}
+        </div>
         <textarea
           ref={ref} rows={1} value={value} maxLength={maxLength} placeholder={placeholder} aria-label={label}
           onChange={(event) => { onChange(event.target.value); onTyping?.(true); }}

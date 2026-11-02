@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import MessageBody from "./MessageBody.jsx";
+import EmojiPanel from "./EmojiPanel.jsx";
 import { dayLabel, formatChatTime, isNearBottom, QUICK_REACTIONS } from "./logic.js";
 import { IconDown, IconEdit, IconFile, IconHistory, IconImage, IconPin, IconReply, IconRetry, IconSmile, IconTrash } from "./icons.jsx";
 
@@ -21,6 +22,8 @@ function Attachments({ items, onOpen, busyId }) {
 
 function Row({ message, grouped, actions, busyId, downloadBusyId, active, onActivate, jump, pickerOpen, onTogglePicker }) {
   const { mine } = message;
+  const [moreOpen, setMoreOpen] = useState(false);
+  useEffect(() => { if (!pickerOpen) setMoreOpen(false); }, [pickerOpen]);
   const tools = [];
   if (!message.deleted && !message.status) {
     if (actions.reply) tools.push(<button key="reply" type="button" className="chat-tool" aria-label="Reply" title="Reply" onClick={() => actions.reply(message)}><IconReply size={16} /></button>);
@@ -78,6 +81,8 @@ function Row({ message, grouped, actions, busyId, downloadBusyId, active, onActi
             {QUICK_REACTIONS.map((reaction) => (
               <button type="button" key={reaction} aria-label={`React ${reaction}`} onClick={() => { actions.react?.(message, reaction, message.reactions?.some((g) => g.reaction === reaction && g.reactedByMe)); onTogglePicker(null); }}>{reaction}</button>
             ))}
+            <button type="button" className="more" data-emoji-toggle aria-label="More emoji" title="More" onClick={() => setMoreOpen((o) => !o)}>+</button>
+            {moreOpen && <EmojiPanel align={message.mine ? "right" : "left"} onPick={(reaction) => { actions.react?.(message, reaction, message.reactions?.some((g) => g.reaction === reaction && g.reactedByMe)); onTogglePicker(null); }} onClose={() => setMoreOpen(false)} />}
           </div>
         )}
         {tools.length > 0 && <div className="chat-msg-tools" role="toolbar" aria-label="Message actions">{tools}</div>}

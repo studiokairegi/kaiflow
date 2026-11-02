@@ -227,3 +227,42 @@ export function chatErrorText(error) {
   if (/rate_limited/i.test(message)) return "You're sending messages too quickly. Wait a moment and try again.";
   return message || "Something went wrong. Please try again.";
 }
+
+// ---------- Emoji panel ----------
+export const RECENT_EMOJI_KEY = "kf_chat_recent_emoji";
+export const RECENT_EMOJI_MAX = 24;
+export const EMOJI_CATEGORIES = [
+  { id: "smileys", label: "Smileys", icon: "😀", emoji: ["😀","😃","😄","😁","😆","😅","😂","🤣","🙂","😉","😊","😇","🥰","😍","🤩","😘","😋","😛","😜","🤪","🤔","🤨","😐","😑","😶","🙄","😏","😴","😌","😔","😕","🙁","😮","😲","😳","🥺","😢","😭","😤","😡","🤯","😱","😰","😓","🤗","🤭","🫡","🥳","😎","🤓","🤝"] },
+  { id: "gestures", label: "People", icon: "👍", emoji: ["👍","👎","👏","🙌","🙏","👌","✌️","🤞","🤙","👋","💪","🫶","🤌","☝️","👀","🧠","❤️","🧡","💛","💚","💙","💜","🖤","💔","💯","🔥","✨","⭐","💡","🎉","🎊","🚀"] },
+  { id: "work", label: "Work", icon: "💼", emoji: ["💼","📌","📎","📅","📝","📊","📈","📉","📁","📂","📧","📞","💻","🖥️","🖨️","🎨","🎬","📷","🎥","🎧","🛠️","⚙️","🔒","🔑","⏰","⌛","✅","❌","⚠️","❗","❓","➕","➖","🔗","🏁","🎯","💰","🧾"] },
+  { id: "nature", label: "Nature", icon: "🌿", emoji: ["🌿","🌱","🌳","🌸","🌻","🌍","☀️","🌙","⛅","🌧️","⚡","❄️","🌈","🐶","🐱","🦁","🦊","🐼","🦄","🐝","🦋"] },
+  { id: "food", label: "Food", icon: "☕", emoji: ["☕","🍵","🍺","🍷","🥂","🍕","🍔","🍟","🌮","🍣","🍜","🍎","🍌","🍓","🍰","🍪","🍫","🍿"] },
+];
+
+export function sanitizeRecentEmoji(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set(); const out = [];
+  for (const item of list) {
+    if (typeof item !== "string" || !item || item.length > 32 || /[\u0000-\u001f\u007f]/.test(item) || seen.has(item)) continue;
+    seen.add(item); out.push(item);
+    if (out.length >= RECENT_EMOJI_MAX) break;
+  }
+  return out;
+}
+export function pushRecentEmoji(list, emoji) {
+  return sanitizeRecentEmoji([emoji, ...sanitizeRecentEmoji(list)]);
+}
+export function loadRecentEmoji(storage) {
+  try { return sanitizeRecentEmoji(JSON.parse((storage ?? globalThis.localStorage).getItem(RECENT_EMOJI_KEY) || "[]")); } catch { return []; }
+}
+export function saveRecentEmoji(list, storage) {
+  try { (storage ?? globalThis.localStorage).setItem(RECENT_EMOJI_KEY, JSON.stringify(sanitizeRecentEmoji(list))); } catch { /* private mode: recents just don't persist */ }
+}
+// Insert text at the caret of a textarea value, respecting maxLength. Returns { value, caret }.
+export function insertAtCaret(value, start, end, text, maxLength = Infinity) {
+  const s = Math.max(0, Math.min(start ?? value.length, value.length));
+  const e = Math.max(s, Math.min(end ?? s, value.length));
+  const next = value.slice(0, s) + text + value.slice(e);
+  if (next.length > maxLength) return { value, caret: s };
+  return { value: next, caret: s + text.length };
+}

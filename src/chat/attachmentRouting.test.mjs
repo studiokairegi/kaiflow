@@ -11,7 +11,7 @@ function read(path) {
 }
 
 test("attachment selection is a non-submitting file input inside the composer", () => {
-  const composer = read("Composer.jsx");
+  const composer = read("src/chat/Composer.jsx");
   assert.match(composer, /<form[^>]+onSubmit=\{\(event\) => \{ event\.preventDefault\(\)/);
   assert.match(composer, /<button type="button"[^>]+aria-label="Attach a file"/);
   assert.match(composer, /type="file"[^>]+multiple/);
@@ -19,14 +19,14 @@ test("attachment selection is a non-submitting file input inside the composer", 
 });
 
 test("internal chat attachment contents no longer use Supabase Storage", () => {
-  const api = read("api.js");
+  const api = read("src/chat/api.js");
   assert.doesNotMatch(api, /supabase\.storage/);
   assert.match(api, /functionUrl\("chat-attachments"\)/);
   assert.match(api, /action: "download"/);
 });
 
 test("portal chat attachment gateway uses Drive and never Supabase Storage", () => {
-  const gateway = fs.readFileSync(path.join(here, "../../supabase/functions/portal-chat/index.ts"), "utf8");
+  const gateway = read("supabase/functions/portal-chat/index.ts");
   assert.doesNotMatch(gateway, /\.storage\.from\(/);
   assert.match(gateway, /uploadFileToDrive/);
   assert.match(gateway, /KairFlow/);
@@ -35,7 +35,7 @@ test("portal chat attachment gateway uses Drive and never Supabase Storage", () 
 });
 
 test("internal chat gateway keeps Drive files private and streams authorized downloads", () => {
-  const gateway = fs.readFileSync(path.join(here, "../../supabase/functions/chat-attachments/index.ts"), "utf8");
+  const gateway = read("supabase/functions/chat-attachments/index.ts");
   assert.doesNotMatch(gateway, /\.storage\.from\(/);
   assert.match(gateway, /uploadFileToDrive\([\s\S]*false/);
   assert.match(gateway, /from\("chat_attachments"\)/);
@@ -44,7 +44,7 @@ test("internal chat gateway keeps Drive files private and streams authorized dow
 });
 
 test("idle auto-refresh has no document navigation and cleans up its listeners", () => {
-  const refresh = fs.readFileSync(path.join(here, "../autoRefresh.js"), "utf8");
+  const refresh = read("src/autoRefresh.js");
   assert.doesNotMatch(refresh, /location\.(reload|assign|replace|href)/);
   assert.match(refresh, /clearIntervalFn\(timer\)/);
   assert.match(refresh, /removeEventListener/);

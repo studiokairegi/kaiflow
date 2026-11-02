@@ -7,7 +7,11 @@
 // model can split the row without rediscovering which is which.
 
 export const DEFAULT_LEAD_CHANNELS = ["Referral", "Cold Email", "Instagram", "Website"];
-export const MILESTONE_DEFAULTS = [50, 25, 25];
+export const MILESTONE_DEFAULTS = [50, 50]; // two-payment split: deposit + delivery
+export const MILESTONE_MIN = 2;
+export const MILESTONE_MAX = 6;
+// The old three-way default every studio was created with. It is treated as "never customised".
+const LEGACY_MILESTONES = [50, 25, 25];
 export const DEFAULT_ARCHIVE_DAYS = { won: 30, lost: 60, no_response: 60, disqualified: 30, closed: 30 };
 export const DEFAULT_PAYMENT_METHODS = ["Bank transfer", "PayPal", "Payoneer", "M-Pesa", "Wise", "Cash", "Other"];
 export const DEFAULT_INVOICE_PREFIXES = { proforma: "PRO", invoice: "INV", receipt: "REC" };
@@ -69,7 +73,7 @@ export const DEFAULT_USER_PREFS = {
 };
 
 export const DATE_FORMATS = [
-  { id: "", label: "Browser default" },
+  { id: "", label: "Default (2026-12-31, year first)" },
   { id: "DMY", label: "31/12/2026 (day first)" },
   { id: "MDY", label: "12/31/2026 (month first)" },
   { id: "ISO", label: "2026-12-31" },
@@ -88,6 +92,12 @@ export const DEFAULT_SETTINGS = {
   studioTaxId: "",
   studioVatStatus: "",
   studioEtimsNumber: "",
+  studioEmail: "",
+  studioPhone: "",
+  studioWebsite: "",
+  invoicePaymentInstructions: "",
+  invoiceFooterNote: "",
+  docDetailsColumns: false, // true once the database has the document-details columns (not a form field)
   currencySymbol: "$",
   milestoneDefaults: MILESTONE_DEFAULTS,
   defaultLandingTab: "dashboard",
@@ -130,6 +140,8 @@ export const SETTING_REGISTRY = {
   currencySymbol: ["studio", "finance"], milestoneDefaults: ["studio", "finance"], invoicePrefixes: ["studio", "finance"],
   defaultPaymentTermsDays: ["studio", "finance"], studioTaxId: ["studio", "finance"], studioVatStatus: ["studio", "finance"],
   studioEtimsNumber: ["studio", "finance"],
+  studioEmail: ["studio", "finance"], studioPhone: ["studio", "finance"], studioWebsite: ["studio", "finance"],
+  invoicePaymentInstructions: ["studio", "finance"], invoiceFooterNote: ["studio", "finance"],
   notificationsEnabled: ["user", "alerts"], userPrefs: ["user", "alerts"],
   hasSeenTutorial: ["account", "account"], plan: ["account", "account"], isAdmin: ["account", "account"],
 };
@@ -182,8 +194,19 @@ export function settingsFromRow(row) {
     studioTaxId: row.studio_tax_id || "",
     studioVatStatus: row.studio_vat_status || "",
     studioEtimsNumber: row.studio_etims_number || "",
+    studioEmail: row.studio_email || "",
+    studioPhone: row.studio_phone || "",
+    studioWebsite: row.studio_website || "",
+    invoicePaymentInstructions: row.invoice_payment_instructions || "",
+    invoiceFooterNote: row.invoice_footer_note || "",
+    docDetailsColumns: Object.prototype.hasOwnProperty.call(row, "studio_email"),
     currencySymbol: row.currency_symbol || D.currencySymbol,
-    milestoneDefaults: Array.isArray(row.milestone_defaults) && row.milestone_defaults.length === 3 ? row.milestone_defaults : MILESTONE_DEFAULTS,
+    milestoneDefaults: (() => {
+      const m = row.milestone_defaults;
+      if (!Array.isArray(m) || m.length < MILESTONE_MIN || m.length > MILESTONE_MAX) return MILESTONE_DEFAULTS;
+      if (m.length === 3 && LEGACY_MILESTONES.every((v, i) => Number(m[i]) === v)) return MILESTONE_DEFAULTS;
+      return m;
+    })(),
     defaultLandingTab: row.default_landing_tab || D.defaultLandingTab,
     defaultShotPriority: row.default_shot_priority || D.defaultShotPriority,
     logoUrl: row.logo_url || "",
@@ -226,6 +249,14 @@ export function settingsToRow(s, userId) {
     studio_tax_id: s.studioTaxId || "",
     studio_vat_status: s.studioVatStatus || "",
     studio_etims_number: s.studioEtimsNumber || "",
+    // Sent only when the columns exist or something was entered, so a database that hasn't run the migration still saves.
+    ...((s.docDetailsColumns || s.studioEmail || s.studioPhone || s.studioWebsite || s.invoicePaymentInstructions || s.invoiceFooterNote) ? {
+      studio_email: String(s.studioEmail || "").trim(),
+      studio_phone: String(s.studioPhone || "").trim(),
+      studio_website: String(s.studioWebsite || "").trim(),
+      invoice_payment_instructions: String(s.invoicePaymentInstructions || "").trim(),
+      invoice_footer_note: String(s.invoiceFooterNote || "").trim(),
+    } : {}),
     currency_symbol: s.currencySymbol,
     milestone_defaults: s.milestoneDefaults.map(Number),
     default_landing_tab: s.defaultLandingTab,
@@ -266,8 +297,21 @@ export function validateSettings(s) {
   if (!SUPPORTED_CURRENCY_SYMBOLS.includes(s.currencySymbol)) e.currencySymbol = "Choose a supported currency.";
 
   const m = s.milestoneDefaults || [];
-  if (m.length !== 3 || m.some((x) => !inRange(x, 0, 100))) e.milestoneDefaults = "Each milestone must be 0-100.";
+  if (m.length < MILESTONE_MIN || m.length > MILESTONE_MAX) e.milestoneDefaults = `Use between ${MILESTONE_MIN} and ${MILESTONE_MAX} milestones.`;
+  else if (m.some((x) => !inRange(x, 0, 100))) e.milestoneDefaults = "Each milestone must be 0-100.";
   else if (Math.round(m.reduce((a, b) => a + Number(b), 0) * 100) / 100 !== 100) e.milestoneDefaults = "Milestones must add up to exactly 100%.";
+
+  if (!Array.isArray(s.leadChannels) || s.leadChannels.length === 0) e.leadChannels = "Keep at least one lead channel.";
+  const logo = String(s.logoUrl || "").trim();
+  if (logo && !/^https?:\/\/[^\s]+$/i.test(logo)) e.logoUrl = "The logo link must start with http:// or https://.";
+
+  const mail = String(s.studioEmail || "").trim();
+  if (mail && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(mail)) e.studioEmail = "That doesn't look like an email address.";
+  const site = String(s.studioWebsite || "").trim();
+  if (site && !/^https?:\/\/[^\s]+$/i.test(site)) e.studioWebsite = "The website must start with http:// or https://.";
+  if (String(s.studioPhone || "").length > 40) e.studioPhone = "Keep the phone number under 40 characters.";
+  if (String(s.invoicePaymentInstructions || "").length > 600) e.invoicePaymentInstructions = "Keep payment instructions under 600 characters.";
+  if (String(s.invoiceFooterNote || "").length > 300) e.invoiceFooterNote = "Keep the footer note under 300 characters.";
 
   const sched = s.followupSchedule || [];
   if (sched.length < 2 || sched.length > MAX_FOLLOWUPS + 1) e.followupSchedule = `Choose 1-${MAX_FOLLOWUPS} follow-ups.`;

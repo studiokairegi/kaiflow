@@ -3,6 +3,7 @@
 // through a SECURITY DEFINER function that uses auth.uid(), never a client-supplied user id.
 import { supabase } from "../supabaseClient";
 import { FEED_EVENT_TYPES, toMs } from "./logic.js";
+import { cancelPush, schedulePush } from "../push/pushClient.js";
 
 const FEED_COLUMNS = "id, project_id, shot_id, event_type, description, created_at, meta";
 
@@ -52,6 +53,18 @@ export function createNotificationApi(userId) {
 
     ack: (ids, opened) => rpc("ack_notifications", { p_activity_ids: ids, p_opened: !!opened }),
     snooze: (id) => rpc("snooze_notification", { p_activity_id: id }),
+    /**
+     * A snoozed notification must ring again even if no KairFlow tab is open, so the reminder is also
+     * queued server-side as a Web Push job due when the snooze ends. Best-effort (needs alerts enabled
+     * in Settings); the service worker stays quiet if a focused tab already shows it.
+     */
+    schedulePushReminder(n, untilMs) {
+      return schedulePush([{
+        key: "snooze:" + n.id, due_at: new Date(untilMs).toISOString(), category: "snooze",
+        title: "Reminder: " + n.title, body: n.summary || "You snoozed this notification.", tag: "snooze-" + n.id, url: "/",
+      }]);
+    },
+    cancelPushReminder: (id) => cancelPush(["snooze:" + id]),
     markReminded: (ids) => rpc("mark_notifications_reminded", { p_activity_ids: ids }),
 
     /** Client comment text for a short preview. Owner-only RLS applies. Returns { commentId: body }. */

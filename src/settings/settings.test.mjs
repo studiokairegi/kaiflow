@@ -157,3 +157,35 @@ test("a dated 'needs follow-up' flag is due on or after its date, and never with
   assert.equal(F.manualFollowupState(lead(), "2026-10-13"), "overdue");
   assert.equal(F.manualFollowupState(lead({ needsFollowup: false }), "2026-10-13"), null);
 });
+
+import * as _Sch from "./schema.js";
+import { test as _t3 } from "node:test";
+import _a3 from "node:assert/strict";
+_t3("milestone defaults: two by default, 2-6 allowed, legacy 50/25/25 treated as untouched", () => {
+  _a3.deepEqual(_Sch.MILESTONE_DEFAULTS, [50, 50]);
+  const base = _Sch.DEFAULT_SETTINGS;
+  _a3.deepEqual(_Sch.validateSettings({ ...base, milestoneDefaults: [50, 50] }).milestoneDefaults, undefined);
+  _a3.deepEqual(_Sch.validateSettings({ ...base, milestoneDefaults: [25, 25, 25, 25] }).milestoneDefaults, undefined);
+  _a3.ok(_Sch.validateSettings({ ...base, milestoneDefaults: [100] }).milestoneDefaults);
+  _a3.ok(_Sch.validateSettings({ ...base, milestoneDefaults: [10, 10, 10, 10, 10, 10, 40] }).milestoneDefaults);
+});
+
+_t3("validation: at least one lead channel, logo link must be http(s)", () => {
+  const base = _Sch.DEFAULT_SETTINGS;
+  _a3.ok(_Sch.validateSettings({ ...base, leadChannels: [] }).leadChannels);
+  _a3.ok(_Sch.validateSettings({ ...base, logoUrl: "javascript:alert(1)" }).logoUrl);
+  _a3.equal(_Sch.validateSettings({ ...base, logoUrl: "https://example.com/logo.png" }).logoUrl, undefined);
+  _a3.equal(_Sch.validateSettings({ ...base, logoUrl: "" }).logoUrl, undefined);
+});
+
+_t3("document details: validated, and only written when the columns exist or are used", () => {
+  const base = _Sch.DEFAULT_SETTINGS;
+  _a3.ok(_Sch.validateSettings({ ...base, studioEmail: "nope" }).studioEmail);
+  _a3.ok(_Sch.validateSettings({ ...base, studioWebsite: "ftp://x" }).studioWebsite);
+  _a3.equal(_Sch.validateSettings({ ...base, studioEmail: "a@b.co", studioWebsite: "https://b.co" }).studioEmail, undefined);
+  _a3.equal("studio_email" in _Sch.settingsToRow(base, "u"), false);
+  _a3.equal(_Sch.settingsToRow({ ...base, studioEmail: "a@b.co" }, "u").studio_email, "a@b.co");
+  const loaded = _Sch.settingsFromRow({ studio_email: "", studio_name: "X" });
+  _a3.equal(loaded.docDetailsColumns, true);
+  _a3.equal(_Sch.settingsToRow(loaded, "u").studio_email, "");   // clearing a saved value really clears it
+});

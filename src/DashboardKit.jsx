@@ -95,7 +95,7 @@ export function ActivityCard({ gradient, icon, iconColor, title, badge, value, l
           <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 2 }}>{label}</div>
         </div>
         {delta !== undefined && delta !== null && (
-          <span style={{ fontSize: 12, fontWeight: 700, background: "rgba(255,255,255,0.22)", borderRadius: 999, padding: "4px 10px" }}>
+          <span title="This month so far vs last month" style={{ fontSize: 12, fontWeight: 700, background: "rgba(255,255,255,0.22)", borderRadius: 999, padding: "4px 10px" }}>
             {delta >= 0 ? "+" : "-"}{Math.abs(delta)}% {delta >= 0 ? "\u25B2" : "\u25BC"}
           </span>
         )}

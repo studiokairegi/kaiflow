@@ -228,6 +228,24 @@ export async function findChildFolder(
   return hit ? { id: hit.id, url: `https://drive.google.com/drive/folders/${hit.id}` } : null;
 }
 
+// Finds an existing, non-trashed top-level folder by exact name in the account's My Drive root, so the
+// shared "KairFlow" root is reused rather than duplicated. Returns null when there is none.
+export async function findRootFolder(
+  accessToken: string,
+  name: string
+): Promise<{ id: string; url: string } | null> {
+  const escaped = name.split("\\").join("\\\\").split("'").join("\\'");
+  const q = `name = '${escaped}' and 'root' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)&orderBy=createdTime&pageSize=1`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) throw new Error(`Drive root folder lookup failed: ${res.status} ${await res.text()}`);
+  const json = await res.json();
+  const hit = json.files?.[0];
+  return hit ? { id: hit.id, url: `https://drive.google.com/drive/folders/${hit.id}` } : null;
+}
+
 // Streams the file bytes (alt=media) without buffering them in memory.
 // `range` (e.g. "bytes=0-1048575") is forwarded so media can be seeked; omitted callers behave as before.
 export async function fetchDriveFileStream(accessToken: string, fileId: string, range?: string, signal?: AbortSignal): Promise<Response> {

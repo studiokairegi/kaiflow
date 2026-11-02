@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Table, useBusy, fmtDate } from "../finance/ui.jsx";
-import { formatMoney } from "../finance/currency.js";
+import { formatMoney, parseAmount } from "../finance/currency.js";
 import { validateWiseSettings } from "./wise.js";
 import * as api from "./api.js";
 
@@ -52,7 +52,7 @@ export function ManualTransfersTab({ onChanged }) {
   const load = () => run(async () => setRows(await api.loadManualPayments()));
   useEffect(() => { load(); }, []);
   const decide = (decision) => run(async () => {
-    await api.reviewManualPayment(active.id, decision, { credited: form.credited ? Number(form.credited) : null, received: form.received ? Number(form.received) : null, receivedCurrency: form.receivedCurrency, note: form.note });
+    await api.reviewManualPayment(active.id, decision, { credited: form.credited ? parseAmount(form.credited) : null, received: form.received ? parseAmount(form.received) : null, receivedCurrency: form.receivedCurrency, note: form.note });
     setActive(null); await load(); await onChanged?.();
   });
   return (
@@ -78,7 +78,7 @@ export function ManualTransfersTab({ onChanged }) {
           </div>
           <Field label="Note (optional)"><input style={S.input} value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></Field>
           <div style={S.row}>
-            <Btn kind="primary" disabled={busy || !form.received} onClick={() => decide("verify")}>Funds arrived · Verify</Btn>
+            <Btn kind="primary" disabled={busy || !(parseAmount(form.received) > 0) || Number.isNaN(parseAmount(form.credited))} onClick={() => decide("verify")}>Funds arrived · Verify</Btn>
             <Btn disabled={busy} onClick={() => decide("reject")}>Reject</Btn>
             <Btn kind="link" onClick={() => setActive(null)}>Cancel</Btn>
           </div>

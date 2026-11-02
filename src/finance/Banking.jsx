@@ -1,18 +1,18 @@
 import React, { useMemo, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, Money, Totals, useBusy, fmtDate } from "./ui.jsx";
-import { FINANCE_CURRENCIES, formatMoney, r2, todayLocal } from "./currency.js";
+import { FINANCE_CURRENCIES, formatMoney, parseAmount, r2, todayLocal } from "./currency.js";
 import { rpc } from "./api.js";
 import { bankBalances, legacyCash } from "./reports.js";
 
 const today = () => todayLocal();
-const num = (v) => Number(v) || 0;
+const num = (v) => { const n = parseAmount(v); return Number.isFinite(n) ? n : 0; };
 
 function AccountModal({ ctx, onClose }) {
   const [f, setF] = useState({ name: "", kind: "bank", currency: ctx.base, opening: "", date: today() });
   const { busy, error, run } = useBusy();
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   return (
-    <Modal title="Add bank or cash account" onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !f.name.trim()} onClick={() => run(async () => { await rpc("finance_create_bank_account", { p_name: f.name, p_kind: f.kind, p_currency: f.currency, p_opening_balance: num(f.opening), p_opened_on: f.date }); await ctx.reload(); onClose(); })}>{busy ? "Adding..." : "Add account"}</Btn></>}>
+    <Modal title="Add bank or cash account" onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !f.name.trim() || Number.isNaN(parseAmount(f.opening))} onClick={() => run(async () => { await rpc("finance_create_bank_account", { p_name: f.name, p_kind: f.kind, p_currency: f.currency, p_opening_balance: num(f.opening), p_opened_on: f.date }); await ctx.reload(); onClose(); })}>{busy ? "Adding..." : "Add account"}</Btn></>}>
       <div style={S.grid(170)}>
         <Field label="Name"><input style={S.input} value={f.name} onChange={set("name")} placeholder="e.g. Wise EUR, KCB Current" /></Field>
         <Field label="Type"><select style={S.input} value={f.kind} onChange={set("kind")}><option value="bank">Bank account</option><option value="wallet">Wallet (PayPal, M-Pesa...)</option><option value="cash">Cash</option></select></Field>
@@ -20,6 +20,7 @@ function AccountModal({ ctx, onClose }) {
         <Field label="Opening balance" hint="Balance on the opening date"><input style={S.input} inputMode="decimal" value={f.opening} onChange={set("opening")} placeholder="0" /></Field>
         <Field label="Opening date"><input style={S.input} type="date" value={f.date} onChange={set("date")} /></Field>
       </div>
+      {Number.isNaN(parseAmount(f.opening)) && <Banner tone="warn">The opening balance isn't a valid number.</Banner>}
       {error && <Banner tone="bad">{error}</Banner>}
     </Modal>
   );
@@ -33,7 +34,7 @@ function TransferModal({ ctx, onClose }) {
   const cross = from && to && from.currency !== to.currency;
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   return (
-    <Modal title="Transfer between accounts" onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !from || !to || from.id === to.id || !(num(f.amountFrom) > 0)} onClick={() => run(async () => { await rpc("finance_record_transfer", { p_from: f.from, p_to: f.to, p_amount_from: num(f.amountFrom), p_amount_to: cross ? num(f.amountTo) : num(f.amountFrom), p_date: f.date, p_reference: f.reference }); await ctx.reload(); onClose(); })}>{busy ? "Transferring..." : "Transfer"}</Btn></>}>
+    <Modal title="Transfer between accounts" onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !from || !to || from.id === to.id || !(num(f.amountFrom) > 0) || (cross && !(num(f.amountTo) > 0))} onClick={() => run(async () => { await rpc("finance_record_transfer", { p_from: f.from, p_to: f.to, p_amount_from: num(f.amountFrom), p_amount_to: cross ? num(f.amountTo) : num(f.amountFrom), p_date: f.date, p_reference: f.reference }); await ctx.reload(); onClose(); })}>{busy ? "Transferring..." : "Transfer"}</Btn></>}>
       <p style={S.sub}>Moving money between your own accounts is not income or expense. Only the two balances change.</p>
       {banks.length < 2 && <Banner tone="warn">Add at least two accounts to record a transfer.</Banner>}
       <div style={S.grid(170)}>
@@ -61,7 +62,7 @@ function ReconcileModal({ ctx, bank, onClose }) {
   const cleared = r2(clearedAlready + picked.reduce((s, p) => s + p.native, 0));
   const diff = r2(num(stmt) - cleared);
   return (
-    <Modal title={`Reconcile \u00b7 ${bank.name}`} onClose={onClose} width={720} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || stmt === "" || Math.abs(diff) > 0.005} onClick={() => run(async () => { await rpc("finance_reconcile", { p_bank: bank.id, p_statement_date: date, p_statement_balance: num(stmt), p_line_ids: picked.map((p) => p.lineId) }); await ctx.reload(); onClose(); })}>{busy ? "Saving..." : "Mark reconciled"}</Btn></>}>
+    <Modal title={`Reconcile \u00b7 ${bank.name}`} onClose={onClose} width={720} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || stmt === "" || Number.isNaN(parseAmount(stmt)) || Math.abs(diff) > 0.005} onClick={() => run(async () => { await rpc("finance_reconcile", { p_bank: bank.id, p_statement_date: date, p_statement_balance: num(stmt), p_line_ids: picked.map((p) => p.lineId) }); await ctx.reload(); onClose(); })}>{busy ? "Saving..." : "Mark reconciled"}</Btn></>}>
       <p style={S.sub}>Tick the transactions that appear on your bank statement, enter the statement's closing balance, and the difference should reach zero.</p>
       <div style={S.grid(160)}>
         <Field label="Statement date"><input style={S.input} type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>

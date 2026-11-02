@@ -13,7 +13,7 @@ function world({ baseline = T0 - 60_000, pageSize = 20, failInit = false } = {})
   const clock = { t: T0 };
   const rows = [];                // this user's activity_log rows (RLS already applied server-side)
   const stateDb = new Map();      // activity_id -> row
-  const calls = { ack: [], snooze: [], reminded: [], fetchPage: 0, subscribe: 0, unsub: 0 };
+  const calls = { pushScheduled: [], pushCancelled: [], ack: [], snooze: [], reminded: [], fetchPage: 0, subscribe: 0, unsub: 0 };
   let onRow = null, onStatus = null;
   let ackGate = null;
   let failNextAck = false, failFetch = false, initFails = failInit;
@@ -45,6 +45,8 @@ function world({ baseline = T0 - 60_000, pageSize = 20, failInit = false } = {})
       stateDb.set(id, { ...(stateDb.get(id) || { activity_id: id }), snoozed_until: until });
       return until;
     },
+    schedulePushReminder: async (n, untilMs) => { calls.pushScheduled.push({ id: n.id, title: n.title, untilMs }); },
+    cancelPushReminder: async (id) => { calls.pushCancelled.push(id); },
     markReminded: async (ids) => {
       calls.reminded.push([...ids]);
       for (const id of ids) { const s = stateDb.get(id); if (s) s.reminded_until = s.snoozed_until; }
@@ -215,6 +217,23 @@ test("a failed acknowledgement reverts and reports, so the notification isn't si
   assert.equal(e.view().badgeCount, 1);
   assert.match(e.view().actionError, /unchanged/);
   e.dispose();
+});
+
+test("snooze also queues a server-side push for when it ends (rings with no tab open); clicking the item cancels it", async () => {
+  const w = world();
+  const a = w.add("client_comment", 3000);
+  const e = w.make(); await e.start();
+  const until = await e.snooze(a.id);
+  assert.deepEqual(w.calls.pushScheduled, [{ id: a.id, title: "Client left a comment", untilMs: until }]);
+  assert.equal(until, T0 + SNOOZE_MS);
+  await e.openItem(a.id);
+  assert.deepEqual(w.calls.pushCancelled, [a.id]);
+  // a failing push queue never breaks the in-app snooze
+  const w2 = world();
+  const b = w2.add("client_comment", 3000);
+  w2.api.schedulePushReminder = async () => { throw new Error("offline"); };
+  const e2 = w2.make(); await e2.start();
+  assert.equal(await e2.snooze(b.id), T0 + SNOOZE_MS);
 });
 
 test("snooze: five minutes, keeps read/unread, no reminder while active, one reminder after expiry", async () => {

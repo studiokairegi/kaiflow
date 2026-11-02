@@ -201,9 +201,12 @@ function isWithinDashboardPeriod(dateStr, days, now = new Date()) {
 // always "today" regardless of whichever funnel period is selected.
 function isToday(dateStr, now = new Date()) {
   if (!dateStr) return false;
-  const d = parseDashboardDate(dateStr);
+  // Compared in the studio's configured time zone, like follow-ups and tasks, not the browser's.
+  const today = todayInZone(now);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr === today;
+  const d = new Date(dateStr);
   if (isNaN(d.getTime())) return false;
-  return d.toDateString() === now.toDateString();
+  return todayInZone(d) === today;
 }
 
 const LEAD_PRIORITIES = [
@@ -680,7 +683,12 @@ function convertAmount(amount, fromSymbol, toSymbol, fxRates) {
   return usd * rate;
 }
 
-const MILESTONE_LABELS = ["Upfront payment", "Mid-project payment", "Delivery payment"];
+// Names a milestone invoice by position: first is the deposit, last is delivery, the rest sit between.
+function milestoneLabel(i, n) {
+  if (i === 0) return "Upfront payment";
+  if (i === n - 1) return "Delivery payment";
+  return n === 3 ? "Mid-project payment" : `Milestone ${i + 1} payment`;
+}
 
 const EXPENSE_CATEGORIES = [
   "Animator Payments",
@@ -702,7 +710,7 @@ function emptyExpense(projectId = null, overrides = {}) {
     description: "",
     amount: "",
     currency: "$",
-    date: new Date().toISOString().slice(0, 10),
+    date: todayInZone(),
     vendor: "",
     bankAccountId: null,
     reference: "",
@@ -1217,7 +1225,7 @@ function coverDepartmentOverspend(departments, spendable, deptId) {
     .filter((d) => d.id !== deptId)
     .map((d) => ({ id: d.id, room: Math.max(0, d.amount - d.crewCost) }));
   const totalRoom = donors.reduce((s, d) => s + d.room, 0);
-  if (shortfall <= 0 || totalRoom + PLANNER_OVER_TOLERANCE < shortfall) return null;
+  if (shortfall <= 0 || totalRoom <= 0 || totalRoom + PLANNER_OVER_TOLERANCE < shortfall) return null;
   const amounts = {};
   departments.forEach((d) => { amounts[d.id] = d.amount; });
   amounts[deptId] = dept.crewCost;
@@ -1363,7 +1371,9 @@ function computePlanSummary(plan, options = {}) {
 
   const staffedCrewCount = crew.filter((p) => computeCrewMemberCost(p) > 0).length;
   const timeline = hasProAccess ? computeTimelineEstimate(scope, staffedCrewCount) : null;
-  const availableDays = workingDaysBetween(plan.startDate, plan.deadline);
+  // Days already gone can't be used: count from today when the start date is in the past.
+  const today = todayInZone();
+  const availableDays = workingDaysBetween(plan.startDate && plan.startDate < today ? today : plan.startDate, plan.deadline);
   const deadlineRisk = computeDeadlineRisk(timeline, availableDays);
 
   const overDepts = departments.filter((d) => d.state === "over");
@@ -1698,9 +1708,12 @@ function teamMemberToRow(member, userId) {
     // `|| 80` previously coerced a genuine, deliberately-entered score of 0
     // into the default of 80. Use nullish coalescing so only a truly
     // missing value (null/undefined/NaN) falls back to the default.
-    dependability_score: Number.isFinite(Number(member.dependabilityScore))
-      ? Number(member.dependabilityScore)
-      : 80,
+    // An empty field (""/null) is "not entered" -> 80, while a deliberate 0 stays 0 (Number("") is 0, so
+    // the blank case has to be checked before converting).
+    dependability_score:
+      member.dependabilityScore === "" || member.dependabilityScore == null || !Number.isFinite(Number(member.dependabilityScore))
+        ? 80
+        : Number(member.dependabilityScore),
     default_speed_value: Number(member.defaultSpeedValue) || 0,
     default_speed_unit: member.defaultSpeedUnit || "",
     notes: member.notes,
@@ -1803,7 +1816,7 @@ function portfolioItemToRow(teamMemberId, userId, item) {
 }
 
 function emptyReview() {
-  return { rating: 5, reviewText: "", reviewer: "", reviewDate: new Date().toISOString().slice(0, 10), projectId: "" };
+  return { rating: 5, reviewText: "", reviewer: "", reviewDate: todayInZone(), projectId: "" };
 }
 
 function reviewFromRow(row) {
@@ -1824,7 +1837,7 @@ function reviewToRow(teamMemberId, userId, review) {
     rating: Number(review.rating) || 5,
     review_text: review.reviewText || "",
     reviewer: review.reviewer || "",
-    review_date: review.reviewDate || new Date().toISOString().slice(0, 10),
+    review_date: review.reviewDate || todayInZone(),
     project_id: review.projectId || null,
   };
 }
@@ -1904,19 +1917,20 @@ function computeLegacyAssignmentMatches(cards, teamMembers) {
 // boundaries. Route bare dates through parseLocalDateStr instead; full ISO
 // timestamps (activity log entries) parse the same either way.
 function monthKey(dateStr) {
-  const d = /^\d{4}-\d{2}-\d{2}$/.test(dateStr || "") ? parseLocalDateStr(dateStr) : new Date(dateStr);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr || "")) return dateStr.slice(0, 7);
+  const d = new Date(dateStr);
   if (isNaN(d.getTime())) return null;
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  return todayInZone(d).slice(0, 7); // month in the studio's time zone
 }
 
 function lastSixMonthKeys() {
   const keys = [];
-  const now = new Date();
+  const [ty, tm] = todayInZone().split("-").map(Number);
   for (let i = 5; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const d = new Date(Date.UTC(ty, tm - 1 - i, 1));
     keys.push({
-      key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
-      label: d.toLocaleString(undefined, { month: "short" }),
+      key: `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`,
+      label: d.toLocaleString(undefined, { month: "short", timeZone: "UTC" }),
     });
   }
   return keys;
@@ -1944,14 +1958,23 @@ function computeDashboardStats(projects, cards, leads) {
   // and diffing against a mid-day `now`, which made a deadline of *today*
   // come out negative and drop off the list entirely. Parse locally and diff
   // against local midnight, matching what computeFollowupStatus already does.
-  const todayStart = startOfLocalDay(now);
-  const nearDeadline = activeProjects.filter((p) => {
-    if (!p.deadline) return false;
-    const d = /^\d{4}-\d{2}-\d{2}$/.test(p.deadline) ? parseLocalDateStr(p.deadline) : new Date(p.deadline);
-    if (isNaN(d.getTime())) return false;
-    const diffDays = Math.round((startOfLocalDay(d) - todayStart) / 86400000);
-    return diffDays >= 0 && diffDays <= 7;
-  });
+  const [tY, tM, tD] = todayInZone(now).split("-").map(Number);
+  const todayUtc = Date.UTC(tY, tM - 1, tD); // today in the studio's zone, as a day number
+  // Days from today to a project's deadline (negative = past), or null when it has none / isn't an open project.
+  const daysToDeadline = (p) => {
+    if (!p.deadline) return null;
+    // A project whose shots are all delivered is not "due" any more.
+    const projectShots = cards.filter((c) => c.projectId === p.id);
+    if (projectShots.length > 0 && isProjectComplete(projectShots.map((s) => s.stage))) return null;
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(p.deadline) ? p.deadline : (isNaN(new Date(p.deadline).getTime()) ? null : todayInZone(new Date(p.deadline)));
+    if (!day) return null;
+    const [dY, dM, dD] = day.split("-").map(Number);
+    return Math.round((Date.UTC(dY, dM - 1, dD) - todayUtc) / 86400000);
+  };
+  const nearDeadline = activeProjects.filter((p) => { const d = daysToDeadline(p); return d !== null && d >= 0 && d <= 7; });
+  // Past the deadline and not finished: these used to disappear from the dashboard altogether.
+  const overdueProjects = activeProjects.filter((p) => { const d = daysToDeadline(p); return d !== null && d < 0; })
+    .sort((a, b) => String(a.deadline).localeCompare(String(b.deadline)));
 
   const projectsCompleted = activeProjects.filter((p) => {
     const shots = cards.filter((c) => c.projectId === p.id);
@@ -1968,6 +1991,7 @@ function computeDashboardStats(projects, cards, leads) {
     activeLeadsCount: activeLeads.length,
     activeProjectsCount: activeProjects.length,
     nearDeadline,
+    overdueProjects,
     dealsWon,
     dealsLost,
     projectsCompleted,
@@ -2007,6 +2031,11 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
   ]
     .filter(Boolean)
     .join("   \u00b7   ");
+  const studioContactLine = [settings.studioEmail, settings.studioPhone, settings.studioWebsite].filter(Boolean).join("   \u00b7   ");
+  if (studioContactLine) {
+    doc.text(studioContactLine, left, y);
+    y += 5.5;
+  }
   if (studioTaxLine) {
     doc.text(studioTaxLine, left, y);
     y += 4.5;
@@ -2125,14 +2154,30 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
     receipt: `This receipt confirms payment received. Thank you for working with ${studioDisplayName}.`,
     invoice: `Thank you for working with ${studioDisplayName}.`,
   };
+  let noteY = lineY + 40;
+  if (settings.invoicePaymentInstructions && docType !== "receipt") {
+    doc.setTextColor(60);
+    doc.setFontSize(10);
+    doc.text("How to pay", left, noteY);
+    doc.setFontSize(9);
+    const payLines = doc.splitTextToSize(settings.invoicePaymentInstructions, 170);
+    doc.text(payLines, left, noteY + 5);
+    noteY += 5 + payLines.length * 4 + 6;
+    doc.setTextColor(130);
+  }
   const noteLines = doc.splitTextToSize(noteByType[docType] || noteByType.invoice, 170);
-  doc.text(noteLines, left, lineY + 40);
+  doc.text(noteLines, left, noteY);
+  if (settings.invoiceFooterNote) {
+    const footLines = doc.splitTextToSize(settings.invoiceFooterNote, 170);
+    doc.text(footLines, left, noteY + noteLines.length * 4 + 3);
+    noteY += footLines.length * 4 + 3;
+  }
 
   // --- Pay Now: a real link annotation to the secure hosted checkout. Created through the existing payment-link
   // RPC; if that fails (not an admin, Paystack not connected, offline) the PDF is still produced, without a button.
   const payLink = await requestPayLink(invoice, balance, { create: createCheckoutSession, origin: window.location.origin });
   if (payLink.ok) {
-    let btnY = lineY + 40 + noteLines.length * 4 + 10;
+    let btnY = noteY + noteLines.length * 4 + 10;
     if (btnY > 262) { doc.addPage(); btnY = 24; }
     drawPayNowButton(doc, payLink.url, { x: left, y: btnY });
     doc.setFontSize(8);
@@ -2468,12 +2513,12 @@ function computeFollowupStatus(lead, schedule = DEFAULT_FOLLOWUP_SCHEDULE) {
     };
   }
 
-  const anchor = parseLocalDateStr(anchorStr);
+  // Whole days between the due date and today in the studio's configured zone (same "today" as the
+  // manual follow-up dates and tasks use), computed on UTC day numbers so DST can't shift it.
   const dayOffset = schedule[nextIndex]?.dayOffset ?? 0;
-  const due = new Date(anchor);
-  due.setDate(due.getDate() + dayOffset);
-  const today = new Date();
-  const daysUntilDue = Math.round((due.setHours(0, 0, 0, 0) - today.setHours(0, 0, 0, 0)) / 86400000);
+  const [aY, aM, aD] = String(anchorStr).slice(0, 10).split("-").map(Number);
+  const [tY, tM, tD] = todayInZone().split("-").map(Number);
+  const daysUntilDue = Math.round((Date.UTC(aY, aM - 1, aD + dayOffset) - Date.UTC(tY, tM - 1, tD)) / 86400000);
 
   let dueLabel;
   if (daysUntilDue < 0) dueLabel = `Follow-up overdue by ${Math.abs(daysUntilDue)}d`;
@@ -2851,6 +2896,7 @@ export default function ShotTracker() {
   const [showSupportModal, setShowSupportModal] = useState(false);
   const [tutorialHighlightTarget, setTutorialHighlightTarget] = useState(null);
   const [pendingLeadLinkId, setPendingLeadLinkId] = useState(null);
+  const [projectError, setProjectError] = useState(""); // last project save/delete failure, shown in the editor
   const [dragOverStage, setDragOverStage] = useState(null);
   const [leadChannelFilter, setLeadChannelFilter] = useState("all");
   const [leadSearch, setLeadSearch] = useState("");
@@ -2859,6 +2905,7 @@ export default function ShotTracker() {
   const [leadPriorityFilter, setLeadPriorityFilter] = useState("all");
   const [leadFollowupFilter, setLeadFollowupFilter] = useState("all");
   const [showArchivedLeads, setShowArchivedLeads] = useState(false);
+  const [leadError, setLeadError] = useState(""); // last lead save/move failure, shown until dismissed
 
   // Shared by the Kanban board columns and the archived-leads list, so
   // toggling "Show archived" doesn't leave the search/channel/priority/
@@ -2879,6 +2926,7 @@ export default function ShotTracker() {
       const notStarted = status.nextActionLabel === "Send initial email";
       if (leadFollowupFilter === "due" && !status.isDue && !(!isLeadStageTerminal(l.stage) && isManualFollowupDue(l, todayInZone()))) return false;
       if (leadFollowupFilter === "upcoming" && (status.isDue || status.daysUntilDue == null)) return false;
+      if (leadFollowupFilter === "soon" && (status.isDue || status.daysUntilDue == null || status.daysUntilDue > 2)) return false; // same rule as the dashboard count
       if (leadFollowupFilter === "completed" && (notStarted || status.daysUntilDue !== null)) return false;
       if (leadFollowupFilter === "none" && !notStarted) return false;
     }
@@ -3354,6 +3402,9 @@ export default function ShotTracker() {
     return driveFields;
   };
 
+  // True only once the saved row (or a fresh default row) was really read. Until then `settings` is just
+  // the built-in defaults, and saving them would overwrite the person's real settings.
+  const settingsLoadedRef = useRef(false);
   const loadSettings = useCallback(async () => {
     if (!userId) return;
     try {
@@ -3366,6 +3417,7 @@ export default function ShotTracker() {
       if (row) {
         const loaded = settingsFromRow(row);
         setSettings(loaded);
+        settingsLoadedRef.current = true;
         if (!hasAppliedLandingTab.current) {
           setWorkspace(new URLSearchParams(window.location.search).get("payments_return") && canAccessPayments(loaded) ? "payments" : loaded.defaultLandingTab || "dashboard");
           hasAppliedLandingTab.current = true;
@@ -3380,6 +3432,7 @@ export default function ShotTracker() {
           .insert(settingsToRow(DEFAULT_SETTINGS, userId));
         if (insertError) throw insertError;
         setSettings(DEFAULT_SETTINGS);
+        settingsLoadedRef.current = true;
         hasAppliedLandingTab.current = true;
         if (!hasCheckedTutorial.current) {
           setShowTutorial(true);
@@ -3392,6 +3445,7 @@ export default function ShotTracker() {
   }, [userId]);
 
   useEffect(() => {
+    settingsLoadedRef.current = false;
     if (userId) loadSettings();
     else setSettings(DEFAULT_SETTINGS);
   }, [userId, loadSettings]);
@@ -3438,6 +3492,10 @@ export default function ShotTracker() {
   }, [userId, leads, settings.followupSchedule]);
 
   const handleSaveSettings = async (nextSettings) => {
+    if (!settingsLoadedRef.current) {
+      await loadSettings(); // the first load failed (offline?): never overwrite real settings with defaults
+      if (!settingsLoadedRef.current) { flashSave(false); return false; }
+    }
     setSaveState("saving");
     try {
       const { error } = await supabase
@@ -3487,6 +3545,7 @@ export default function ShotTracker() {
     if (!trimmed) return;
     const existing = settings.leadChannels || DEFAULT_LEAD_CHANNELS;
     if (existing.some((c) => c.toLowerCase() === trimmed.toLowerCase())) return;
+    if (!settingsLoadedRef.current) return;
     const nextSettings = { ...settings, leadChannels: [...existing, trimmed] };
     setSettings(nextSettings);
     try {
@@ -3496,6 +3555,8 @@ export default function ShotTracker() {
       if (error) throw error;
     } catch (e) {
       console.error("Adding lead channel failed:", e);
+      setSettings(settings); // it wasn't saved, so don't keep showing it
+      window.alert("Couldn't add that channel. Please try again.");
     }
   };
 
@@ -3810,8 +3871,10 @@ export default function ShotTracker() {
   const handleSaveProject = async (project) => {
     if (!project.id && atProjectLimit) {
       flashSave(false);
+      setProjectError(`The free plan is limited to ${FREE_PROJECT_LIMIT} active projects. Archive one or upgrade to Pro.`);
       return;
     }
+    setProjectError("");
     setSaveState("saving");
     try {
       const shareToken = project.shareEnabled ? project.shareToken || genShareToken() : project.shareToken;
@@ -3946,11 +4009,15 @@ export default function ShotTracker() {
           cards: [...prev.cards, ...newCards],
         }));
 
-        try {
-          await handleCreateDriveFolders(inserted.id, inserted.name);
-        } catch (driveErr) {
+        // Drive folders are created in the background: the project is already saved, so the editor
+        // must not wait on Google. The project updates itself when the folders exist.
+        handleCreateDriveFolders(inserted.id, inserted.name).catch((driveErr) => {
           console.error("Drive folder provisioning failed:", driveErr);
-        }
+          if (driveEmail) {
+            setDriveNotice("Project saved, but its Google Drive folders couldn't be created. You can create them from the project.");
+            setTimeout(() => setDriveNotice(""), 8000);
+          }
+        });
 
         if (pendingLeadLinkId) {
           const linkId = pendingLeadLinkId;
@@ -3981,10 +4048,9 @@ export default function ShotTracker() {
     } catch (e) {
       console.error("Project save failed:", e);
       flashSave(false);
-      // Same reasoning as the cancel handler: don't let a pending
-      // lead->project link survive to attach itself to a later,
-      // unrelated project.
-      if (!project.id && pendingLeadLinkId) setPendingLeadLinkId(null);
+      // The editor stays open for a retry, so the pending lead->project link must survive too, or the
+      // retried project would silently lose its link to the Won lead. Cancelling the editor clears it.
+      setProjectError("Couldn't save this project" + (e?.message ? ` (${e.message})` : "") + ". Your changes are still in the form. Try again.");
       // Keep the editor open on failure so the user can retry or fix
       // whatever caused the error without losing their unsaved changes.
     }
@@ -4156,6 +4222,15 @@ export default function ShotTracker() {
   };
 
   const handleDeleteProject = async (id) => {
+    // The ledger refuses to delete invoices that have recorded payments, which blocks deleting the
+    // whole project. Check first, so the Drive folder isn't trashed for a delete that then fails.
+    const paidInvoices = invoices.filter((inv) => inv.projectId === id && parseMoney(inv.amountPaid) > 0);
+    if (paidInvoices.length > 0) {
+      setProjectError(`This project has ${paidInvoices.length} invoice${paidInvoices.length === 1 ? "" : "s"} with recorded payments, so it can't be deleted. Void the payments first, or archive the project instead.`);
+      flashSave(false);
+      return;
+    }
+    setProjectError("");
     setSaveState("saving");
     try {
       // Best-effort: trash the project's Drive folder (and everything
@@ -4219,6 +4294,7 @@ export default function ShotTracker() {
     } catch (e) {
       console.error("Project delete failed:", e);
       flashSave(false);
+      setProjectError("Couldn't delete this project" + (e?.message ? ` (${e.message})` : "") + ".");
     }
   };
 
@@ -4303,6 +4379,7 @@ export default function ShotTracker() {
     } catch (e) {
       console.error("Shot save failed:", e);
       flashSave(false);
+      return false;
       // Keep the editor open on failure so unsaved edits aren't lost.
     }
   };
@@ -4423,6 +4500,7 @@ export default function ShotTracker() {
         setData((prev) => ({ ...prev, leads: [...prev.leads, savedLead] }));
       }
       flashSave(true);
+      setLeadError("");
       setEditingLead(null);
       if (savedLead.stage === "won" && (!oldLead || oldLead.stage !== "won") && savedLead.id) {
         await refreshLeadContact(savedLead.id);
@@ -4431,6 +4509,7 @@ export default function ShotTracker() {
     } catch (e) {
       console.error("Lead save failed:", e);
       flashSave(false);
+      setLeadError("Couldn't save this lead" + (e?.message ? ` (${e.message})` : "") + ". Your changes are still in the form. Try again.");
       return null;
     }
   };
@@ -4477,12 +4556,25 @@ export default function ShotTracker() {
     const oldLead = data.leads.find((l) => l.id === id);
     if (oldLead && oldLead.stage === stage) return; // no-op guard, same reasoning as the drag dispatch check
     const nowIso = new Date().toISOString();
-    const entries = oldLead ? buildActivityEntries(oldLead, { ...oldLead, stage }) : [];
+    // Moving a lead into "Cold Email Sent" means the first email went out: record it the way the editor
+    // does, so the follow-up schedule starts and the dashboard's "Sent" count includes it.
+    let emailPatch = null;
+    if (oldLead && stage === "cold_email") {
+      const emails = normalizeEmails(oldLead.emails);
+      if (emails.length && !emails[0].sent) {
+        emailPatch = {
+          emails: emails.map((em, i) => (i === 0 ? { ...em, sent: true, dateSent: todayInZone() } : em)),
+          lastContactedAt: nowIso,
+        };
+      }
+    }
+    const nextLead = oldLead ? { ...oldLead, stage, ...(emailPatch || {}) } : null;
+    const entries = oldLead ? buildActivityEntries(oldLead, nextLead) : [];
     setData((prev) => ({
       ...prev,
       leads: prev.leads.map((l) =>
         l.id === id
-          ? { ...l, stage, stageChangedAt: nowIso, activityLog: [...(l.activityLog || []), ...entries] }
+          ? { ...l, ...(emailPatch || {}), stage, stageChangedAt: nowIso, activityLog: [...(l.activityLog || []), ...entries] }
           : l
       ),
     }));
@@ -4494,6 +4586,7 @@ export default function ShotTracker() {
           stage,
           stage_changed_at: nowIso,
           activity_log: [...(oldLead?.activityLog || []), ...entries],
+          ...(emailPatch ? { emails: emailPatch.emails, last_contacted_at: emailPatch.lastContactedAt } : {}),
         })
         .eq("id", id);
       if (error) throw error;
@@ -4502,6 +4595,7 @@ export default function ShotTracker() {
     } catch (e) {
       console.error("Lead stage move failed:", e);
       flashSave(false);
+      setLeadError("Couldn't move that lead" + (e?.message ? ` (${e.message})` : "") + ". It was put back where it was.");
       // Roll back the optimistic move - otherwise the board shows a stage
       // the database never actually accepted until the next full reload.
       if (oldLead) {
@@ -4574,14 +4668,19 @@ export default function ShotTracker() {
     setSaveState("saving");
     try {
       if (invoice.id) {
-        const { error } = await supabase
+        // .select().single() so a no-op update (row gone / not permitted) surfaces as an error and
+        // the list shows what the server actually stored (amount recomputed, status synced).
+        const { data: updated, error } = await supabase
           .from("invoices")
           .update(invoiceToRow(invoice, userId))
-          .eq("id", invoice.id);
+          .eq("id", invoice.id)
+          .select()
+          .single();
         if (error) throw error;
+        const saved = invoiceFromRow(updated);
         setData((prev) => ({
           ...prev,
-          invoices: prev.invoices.map((inv) => (inv.id === invoice.id ? invoice : inv)),
+          invoices: prev.invoices.map((inv) => (inv.id === invoice.id ? saved : inv)),
         }));
       } else {
         const { data: inserted, error } = await supabase
@@ -4594,6 +4693,7 @@ export default function ShotTracker() {
       }
       flashSave(true);
       setEditingInvoice(null);
+      return true;
     } catch (e) {
       console.error("Invoice save failed:", e);
       alertLedgerError(e);
@@ -4623,7 +4723,7 @@ export default function ShotTracker() {
       ...invoice,
       status: "paid",
       amountPaid: invoice.amount,
-      paidDate: new Date().toISOString().slice(0, 10),
+      paidDate: todayInZone(),
     };
     await handleSaveInvoice(updated);
   };
@@ -4649,7 +4749,7 @@ export default function ShotTracker() {
       amount: source.amount,
       amountPaid: isReceipt ? source.amount : source.amountPaid,
       status: isReceipt ? "paid" : "unpaid",
-      paidDate: isReceipt ? new Date().toISOString().slice(0, 10) : "",
+      paidDate: isReceipt ? todayInZone() : "",
       convertedFromId: source.id,
     });
   };
@@ -4659,24 +4759,25 @@ export default function ShotTracker() {
     const project = projects.find((p) => p.id === selectedProjectId);
     const projectShots = cards.filter((c) => c.projectId === selectedProjectId);
     const { totalBudget } = projectBudgetSummary(project, projectShots, projectInvoices);
-    const numbers = nextInvoiceNumbers(projectInvoices, 3);
-    const rows = [0, 1, 2].map((i) => {
+    const count = percentages.length;
+    const numbers = nextInvoiceNumbers(projectInvoices, count);
+    const rows = percentages.map((_, i) => {
       const amount = ((totalBudget * (parseFloat(percentages[i]) || 0)) / 100).toFixed(2);
       return {
         projectId: selectedProjectId,
         invoiceNumber: numbers[i],
-        description: MILESTONE_LABELS[i],
+        description: milestoneLabel(i, count),
         amount,
         amountPaid: "",
         currency: project?.currency || settings.currencySymbol,
-        issueDate: new Date().toISOString().slice(0, 10),
+        issueDate: todayInZone(),
         dueDate: "",
         status: "unpaid",
       };
     });
     setSaveState("saving");
     try {
-      // create_milestone_invoices() inserts all 3 rows in a single INSERT,
+      // create_milestone_invoices() inserts all the rows in a single INSERT,
       // so a failure partway through can't leave a broken partial milestone
       // set (e.g. just the upfront payment with the other two missing) the
       // way three sequential handleSaveInvoice() calls used to.
@@ -4702,14 +4803,17 @@ export default function ShotTracker() {
     setSaveState("saving");
     try {
       if (expense.id) {
-        const { error } = await supabase
+        const { data: updated, error } = await supabase
           .from("expenses")
           .update(expenseToRow(expense, userId))
-          .eq("id", expense.id);
+          .eq("id", expense.id)
+          .select()
+          .single();
         if (error) throw error;
+        const saved = expenseFromRow(updated);
         setData((prev) => ({
           ...prev,
-          expenses: prev.expenses.map((e) => (e.id === expense.id ? expense : e)),
+          expenses: prev.expenses.map((e) => (e.id === expense.id ? saved : e)),
         }));
       } else {
         const { data: inserted, error } = await supabase
@@ -4749,7 +4853,7 @@ export default function ShotTracker() {
     const description = `${card.title || "Shot"}${card.assignedTo ? " \u2014 " + card.assignedTo : ""}`;
     const amount = parseMoney(card.assignedPay);
     const currency = project?.currency || "$";
-    const date = new Date().toISOString().slice(0, 10);
+    const date = todayInZone();
     try {
       const { data: result, error } = await supabase.rpc("log_shot_payment", {
         p_shot_id: card.id,
@@ -4890,10 +4994,11 @@ export default function ShotTracker() {
     setEditingExpense(null);
   };
 
+  // Resolves to { ok: true } or { ok: false, message } so the planner can say what went wrong.
   const handleSaveBudgetPlanner = async (plan) => {
     if (!plan.id && atBudgetPlannerLimit) {
       flashSave(false);
-      return;
+      return { ok: false, message: `The free plan is limited to ${FREE_BUDGET_PLANNER_LIMIT} budget plans. Delete one or upgrade to Pro.` };
     }
     setSaveState("saving");
     try {
@@ -4923,9 +5028,11 @@ export default function ShotTracker() {
         setEditingBudgetPlanner(savedPlan);
       }
       flashSave(true);
+      return { ok: true };
     } catch (e) {
       console.error("Budget planner save failed:", e);
       flashSave(false);
+      return { ok: false, message: "Couldn't save this plan" + (e?.message ? ` (${e.message})` : "") + ". Your changes are still on screen. Try again." };
     }
   };
 
@@ -5072,7 +5179,7 @@ export default function ShotTracker() {
     const blob = new Blob([payload], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    const stamp = new Date().toISOString().slice(0, 10);
+    const stamp = todayInZone();
     a.href = url;
     a.download = `shot-tracker-backup-${stamp}.json`;
     document.body.appendChild(a);
@@ -6047,6 +6154,10 @@ export default function ShotTracker() {
           onOpenLead={(lead) => setEditingLead(lead)}
           onOpenShot={(card) => { openProject(card.projectId); setEditingCard(card); }}
           onOpenContact={() => { setWorkspace("leads"); setCrmTab("contacts"); }}
+          onNewProject={() => setEditingProject(emptyProject({ currency: settings.currencySymbol }))}
+          onNewLead={() => setEditingLead(emptyLead())}
+          onNewInvoice={canSeeFinance ? () => { setWorkspace("finance"); setPickInvoiceProject(true); } : undefined}
+          onNewExpense={canSeeFinance ? () => setEditingExpense(emptyExpense()) : undefined}
           onGoToLeads={(filters = {}) => {
             setLeadStatusFilter(filters.status || "all");
             setLeadPriorityFilter(filters.priority || "all");
@@ -6091,6 +6202,13 @@ export default function ShotTracker() {
               {label}
             </button>
           ))}
+        </div>
+      )}
+
+      {view === "projects" && workspace === "leads" && leadError && (
+        <div role="alert" style={{ margin: "0 0 10px", padding: "10px 14px", borderRadius: 8, background: "rgba(255,77,77,0.12)", border: "1px solid rgba(255,77,77,0.35)", color: "#FF9A9A", fontSize: 13, display: "flex", gap: 10, alignItems: "center" }}>
+          <span style={{ flex: 1 }}>{leadError}</span>
+          <button type="button" aria-label="Dismiss" style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", fontSize: 16 }} onClick={() => setLeadError("")}>{"\u00d7"}</button>
         </div>
       )}
 
@@ -6139,6 +6257,7 @@ export default function ShotTracker() {
             >
               <option value="all">Any follow-up</option>
               <option value="due">Due</option>
+              <option value="soon">Due within 2 days</option>
               <option value="upcoming">Upcoming</option>
               <option value="completed">Completed</option>
               <option value="none">None</option>
@@ -6679,10 +6798,12 @@ export default function ShotTracker() {
             // link must not silently attach to whatever project they save
             // next.
             setPendingLeadLinkId(null);
+            setProjectError("");
             setEditingProject(null);
           }}
           onSave={handleSaveProject}
           onDelete={handleDeleteProject}
+          saveError={projectError}
           isNew={!editingProject.id}
           driveEmail={driveEmail}
           onCreateDriveFolders={handleCreateDriveFolders}
@@ -6716,6 +6837,8 @@ export default function ShotTracker() {
           leads={leads}
           followupSchedule={settings.followupSchedule || DEFAULT_FOLLOWUP_SCHEDULE}
           autoNoResponse={settings.autoNoResponse !== false}
+          saveError={leadError}
+          liveStage={leads.find((l) => l.id === editingLead.id)?.stage}
         />
       )}
 
@@ -7309,17 +7432,21 @@ function LegacyAssignmentReview({ matches, onLink }) {
   const [linking, setLinking] = useState(null); // card id currently being linked
   const [linkingAll, setLinkingAll] = useState(false); // batch link in progress
   const [picks, setPicks] = useState({}); // cardId -> chosen member id, for ambiguous rows
+  const [linkError, setLinkError] = useState("");
 
   const link = async (cardId, memberId) => {
-    if (!memberId) return;
+    if (!memberId) return true;
     setLinking(cardId);
-    await onLink(cardId, memberId);
+    const ok = await onLink(cardId, memberId);
     setLinking(null);
+    if (ok === false) setLinkError("Couldn't link some shots. They were left as they were. Try again.");
+    return ok !== false;
   };
 
   const linkAllUnique = async () => {
     if (linkingAll) return;
     setLinkingAll(true);
+    setLinkError("");
     try {
       for (const { card, member } of matches.unique) {
         // eslint-disable-next-line no-await-in-loop
@@ -7332,6 +7459,7 @@ function LegacyAssignmentReview({ matches, onLink }) {
 
   return (
     <div className="kf-content-wrap" style={{ ...styles.invoicesWrap, marginTop: 8, border: "1px solid #2a3634", borderRadius: 8, padding: 12 }}>
+      {linkError && <p role="alert" style={{ ...styles.fieldHint, color: "#FF9A9A" }}>{linkError}</p>}
       {matches.unique.length > 0 && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -7454,8 +7582,10 @@ function PlannerDashboard({ plans, settings, onOpen, onNew, atLimit, hasProAcces
       </div>
 
       <div className="kf-planner-stats" style={styles.dashboardGrid}>
-        <PlannerStatCard label="Total planned" value={`${cur}${formatMoney(analytics.totalPlannedValue)}`} />
-        <PlannerStatCard label="Avg. production budget" value={`${cur}${formatMoney(analytics.averageProductionCost)}`} />
+        <PlannerStatCard label="Total planned" value={analytics.mixedCurrencies
+          ? Object.entries(analytics.totalsByCurrency).map(([sym, n]) => `${sym}${sym.length > 1 ? " " : ""}${formatMoney(n)}`).join(" + ")
+          : `${Object.keys(analytics.totalsByCurrency)[0] || cur}${formatMoney(analytics.totalPlannedValue)}`} />
+        <PlannerStatCard label="Avg. production budget" value={analytics.mixedCurrencies ? "Mixed currencies" : `${Object.keys(analytics.totalsByCurrency)[0] || cur}${formatMoney(analytics.averageProductionCost)}`} />
         <PlannerStatCard label="Avg. target profit" value={`${analytics.averageMargin.toFixed(1)}%`} />
         <PlannerStatCard label="Converted to project" value={`${analytics.convertedCount} / ${plans.length}`} />
         <PlannerStatCard label="Proposal win rate" value={analytics.winRate === null ? "—" : `${analytics.winRate.toFixed(0)}%`} />
@@ -8352,6 +8482,10 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   const [clockingIn, setClockingIn] = useState(false);
   const [clockingOut, setClockingOut] = useState(false);
   const [clockError, setClockError] = useState("");
+  // Server clock minus this device's clock, so a wrong device clock doesn't skew elapsed time.
+  const [serverOffsetMs, setServerOffsetMs] = useState(0);
+  const [reconciled, setReconciled] = useState(false); // restored focus phase checked against the database
+  const retryAfterRef = useRef(0); // don't hammer a failing clock-out at a phase boundary
 
   // Pomodoro focus sessions - reuse the exact same clock-in/out calls above
   // (tagged session_type: "pomodoro"), so a focus session is just a
@@ -8509,10 +8643,27 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
       });
       setActiveSession(active);
       setTodaySeconds(completedSeconds);
+      try {
+        const t0 = Date.now();
+        const { data: serverNow, error: timeError } = await supabase.rpc("studio_server_time");
+        const t1 = Date.now();
+        const ms = Date.parse(serverNow);
+        if (!timeError && Number.isFinite(ms)) setServerOffsetMs(Math.round(ms - (t0 + t1) / 2));
+      } catch { /* function not installed yet: keep using the device clock */ }
     } catch (err) {
       console.error("Studio time load failed:", err);
     }
   }, [userId]);
+
+  // Today's total must reset at local midnight even if the app stays open overnight.
+  useEffect(() => {
+    let day = startOfLocalDay(new Date()).getTime();
+    const id = setInterval(() => {
+      const d = startOfLocalDay(new Date()).getTime();
+      if (d !== day) { day = d; refetchSessions(); }
+    }, 30000);
+    return () => clearInterval(id);
+  }, [refetchSessions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -8533,11 +8684,34 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   // break has no corresponding DB row by design, so it's trusted as-is.
   useEffect(() => {
     if (initializing) return;
-    // (A paused work phase is clocked out on purpose, so it's trusted as-is too.)
-    if (pomodoroPhase === "work" && pausedRemaining == null && (!activeSession || activeSession.sessionType !== "pomodoro")) {
-      setPomodoroPhase(null);
-      setPhaseEndsAt(null);
-    }
+    let alive = true;
+    (async () => {
+      // (A paused work phase is clocked out on purpose, so it's trusted as-is too.)
+      if (pomodoroPhase === "work" && pausedRemaining == null && (!activeSession || activeSession.sessionType !== "pomodoro")) {
+        setPomodoroPhase(null);
+        setPhaseEndsAt(null);
+      } else if (pomodoroPhase === "work" && pausedRemaining == null && phaseEndsAt && Date.now() > phaseEndsAt + 5000) {
+        // The focus round ended while the app was closed. Close the session at its planned end rather than
+        // now, so the time between the end of the round and reopening is not counted as work.
+        try {
+          const { error } = await supabase.rpc("clock_out_active_session_at", { p_at: new Date(phaseEndsAt).toISOString() });
+          if (!error) {
+            await refetchSessions();
+            if (alive) { setPomodoroPhase(null); setPhaseEndsAt(null); setPomodoroCycle(1); }
+          }
+          // on error (function not installed yet) fall through to the normal advance, as before
+        } catch { /* keep the existing behaviour */ }
+      }
+      // A restored break that already ran out while the app was closed would auto-advance and clock the user
+      // back in on page load. Drop it instead; the user can start the next focus session themselves.
+      if ((pomodoroPhase === "break" || pomodoroPhase === "longBreak") && pausedRemaining == null && phaseEndsAt && Date.now() > phaseEndsAt + 60000) {
+        setPomodoroPhase(null);
+        setPhaseEndsAt(null);
+        setPomodoroCycle(1);
+      }
+      if (alive) setReconciled(true);
+    })();
+    return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initializing]);
 
@@ -8603,8 +8777,16 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
       // trusting the browser's clock or risking a read-then-write gap.
       const { data: row, error } = await supabase.rpc("clock_out_active_session");
       if (error) throw error;
+      const closedDuration = row?.duration || 0;
+      // A session that began before local midnight only counts from midnight onward (same clipping as refetchSessions).
+      const closedStart = activeSession?.clockIn ? new Date(activeSession.clockIn) : null;
+      const closedEnd = row?.clock_out ? new Date(row.clock_out) : new Date();
+      const midnight = startOfLocalDay(new Date());
+      const closedToday = closedStart && closedStart < midnight
+        ? Math.min(closedDuration, Math.max(0, Math.round((closedEnd - midnight) / 1000)))
+        : closedDuration;
       setActiveSession(null);
-      setTodaySeconds((prev) => prev + (row?.duration || 0));
+      setTodaySeconds((prev) => prev + closedToday);
       return row;
     } catch (err) {
       setClockError(err.message || "Couldn't clock out, please try again.");
@@ -8643,15 +8825,17 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   };
 
   const advancePomodoroPhase = async () => {
-    if (transitioningRef.current) return;
+    if (transitioningRef.current || Date.now() < retryAfterRef.current) return;
     transitioningRef.current = true;
     try {
       if (pomodoroPhase === "work") {
         try {
           await handleClockOut();
         } catch {
-          // Already surfaced via clockError; still move on to the break so
-          // one failed request doesn't get the whole rhythm stuck.
+          // The session could not be closed (error shown via clockError). Stay in the focus phase and retry
+          // shortly: starting the break now would leave the session open and count the break as work.
+          retryAfterRef.current = Date.now() + 5000;
+          return;
         }
         const rounds = pomodoroSession.cyclesBeforeLongBreak;
         if (pomodoroCycle >= rounds) {
@@ -8709,13 +8893,13 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   // clear (and for the reconciliation effect above to run first) ensures
   // activeSession is trustworthy before any auto-advance can fire.
   useEffect(() => {
-    if (initializing) return;
+    if (initializing || !reconciled) return;
     if (!pomodoroPhase || !phaseEndsAt) return;
     if (pausedRemaining != null) return; // paused: the countdown is frozen
     if (now.getTime() < phaseEndsAt) return;
     advancePomodoroPhase();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [now, pomodoroPhase, phaseEndsAt, initializing, pausedRemaining]);
+  }, [now, pomodoroPhase, phaseEndsAt, initializing, pausedRemaining, reconciled]);
 
   const startPomodoro = () => {
     if (activeSession || pomodoroPhase || clockingIn) return;
@@ -8835,8 +9019,9 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
     setPipWindow(null);
   };
 
+  const correctedNow = now.getTime() + serverOffsetMs;
   const elapsedSeconds = activeSession
-    ? Math.max(0, Math.floor((now - new Date(activeSession.clockIn)) / 1000))
+    ? Math.max(0, Math.floor((correctedNow - new Date(activeSession.clockIn)) / 1000))
     : 0;
   // Same "only count what actually happened today" clipping as
   // refetchSessions applies to completed sessions - a still-open session
@@ -8845,7 +9030,7 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   // elapsedSeconds itself stays uncapped since the big clock above it is a
   // stopwatch for the whole continuous session, not a "today" figure.
   const elapsedSecondsToday = activeSession
-    ? Math.max(0, Math.floor((now - Math.max(new Date(activeSession.clockIn).getTime(), startOfLocalDay(now).getTime())) / 1000))
+    ? Math.max(0, Math.floor((correctedNow - Math.max(new Date(activeSession.clockIn).getTime(), startOfLocalDay(now).getTime())) / 1000))
     : 0;
 
   let trackingContent;
@@ -9001,7 +9186,7 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
   const compactBusy = clockingIn || clockingOut;
   // Red only while the timer is paused/stopped AND less than 60% of today's working hours are clocked.
   const dayTarget = scheduledSecondsForDay(new Date());
-  const behindOnHours = dayTarget > 0 && (todaySeconds + elapsedSecondsToday) < dayTarget * 0.6;
+  const behindOnHours = !initializing && dayTarget > 0 && (todaySeconds + elapsedSecondsToday) < dayTarget * 0.6;
   // On the dashboard the clock card is placed directly above the Calendar (#kf-clock-slot).
   const [slot, setSlot] = useState(null);
   useEffect(() => {
@@ -9104,8 +9289,9 @@ function StudioTimeCard({ userId, visible = true, accountConfig = null }) {
 // user's own planner data. No dashboard, just the numbers the spec asks for.
 function computePlannerPortfolioAnalytics(plans) {
   if (plans.length === 0) {
-    return { totalPlannedValue: 0, averageMargin: 0, averageProductionCost: 0, convertedCount: 0, winRate: null };
+    return { totalPlannedValue: 0, totalsByCurrency: {}, mixedCurrencies: false, averageMargin: 0, averageProductionCost: 0, convertedCount: 0, winRate: null };
   }
+  const totalsByCurrency = {}; // plans can be priced in different currencies, so never add them together
   let totalPlannedValue = 0;
   let totalMargin = 0;
   let totalProductionCost = 0;
@@ -9115,6 +9301,8 @@ function computePlannerPortfolioAnalytics(plans) {
   plans.forEach((plan) => {
     const calc = computeBudgetPlan(plan);
     totalPlannedValue += calc.budget;
+    const sym = plan.currency || "$";
+    totalsByCurrency[sym] = (totalsByCurrency[sym] || 0) + calc.budget;
     totalMargin += calc.profitPercent;
     totalProductionCost += calc.productionBudget;
     if (plan.status === "converted") convertedCount += 1;
@@ -9123,6 +9311,8 @@ function computePlannerPortfolioAnalytics(plans) {
   });
   return {
     totalPlannedValue,
+    totalsByCurrency,
+    mixedCurrencies: Object.keys(totalsByCurrency).length > 1,
     averageMargin: totalMargin / plans.length,
     averageProductionCost: totalProductionCost / plans.length,
     convertedCount,
@@ -9150,7 +9340,13 @@ function computeNeedsAttentionCounts(leads, schedule) {
   return { followupsDueToday, hotAwaitingResponse, proposalsAwaitingResponse, approachingDeadline };
 }
 
-function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToPayments, onGoToFinance, onGoToLeads, onOpenLead, onOpenShot, onOpenContact, user, userId }) {
+function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToPayments, onGoToFinance, onGoToLeads, onOpenLead, onOpenShot, onOpenContact, onNewProject, onNewLead, onNewInvoice, onNewExpense, user, userId }) {
+  // Re-render when the calendar day rolls over so "today", the week strip and due dates never go stale.
+  const [, setDayKey] = useState(todayInZone);
+  useEffect(() => {
+    const id = setInterval(() => setDayKey(todayInZone()), 60000);
+    return () => clearInterval(id);
+  }, []);
   const stats = computeDashboardStats(projects, cards, leads, invoices);
   // Financial figures come from the accounting ledger (finance/reports.js), in the studio's
   // base currency using each transaction's own stored FX rate. Nothing is converted here.
@@ -9161,6 +9357,9 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   const finDelta = (() => {
     const sr = fin.summary?.series;
     if (!sr || sr.length < 2 || fin.privacy) return null;
+    // This month so far vs the whole previous month would read as a big drop early on, so wait
+    // until the month is far enough along; the pill's tooltip names what it compares.
+    if (Number(todayInZone().slice(8, 10)) < 8) return null;
     const prev = sr[sr.length - 2].revenue, now = sr[sr.length - 1].revenue;
     return prev > 0 ? Math.round(((now - prev) / prev) * 100) : now > 0 ? 100 : null;
   })();
@@ -9277,8 +9476,9 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   // pricing, qualification and negotiation. So response rate is the headline
   // and win rate sits beside it, rather than win rate alone standing in for
   // the whole picture (which reads 0% for a campaign pulling steady replies).
-  const responseRate = coldEmailsSentTotal > 0 ? (respondedTotal / coldEmailsSentTotal) * 100 : 0;
-  const winRate = coldEmailsSentTotal > 0 ? (wonTotal / coldEmailsSentTotal) * 100 : 0;
+  // Capped at 100%: replies/wins logged in the window can belong to emails sent before it.
+  const responseRate = coldEmailsSentTotal > 0 ? Math.min(100, (respondedTotal / coldEmailsSentTotal) * 100) : 0;
+  const winRate = coldEmailsSentTotal > 0 ? Math.min(100, (wonTotal / coldEmailsSentTotal) * 100) : 0;
 
   // Today's figures always mean today, independent of whichever period is
   // selected above - they answer "what came in today", not "today, within
@@ -9297,7 +9497,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   // the intended reading of a daily campaign figure; the period-filtered
   // funnel above is where cohort-style rates live.
   const respondedToday = leads.filter((l) => hadStageEvent(l, "responded", (ts) => isToday(ts, now))).length;
-  const successRateToday = coldEmailsSentToday > 0 ? (respondedToday / coldEmailsSentToday) * 100 : null;
+  const successRateToday = coldEmailsSentToday > 0 ? Math.min(100, (respondedToday / coldEmailsSentToday) * 100) : null;
 
   // Needs Attention: a handful of counts that point at something the user
   // should actually act on today, each clickable straight into a filtered
@@ -9306,6 +9506,26 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     computeNeedsAttentionCounts(leads, schedule);
 
   const needsAttentionItems = [
+    stats.overdueProjects.length > 0 && {
+      label: `${stats.overdueProjects.length} project${stats.overdueProjects.length === 1 ? "" : "s"} past the deadline`,
+      onClick: onGoToProjects,
+    },
+    fin.summary?.overdueCount > 0 && {
+      label: `${fin.summary.overdueCount} overdue invoice${fin.summary.overdueCount === 1 ? "" : "s"}`,
+      onClick: onGoToFinance,
+    },
+    fin.summary?.upcomingCount > 0 && {
+      label: `${fin.summary.upcomingCount} freelancer bill${fin.summary.upcomingCount === 1 ? "" : "s"} due soon or overdue`,
+      onClick: onGoToFinance,
+    },
+    fin.summary?.fxIssueCount > 0 && {
+      label: `${fin.summary.fxIssueCount} transaction${fin.summary.fxIssueCount === 1 ? "" : "s"} need an exchange rate`,
+      onClick: onGoToFinance,
+    },
+    canAccessPayments(settings) && unrec > 0 && {
+      label: `${unrec} payment${unrec === 1 ? "" : "s"} to reconcile`,
+      onClick: onGoToPayments,
+    },
     followupsDueToday > 0 && {
       label: `${followupsDueToday} follow-up${followupsDueToday === 1 ? "" : "s"} due today`,
       onClick: () => onGoToLeads({ followup: "due" }),
@@ -9320,7 +9540,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
     },
     approachingDeadline > 0 && {
       label: `${approachingDeadline} lead${approachingDeadline === 1 ? "" : "s"} approaching follow-up deadline`,
-      onClick: () => onGoToLeads({ followup: "upcoming" }),
+      onClick: () => onGoToLeads({ followup: "soon" }),
     },
   ].filter(Boolean);
 
@@ -9366,6 +9586,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         { icon: "check", label: "completed", value: stats.projectsCompleted },
         { icon: "film", label: "shots", value: stats.totalShots },
         { icon: "calendar", label: "due in 7d", value: stats.nearDeadline.length, tone: stats.nearDeadline.length ? "warn" : undefined, dim: !stats.nearDeadline.length },
+        ...(stats.overdueProjects.length ? [{ icon: "alert", label: "overdue", value: stats.overdueProjects.length, tone: "bad" }] : []),
       ],
     },
     {
@@ -9392,21 +9613,24 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         { icon: "clock", label: "pending", value: payMoney(paySummary?.pendingIncoming), dim: isEmpty(paySummary?.pendingIncoming) },
         { icon: "undo", label: "refunds", value: payMoney(paySummary?.refunds), dim: isEmpty(paySummary?.refunds) },
         { icon: "send", label: "payouts due", value: payMoney(paySummary?.approvedPayoutsAwaiting), dim: isEmpty(paySummary?.approvedPayoutsAwaiting) },
-        { icon: "zap", label: "simulated", value: payMoney(paySummary?.simulatedPaid), dim: isEmpty(paySummary?.simulatedPaid) },
         { icon: "alert", label: "unreconciled", value: paySummary ? unrec : "...", tone: unrec ? "bad" : undefined, dim: !unrec },
       ],
     }]),
   ];
 
+  const [wY, wM, wD] = todayInZone().split("-").map(Number);
   const weekDays = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() + i);
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    return { key, dow: d.toLocaleDateString(undefined, { weekday: "short" }), day: d.getDate() };
+    const d = new Date(Date.UTC(wY, wM - 1, wD + i));
+    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+    return { key, dow: d.toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" }), day: d.getUTCDate() };
   });
+  const weekRangeLabel = (() => {
+    const fmt = (d) => new Date(d.key + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+    return `${fmt(weekDays[0])} \u2013 ${fmt(weekDays[6])}`;
+  })();
   const deadlineMarks = {};
   for (const p of stats.nearDeadline) if (/^\d{4}-\d{2}-\d{2}$/.test(p.deadline || "")) deadlineMarks[p.deadline] = (deadlineMarks[p.deadline] || 0) + 1;
-  const qualifiedRate = coldEmailsSentTotal > 0 ? (qualifiedTotal / coldEmailsSentTotal) * 100 : 0;
+  const qualifiedRate = coldEmailsSentTotal > 0 ? Math.min(100, (qualifiedTotal / coldEmailsSentTotal) * 100) : 0;
 
   return (
     <div className="kf-dash-shell" style={styles.dashboardShell}>
@@ -9415,6 +9639,12 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
         {fin.data && <PrivacyToggle privacy={fin.privacy} onChange={fin.setPrivacy} compact />}
       </div>
 
+      {(fin.error || payData.error) && (
+        <div role="alert" style={{ ...styles.dashboardEmptyState, margin: "0 0 10px", color: "#F2A65A", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <span>{fin.error ? "Finance figures couldn't load" : "Payments figures couldn't load"}, so some numbers below show "..." instead.</span>
+          <ActionButton onClick={() => { if (fin.error) fin.reload(); if (payData.error) payData.reload?.(); }}>Retry</ActionButton>
+        </div>
+      )}
       <div className="kf-dash-body" style={styles.dashboardBody}>
       <div className="kf-dash-tasks">
         <TasksPanel
@@ -9481,23 +9711,44 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
               <DonutBreakdown data={leadsByChannel} emptyLabel={allChannelsHidden ? "Channels hidden" : "No channels"} centerLabel="Channels" size={46} compact tiny />
             </div>
           </Panel>
+
+          <PanelTitle>Quick actions</PanelTitle>
+          <Panel>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {[
+                onNewProject && ["New project", onNewProject],
+                onNewLead && ["New lead", onNewLead],
+                onNewInvoice && ["New invoice", onNewInvoice],
+                onNewExpense && ["Log expense", onNewExpense],
+              ].filter(Boolean).map(([label, fn]) => (
+                <button key={label} type="button" onClick={fn} style={{ border: "1px solid rgba(255,255,255,0.14)", background: "transparent", color: "inherit", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "7px 12px", whiteSpace: "nowrap" }}>+ {label}</button>
+              ))}
+            </div>
+          </Panel>
         </div>
 
         {/* Right: Calendar, Outreach trend, Needs attention */}
         <div style={styles.dashboardCol}>
 <div className="kf-dash-clockcal" style={styles.dashboardCol}>
           <div id="kf-clock-slot" />
-          <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>{weekDays[0].key.slice(0, 7)} {"\u00b7"} next 7 days</span>}>Calendar</PanelTitle>
+          <PanelTitle right={<span style={styles.dashboardCardHeaderHint}>{weekRangeLabel} {"\u00b7"} next 7 days</span>}>Calendar</PanelTitle>
           <Panel>
             <WeekStrip days={weekDays} marks={deadlineMarks} />
             <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+              {stats.overdueProjects.map((p) => (
+                <div key={`od-${p.id}`} style={styles.dashboardDeadlineRow} onClick={() => onOpenProject(p.id)}>
+                  <span style={styles.dashboardDeadlineName}>{p.name}</span>
+                  {p.client && <span style={styles.dashboardKpiSub}>{p.client}</span>}
+                  <span style={{ ...styles.dashboardDeadlineDate, color: "#FF8A8A" }}>Overdue {"\u00b7"} {/^\d{4}-\d{2}-\d{2}$/.test(p.deadline) ? new Date(p.deadline + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" }) : p.deadline}</span>
+                </div>
+              ))}
               {stats.nearDeadline.length === 0 ? (
                 <p style={{ ...styles.dashboardEmptyState, margin: 0 }}>Nothing due in the next 7 days.</p>
               ) : stats.nearDeadline.map((p) => (
                 <div key={p.id} style={styles.dashboardDeadlineRow} onClick={() => onOpenProject(p.id)}>
                   <span style={styles.dashboardDeadlineName}>{p.name}</span>
                   {p.client && <span style={styles.dashboardKpiSub}>{p.client}</span>}
-                  <span style={styles.dashboardDeadlineDate}>{p.deadline}</span>
+                  <span style={styles.dashboardDeadlineDate}>{/^\d{4}-\d{2}-\d{2}$/.test(p.deadline) ? new Date(p.deadline + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" }) : p.deadline}</span>
                 </div>
               ))}
             </div>
@@ -9558,7 +9809,7 @@ const TUTORIAL_STEPS = [
   },
   {
     title: "Invoicing & Finance",
-    body: "Create invoices per project, generate a 50/25/25 milestone split in one tap, and log expenses. Finance rolls everything up into USD automatically, even across projects billed in different currencies.",
+    body: "Create invoices per project, generate a milestone split (two payments by default, more if needed) in one tap, and log expenses. Finance rolls everything up into USD automatically, even across projects billed in different currencies.",
     targetTab: "finance",
   },
   {
@@ -9894,6 +10145,7 @@ function InvoicesPanel({
                       style={styles.cancelButton}
                       onClick={(e) => {
                         e.stopPropagation();
+                        if (!window.confirm(`Mark ${inv.invoiceNumber || "this document"} as fully paid today? This records the payment in your books.`)) return;
                         onMarkPaid(inv);
                       }}
                     >
@@ -9954,7 +10206,7 @@ function InvoicesPanel({
   );
 }
 
-function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail, onCreateDriveFolders, hasProAccess, showProBadge = !hasProAccess, atProjectLimit, shotCount, invoiceCount, pipelineLibrary, onApplyPipeline, onApplyPipelinePreset, projectCards, onMigratePipeline, onUndoMigratePipeline }) {
+function ProjectEditor({ project, onCancel, onSave, onDelete, saveError = "", isNew, driveEmail, onCreateDriveFolders, hasProAccess, showProBadge = !hasProAccess, atProjectLimit, shotCount, invoiceCount, pipelineLibrary, onApplyPipeline, onApplyPipelinePreset, projectCards, onMigratePipeline, onUndoMigratePipeline }) {
   const [form, setForm] = useState(project);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
   const [linkCopied, setLinkCopied] = useState(false);
@@ -10098,6 +10350,8 @@ function ProjectEditor({ project, onCancel, onSave, onDelete, isNew, driveEmail,
             <CloseIcon />
           </button>
         </div>
+
+        {saveError && <div role="alert" style={{ margin: "0 0 10px", padding: "8px 12px", borderRadius: 8, background: "rgba(255,77,77,0.12)", border: "1px solid rgba(255,77,77,0.35)", color: "#FF9A9A", fontSize: 13 }}>{saveError}</div>}
 
         {isNew && atProjectLimit ? (
           <ProUpgradePrompt feature={`More than ${FREE_PROJECT_LIMIT} active projects`} />
@@ -10844,6 +11098,8 @@ function LeadEditor({
   leads = [],
   followupSchedule = DEFAULT_FOLLOWUP_SCHEDULE,
   autoNoResponse = true,
+  saveError = "",
+  liveStage = undefined,
 }) {
   const [form, setForm] = useState(() => ({ ...lead, emails: normalizeEmails(lead.emails, followupSchedule.length) }));
   const [isEditing, setIsEditing] = useState(isNew);
@@ -10858,6 +11114,15 @@ function LeadEditor({
   const [quickFollowupDate, setQuickFollowupDate] = useState(() => todayInZone());
   const [confirmingDuplicate, setConfirmingDuplicate] = useState(false);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+
+  // The lead was dragged to another column while this editor was open: follow it, unless the person
+  // already chose a different stage here, so saving never puts the old stage back.
+  const baseStageRef = useRef(lead.stage);
+  useEffect(() => {
+    if (!liveStage || liveStage === baseStageRef.current) return;
+    setForm((f) => (f.stage === baseStageRef.current ? { ...f, stage: liveStage } : f));
+    baseStageRef.current = liveStage;
+  }, [liveStage]);
 
   const handleCopyEmail = () => {
     if (!form.email) return;
@@ -10916,7 +11181,7 @@ function LeadEditor({
       if (i !== index) return em;
       const updated = { ...em, ...patch };
       if (patch.sent === true && !em.sent) {
-        updated.dateSent = new Date().toISOString().slice(0, 10);
+        updated.dateSent = todayInZone();
         justSent = true;
       }
       if (patch.sent === false) {
@@ -10975,6 +11240,8 @@ function LeadEditor({
             </button>
           </div>
         )}
+
+        {saveError && <div role="alert" style={{ margin: "0 0 10px", padding: "8px 12px", borderRadius: 8, background: "rgba(255,77,77,0.12)", border: "1px solid rgba(255,77,77,0.35)", color: "#FF9A9A", fontSize: 13 }}>{saveError}</div>}
 
         {!isEditing ? (
           <>
@@ -12056,6 +12323,8 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
     return () => { alive = false; };
   }, []);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+  const [formError, setFormError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   return (
     <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay} onClick={onCancel}>
@@ -12116,7 +12385,7 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
           </div>
           <div style={styles.field}>
             <label style={styles.label}>Currency</label>
-            <select style={styles.input} value={form.currency || "$"} onChange={set("currency")}>
+            <select style={styles.input} value={form.currency || "$"} onChange={(e) => setForm({ ...form, currency: e.target.value, bankAccountId: null })}>
               {CURRENCIES.map((c) => (
                 <option key={c.code} value={c.symbol}>
                   {c.label}
@@ -12154,16 +12423,33 @@ function ExpenseEditor({ expense, projects, onCancel, onSave, onDelete, isNew })
 
         <div className="kf-modal-footer" style={styles.modalFooter}>
           {!isNew && (
-            <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
+            <button
+              style={styles.deleteButton}
+              disabled={saving}
+              onClick={() => { if (window.confirm("Delete this expense? This can't be undone.")) onDelete(form.id); }}
+            >
               <TrashIcon />
               Delete
             </button>
           )}
           <div style={{ flex: 1 }} />
+          {formError && <span role="alert" style={{ ...styles.fieldHint, color: "#FF8A8A", flexBasis: "100%", order: -1 }}>{formError}</span>}
           <button style={styles.cancelButton} onClick={onCancel}>
             Cancel
           </button>
-          <button style={styles.saveButton} onClick={() => onSave(form)}>
+          <button
+            style={{ ...styles.saveButton, opacity: saving ? 0.6 : 1 }}
+            disabled={saving}
+            onClick={async () => {
+              if (saving) return;
+              const problem = !(parseMoney(form.amount) > 0) ? "Enter an amount greater than zero."
+                : !form.date ? "Choose the date of the expense."
+                : "";
+              if (problem) { setFormError(problem); return; }
+              setFormError(""); setSaving(true);
+              try { await onSave(form); } finally { setSaving(false); }
+            }}
+          >
             Save expense
           </button>
         </div>
@@ -12366,6 +12652,7 @@ function PlannerWorkspace({
   onSave, onDelete, onDuplicate, onSaveAsTemplate, onConvertToProject, onClose,
 }) {
   const [form, setForm] = useState(plan);
+  const [saveMsg, setSaveMsg] = useState("");
   const [editSplit, setEditSplit] = useState(false);
   const ui = plannerUI();
   const duplicateMemberNames = findDuplicateMemberNames(teamMembers || []);
@@ -12742,11 +13029,19 @@ function PlannerWorkspace({
         <PlannerField label="Notes">
           <textarea style={{ ...styles.textarea, width: "100%", boxSizing: "border-box" }} rows={3} value={form.notes} onChange={set("notes")} placeholder="Anything worth remembering about this plan..." />
         </PlannerField>
+        {saveMsg && <p role="alert" style={{ ...styles.fieldHint, color: "#FF9A9A" }}>{saveMsg}</p>}
         {convertedProject && (
           <p style={styles.fieldHint}>{`This plan has already been converted to project "${convertedProject.name}".`}</p>
         )}
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <button style={styles.saveButton} onClick={() => onSave({ ...form, name: form.name || "Untitled plan" })}>Save</button>
+          <button
+            style={styles.saveButton}
+            onClick={async () => {
+              setSaveMsg("");
+              const r = await onSave({ ...form, name: form.name || "Untitled plan" });
+              if (r && r.ok === false) setSaveMsg(r.message);
+            }}
+          >Save</button>
           {!isNew && (
             hasProAccess ? (
               <button
@@ -12757,7 +13052,11 @@ function PlannerWorkspace({
                     window.alert("This plan has already been converted to a project.");
                     return;
                   }
-                  const result = await onConvertToProject(form);
+                  // The project is built from the saved plan, so save what's on screen first; stop if that fails.
+                  setSaveMsg("");
+                  const saved = await onSave({ ...form, name: form.name || "Untitled plan" });
+                  if (saved && saved.ok === false) { setSaveMsg(saved.message); return; }
+                  const result = await onConvertToProject({ ...form, name: form.name || "Untitled plan" });
                   if (result?.project) setForm({ ...form, status: "converted", convertedProjectId: result.project.id });
                   else if (result?.limitReached) window.alert(`Free plan is limited to ${FREE_PROJECT_LIMIT} active projects. Archive one or upgrade to Pro.`);
                   else if (result?.alreadyConverted) window.alert("This plan has already been converted to a project.");
@@ -12818,6 +13117,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
   const [newPortfolioItem, setNewPortfolioItem] = useState(emptyPortfolioItem());
   const [addingReview, setAddingReview] = useState(false);
   const [newReview, setNewReview] = useState(emptyReview());
+  const [subError, setSubError] = useState(""); // last portfolio/review save or delete failure
 
   useEffect(() => {
     if (isNew || !member.id) return;
@@ -12891,11 +13191,13 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
         .select()
         .single();
       if (error) throw error;
+      setSubError("");
       setPortfolioItems([portfolioItemFromRow(inserted), ...portfolioItems]);
       setNewPortfolioItem(emptyPortfolioItem());
       setAddingPortfolioItem(false);
     } catch (e) {
       console.error("Saving portfolio item failed:", e);
+      setSubError("Couldn't save that portfolio item. Try again.");
     }
   };
 
@@ -12906,6 +13208,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
       setPortfolioItems(portfolioItems.filter((p) => p.id !== id));
     } catch (e) {
       console.error("Deleting portfolio item failed:", e);
+      setSubError("Couldn't delete that portfolio item. Try again.");
     }
   };
 
@@ -12921,11 +13224,13 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
         .select()
         .single();
       if (error) throw error;
+      setSubError("");
       setReviews([reviewFromRow(inserted), ...reviews]);
       setNewReview(emptyReview());
       setAddingReview(false);
     } catch (e) {
       console.error("Saving review failed:", e);
+      setSubError("Couldn't save that review. Try again.");
     }
   };
 
@@ -12936,6 +13241,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
       setReviews(reviews.filter((r) => r.id !== id));
     } catch (e) {
       console.error("Deleting review failed:", e);
+      setSubError("Couldn't delete that review. Try again.");
     }
   };
 
@@ -13493,6 +13799,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
 
             <div style={{ display: activeTab === "portfolio" ? undefined : "none" }}>
             <div style={styles.fieldDivider}>Portfolio</div>
+            {subError && <p role="alert" style={{ ...styles.fieldHint, color: "#FF9A9A" }}>{subError}</p>}
             {portfolioItems.length === 0 && !addingPortfolioItem && (
               <p style={styles.fieldHint}>No portfolio items yet.</p>
             )}
@@ -13606,6 +13913,7 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
                 </button>
               </div>
             ))}
+            {subError && <p role="alert" style={{ ...styles.fieldHint, color: "#FF9A9A" }}>{subError}</p>}
             {addingReview ? (
               <div style={{ border: "1px solid #2a3634", borderRadius: 8, padding: 10, marginTop: 6 }}>
                 <div className="kf-field-row" style={styles.fieldRow}>
@@ -13707,6 +14015,8 @@ function TeamMemberEditor({ member, onCancel, onSave, onArchive, isNew, currency
 function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySymbol, hasProAccess, showProBadge = !hasProAccess }) {
   const [form, setForm] = useState({ currency: currencySymbol || "$", amountMode: "manual", ...invoice });
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+  const [formError, setFormError] = useState("");
+  const [saving, setSaving] = useState(false);
   const docType = form.docType || "invoice";
   const hasLineItems = form.amountMode === "items";
   const computedTotal = hasLineItems ? lineItemsTotal(form.lineItems) : parseMoney(form.amount);
@@ -13739,7 +14049,7 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
           invoiceNumber: nextNumber,
           status: "paid",
           amountPaid: f.amountPaid || String(total),
-          paidDate: f.paidDate || new Date().toISOString().slice(0, 10),
+          paidDate: f.paidDate || todayInZone(),
         };
       }
       return { ...f, docType: targetType, invoiceNumber: nextNumber };
@@ -14010,7 +14320,7 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
                     ...form,
                     status: "paid",
                     amountPaid: hasLineItems ? String(computedTotal) : form.amount,
-                    paidDate: form.paidDate || new Date().toISOString().slice(0, 10),
+                    paidDate: form.paidDate || todayInZone(),
                   })
                 }
               >
@@ -14022,24 +14332,42 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
 
         <div className="kf-modal-footer" style={styles.modalFooter}>
           {!isNew && (
-            <button style={styles.deleteButton} onClick={() => onDelete(form.id)}>
+            <button
+              style={styles.deleteButton}
+              disabled={saving}
+              onClick={() => {
+                const paidNote = parseMoney(form.amountPaid) > 0 ? " It has payments recorded against it." : "";
+                if (window.confirm(`Delete ${form.invoiceNumber || "this document"}?${paidNote} This can't be undone.`)) onDelete(form.id);
+              }}
+            >
               <TrashIcon />
               Delete
             </button>
           )}
           <div style={{ flex: 1 }} />
+          {formError && <span role="alert" style={{ ...styles.fieldHint, color: "#FF8A8A", flexBasis: "100%", order: -1 }}>{formError}</span>}
           <button style={styles.cancelButton} onClick={onCancel}>
             Cancel
           </button>
           <button
-            style={styles.saveButton}
-            onClick={() =>
-              onSave({
-                ...form,
-                invoiceNumber: form.invoiceNumber || `${DOC_TYPE_PREFIX[docType] || "INV"}-0001`,
-                amount: hasLineItems ? String(computedTotal) : form.amount,
-              })
-            }
+            style={{ ...styles.saveButton, opacity: saving ? 0.6 : 1 }}
+            disabled={saving}
+            onClick={async () => {
+              if (saving) return;
+              const ref = String(form.invoiceNumber || "").trim();
+              const problem = !ref ? "Enter a reference number."
+                : !(computedTotal > 0) ? "Enter an amount greater than zero."
+                : parseMoney(form.amountPaid) < 0 ? "Amount paid can't be negative."
+                : parseMoney(form.amountPaid) > computedTotal + 0.005 ? "Amount paid is more than the total."
+                : !form.issueDate ? "Choose an issue date."
+                : form.dueDate && form.dueDate < form.issueDate ? "The due date is before the issue date."
+                : "";
+              if (problem) { setFormError(problem); return; }
+              setFormError(""); setSaving(true);
+              try {
+                await onSave({ ...form, invoiceNumber: ref, amount: hasLineItems ? String(computedTotal) : form.amount });
+              } finally { setSaving(false); }
+            }}
           >
             Save {DOC_TYPES.find((t) => t.id === docType)?.label.toLowerCase() || "invoice"}
           </button>
@@ -14052,7 +14380,7 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
 function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, currencySymbol }) {
   const cur = currencySymbol || "$";
   const [percentages, setPercentages] = useState(
-    (defaultPercentages && defaultPercentages.length === 3 ? defaultPercentages : MILESTONE_DEFAULTS).map(String)
+    (defaultPercentages && defaultPercentages.length >= 2 && defaultPercentages.length <= 6 ? defaultPercentages : MILESTONE_DEFAULTS).map(String)
   );
   const totalPercent = percentages.reduce((sum, p) => sum + (parseFloat(p) || 0), 0);
   const setPct = (i) => (e) => {
@@ -14060,6 +14388,13 @@ function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, c
     next[i] = e.target.value;
     setPercentages(next);
   };
+  const splitEvenly = (n) => {
+    const base = Math.floor((10000 / n)) / 100;
+    const next = Array.from({ length: n }, () => base);
+    next[n - 1] = Math.round((100 - base * (n - 1)) * 100) / 100; // last one absorbs the rounding
+    setPercentages(next.map(String));
+  };
+  const count = percentages.length;
 
   return (
     <div className="kf-modal-overlay" role="dialog" aria-modal="true" style={styles.overlay} onClick={onCancel}>
@@ -14075,10 +14410,10 @@ function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, c
           Splits the project's {cur}{formatMoney(totalBudget)} budget into invoices.
         </p>
 
-        {MILESTONE_LABELS.map((label, i) => (
-          <div key={label} style={styles.fieldRow}>
+        {percentages.map((_, i) => (
+          <div key={i} style={styles.fieldRow}>
             <div style={styles.field}>
-              <label style={styles.label}>{label}</label>
+              <label style={styles.label}>{milestoneLabel(i, count)}</label>
               <input
                 style={styles.input}
                 type="number"
@@ -14099,8 +14434,24 @@ function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, c
           </div>
         ))}
 
-        <p style={{ ...styles.fieldHint, color: totalPercent === 100 ? "#3DDC84" : "#F2A65A" }}>
-          Total: {totalPercent}%{totalPercent !== 100 ? " — doesn't add up to 100%, invoices will use these amounts anyway" : ""}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {count < 6 && (
+            <button type="button" style={styles.addRevisionButton} onClick={() => setPercentages([...percentages, "0"])}>
+              + Add milestone
+            </button>
+          )}
+          {count > 2 && (
+            <button type="button" style={styles.addRevisionButton} onClick={() => setPercentages(percentages.slice(0, -1))}>
+              Remove last
+            </button>
+          )}
+          <button type="button" style={styles.addRevisionButton} onClick={() => splitEvenly(count)}>
+            Split evenly
+          </button>
+        </div>
+
+        <p style={{ ...styles.fieldHint, color: Math.abs(totalPercent - 100) < 0.005 ? "#3DDC84" : "#F2A65A" }}>
+          Total: {Math.round(totalPercent * 100) / 100}%{Math.abs(totalPercent - 100) >= 0.005 ? " — doesn't add up to 100%, invoices will use these amounts anyway" : ""}
         </p>
 
         <div className="kf-modal-footer" style={styles.modalFooter}>

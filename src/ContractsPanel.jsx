@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  CONTRACT_STATUS, DEFAULT_CONTRACT_BODY, DEFAULT_REVISION_ROUNDS, DEFAULT_MILESTONE_PERCENTS, MILESTONE_LABELS,
+  CONTRACT_STATUS, DEFAULT_CONTRACT_BODY, DEFAULT_REVISION_ROUNDS, DEFAULT_MILESTONE_PERCENTS, milestoneLabel, MILESTONE_MIN, MILESTONE_MAX,
   buildContractTerms, renderContractBody, compareTerms, validateMilestonePercents,
   formatContractMoney, formatContractDate, contractSignLink,
 } from "./contracts.js";
@@ -26,7 +26,7 @@ const when = (iso) => (iso ? new Date(iso).toLocaleDateString() : "");
 export default function ContractsPanel({ contact, projects = [], cards = [], studio = {}, ui }) {
   const { C, card, field, btn } = ui;
   const studioName = studio.legalName || studio.name || "Studio";
-  const defaultPercents = (studio.milestoneDefaults && studio.milestoneDefaults.length === 3 ? studio.milestoneDefaults : DEFAULT_MILESTONE_PERCENTS).map(String);
+  const defaultPercents = (studio.milestoneDefaults && studio.milestoneDefaults.length >= MILESTONE_MIN && studio.milestoneDefaults.length <= MILESTONE_MAX ? studio.milestoneDefaults : DEFAULT_MILESTONE_PERCENTS).map(String);
 
   const [contracts, setContracts] = useState(null);
   const [template, setTemplate] = useState(null);
@@ -108,7 +108,7 @@ export default function ContractsPanel({ contact, projects = [], cards = [], stu
   const startCreate = (forProjectId, fromContract) => {
     setCreating(true); setLink(""); setNote("");
     setProjectId(forProjectId || "");
-    setPercents(fromContract?.terms?.milestones?.length === 3 ? fromContract.terms.milestones.map((m) => String(m.percent)) : defaultPercents);
+    setPercents(fromContract?.terms?.milestones?.length >= MILESTONE_MIN && fromContract?.terms?.milestones?.length <= MILESTONE_MAX ? fromContract.terms.milestones.map((m) => String(m.percent)) : defaultPercents);
     if (fromContract?.studio_signatory) setSignatory(fromContract.studio_signatory);
   };
 
@@ -247,13 +247,17 @@ export default function ContractsPanel({ contact, projects = [], cards = [], stu
           <fieldset style={{ border: "none", padding: 0, margin: "8px 0" }}>
             <legend style={label}>Payment schedule (% of fee)</legend>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {MILESTONE_LABELS.map((l, i) => (
-                <div key={l} style={{ flex: "1 1 90px" }}>
-                  <label style={label} htmlFor={`ct-pct-${i}`}>{l}</label>
+              {percents.map((_, i) => (
+                <div key={i} style={{ flex: "1 1 90px" }}>
+                  <label style={label} htmlFor={`ct-pct-${i}`}>{milestoneLabel(i, percents.length)}</label>
                   <input id={`ct-pct-${i}`} style={field} inputMode="decimal" value={percents[i]}
                     onChange={(e) => setPercents(percents.map((v, j) => (j === i ? e.target.value : v)))} />
                 </div>
               ))}
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              {percents.length < MILESTONE_MAX && <button type="button" style={btn(C.teal, false)} onClick={() => setPercents([...percents, "0"])}>+ Add payment</button>}
+              {percents.length > MILESTONE_MIN && <button type="button" style={btn(C.muted, false)} onClick={() => setPercents(percents.slice(0, -1))}>Remove last</button>}
             </div>
             {!pctCheck.ok && <p role="alert" style={{ ...hint, color: C.red }}>{pctCheck.error}</p>}
           </fieldset>

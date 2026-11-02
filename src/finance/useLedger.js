@@ -1,19 +1,21 @@
 import { todayLocal } from "./currency.js";
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { loadLedger, savePrivacy } from "./api.js";
 import { buildPostings, dashboardSummary } from "./reports.js";
 
 // Loads the ledger once and exposes it with derived postings. Reload after any write.
 export function useLedger(userId) {
   const [state, setState] = useState({ loading: true, error: "", data: null });
+  const seq = useRef(0);
   const reload = useCallback(async () => {
     if (!userId) return;
+    const mine = ++seq.current; // an older, slower load must never overwrite a newer one
     try {
       const data = await loadLedger();
-      setState({ loading: false, error: "", data });
+      if (mine === seq.current) setState({ loading: false, error: "", data });
     } catch (e) {
       console.error("Finance load failed:", e);
-      setState((s) => ({ ...s, loading: false, error: e?.message || "Couldn't load Finance." }));
+      if (mine === seq.current) setState((s) => ({ ...s, loading: false, error: e?.message || "Couldn't load Finance." }));
     }
   }, [userId]);
   useEffect(() => { reload(); }, [reload]);

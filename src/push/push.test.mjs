@@ -77,6 +77,7 @@ test("scheduled keys are namespaced to the caller and limited to known prefixes"
   const user = "11111111-1111-4111-8111-111111111111";
   assert.equal(namespacedKey(user, "pomo:timer"), `${user}:pomo:timer`);
   assert.equal(namespacedKey(user, "digest:morning"), `${user}:digest:morning`);
+  assert.equal(namespacedKey(user, "snooze:a1"), `${user}:snooze:a1`);
   assert.equal(namespacedKey(user, "chat:abc"), null);
   assert.equal(namespacedKey(user, "pomo"), null);
   assert.equal(namespacedKey(user, "pomo:../x y"), null);

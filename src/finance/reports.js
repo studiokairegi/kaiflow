@@ -387,7 +387,8 @@ export function toCsv(rows) {
   if (!rows.length) return "";
   const cols = Object.keys(rows[0]);
   const esc = (v) => {
-    const s = String(v ?? "");
+    let s = String(v ?? "");
+    if (typeof v === "string" && /^[=+\-@\t\r]/.test(s)) s = `'${s}`; // stop spreadsheets running imported text as a formula
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   return [cols.join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n");
@@ -417,6 +418,9 @@ export function legacyCash(postings) {
 // ---------------------------------------------------------------------------
 const monthKey = (d) => d.slice(0, 7);
 
+// Revenue headline figures exclude realized FX gain/loss (it still counts in net profit).
+const operatingRevenue = (pl) => r2(pl.revenue.filter((r) => r.systemKey !== "fx_gain_loss").reduce((s, r) => s + r.amount, 0));
+
 export function dashboardSummary(data, { today, docsAR = [], docsAP = [] }) {
   const postings = buildPostings(data);
   const year = today.slice(0, 4);
@@ -431,7 +435,7 @@ export function dashboardSummary(data, { today, docsAR = [], docsAP = [] }) {
   const series = months.map((m) => {
     const last = new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0)).getUTCDate();
     const pl = profitAndLoss(postings, { from: `${m}-01`, to: `${m}-${String(last).padStart(2, "0")}` });
-    return { month: m, revenue: pl.totalRevenue, expenses: r2(pl.totalCogs + pl.totalOpex), profit: pl.netProfit };
+    return { month: m, revenue: operatingRevenue(pl), expenses: r2(pl.totalCogs + pl.totalOpex), profit: pl.netProfit };
   });
   const banks = bankBalances(postings, data.bankAccounts || []);
   const legacy = legacyCash(postings);
@@ -447,8 +451,8 @@ export function dashboardSummary(data, { today, docsAR = [], docsAP = [] }) {
   const soon = ap.rows.filter((r) => daysBetween(r.dueDate, today) <= 14);
   return {
     baseCurrency: data.settings?.base_currency || "USD",
-    revenueYtd: ytd.totalRevenue, expensesYtd: r2(ytd.totalCogs + ytd.totalOpex), netProfitYtd: ytd.netProfit,
-    revenueMonth: thisMonth.totalRevenue, expensesMonth: r2(thisMonth.totalCogs + thisMonth.totalOpex), netProfitMonth: thisMonth.netProfit,
+    revenueYtd: operatingRevenue(ytd), expensesYtd: r2(ytd.totalCogs + ytd.totalOpex), netProfitYtd: ytd.netProfit,
+    revenueMonth: operatingRevenue(thisMonth), expensesMonth: r2(thisMonth.totalCogs + thisMonth.totalOpex), netProfitMonth: thisMonth.netProfit,
     revenueYtdNative: nativeRevenue,
     cashBase, cashNative, banks, legacyCash: legacy,
     receivableBase: ar.totalBase, receivableNative: ar.totalNativeByCurrency, receivableCount: ar.rows.length,

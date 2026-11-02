@@ -153,12 +153,12 @@ export function makeTasksApi(sb) {
     async updateSeries(before, input, today) {
       const v = validateSeriesInput(input);
       if (!v.ok) validation(v.errors);
-      const { data, error } = await one(sb.from("studio_task_series").update(seriesToRow(v.value)).eq("id", before.id));
+      const row = seriesToRow(v.value);
+      const regenerate = scheduleChanged(before, seriesFromRow(row));
+      // One transaction: update the series and sync/regenerate its future occurrences.
+      const { data, error } = await sb.rpc("studio_task_series_update", { p_series_id: before.id, p_patch: row, p_today: today, p_regenerate: regenerate });
       if (error) fail(error);
       const series = seriesFromRow(data);
-      const regenerate = scheduleChanged(before, series);
-      const { error: e2 } = await sb.rpc("studio_task_series_sync", { p_series_id: series.id, p_today: today, p_regenerate: regenerate });
-      if (e2) fail(e2);
       const refreshed = regenerate ? await this.refreshSeries(series.id) : series;
       if (regenerate) await this.materialize(refreshed, today);
       return refreshed;

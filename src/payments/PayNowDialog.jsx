@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { S, T, Btn, Banner, Field, Modal, useBusy } from "../finance/ui.jsx";
-import { formatMoney, symbolToCode } from "../finance/currency.js";
+import { formatMoney, parseAmount, symbolToCode } from "../finance/currency.js";
 import { SANDBOX_NOTICE, checkoutBlocker, isValidEmail, outstandingOf } from "./logic.js";
 import { startCheckout, verifyPayment } from "./api.js";
 
@@ -15,7 +15,7 @@ export default function PayNowDialog({ invoice, defaultEmail = "", onClose, onCh
   const [result, setResult] = useState(null);
   const { busy, error, run } = useBusy();
   const blocker = checkoutBlocker(invoice);
-  const amt = Number(amount);
+  const amt = parseAmount(amount);
   const amountOk = Number.isFinite(amt) && amt > 0 && amt <= outstanding + 0.005;
 
   const open = () => run(async () => {
@@ -44,7 +44,7 @@ export default function PayNowDialog({ invoice, defaultEmail = "", onClose, onCh
         </>
       ) : (
         <>
-          <p style={S.sub}>Checkout for <strong>{formatMoney(session.currency, session.amount)}</strong> opened in a new tab{session.reused ? " (resumed an existing one)" : ""}. Reference <code>{session.reference}</code>.</p>
+          <p style={S.sub}>Checkout for <strong>{formatMoney(session.currency, session.amount)}</strong> is ready{session.reused ? " (resumed an existing one)" : ""}. If no new tab opened (pop-up blocked), use Reopen checkout. Reference <code>{session.reference}</code>.</p>
           <p style={S.sub}>After paying with a test card, come back and verify. The invoice only updates once Paystack confirms the payment to our server; returning from the checkout page is not proof of payment.</p>
           <div style={S.row}>
             <Btn kind="primary" disabled={busy} onClick={verify}>{busy ? "Verifying…" : "Verify payment"}</Btn>

@@ -1,13 +1,13 @@
 import React, { useMemo, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, Money, Totals, useBusy, fmtDate } from "./ui.jsx";
 import { AgingCard } from "./Sales.jsx";
-import { FINANCE_CURRENCIES, symbolToCode, formatMoney, todayLocal } from "./currency.js";
+import { FINANCE_CURRENCIES, symbolToCode, formatMoney, parseAmount, todayLocal } from "./currency.js";
 import { rpc } from "./api.js";
 import { aging } from "./reports.js";
 
 const METHODS = ["Bank transfer", "PayPal", "Wise", "Payoneer", "M-Pesa", "Cash", "Other"];
 const today = () => todayLocal();
-const num = (v) => Number(v) || 0;
+const num = (v) => { const n = parseAmount(v); return Number.isFinite(n) ? n : 0; };
 
 function BillModal({ ctx, onClose }) {
   const { data, projects, teamMembers } = ctx;
@@ -20,7 +20,7 @@ function BillModal({ ctx, onClose }) {
     await ctx.reload(); onClose();
   });
   return (
-    <Modal title="New bill" onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !(num(f.amount) > 0)} onClick={submit}>{busy ? "Saving..." : f.approve ? "Save and approve" : "Save draft"}</Btn></>}>
+    <Modal title="New bill" onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !(num(f.amount) > 0) || Number.isNaN(parseAmount(f.amount)) || (f.due_date && f.issue_date && f.due_date < f.issue_date)} onClick={submit}>{busy ? "Saving..." : f.approve ? "Save and approve" : "Save draft"}</Btn></>}>
       <p style={S.sub}>A bill is money you owe. Cost is recognised now; cash only moves when you record a payment.</p>
       <div style={S.grid(180)}>
         <Field label="Freelancer / vendor">
@@ -39,6 +39,8 @@ function BillModal({ ctx, onClose }) {
       </div>
       <Field label="Description"><input style={S.input} value={f.description} onChange={set("description")} placeholder="e.g. Genga for shots 12-20" /></Field>
       <label style={{ fontSize: 13.5, display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={f.approve} onChange={set("approve")} /> Approve now (post to accounts payable)</label>
+      {Number.isNaN(parseAmount(f.amount)) && <Banner tone="warn">The amount isn't a valid number.</Banner>}
+      {f.due_date && f.issue_date && f.due_date < f.issue_date && <Banner tone="warn">The due date is before the issue date.</Banner>}
       {error && <Banner tone="bad">{error}</Banner>}
     </Modal>
   );
@@ -58,7 +60,7 @@ function PayBillModal({ ctx, bill, outstanding, onClose }) {
     await ctx.reload(); onClose();
   });
   return (
-    <Modal title={`Pay ${bill.vendor_name}`} onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !bank || !(num(amount) > 0)} onClick={submit}>{busy ? "Recording..." : "Record payment"}</Btn></>}>
+    <Modal title={`Pay ${bill.vendor_name}`} onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={busy || !bank || !(num(amount) > 0) || num(amount) > outstanding + 0.005} onClick={submit}>{busy ? "Recording..." : "Record payment"}</Btn></>}>
       <p style={S.sub}>Outstanding on this bill: <strong>{formatMoney(bill.currency, outstanding)}</strong>. This reduces what you owe and the selected account's balance; it does not create a second expense.</p>
       {banks.length === 0 && <Banner tone="warn">You have no {bill.currency} bank or cash account. Add one under Banking, or convert funds with a transfer first.</Banner>}
       <div style={S.grid(160)}>
@@ -68,6 +70,7 @@ function PayBillModal({ ctx, bill, outstanding, onClose }) {
         <Field label="Method"><select style={S.input} value={method} onChange={(e) => setMethod(e.target.value)}>{METHODS.map((m) => <option key={m}>{m}</option>)}</select></Field>
       </div>
       <Field label="Reference"><input style={S.input} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Transaction ID, optional" /></Field>
+      {num(amount) > outstanding + 0.005 && <Banner tone="warn">That is more than the {formatMoney(bill.currency, outstanding)} still owed on this bill.</Banner>}
       {error && <Banner tone="bad">{error}</Banner>}
     </Modal>
   );

@@ -4,6 +4,7 @@
 // Everything is grouped BY CURRENCY and never summed across currencies: a Kenyan shilling is
 // not a dollar, and the Finance module takes the same position.
 import { symbolToCode } from "../finance/currency.js";
+import { todayInZone } from "../settings/runtime.js";
 
 export const SIMULATED_NOTICE = "SIMULATED — NO MONEY TRANSFERRED";
 export const FEE_CATEGORY = "Payment processing fees";
@@ -138,9 +139,11 @@ export function summarizePayments({ transactions = [], payouts = [], bills = [],
   for (const c of new Set([...Object.keys(receivedGross), ...Object.keys(feeTotals)])) net[c] = r2((receivedGross[c] || 0) - (feeTotals[c] || 0));
   const refunds = nonZero(sumBy(tx.filter((t) => Number(t.refunded_amount) > 0), (t) => t.currency, (t) => t.refunded_amount));
 
-  const today = todayIso || now.toISOString().slice(0, 10);
+  const today = todayIso || todayInZone(now);
+  // A payment belongs to "today" by the studio calendar, not by the UTC date inside its timestamp.
+  const dayOf = (iso) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? "" : todayInZone(d); };
   const receivedToday = nonZero(sumBy(
-    transactions.filter((t) => COUNTED.includes(t.status) && t.apply_status === "applied" && String(t.paid_at || "").slice(0, 10) === today),
+    transactions.filter((t) => COUNTED.includes(t.status) && t.apply_status === "applied" && t.paid_at && dayOf(t.paid_at) === today),
     (t) => t.currency, (t) => t.amount));
 
   const pendingTx = tx.filter((t) => ["initialized", "pending"].includes(t.status));

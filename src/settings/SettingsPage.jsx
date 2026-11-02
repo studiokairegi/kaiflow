@@ -61,7 +61,10 @@ function AddRow({ placeholder, onAdd, label = "Add" }) {
 // ---------------------------------------------------------------- General
 function GeneralTab({ form, set, errors, personalOnly = false }){
   const zones = useMemo(() => {
-    try { return Intl.supportedValuesOf("timeZone"); } catch { return ["UTC", "Africa/Nairobi", "Europe/London", "America/New_York", "Asia/Tokyo"]; }
+    try {
+      const all = Intl.supportedValuesOf("timeZone");
+      return form.timezone && !all.includes(form.timezone) ? [form.timezone, ...all] : all; // never blank out a saved zone
+    } catch { return ["UTC", "Africa/Nairobi", "Europe/London", "America/New_York", "Asia/Tokyo"]; }
   }, []);
   const ww = form.workweek;
   const toggleDay = (d) => set({ workweek: { ...ww, days: ww.days.includes(d) ? ww.days.filter((x) => x !== d) : [...ww.days, d] } });
@@ -81,6 +84,7 @@ function GeneralTab({ form, set, errors, personalOnly = false }){
             <input style={{ ...S.input, maxWidth: 420 }} value={form.logoUrl} onChange={(e) => set({ logoUrl: e.target.value })} placeholder="https://..." />
             {form.logoUrl && <img src={form.logoUrl} alt="Logo preview" style={{ height: 36, borderRadius: 4, border: `1px solid ${T.border}` }} onError={(e) => { e.currentTarget.style.display = "none"; }} />}
           </div>
+          <Err msg={errors.logoUrl} />
         </Field>
       </Section>
       </>}
@@ -144,6 +148,7 @@ function CrmTab({ form, set, errors, reasonDefaults }) {
         <ChipList items={channels} onRemove={(c) => set({ leadChannels: channels.filter((x) => x !== c) })}
           extra={(c) => <button type="button" onClick={() => set({ dashboardHiddenChannels: hidden.includes(c) ? hidden.filter((x) => x !== c) : [...hidden, c] })} style={{ background: "none", border: "none", color: hidden.includes(c) ? T.warn : T.accentText, cursor: "pointer", fontSize: 12 }}>{hidden.includes(c) ? "Hidden" : "Shown"}</button>} />
         <AddRow placeholder="New channel" label="Add channel" onAdd={(t) => { if (!channels.some((c) => c.toLowerCase() === t.toLowerCase())) set({ leadChannels: [...channels, t] }); }} />
+        <Err msg={errors.leadChannels} />
       </Section>
       <Section title="Follow-up cadence" hint="After the first email, how many follow-ups to schedule and when. Existing leads keep their own email slots; only the first N follow-ups count as scheduled.">
         <div style={S.row}>
@@ -265,8 +270,11 @@ function FinanceTab({ form, set, errors, userId, onPrivacy }) {
         </div>
       </Section>
       <Section title="Invoicing defaults">
-        <Field label="Milestone split (%)" hint={`Deposit / midpoint / final. Currently adds up to ${sum}%.`}>
-          <div style={S.row}>{m.map((v, i) => <Num key={i} value={v} min={0} max={100} width={90} onChange={(x) => set({ milestoneDefaults: m.map((y, j) => (j === i ? (x === "" ? "" : Number(x)) : y)) })} />)}<span style={{ color: sum === 100 ? T.ok : T.warn, fontSize: 13 }}>= {sum}%</span></div>
+        <Field label="Milestone split (%)" hint={`Deposit first, final payment last; add more in between if a client needs them. Currently adds up to ${sum}%.`}>
+          <div style={S.row}>{m.map((v, i) => <Num key={i} value={v} min={0} max={100} width={90} onChange={(x) => set({ milestoneDefaults: m.map((y, j) => (j === i ? (x === "" ? "" : Number(x)) : y)) })} />)}<span style={{ color: sum === 100 ? T.ok : T.warn, fontSize: 13 }}>= {sum}%</span>
+            {m.length < 6 && <button type="button" style={{ ...S.input, width: "auto", cursor: "pointer" }} onClick={() => set({ milestoneDefaults: [...m, 0] })}>+ Add</button>}
+            {m.length > 2 && <button type="button" style={{ ...S.input, width: "auto", cursor: "pointer" }} onClick={() => set({ milestoneDefaults: m.slice(0, -1) })}>Remove last</button>}
+          </div>
           <Err msg={errors.milestoneDefaults} />
         </Field>
         <Field label="Document reference prefixes" hint="Used for the next reference only. References already issued never change.">
@@ -283,6 +291,15 @@ function FinanceTab({ form, set, errors, userId, onPrivacy }) {
           <Field label="VAT status"><input style={S.input} value={form.studioVatStatus} onChange={(e) => set({ studioVatStatus: e.target.value })} placeholder="e.g. Registered / Not registered" /></Field>
           <Field label="eTIMS number"><input style={S.input} value={form.studioEtimsNumber} onChange={(e) => set({ studioEtimsNumber: e.target.value })} /></Field>
         </div>
+      </Section>
+      <Section title="Document details" hint="Printed on invoices, pro-formas and receipts so clients know how to reach and pay you.">
+        <div style={S.grid(240)}>
+          <Field label="Contact email"><input style={S.input} type="email" value={form.studioEmail} onChange={(e) => set({ studioEmail: e.target.value })} placeholder="billing@yourstudio.com" /><Err msg={errors.studioEmail} /></Field>
+          <Field label="Phone"><input style={S.input} value={form.studioPhone} onChange={(e) => set({ studioPhone: e.target.value })} /><Err msg={errors.studioPhone} /></Field>
+          <Field label="Website"><input style={S.input} value={form.studioWebsite} onChange={(e) => set({ studioWebsite: e.target.value })} placeholder="https://..." /><Err msg={errors.studioWebsite} /></Field>
+        </div>
+        <Field label="Payment instructions" hint="e.g. bank name, account number, M-Pesa till or PayPal address. Shown above the thank-you note."><textarea style={{ ...S.input, minHeight: 80 }} maxLength={600} value={form.invoicePaymentInstructions} onChange={(e) => set({ invoicePaymentInstructions: e.target.value })} /><Err msg={errors.invoicePaymentInstructions} /></Field>
+        <Field label="Footer note" hint="An extra line at the bottom, such as late-payment terms."><input style={S.input} maxLength={300} value={form.invoiceFooterNote} onChange={(e) => set({ invoiceFooterNote: e.target.value })} /><Err msg={errors.invoiceFooterNote} /></Field>
       </Section>
       <Section title="Privacy" hint="Hides every financial amount across Finance and the dashboard. Applies immediately and is saved to your account.">
         <Switch checked={!!fin?.privacy_mode} disabled={privBusy || fin === undefined} onChange={togglePrivacy} label="Hide financial figures" />
@@ -383,6 +400,30 @@ function AlertsTab({ form, set, periodOptions, onEnableNotifications, hiddenCoun
   );
 }
 
+function ChangePasswordSection() {
+  const [pw, setPw] = useState("");
+  const [again, setAgain] = useState("");
+  const [state, setState] = useState({ busy: false, msg: "", ok: false });
+  const problem = pw.length > 0 && pw.length < 8 ? "Use at least 8 characters." : again && pw !== again ? "The two passwords don't match." : "";
+  const submit = async () => {
+    setState({ busy: true, msg: "", ok: false });
+    const { error } = await supabase.auth.updateUser({ password: pw });
+    if (error) setState({ busy: false, msg: error.message || "Couldn't change the password. Sign in again and retry.", ok: false });
+    else { setPw(""); setAgain(""); setState({ busy: false, msg: "Password changed.", ok: true }); }
+  };
+  return (
+    <Section title="Password" hint="Choose a new password for this account.">
+      <div style={S.grid(240)}>
+        <Field label="New password"><input style={S.input} type="password" autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} /></Field>
+        <Field label="Repeat new password"><input style={S.input} type="password" autoComplete="new-password" value={again} onChange={(e) => setAgain(e.target.value)} /></Field>
+      </div>
+      <Err msg={problem} />
+      {state.msg && <Banner tone={state.ok ? "ok" : "bad"}>{state.msg}</Banner>}
+      <div><Btn disabled={state.busy || pw.length < 8 || pw !== again} onClick={submit}>{state.busy ? "Saving..." : "Change password"}</Btn></div>
+    </Section>
+  );
+}
+
 // Employees get their own account/support controls, not destructive owner-account
 // actions or studio-wide integration settings.
 function PersonalAccountTab({ email, onSignOut, onOpenSupport, onReplayTutorial }) {
@@ -392,6 +433,7 @@ function PersonalAccountTab({ email, onSignOut, onOpenSupport, onReplayTutorial 
         <Field label="Email"><span style={{ fontSize: 14 }}>{email}</span></Field>
         <div style={S.row}><Btn onClick={onSignOut}>Sign out</Btn></div>
       </Section>
+      <ChangePasswordSection />
       <Section title="Help & support">
         <div style={S.row}><Btn onClick={onReplayTutorial}>Replay the tutorial</Btn><Btn onClick={onOpenSupport}>Report a problem or ask a question</Btn></div>
       </Section>
@@ -450,6 +492,7 @@ function AccountTab({ settings, email, drive, patreon, onReplayTutorial, onOpenS
         </div>
         <span style={S.sub}>Export backup downloads all your data as a JSON file.</span>
       </Section>
+      <ChangePasswordSection />
       <Section title="Help">
         <div style={S.row}><Btn onClick={onReplayTutorial}>Replay the tutorial</Btn><Btn onClick={onOpenSupport}>Report a problem or ask a question</Btn></div>
         {settings.isAdmin && (
@@ -498,7 +541,12 @@ export default function SettingsPage(props) {
   const [form, setForm] = useState(settings);
   const [tab, setTab] = useState("general");
   const [status, setStatus] = useState("idle"); // idle | saving | saved | failed
-  const errors = useMemo(() => validateSettings(form), [form]);
+  // Only flag problems on tabs this person can actually open (employees don't see the studio tabs).
+  const errors = useMemo(() => {
+    const all = validateSettings(form);
+    const visible = new Set(settingsTabs.map(([id]) => id));
+    return Object.fromEntries(Object.entries(all).filter(([k]) => [...errorTabs({ [k]: all[k] })].every((t) => visible.has(t))));
+  }, [form, settingsTabs]);
   const dirty = useMemo(() => dirtyTabs(settings, form), [settings, form]);
   const bad = useMemo(() => errorTabs(errors), [errors]);
   const errCount = Object.keys(errors).length;
