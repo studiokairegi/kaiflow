@@ -129,6 +129,8 @@ export function PortalThread({ organizationId, userId, thread, onBack, onChanged
   const [drawer, setDrawer] = useState(null);
   const [downloadBusy, setDownloadBusy] = useState(null);
   const [error, setError] = useState("");
+  const [replyTo, setReplyTo] = useState(null);
+  const [jumpId, setJumpId] = useState(null);
   const textareaRef = useRef(null);
   const threadId = thread.thread_id;
 
@@ -136,13 +138,13 @@ export function PortalThread({ organizationId, userId, thread, onBack, onChanged
     try { setRows(await chatApi.portalMessages(threadId)); setError(""); chatApi.portalMarkRead(threadId).then(onChanged).catch(() => {}); }
     catch (e) { setError(portalErrorText(e)); } finally { setLoading(false); }
   }, [threadId, onChanged]);
-  useEffect(() => { setRows([]); setLoading(true); setDrawer(null); setDraft(""); setFiles([]); load(); }, [threadId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setRows([]); setLoading(true); setDrawer(null); setDraft(""); setFiles([]); setReplyTo(null); setJumpId(null); load(); }, [threadId]); // eslint-disable-line react-hooks/exhaustive-deps
   usePolling(load, 5000, true);
 
   const outbox = useOutbox({
     send: (item) => (item.files?.length
-      ? chatApi.portalSendWithFiles(threadId, item.body, item.key, item.files)
-      : chatApi.portalSendText(threadId, item.body, item.key)),
+      ? chatApi.portalSendWithFiles(threadId, item.body, item.key, item.files, item.replyToId || null)
+      : chatApi.portalSendText(threadId, item.body, item.key, item.replyToId || null)),
     onSent: () => { load(); onChanged(); },
     errorText: portalErrorText,
   });
@@ -153,8 +155,8 @@ export function PortalThread({ organizationId, userId, thread, onBack, onChanged
     if (check) { setComposerError(check); return; }
     if (!body && !files.length) return;
     setComposerError("");
-    outbox.enqueue({ body, files, scope: threadId });
-    setDraft(""); setFiles([]);
+    outbox.enqueue({ body, files, scope: threadId, replyToId: replyTo?.id || null, replyTo: replyTo ? { id: replyTo.id, name: replyTo.senderName, preview: replyTo.preview } : null });
+    setDraft(""); setFiles([]); setReplyTo(null);
     textareaRef.current?.focus();
   };
 
@@ -164,13 +166,23 @@ export function PortalThread({ organizationId, userId, thread, onBack, onChanged
     return {
       id: row.id, senderKey: `${row.sender_kind}:${row.sender_user_id || row.sender_label}`, senderName: name, avatar: initials(name), mine,
       badge: row.sender_kind === "client" ? "Client" : row.sender_kind === "guest" ? "Guest" : row.sender_kind === "staff" && !mine ? "Studio" : "",
-      body: row.body, createdAt: row.created_at, attachments: row.attachments || [], reactions: [], canReact: false, canPin: false,
+      body: row.body, createdAt: row.created_at, attachments: row.attachments || [],
+      replyTo: row.reply_to ? { id: row.reply_to.id, name: row.reply_to.label || "Earlier message", preview: row.reply_to.preview || "Attachment" } : null,
+      reactions: (row.reactions || []).map((group) => ({ reaction: group.reaction, count: group.count, reactedByMe: !!group.mine, names: group.names || [] })),
+      canReact: true, canPin: false,
     };
   }), [rows, userId]);
   const pending = useMemo(() => outboxToMessages(outbox.items.filter((item) => item.scope === threadId), { senderKey: `staff:${userId}`, senderName: "You" }), [outbox.items, threadId, userId]);
 
+  const rowsRef = useRef(rows); rowsRef.current = rows;
   const actions = useMemo(() => ({
     retry: (message) => outbox.retry(message.id), discard: (message) => outbox.discard(message.id),
+    reply: (m) => { setReplyTo({ id: m.id, senderName: m.mine ? "yourself" : m.senderName, preview: (m.body || "Attachment").slice(0, 160) }); textareaRef.current?.focus(); },
+    jumpTo: (id) => { if (rowsRef.current.some((row) => row.id === id)) setJumpId(id); else setError("The original message isn't in the loaded history."); },
+    react: async (m, reaction, reactedByMe) => {
+      try { await chatApi.portalReact(m.id, reaction, !reactedByMe); await load(); }
+      catch (e) { setError(portalErrorText(e)); }
+    },
     openAttachment: async (attachment) => {
       if (attachment.local) return;
       setDownloadBusy(attachment.id);
@@ -181,7 +193,7 @@ export function PortalThread({ organizationId, userId, thread, onBack, onChanged
         if (popup) popup.location.href = url; else window.location.assign(url);
       } catch (e) { popup?.close(); setError(portalErrorText(e)); } finally { setDownloadBusy(null); }
     },
-  }), [outbox]);
+  }), [outbox, load]);
 
   return (
     <>
@@ -194,6 +206,7 @@ export function PortalThread({ organizationId, userId, thread, onBack, onChanged
       </header>
       <div className="chat-body">
         <MessageList conversationKey={threadId} messages={messages} outbox={pending} loading={loading} actions={actions} downloadBusyId={downloadBusy}
+          jumpId={jumpId} onJumpDone={() => setJumpId(null)}
           notices={error ? <div className="chat-alert error" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="Dismiss"><IconClose size={14} /></button></div> : null}
           empty={<div className="chat-empty"><strong>No messages yet</strong><p>{thread.kind === "client" ? "Replies here are visible to the client." : "Replies here are visible to the invited freelancers."}</p></div>} />
         {drawer === "notes" && <NotesPanel threadId={threadId} onClose={() => setDrawer(null)} />}
@@ -201,7 +214,8 @@ export function PortalThread({ organizationId, userId, thread, onBack, onChanged
       </div>
       <Composer value={draft} onChange={setDraft} onSend={submit} files={files} onFilesChange={setFiles} accept={PORTAL_ACCEPT} textareaRef={textareaRef}
         error={composerError} placeholder={thread.kind === "client" ? "Reply to the client…" : "Reply to the freelancer…"}
-        footerNote={thread.kind === "client" ? "Visible to the client" : "Visible to invited guests"} label="Reply" />
+        footerNote={thread.kind === "client" ? "Visible to the client" : "Visible to invited guests"} label="Reply"
+        replyTo={replyTo} onCancelReply={() => setReplyTo(null)} />
     </>
   );
 }

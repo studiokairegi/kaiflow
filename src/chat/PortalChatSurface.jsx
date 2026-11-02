@@ -13,7 +13,7 @@ import {
 
 // Shared thread UI for the two token-based audiences. It never receives internal notes (they are a
 // separate table the gateway cannot read) and shows only sender labels, never ids or emails.
-export default function PortalChatSurface({ list, send, download, selfKind, selfLabel, title, subtitle, onInvalid, placeholder = "Write a message…", footerNote = "", pushWho = null }) {
+export default function PortalChatSurface({ list, send, react, download, selfKind, selfLabel, title, subtitle, onInvalid, placeholder = "Write a message…", footerNote = "", pushWho = null }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
@@ -21,6 +21,8 @@ export default function PortalChatSurface({ list, send, download, selfKind, self
   const [composerError, setComposerError] = useState("");
   const [error, setError] = useState("");
   const [downloadBusy, setDownloadBusy] = useState(null);
+  const [replyTo, setReplyTo] = useState(null);
+  const [jumpId, setJumpId] = useState(null);
   const [soundOn, setSoundOn] = useState(() => readSoundPreference());
   const [permission, setPermission] = useState(() => notificationPermission());
   const [unreadWhileAway, setUnreadWhileAway] = useState(0);
@@ -59,7 +61,7 @@ export default function PortalChatSurface({ list, send, download, selfKind, self
   usePolling(load, 4000, true, { hidden: true });
 
   const outbox = useOutbox({
-    send: (item) => send(item.body, item.key, item.files),
+    send: (item) => send(item.body, item.key, item.files, item.replyToId || null),
     onSent: () => load(),
     errorText: (e) => e?.message || portalErrorText(""),
   });
@@ -71,15 +73,14 @@ export default function PortalChatSurface({ list, send, download, selfKind, self
     if (!body && !files.length) return;
     if (body.length > 4000) { setComposerError(portalErrorText("message_too_long")); return; }
     setComposerError("");
-    outbox.enqueue({ body, files });
-    setDraft(""); setFiles([]);
+    outbox.enqueue({ body, files, replyToId: replyTo?.id || null, replyTo: replyTo ? { id: replyTo.id, name: replyTo.senderName, preview: replyTo.preview } : null });
+    setDraft(""); setFiles([]); setReplyTo(null);
     textareaRef.current?.focus();
   };
 
-  const isMine = useCallback((row) => {
-    if (typeof row.mine === "boolean") return row.mine; // guests: decided by the server from their session
-    return row.sender_kind === selfKind && (selfKind === "client" || row.sender_label === selfLabel);
-  }, [selfKind, selfLabel]);
+  // Ownership is determined by the gateway from a stable participant/session identity.
+  // Never infer it from sender_kind or a display name: multiple portal participants can share both.
+  const isMine = useCallback((row) => row.mine === true, []);
 
   // Notify when someone else writes: a tone, a desktop notification if the tab is in the background,
   // and an unread count in the tab title. The first load only records history.
@@ -112,13 +113,22 @@ export default function PortalChatSurface({ list, send, download, selfKind, self
     return {
       id: row.id, senderKey: `${row.sender_kind}:${row.sender_label}`, senderName: name, avatar: initials(name), mine,
       badge: row.sender_kind === "staff" ? "Studio" : "", body: row.body, createdAt: row.created_at, attachments: row.attachments || [],
-      reactions: [], canReact: false, canPin: false,
+      replyTo: row.reply_to ? { id: row.reply_to.id, name: row.reply_to.label || "Earlier message", preview: row.reply_to.preview || "Attachment" } : null,
+      reactions: (row.reactions || []).map((group) => ({ reaction: group.reaction, count: group.count, reactedByMe: !!group.mine, names: group.names || [] })),
+      canReact: Boolean(react), canPin: false,
     };
-  }), [rows, isMine]);
+  }), [rows, isMine, react]);
   const pending = useMemo(() => outboxToMessages(outbox.items, { senderKey: `${selfKind}:${selfLabel}`, senderName: "You" }), [outbox.items, selfKind, selfLabel]);
 
+  const rowsRef = useRef(rows); rowsRef.current = rows;
   const actions = useMemo(() => ({
     retry: (m) => outbox.retry(m.id), discard: (m) => outbox.discard(m.id),
+    reply: (m) => { setReplyTo({ id: m.id, senderName: m.mine ? "yourself" : m.senderName, preview: (m.body || "Attachment").slice(0, 160) }); textareaRef.current?.focus(); },
+    jumpTo: (id) => { if (rowsRef.current.some((row) => row.id === id)) setJumpId(id); else setError("The original message isn't in the loaded history."); },
+    ...(react ? { react: async (m, reaction, reactedByMe) => {
+      try { await react(m.id, reaction, !reactedByMe); await load(); }
+      catch (e) { handleError(e); }
+    } } : {}),
     openAttachment: async (attachment) => {
       if (attachment.local) return;
       setDownloadBusy(attachment.id);
@@ -129,7 +139,7 @@ export default function PortalChatSurface({ list, send, download, selfKind, self
         if (popup) popup.location.href = result.url; else window.location.assign(result.url);
       } catch (e) { popup?.close(); handleError(e); } finally { setDownloadBusy(null); }
     },
-  }), [outbox, download, handleError]);
+  }), [outbox, download, handleError, react, load]);
 
   return (
     <>
@@ -154,11 +164,13 @@ export default function PortalChatSurface({ list, send, download, selfKind, self
       {pushNote && <div className="chat-alert error" style={{ margin: "8px 12px 0" }} role="alert"><span>{pushNote}</span><button type="button" onClick={() => setPushNote("")} aria-label="Dismiss"><IconClose size={14} /></button></div>}
       <div className="chat-body">
         <MessageList conversationKey="portal" messages={messages} outbox={pending} loading={loading} actions={actions} downloadBusyId={downloadBusy}
+          jumpId={jumpId} onJumpDone={() => setJumpId(null)}
           notices={error ? <div className="chat-alert error" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="Dismiss"><IconClose size={14} /></button></div> : null}
           empty={<div className="chat-empty"><strong>No messages yet</strong><p>Say hello — the studio will reply here.</p></div>} />
       </div>
       <Composer value={draft} onChange={setDraft} onSend={submit} files={files} onFilesChange={setFiles} accept={PORTAL_ACCEPT}
-        textareaRef={textareaRef} error={composerError} placeholder={placeholder} maxLength={4000} footerNote={footerNote} />
+        textareaRef={textareaRef} error={composerError} placeholder={replyTo ? "Write a reply…" : placeholder} maxLength={4000} footerNote={footerNote}
+        replyTo={replyTo} onCancelReply={() => setReplyTo(null)} />
     </>
   );
 }

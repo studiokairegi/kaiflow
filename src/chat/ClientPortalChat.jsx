@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import PortalChatSurface from "./PortalChatSurface.jsx";
-import { clientApi, freelancerApi } from "./portalApi.js";
+import { clientApi, freelancerApi, getPortalParticipantId } from "./portalApi.js";
 import "./chat.css";
 
 // Embedded in the Client Portal. The credential is the project's existing share token. Replies the
@@ -15,11 +15,13 @@ export default function ClientPortalChat({ token, defaultName = "", kind = "clie
   const [draftName, setDraftName] = useState(name);
   const [expired, setExpired] = useState(false);
   const label = name.trim() || (isFreelancer ? "Freelancer" : "Client");
+  const participantId = useMemo(() => getPortalParticipantId(isFreelancer ? "freelancer" : "client", token), [isFreelancer, token]);
   const api = useMemo(() => ({
-    list: () => remote.list(token),
-    send: (body, key, files) => remote.send(token, label, body, key, files),
+    list: () => remote.list(token, null, label, participantId),
+    send: (body, key, files, replyToId) => remote.send(token, label, body, key, files, replyToId, participantId),
+    react: (messageId, reaction, active) => remote.react(token, label, messageId, reaction, active, participantId),
     download: (id) => remote.download(token, id),
-  }), [token, label, remote]);
+  }), [token, label, remote, participantId]);
 
   if (expired) return <div className="chat-root chat-theme-auto chat-embed"><div className="chat-empty"><strong>Chat unavailable</strong><p>This link no longer has chat access. Ask the studio for a new one.</p></div></div>;
   if (editing) {

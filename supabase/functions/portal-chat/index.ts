@@ -10,6 +10,8 @@
 //   mode "client"  list | send | download   with {share_token}   (the project's portal link)
 //   mode "freelancer" list | send | download with {share_token}  (the freelancer's existing per-shot link)
 //   mode "staff"   send (with attachments) | download   with Authorization: Bearer <user JWT>
+//   client / guest / freelancer also support: react {message_id, reaction, active}; send accepts reply_to_id.
+//   Replies and reactions are validated against the thread the credential resolved to, never a thread id from the browser.
 //
 // JSON for everything; `send` may be multipart/form-data (fields + up to 5 `files`).
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY (defaults), PORTAL_HASH_PEPPER (optional),
@@ -171,6 +173,15 @@ Deno.serve(async (req) => {
     const mode = String(fields.mode || "");
     if (!["guest", "client", "freelancer", "staff"].includes(mode)) throw new HttpError(400, "invalid_request");
 
+    const participantId = String(fields.participant_id || "").trim();
+    if (
+      (mode === "client" || mode === "freelancer") &&
+      (action === "list" || action === "send" || action === "react") &&
+      !UUID.test(participantId)
+    ) {
+      throw new HttpError(400, "invalid_request");
+    }
+
     // Per-network ceiling, then a stop for anyone who keeps presenting bad credentials.
     const forwarded = req.headers.get("cf-connecting-ip") || (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "unknown";
     const ipHash = await sha256Hex(`${Deno.env.get("PORTAL_HASH_PEPPER") || ""}|${forwarded}`);
@@ -257,6 +268,12 @@ Deno.serve(async (req) => {
       }
       rateSubject = await sha256Hex(`staff:${auth.slice(-40)}`);
     }
+    // Guests use their server-issued session; client and freelancer participants use a stable browser-local ID.
+    const reactorKey = mode === "guest" && sessionId
+      ? `guest:${sessionId}`
+      : mode === "staff"
+        ? ""
+        : `${mode}:${participantId}`;
 
     // ---- list ----
     if (action === "list") {
@@ -267,7 +284,11 @@ Deno.serve(async (req) => {
       // Guests also get an explicit `mine` flag (from their session) so same-named guests are never confused.
       const { data, error } = mode === "guest" && sessionId
         ? await admin.rpc("portal_guest_messages", { p_thread_id: threadId, p_session_id: sessionId, p_after: afterIso, p_limit: 100 })
-        : await admin.rpc("portal_thread_messages", { p_thread_id: threadId, p_after: afterIso, p_limit: 100 });
+        : await admin.rpc("portal_thread_messages", {
+          p_thread_id: threadId, p_after: afterIso, p_limit: 100,
+          p_viewer_key: reactorKey,
+          p_viewer_participant_id: mode === "client" || mode === "freelancer" ? participantId : null,
+        });
       if (error) throw new HttpError(500, "unexpected_error");
       return json({ ok: true, messages: data || [], display_name: label });
     }
@@ -278,6 +299,8 @@ Deno.serve(async (req) => {
       const body = String(fields.body || "");
       const key = String(fields.idempotency_key || "");
       if (key.length < 8 || key.length > 64) throw new HttpError(400, "invalid_request");
+      const replyToId = String(fields.reply_to_id || "").trim() || null;
+      if (replyToId && !UUID.test(replyToId)) throw new HttpError(400, "invalid_request");
       if (files.length > MAX_FILES) throw new HttpError(400, "too_many_attachments");
       if (files.length && await limited(`portal_upload_${mode}`, rateSubject, 10, 600)) throw new HttpError(429, "rate_limited");
       const attachments: Array<Record<string, unknown>> = [];
@@ -299,12 +322,14 @@ Deno.serve(async (req) => {
       let result;
       if (mode === "staff") {
         result = await staffClient!.rpc("portal_staff_send", {
-          p_thread_id: threadId, p_body: body, p_idempotency_key: key, p_attachments: attachments,
+          p_thread_id: threadId, p_body: body, p_idempotency_key: key, p_attachments: attachments, p_reply_to_id: replyToId,
         });
       } else {
         result = await admin.rpc("portal_post_message", {
           p_thread_id: threadId, p_sender_kind: mode === "client" ? "client" : "guest", p_guest_session_id: sessionId,
           p_label: label, p_body: body, p_idempotency_key: key, p_attachments: attachments,
+          p_reply_to_id: replyToId,
+          p_sender_participant_id: mode === "client" || mode === "freelancer" ? participantId : null,
         });
       }
       if (result.error) {
@@ -312,6 +337,7 @@ Deno.serve(async (req) => {
         const map: Array<[RegExp, number, string]> = [
           [/message_too_long/, 400, "message_too_long"], [/empty_message/, 400, "empty_message"],
           [/rate_limited/, 429, "rate_limited"], [/too_many_attachments/, 400, "too_many_attachments"],
+          [/reply_target_not_in_thread/, 400, "reply_target_not_in_thread"],
           [/not_authorized|thread_not_found|thread_kind_mismatch/, 403, "not_authorized"],
         ];
         const hit = map.find(([re]) => re.test(msg));
@@ -319,6 +345,26 @@ Deno.serve(async (req) => {
       }
       uploaded.length = 0; // persisted: keep the files
       return json({ ok: true, message_id: result.data });
+    }
+
+    // ---- react: add or remove one reaction on a message in the caller's own thread ----
+    if (action === "react") {
+      if (mode === "staff") throw new HttpError(400, "invalid_request"); // staff react through their own authorized RPC
+      if (await limited(`portal_react_${mode}`, rateSubject, 60, 60)) throw new HttpError(429, "rate_limited");
+      const messageId = String(fields.message_id || "");
+      const reaction = String(fields.reaction || "");
+      if (!UUID.test(messageId) || !reaction || reaction.length > 32) throw new HttpError(400, "invalid_request");
+      const { error } = await admin.rpc("portal_set_reaction", {
+        p_thread_id: threadId, p_message_id: messageId, p_reactor_key: reactorKey, p_label: label,
+        p_reaction: reaction, p_active: fields.active === true || fields.active === "true",
+      });
+      if (error) {
+        const msg = String(error.message || "");
+        if (/invalid_reaction|too_many_reactions/.test(msg)) throw new HttpError(400, /too_many/.test(msg) ? "too_many_reactions" : "invalid_reaction");
+        if (/message_not_found|thread_not_found/.test(msg)) throw new HttpError(404, "not_found");
+        throw new HttpError(500, "unexpected_error");
+      }
+      return json({ ok: true });
     }
 
     // ---- download: authorize, then a 60-second signed ticket URL back to this function ----
