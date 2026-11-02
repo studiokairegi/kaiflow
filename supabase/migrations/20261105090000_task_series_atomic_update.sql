@@ -37,4 +37,5 @@ begin
   return s;
 end;
 $$;
+revoke all on function public.studio_task_series_update(uuid, jsonb, date, boolean) from public;
 grant execute on function public.studio_task_series_update(uuid, jsonb, date, boolean) to authenticated;
