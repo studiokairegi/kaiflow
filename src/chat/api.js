@@ -123,15 +123,19 @@ export const chatApi = {
   async portalMessages(threadId, limit = 100) {
     return (await rpc("portal_staff_messages", { p_thread_id: threadId, p_limit: limit })) || [];
   },
-  async portalSendText(threadId, body, idempotencyKey) {
-    return rpc("portal_staff_send", { p_thread_id: threadId, p_body: body, p_idempotency_key: idempotencyKey, p_attachments: [] });
+  async portalSendText(threadId, body, idempotencyKey, replyToId = null) {
+    return rpc("portal_staff_send", { p_thread_id: threadId, p_body: body, p_idempotency_key: idempotencyKey, p_attachments: [], p_reply_to_id: replyToId });
+  },
+  async portalReact(messageId, reaction, active) {
+    return rpc("portal_staff_set_reaction", { p_message_id: messageId, p_reaction: reaction, p_active: !!active });
   },
   // Attachments go through the gateway so files are validated and stored server-side.
-  async portalSendWithFiles(threadId, body, idempotencyKey, files) {
+  async portalSendWithFiles(threadId, body, idempotencyKey, files, replyToId = null) {
     const { data: { session } } = await supabase.auth.getSession();
     const form = new FormData();
     form.append("mode", "staff"); form.append("action", "send"); form.append("thread_id", threadId);
     form.append("body", body); form.append("idempotency_key", idempotencyKey);
+    if (replyToId) form.append("reply_to_id", replyToId);
     for (const file of files) form.append("files", file);
     const response = await fetch(functionUrl("portal-chat"), { method: "POST", headers: { Authorization: `Bearer ${session?.access_token || ""}` }, body: form });
     const result = await response.json().catch(() => ({}));

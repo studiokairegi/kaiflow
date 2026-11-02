@@ -55,7 +55,8 @@ export default function GuestChatPage() {
   const sessionToken = session?.session;
   const api = useMemo(() => sessionToken ? {
     list: () => guestApi.list(sessionToken),
-    send: (body, key, files) => guestApi.send(sessionToken, body, key, files),
+    send: (body, key, files, replyToId) => guestApi.send(sessionToken, body, key, files, replyToId),
+    react: (messageId, reaction, active) => guestApi.react(sessionToken, messageId, reaction, active),
     download: (id) => guestApi.download(sessionToken, id),
   } : null, [sessionToken]);
 
