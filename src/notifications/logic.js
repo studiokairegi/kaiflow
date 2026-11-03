@@ -18,6 +18,19 @@ export const NOTIFY_TYPES = {
   freelancer_upload: { title: "Freelancer uploaded a file", actor: "freelancer" },
   cut_submitted: { title: "Freelancer submitted a cut", actor: "freelancer" },
   chat_message: { title: "New studio message", actor: "staff" },
+  // KairFlow Intelligence (written only by the database, see 20261108100000_intelligence_crm_notifications.sql).
+  // The row's meta.title carries the specific headline; these are the fallbacks.
+  intel_positive_reply: { title: "Positive reply from a prospect", actor: "prospect" },
+  intel_meeting_request: { title: "Meeting request from a prospect", actor: "prospect" },
+  intel_pricing_inquiry: { title: "Pricing enquiry from a prospect", actor: "prospect" },
+  intel_negotiation: { title: "Prospect negotiation", actor: "prospect" },
+  intel_portfolio_request: { title: "Portfolio request from a prospect", actor: "prospect" },
+  intel_project_opportunity: { title: "Project opportunity", actor: "prospect" },
+  intel_rejection: { title: "Prospect declined", actor: "prospect" },
+  intel_unsubscribe: { title: "Prospect unsubscribed", actor: "prospect" },
+  intel_needs_review: { title: "Intelligence needs your review", actor: "prospect" },
+  intel_bounce: { title: "Email bounced", actor: "prospect" },
+  intel_send_unknown: { title: "Email delivery needs checking", actor: "prospect" },
 };
 export const FEED_EVENT_TYPES = Object.keys(NOTIFY_TYPES);
 
@@ -38,7 +51,7 @@ export function toNotification(row) {
   return {
     id: String(row.id),
     type,
-    title: def.title,
+    title: type.startsWith("intel_") && row.meta && row.meta.title ? String(row.meta.title).slice(0, 140) : def.title,
     actor: def.actor,
     projectId: row.project_id ?? null,
     shotId: row.shot_id ?? null,
@@ -48,6 +61,7 @@ export function toNotification(row) {
     commentId: row.meta && row.meta.commentId ? String(row.meta.commentId) : null,
     conversationId: row.meta && row.meta.conversationId ? String(row.meta.conversationId) : null,
     messageId: row.meta && row.meta.messageId ? String(row.meta.messageId) : null,
+    leadId: row.meta && row.meta.leadId ? String(row.meta.leadId) : null,
   };
 }
 

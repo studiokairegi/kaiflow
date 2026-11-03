@@ -37,6 +37,8 @@ import DepartmentHome from "./studio/DepartmentHome.jsx";
 import { useTeamAccess, MemberAccessRow, AccessFeedback, DepartmentsDrawer } from "./studio/TeamAccessPanel.jsx";
 import { allowedWorkspaceKeys, friendlyInviteError, readFunctionError } from "./studio/access.js";
 import "./studio/invite.css";
+import { canAccessIntelligence, loadIntelligenceAccess } from "./intelligence/access.js";
+import AiGeneratedBadge, { isAiGeneratedLead } from "./intelligence/AiGeneratedBadge.jsx";
 
 // Used only as a guaranteed-empty UUID filter when a studio has no mapped
 // business-data owners. It prevents a missing owner mapping from widening a query.
@@ -58,6 +60,7 @@ const SettingsPage = lazyWithSuspense(() => import("./settings/SettingsPage.jsx"
 const FinanceModule = lazyWithSuspense(() => import("./finance/FinanceModule.jsx"), { label: "Loading finance…", logo: true });
 const PortfolioTab = lazyWithSuspense(() => import("./portfolio/PortfolioTab.jsx"), { label: "Loading portfolio…" });
 const PaymentsModule = lazyWithSuspense(() => import("./payments/PaymentsModule.jsx"), { label: "Loading payments…", logo: true });
+const IntelligenceModule = lazyWithSuspense(() => import("./intelligence/IntelligenceModule.jsx"), { label: "Loading intelligence…" });
 const ChatPage = lazyWithSuspense(() => import("./chat/ChatPage.jsx"), { label: "Loading studio chat…" });
 const DonutBreakdown = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "DonutBreakdown", label: "" });
 const HoursTrendChart = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "HoursTrendChart", label: "" });
@@ -2348,6 +2351,10 @@ function leadFromRow(row) {
     outcomeReason: row.outcome_reason || row.lost_reason || "",
     linkedProjectId: row.linked_project_id,
     contactId: row.contact_id, // undefined until the contacts migration runs; leadToRow never writes it
+    // Attribution written only by KairFlow Intelligence's database function; leadToRow never writes these.
+    sourceKind: row.source_kind || "manual",
+    intelProspectId: row.intel_prospect_id || null,
+    createdBy: row.created_by || null,
     createdAt: row.created_at || null,
   };
 }
@@ -3168,6 +3175,28 @@ export default function ShotTracker() {
       setWorkspace("dashboard");
     }
   }, [studioAccessReady, studioAccess, visibleWorkspaces, workspace, view]);
+  // KairFlow Intelligence: the database decides (admin AND active Master User, intel_is_authorized).
+  // null = not checked yet (treated as denied). Re-checked on sign-in, studio switch and when the
+  // tab regains focus, so a revoked permission takes effect without a reload.
+  const [intelAccess, setIntelAccess] = useState(null);
+  const [intelTarget, setIntelTarget] = useState(null); // set by a notification click; consumed by the Intelligence module
+  useEffect(() => {
+    let cancelled = false;
+    setIntelAccess(null);
+    if (!userId) return undefined;
+    const check = async () => {
+      const ok = await loadIntelligenceAccess(supabase, userId);
+      if (!cancelled) setIntelAccess(ok);
+    };
+    check();
+    const onVisible = () => { if (document.visibilityState === "visible") check(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { cancelled = true; document.removeEventListener("visibilitychange", onVisible); };
+  }, [userId, activeStudioOrganizationId]);
+  // Direct entry (default landing tab, tutorial, stale state) can never land on Intelligence unless allowed.
+  useEffect(() => {
+    if (workspace === "intelligence" && intelAccess === false) setWorkspace("dashboard");
+  }, [workspace, intelAccess]);
   // Global activity notifications (bell in the header). Disposes its realtime channel/timers on sign-out.
   const notifications = useNotifications(userId);
   // Timer changes made on the dashboard are saved to the account (debounced) so they
@@ -5425,6 +5454,14 @@ export default function ShotTracker() {
   // Notification click-through: same mechanism as the Activity tab (select project, open the shot,
   // highlight the activity entry). Returns { ok, message } so the panel can report stale items.
   const handleOpenNotification = (n) => {
+    if (typeof n?.type === "string" && n.type.startsWith("intel_")) {
+      // KairFlow Intelligence events open the matching conversation; only the authorized admin can.
+      if (intelAccess !== true) return { ok: false, message: "KairFlow Intelligence is restricted." };
+      setIntelTarget({ prospectId: n.conversationId || null, leadId: n.leadId || null, messageId: n.messageId || null, nonce: Date.now() });
+      setView("projects");
+      setWorkspace("intelligence");
+      return { ok: true };
+    }
     if (n?.type === "chat_message" && n.conversationId) {
       setChatTargetConversationId(n.conversationId);
       setChatTargetMessageId(n.messageId || null);
@@ -5942,7 +5979,7 @@ export default function ShotTracker() {
               <BackIcon />
               All plans
             </button>
-          ) : workspace === "dashboard" || workspace === "payments" ? null : (
+          ) : workspace === "dashboard" || workspace === "payments" || workspace === "intelligence" ? null : (
             <button
               className="kf-header-primary" style={styles.newButton}
               onClick={() => setEditingProject(emptyProject({ currency: settings.currencySymbol }))}
@@ -5980,6 +6017,12 @@ export default function ShotTracker() {
             onClick={() => setWorkspace("leads")}
           >
             Leads
+          </button>}
+          {canAccessIntelligence(intelAccess) && <button
+            style={{ ...styles.tabButton, ...(workspace === "intelligence" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("intelligence")}
+          >
+            Intelligence
           </button>}
           {visibleWorkspaces.includes("planner") && <button
             style={{ ...styles.tabButton, ...(workspace === "planner" ? styles.tabButtonActive : {}) }}
@@ -6344,7 +6387,7 @@ export default function ShotTracker() {
                 .map((lead) => (
                   <div key={lead.id} style={{ ...styles.card, cursor: "pointer" }} onClick={() => handleLeadClick(lead)}>
                     <div style={styles.cardTop}>
-                      <span style={styles.cardTitle}>{lead.companyName || "Untitled lead"}</span>
+                      <span style={styles.cardTitle}>{lead.companyName || "Untitled lead"}{isAiGeneratedLead(lead) && <AiGeneratedBadge />}</span>
                     </div>
                     <div style={styles.cardFooter}>
                       <span style={styles.cardTag}>
@@ -6406,6 +6449,7 @@ export default function ShotTracker() {
                               <span style={styles.cardTitle}>
                                 <PriorityMark meta={priorityMeta} />
                                 {lead.companyName || "Untitled lead"}
+                                {isAiGeneratedLead(lead) && <AiGeneratedBadge />}
                               </span>
                             </div>
                             {lead.contactPerson && (
@@ -6473,6 +6517,7 @@ export default function ShotTracker() {
         </>
       )}
 
+      {view === "projects" && workspace === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setWorkspace("leads"); setEditingLead(l); } }} />}
       {view === "projects" && workspace === "payments" && !canAccessPayments(settings) && <PaymentsRestricted />}
       {view === "projects" && workspace === "payments" && canAccessPayments(settings) && (
         <PaymentsModule
@@ -11218,6 +11263,7 @@ function LeadEditor({
         <div style={styles.modalHeader}>
           <span style={styles.modalTitle}>
             {isNew ? "New lead" : isEditing ? "Edit lead" : form.companyName || "Untitled lead"}
+            {!isNew && isAiGeneratedLead(form) && <AiGeneratedBadge />}
           </span>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {!isNew && !isEditing && (

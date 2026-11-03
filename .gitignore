@@ -3,3 +3,8 @@ dist/
 .env
 node_modules/
 paystack-live.env.txt
+
+# KairFlow Intelligence worker
+.venv/
+__pycache__/
+*.py[cod]

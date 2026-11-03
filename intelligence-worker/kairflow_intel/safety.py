@@ -1,0 +1,173 @@
+"""Fetching untrusted web pages safely, and turning them into plain text the pipeline can trust to be DATA."""
+from __future__ import annotations
+
+import ipaddress
+import re
+import socket
+import time
+import urllib.robotparser
+from urllib.parse import urljoin, urlparse
+
+import requests
+from bs4 import BeautifulSoup, Comment
+
+from .errors import PermanentError, TransientError
+
+ALLOWED_TYPES = ("text/html", "application/xhtml", "text/plain", "application/json", "application/xml", "text/xml")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9\-]{1,63}(?:\.[A-Za-z0-9\-]{1,63})+")
+JUNK_EMAIL_TLD = {"png", "jpg", "jpeg", "gif", "webp", "svg", "css", "js"}
+
+
+def is_public_ip(ip: str) -> bool:
+    a = ipaddress.ip_address(ip)
+    return not (a.is_private or a.is_loopback or a.is_link_local or a.is_multicast or a.is_reserved or a.is_unspecified)
+
+
+def assert_public_url(url: str, resolver=socket.getaddrinfo) -> None:
+    """SSRF guard: http(s) only, no credentials, every resolved address must be public."""
+    p = urlparse(url)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        raise PermanentError(f"blocked url scheme: {url[:80]}")
+    if p.username or p.password:
+        raise PermanentError("blocked url with credentials")
+    if p.port not in (None, 80, 443, 8080, 8443):
+        raise PermanentError("blocked url port")
+    try:
+        infos = resolver(p.hostname, None)
+    except socket.gaierror as exc:
+        raise TransientError(f"dns failure for {p.hostname}") from exc
+    addrs = {i[4][0] for i in infos}
+    if not addrs or not all(is_public_ip(a) for a in addrs):
+        raise PermanentError(f"blocked non-public address for {p.hostname}")
+
+
+class Fetcher:
+    """Polite, bounded, robots-respecting fetcher. Redirects are followed manually and re-validated on every hop."""
+
+    def __init__(self, cfg, session: requests.Session | None = None, resolver=socket.getaddrinfo,
+                 sleep=time.sleep, clock=time.monotonic):
+        self.cfg, self.s, self.resolver, self.sleep, self.clock = cfg, session or requests.Session(), resolver, sleep, clock
+        self._robots: dict[str, urllib.robotparser.RobotFileParser | None] = {}
+        self._last_hit: dict[str, float] = {}
+
+    def _pace(self, host: str) -> None:
+        wait = self.cfg.per_host_delay - (self.clock() - self._last_hit.get(host, -1e9))
+        if wait > 0:
+            self.sleep(wait)
+        self._last_hit[host] = self.clock()
+
+    def _get_raw(self, url: str, accept_any_type: bool = False):
+        for _ in range(5):
+            assert_public_url(url, self.resolver)
+            self._pace(urlparse(url).hostname or "")
+            try:
+                r = self.s.get(url, headers={"User-Agent": self.cfg.user_agent, "Accept": "text/html,*/*;q=0.5"},
+                               timeout=self.cfg.fetch_timeout, allow_redirects=False, stream=True)
+            except requests.RequestException as exc:
+                raise TransientError(f"fetch failed: {exc}") from exc
+            if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
+                url = urljoin(url, r.headers["Location"])
+                r.close()
+                continue
+            return url, r
+        raise PermanentError("too many redirects")
+
+    def allowed_by_robots(self, url: str) -> bool:
+        p = urlparse(url)
+        origin = f"{p.scheme}://{p.netloc}"
+        if origin not in self._robots:
+            rp = urllib.robotparser.RobotFileParser()
+            try:
+                _, r = self._get_raw(origin + "/robots.txt")
+                if r.status_code == 200:
+                    rp.parse(r.raw.read(200_000, decode_content=True).decode("utf-8", "replace").splitlines())
+                    self._robots[origin] = rp
+                elif 400 <= r.status_code < 500:
+                    self._robots[origin] = None            # no robots.txt: allowed
+                else:
+                    self._robots[origin] = rp
+                    rp.disallow_all = True                 # server error: be conservative
+                r.close()
+            except (TransientError, PermanentError):
+                rp.disallow_all = True
+                self._robots[origin] = rp
+        rp = self._robots[origin]
+        return True if rp is None else rp.can_fetch(self.cfg.user_agent, url)
+
+    def fetch(self, url: str) -> tuple[str, str]:
+        """Returns (final_url, html_or_text). Raises PermanentError if disallowed or unsuitable."""
+        assert_public_url(url, self.resolver)
+        if not self.allowed_by_robots(url):
+            raise PermanentError(f"disallowed by robots.txt: {url[:100]}")
+        final, r = self._get_raw(url)
+        try:
+            if r.status_code >= 500 or r.status_code == 429:
+                raise TransientError(f"{r.status_code} from {urlparse(final).hostname}")
+            if r.status_code >= 400:
+                raise PermanentError(f"{r.status_code} from {urlparse(final).hostname}")
+            ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype and not ctype.startswith(ALLOWED_TYPES):
+                raise PermanentError(f"unsupported content type {ctype}")
+            data = r.raw.read(self.cfg.max_fetch_bytes + 1, decode_content=True)
+            if len(data) > self.cfg.max_fetch_bytes:
+                data = data[: self.cfg.max_fetch_bytes]
+            return final, data.decode(r.encoding or "utf-8", "replace")
+        finally:
+            r.close()
+
+
+_HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0", re.I)
+
+
+def html_to_text(html: str, limit: int = 60_000) -> str:
+    """Visible text only. Scripts, styles, comments and visually hidden elements (a common place to hide
+    prompt-injection text) are dropped."""
+    soup = BeautifulSoup(html, "lxml")
+    for t in soup(["script", "style", "noscript", "template", "svg", "iframe"]):
+        t.decompose()
+    for c in soup.find_all(string=lambda s: isinstance(s, Comment)):
+        c.extract()
+    for t in soup.find_all(True):
+        if t.attrs is None:
+            continue
+        if t.has_attr("hidden") or t.get("aria-hidden") == "true" or _HIDDEN_STYLE.search(t.get("style") or ""):
+            t.decompose()
+    text = re.sub(r"[ \t\r\f\v]+", " ", soup.get_text("\n"))
+    text = re.sub(r"\n\s*\n+", "\n", text).strip()
+    return text[:limit]
+
+
+def extract_emails(html: str) -> list[dict]:
+    """Business contact candidates found on a page: mailto links first, then visible text."""
+    soup = BeautifulSoup(html, "lxml")
+    found: dict[str, str] = {}
+    for a in soup.find_all("a", href=True):
+        if a["href"].lower().startswith("mailto:"):
+            addr = a["href"][7:].split("?")[0].strip().lower()
+            if EMAIL_RE.fullmatch(addr):
+                found.setdefault(addr, "mailto")
+    for m in EMAIL_RE.finditer(html_to_text(html)):
+        found.setdefault(m.group(0).lower(), "text")
+    return [{"email": e, "how": how} for e, how in found.items() if e.rsplit(".", 1)[-1] not in JUNK_EMAIL_TLD]
+
+
+def norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").lower()).strip()
+
+
+def quote_in_text(quote: str, text: str, min_len: int = 12) -> bool:
+    """A model-supplied quote counts as evidence only if it literally appears in the fetched text."""
+    q = norm(quote)
+    return len(q) >= min_len and q in norm(text)
+
+
+def sentence_around(text: str, start: int, end: int, max_len: int = 240) -> str:
+    a = max(text.rfind(".", 0, start), text.rfind("\n", 0, start), text.rfind("!", 0, start), text.rfind("?", 0, start)) + 1
+    cands = [i for i in (text.find(".", end), text.find("\n", end), text.find("!", end), text.find("?", end)) if i != -1]
+    b = (min(cands) + 1) if cands else len(text)
+    s = text[a:b].strip()
+    if len(s) > max_len:
+        mid = start - a
+        lo = max(0, mid - max_len // 2)
+        s = s[lo: lo + max_len].strip()
+    return s

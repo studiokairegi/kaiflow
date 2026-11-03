@@ -1,0 +1,10 @@
+[
+  {"name": "same email, different case", "lead": {"companyName": "Alpha Games", "website": "", "email": "Hello@Alpha.com", "contactPerson": ""}, "probe": {"companyName": "Other", "website": "", "email": " hello@alpha.com ", "contactPerson": ""}, "expect": "very_high"},
+  {"name": "same website ignoring scheme, www and slash", "lead": {"companyName": "A", "website": "https://www.pixelmoon.com/", "email": "", "contactPerson": ""}, "probe": {"companyName": "B", "website": "pixelmoon.com", "email": "", "contactPerson": ""}, "expect": "very_high"},
+  {"name": "same company and same contact", "lead": {"companyName": "Moon Studio Ltd.", "website": "", "email": "", "contactPerson": "Rina Tanaka"}, "probe": {"companyName": "moon", "website": "", "email": "", "contactPerson": "rina tanaka"}, "expect": "very_high"},
+  {"name": "same normalized company only", "lead": {"companyName": "Sky Studio", "website": "", "email": "", "contactPerson": "A"}, "probe": {"companyName": "Sky Games", "website": "", "email": "", "contactPerson": "B"}, "expect": "high"},
+  {"name": "long prefix", "lead": {"companyName": "Nebula", "website": "", "email": "", "contactPerson": ""}, "probe": {"companyName": "Nebula Works", "website": "", "email": "", "contactPerson": ""}, "expect": "medium"},
+  {"name": "short names never prefix-match", "lead": {"companyName": "Ab", "website": "", "email": "", "contactPerson": ""}, "probe": {"companyName": "Abc Corp", "website": "", "email": "", "contactPerson": ""}, "expect": null},
+  {"name": "unrelated", "lead": {"companyName": "Alpha", "website": "alpha.com", "email": "a@alpha.com", "contactPerson": "X"}, "probe": {"companyName": "Zed", "website": "zed.com", "email": "z@zed.com", "contactPerson": "Y"}, "expect": null},
+  {"name": "empty probe matches nothing", "lead": {"companyName": "Alpha", "website": "alpha.com", "email": "a@alpha.com", "contactPerson": "X"}, "probe": {"companyName": "", "website": "", "email": "", "contactPerson": ""}, "expect": null}
+]
