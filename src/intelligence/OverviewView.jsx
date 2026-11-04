@@ -1,7 +1,7 @@
 import React from "react";
 import { S, T, Btn, Pill, Banner, useBusy } from "../finance/ui.jsx";
 import { intelApi } from "./api.js";
-import { AUTONOMY, attentionItems, workerState } from "./logic.js";
+import { AUTONOMY, attentionItems, workerState, mailStatusLabel } from "./logic.js";
 import { Kpi, Section, Muted, confirmAction } from "./kit.jsx";
 
 export default function OverviewView({ o, mail, supabase, onChanged, setTab }) {
@@ -28,7 +28,7 @@ export default function OverviewView({ o, mail, supabase, onChanged, setTab }) {
       </Banner>
       <div style={S.row}>
         <Pill tone={w.tone}>{w.label}</Pill>
-        <Pill tone={mail?.status === "connected" ? "ok" : "warn"}>{mail?.status === "connected" ? `Zoho Mail connected (${mail.mailbox || "mailbox"})` : "Zoho Mail not connected"}</Pill>
+        <Pill tone={mail?.status === "connected" ? "ok" : "warn"}>{mailStatusLabel(mail)}</Pill>
         <Pill tone="info">{AUTONOMY[o.autonomy]?.split(":")[0] || o.autonomy} mode</Pill>
         {!o.agent_registered && <Pill tone="warn">Agent identity not registered</Pill>}
       </div>

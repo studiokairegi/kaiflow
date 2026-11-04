@@ -35,3 +35,6 @@ class FakeSession:
         r = self.routes.get(url)
         if r is None: return Resp(404)
         return r(url) if callable(r) else r
+
+    def post(self, url, **kw):
+        return self.get(url, **kw)

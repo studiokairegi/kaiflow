@@ -67,9 +67,33 @@ test("api: writes only call intel_admin_* functions, reads only intel tables", a
     rpc: async (n, a) => { calls.push(["rpc", n, a]); return { data: { ok: true }, error: null }; },
     from: (t) => { calls.push(["from", t]); const q = { select: () => q, order: () => q, limit: () => q, eq: () => q, in: () => q, then: (r) => r({ data: [], error: null }) }; return q; },
   };
-  await intelApi.setKillSwitch(sb, true); await intelApi.reviewMessage(sb, "m", "approve"); await intelApi.enqueue(sb, "discover", { type: "indie_game_developer" });
+  await intelApi.setKillSwitch(sb, true); await intelApi.disconnectMail(sb); await intelApi.reviewMessage(sb, "m", "approve"); await intelApi.enqueue(sb, "discover", { type: "indie_game_developer" });
   await intelApi.prospects(sb); await intelApi.messages(sb); await intelApi.kb(sb); await intelApi.leadsFor(sb, ["l1"]); await intelApi.leadsFor(sb, []);
   assert.ok(calls.filter((c) => c[0] === "rpc").every((c) => c[1].startsWith("intel_admin_")));
   assert.ok(calls.filter((c) => c[0] === "from").every((c) => c[1].startsWith("intel_") || c[1] === "leads"));
   await assert.rejects(intelApi.overview({ rpc: async () => ({ data: null, error: { message: "KairFlow Intelligence is restricted." } }) }), /restricted/);
+});
+
+import { profileFromForm, profileToForm, proposedTerms, sourceState } from "./logic.js";
+
+test("sourceState: a source with unconfirmed terms can never look as if it is running", () => {
+  const base = { tos_status: "confirmed", enabled: true, daily_budget: 10, used_today: 0, circuit_open_until: null };
+  assert.equal(sourceState(base).label, "Running");
+  assert.equal(sourceState({ ...base, tos_status: "unverified" }).label, "Terms not confirmed");
+  assert.equal(sourceState({ ...base, tos_status: "unverified", enabled: true }).tone, "warn");
+  assert.equal(sourceState({ ...base, tos_status: "excluded" }).tone, "bad");
+  assert.equal(sourceState({ ...base, enabled: false }).label, "Off");
+  assert.equal(sourceState({ ...base, used_today: 10 }).label, "Daily budget used");
+  assert.equal(sourceState({ ...base, circuit_open_until: new Date(Date.now() + 3600_000).toISOString() }).label, "Paused after errors");
+  assert.equal(sourceState({ ...base, circuit_open_until: new Date(Date.now() - 1000).toISOString() }).label, "Running");
+  assert.equal(sourceState(null).label, "Off");
+});
+
+test("profile form round-trips, de-duplicates and refuses an empty profile", () => {
+  const form = { description: "d", termsEn: "key animation\nKey  animation\n", termsJa: "原画募集\n\n", exclude: "school", approved: false };
+  const p = profileFromForm(form);
+  assert.deepEqual(p.termsEn, ["key animation", "Key animation"]); assert.deepEqual(p.termsJa, ["原画募集"]); assert.deepEqual(p.exclude, ["school"]);
+  assert.throws(() => profileFromForm({ description: "", termsEn: "", termsJa: "", exclude: "" }), /at least one/);
+  assert.deepEqual(profileToForm({ description: "x", terms_en: ["a"], terms_ja: ["b"], exclude: ["c"], approved: true }), { description: "x", termsEn: "a", termsJa: "b", exclude: "c", approved: true });
+  assert.equal(proposedTerms({}), null); assert.deepEqual(proposedTerms({ proposed_en: ["a"], proposed_ja: [], proposed_exclude: ["z"] }), { termsEn: "a", termsJa: "", exclude: "z" });
 });

@@ -17,3 +17,5 @@ create table if not exists activity_log (id uuid primary key default gen_random_
 alter table activity_log add column if not exists meta jsonb not null default '{}'::jsonb;
 alter table activity_log add column if not exists description text not null default '';
 alter table activity_log add column if not exists project_id uuid;
+alter table leads add column if not exists archived_at timestamptz;
+alter table leads add column if not exists needs_followup boolean not null default false;

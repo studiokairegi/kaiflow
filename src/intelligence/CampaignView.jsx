@@ -4,6 +4,7 @@ import { intelApi } from "./api.js";
 import { PROSPECT_TYPES, criteriaPatch, joinLines, statusInfo } from "./logic.js";
 import { Input, Section, TextArea, useLoad, Muted } from "./kit.jsx";
 import ProspectModal from "./ProspectModal.jsx";
+import { DiscoveryProfile, DiscoveryStats, ManualPost } from "./DiscoveryPanels.jsx";
 
 const HELP = {
   indie_game_developer: "Looks at Steam and itch.io pages and the developer's own site for 2D, anime-inspired, stylized or narrative games with an upcoming release, a campaign, or a stated need for animation.",
@@ -43,6 +44,9 @@ export default function CampaignView({ type, supabase, tick, onChanged, onOpenLe
         {type === "animation_studio_support" && <Field label="Studio pages to watch (one URL per line)" hint="Recruitment, careers or outsourcing pages of studios you want to approach. Robots rules are respected."><TextArea value={f.seedUrls} onChange={(e) => setF({ ...f, seedUrls: e.target.value })} placeholder="https://example-studio.jp/recruit" /></Field>}
         <div><Btn kind="primary" disabled={busy} onClick={save}>Save campaign</Btn></div>
       </Section>
+      {type === "animation_studio_support" && <DiscoveryStats supabase={supabase} tick={tick} />}
+      <DiscoveryProfile campaign={c} supabase={supabase} onChanged={async () => { await camps.reload(); await onChanged(); }} />
+      {type === "animation_studio_support" && <ManualPost type={type} supabase={supabase} onChanged={onChanged} />}
       <Section title="Prospects" hint="Click a row for evidence and the score breakdown.">
         <Table rowKey={(r) => r.id} onRow={setOpen} empty={pros.loading ? "Loading…" : "Nothing discovered yet. Run discovery."} rows={mine}
           columns={[

@@ -69,12 +69,42 @@ def build_initial(prospect: dict, evidence: list[dict], kb: dict, settings: dict
     return {"subject": SUBJECT[ptype].format(name=prospect["name"])[:120], "body": body}
 
 
-def build_followup(prospect: dict, kb: dict, settings: dict, sent_on: str) -> dict:
+MAX_STEP = 3
+
+
+def next_step(prospect: dict, lead: dict | None, previous_followups: int) -> int:
+    """Which email slot (1..3) this follow-up fills. Adopted CRM leads may already have manual follow-ups: use the first unsent slot."""
+    if prospect.get("origin") == "crm_existing":
+        flags = list((lead or {}).get("sent_flags") or [])
+        for i in range(1, MAX_STEP + 1):
+            if i >= len(flags) or not flags[i]:
+                return i
+        raise PermanentError("every follow-up slot on this lead was already used")
+    step = 1 + previous_followups
+    if step > MAX_STEP:
+        raise PermanentError("follow-up limit reached")
+    return step
+
+
+def thread_parent(messages: list[dict]) -> dict | None:
+    """The newest SENT outbound message that has an RFC Message-ID: what a follow-up should reply into. None = no thread to join."""
+    for m in reversed(messages or []):
+        if m.get("direction") == "outbound" and m.get("state") == "sent" and m.get("rfc_message_id"):
+            refs = " ".join(x for x in [(m.get("references_ids") or "").strip(), m["rfc_message_id"]] if x)
+            return {"in_reply_to": m["rfc_message_id"], "references": refs[-3900:], "subject": m.get("subject") or ""}
+    return None
+
+
+def build_followup(prospect: dict, kb: dict, settings: dict, sent_on: str, parent_subject: str | None = None) -> dict:
     require_kb(kb, prospect["type"])
     body = "\n\n".join([greeting(prospect),
                         f"I wanted to follow up briefly on the note I sent on {sent_on}. If animation support is not a priority right now, no problem at all.",
                         kb["portfolio.main"]["body"].strip()]) + "\n" + policy.compliance_footer(settings)
-    return {"subject": f"Re: {SUBJECT[prospect['type']].format(name=prospect['name'])}"[:120], "body": body}
+    if parent_subject:   # joining a real thread: keep its subject, add Re: once
+        subject = parent_subject if re.match(r"(?i)^re:", parent_subject) else f"Re: {parent_subject}"
+    else:                # no thread to join (e.g. an email sent from the CRM by hand): do not fake a reply
+        subject = f"Following up: {SUBJECT[prospect['type']].format(name=prospect['name'])}"
+    return {"subject": subject[:120], "body": body}
 
 
 def build_auto_reply(label: str, prospect: dict, kb: dict, settings: dict, inbound_subject: str) -> dict | None:

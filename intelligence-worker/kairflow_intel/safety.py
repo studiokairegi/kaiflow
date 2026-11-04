@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup, Comment
 
 from .errors import PermanentError, TransientError
 
-ALLOWED_TYPES = ("text/html", "application/xhtml", "text/plain", "application/json", "application/xml", "text/xml")
+ALLOWED_TYPES = ("text/html", "application/xhtml", "text/plain", "application/json", "application/xml", "text/xml", "application/rss", "application/atom")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9\-]{1,63}(?:\.[A-Za-z0-9\-]{1,63})+")
 JUNK_EMAIL_TLD = {"png", "jpg", "jpeg", "gif", "webp", "svg", "css", "js"}
 
@@ -93,6 +93,16 @@ class Fetcher:
                 self._robots[origin] = rp
         rp = self._robots[origin]
         return True if rp is None else rp.can_fetch(self.cfg.user_agent, url)
+
+    def sitemaps(self, url: str) -> list[str]:
+        """Sitemap URLs the site declares in robots.txt (empty if none)."""
+        p = urlparse(url)
+        self.allowed_by_robots(f"{p.scheme}://{p.netloc}/")
+        rp = self._robots.get(f"{p.scheme}://{p.netloc}")
+        try:
+            return list(rp.site_maps() or []) if rp is not None else []
+        except Exception:
+            return []
 
     def fetch(self, url: str) -> tuple[str, str]:
         """Returns (final_url, html_or_text). Raises PermanentError if disallowed or unsuitable."""

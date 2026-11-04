@@ -9,7 +9,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Callable
 
-from . import classify as cls, drafting, mailops, policy, research, sources
+from . import classify as cls, discovery, drafting, mailops, policy, research, sources
 from .errors import PermanentError, RpcError, TransientError
 
 DEFER = {"daily_cap", "followup_cap", "campaign_cap", "followup_not_due", "campaign_paused", "kill_switch", "needs_reconcile"}
@@ -22,6 +22,7 @@ class Deps:
     fetcher: object
     zoho: object
     llm: object              # OllamaClient
+    api: object = None       # ApiClient for the documented discovery APIs
     sleep: Callable = time.sleep
     clock: Callable = time.time
     rand: Callable = random.uniform
@@ -37,20 +38,25 @@ def _kb(d):  # approved entries only; the database never returns the rest
 
 
 def h_discover(d: Deps, job):
-    t = job["payload"]["type"]
+    pl = job["payload"]
+    t = pl["type"]
+    manual = bool(pl.get("manual"))                      # asked for from Agent Chat: finds and researches only, never sends
+    limit = max(1, min(int(pl["limit"]), 25)) if pl.get("limit") else None
     st = d.rpc("intel_agent_settings", {})
     camp = next((c for c in st["campaigns"] if c["type"] == t), None)
-    if not camp or camp["status"] != "active":
+    if not camp or (camp["status"] != "active" and not manual):
         return {"skipped": "campaign paused"}
     new = 0
     for c in sources.discover(d.fetcher, t, camp["criteria"]):
+        if limit is not None and new >= limit:
+            break
         meta = c.get("meta", {})
         r = d.rpc("intel_agent_upsert_prospect", {"p_type": t, "p_name": c["name"], "p_website": c["website"], "p_contact_name": "", "p_contact_email": c.get("contact_email", ""),
                                                   "p_contact_source_url": c.get("contact_source_url", ""), "p_country": c.get("country", ""), "p_language": meta.get("language", "en"), "p_verified": meta})
         if r["created"] and not r.get("suppressed"):
             new += 1
             _enq(d, "research", {"prospect_id": r["prospect_id"]}, f"research:{r['prospect_id']}")
-    return {"new": new}
+    return {"new": new, "manual": manual}
 
 
 def h_research(d: Deps, job):
@@ -58,9 +64,12 @@ def h_research(d: Deps, job):
     ctx = d.rpc("intel_agent_context", {"p_prospect_id": pid})
     if not ctx or ctx["prospect"]["status"] not in ("discovered", "researched"):
         return {"skipped": "not researchable"}
+    if not ctx["prospect"].get("website"):
+        d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "official website not found; add it or reject"})
+        return {"skipped": "no website"}
     llm = lambda text: d.llm.generate_json(research.ENTITY_INSTRUCTION, text, research.ENTITY_SCHEMA, fast=True)
     out = research.research(d.rpc, d.fetcher, llm, ctx)
-    _enq(d, "qualify", {"prospect_id": pid}, f"qualify:{pid}")
+    _enq(d, "analyze_site", {"prospect_id": pid}, f"analyze:{pid}")      # deeper site look, then qualification
     return out
 
 
@@ -96,19 +105,26 @@ def h_draft(d: Deps, job):
             f"Write ONE friendly sentence (30 to 200 characters) from an animation studio introducing itself to {name}. Refer to something in the snippets. No numbers, no links, no claim that anyone played, watched or reviewed anything.",
             snips, drafting.HOOK_SCHEMA))
         step, key = 0, f"draft:{pid}:initial"
+        thread = None
     else:
         if p["status"] != "contacted":
             return {"skipped": f"status {p['status']}"}
-        prev = [m for m in ctx["messages"] if m["kind"] == "followup" and m["state"] not in ("discarded", "failed")]
-        initial = next((m for m in ctx["messages"] if m["kind"] == "initial" and m["state"] == "sent"), None)
-        step, key = 1 + len(prev), f"draft:{pid}:fu{1 + len(prev)}"
-        mail = drafting.build_followup(p, kb, st, (initial or {}).get("created_at", "")[:10] or "recently")
+        msgs = ctx["messages"]
+        prev = [m for m in msgs if m["kind"] == "followup" and m["state"] not in ("discarded", "failed")]
+        initial = next((m for m in msgs if m["kind"] == "initial" and m["state"] == "sent"), None)
+        step = drafting.next_step(p, ctx.get("lead"), len(prev))
+        key = f"draft:{pid}:fu{step}"
+        parent = drafting.thread_parent(msgs)
+        anchor = ((initial or {}).get("sent_at") or (initial or {}).get("created_at") or "")[:10] or "recently"
+        mail = drafting.build_followup(p, kb, st, anchor, parent["subject"] if parent else None)
+        thread = parent
     bad = policy.validate_outbound(mail["subject"], mail["body"], st, drafting.approved_urls(kb), kind, p.get("domain", ""))
     if bad:
         d.rpc("intel_agent_log", {"p_action": "draft_blocked", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"violations": bad}})
         raise PermanentError("draft failed policy: " + "; ".join(bad))
     r = d.rpc("intel_agent_upsert_draft", {"p_prospect_id": pid, "p_kind": kind, "p_step": step, "p_subject": mail["subject"], "p_body": mail["body"],
-                                           "p_idempotency_key": key, "p_to_email": p["contact_email"], "p_auto_ok": False, "p_in_reply_to": None, "p_references": None})
+                                           "p_idempotency_key": key, "p_to_email": p["contact_email"], "p_auto_ok": False,
+                                           "p_in_reply_to": (thread or {}).get("in_reply_to"), "p_references": (thread or {}).get("references")})
     if r.get("ok") and r.get("state") == "approved":
         _enq(d, "send", {"message_id": r["message_id"]}, f"send:{r['message_id']}:{int(d.clock() // 900)}")
     return r
@@ -148,10 +164,17 @@ def h_classify(d: Deps, job):
             reply = drafting.build_auto_reply(r["class"], ctx["prospect"], kb, st, m.get("subject", ""))
             if reply and not policy.validate_outbound(reply["subject"], reply["body"], st, drafting.approved_urls(kb), "reply", ctx["prospect"].get("domain", "")):
                 out = d.rpc("intel_agent_upsert_draft", {"p_prospect_id": m["prospect_id"], "p_kind": "reply", "p_step": 0, "p_subject": reply["subject"], "p_body": reply["body"],
-                                                         "p_idempotency_key": f"reply:{m['id']}", "p_to_email": m["from_email"], "p_auto_ok": True, "p_in_reply_to": None, "p_references": None})
+                                                         "p_idempotency_key": f"reply:{m['id']}", "p_to_email": m["from_email"], "p_auto_ok": True,
+                                                         "p_in_reply_to": m.get("rfc_message_id") or None,
+                                                         "p_references": " ".join(x for x in [(m.get("references_ids") or "").strip(), m.get("rfc_message_id") or ""] if x)[-3900:] or None})
                 if out.get("ok") and out.get("state") == "approved":
                     _enq(d, "send", {"message_id": out["message_id"]}, f"send:{out['message_id']}:{int(d.clock() // 900)}", priority=3)
     return {"classified": done}
+
+
+def h_chat(d: Deps, job):
+    from . import chat
+    return chat.handle(d, job["payload"])
 
 
 def h_reconcile(d: Deps, job):
@@ -173,8 +196,10 @@ def h_retention(d: Deps, job):
     return {"pruned": d.rpc("intel_agent_prune", {"p_evidence_days": 45})}
 
 
-HANDLERS = {"discover": h_discover, "research": h_research, "qualify": h_qualify, "resolve": h_resolve, "draft": h_draft, "send": h_send,
-            "sync_mail": h_sync_mail, "classify": h_classify, "reconcile": h_reconcile, "followup_scan": h_followup_scan, "retention": h_retention}
+HANDLERS = {"seed_sources": discovery.h_seed_sources, "analyze_site": discovery.h_analyze_site, "news_scan": discovery.h_news_scan,
+            "feed_poll": discovery.h_feed_poll, "crawl_index": discovery.h_crawl_index, "manual_post": discovery.h_manual_post,
+            "profile_terms": discovery.h_profile_terms, "discover": h_discover, "research": h_research, "qualify": h_qualify, "resolve": h_resolve, "draft": h_draft, "send": h_send,
+            "sync_mail": h_sync_mail, "classify": h_classify, "reconcile": h_reconcile, "followup_scan": h_followup_scan, "retention": h_retention, "chat": h_chat}
 
 
 class _Lease:
@@ -207,6 +232,12 @@ class Worker:
         for c in st["campaigns"]:
             if c["status"] == "active":
                 _enq(d, "discover", {"type": c["type"]}, f"discover:{c['type']}:{today}")
+                if c["type"] == "animation_studio_support":     # autonomous discovery: weekly seed, daily news, 6-hourly feeds, monthly archive check
+                    wk, mo = time.strftime("%G-W%V", time.gmtime(now)), time.strftime("%Y-%m", time.gmtime(now))
+                    _enq(d, "seed_sources", {"type": c["type"]}, f"seed:{wk}")
+                    _enq(d, "news_scan", {}, f"news:{today}")
+                    _enq(d, "feed_poll", {}, f"feeds:{int(now // 21600)}")
+                    _enq(d, "crawl_index", {}, f"crawl:{mo}")
         if not st["kill_switch"]:
             for i, m in enumerate(d.rpc("intel_agent_approved_outbound", {"p_limit": 10}) or []):
                 _enq(d, "send", {"message_id": m["id"]}, f"send:{m['id']}:{int(now // 900)}", delay=i * 60)

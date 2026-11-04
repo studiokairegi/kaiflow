@@ -67,8 +67,8 @@ export async function handleCallback(req: Request, deps: Deps): Promise<Response
     const code = url.searchParams.get("code"), state = url.searchParams.get("state") || "";
     if (!code || !/^[0-9a-f-]{36}$/i.test(state)) return new Response("Missing or invalid code or state", { status: 400 });
 
-    const { data: st } = await deps.service.from("intel_oauth_states").select("organization_id,user_id,data_center,created_at,used_at").eq("state", state).maybeSingle();
-    if (!st || st.used_at || deps.now() - new Date(st.created_at).getTime() > STATE_TTL_MS || !isDataCenter(st.data_center)) {
+    const { data: st } = await deps.service.from("intel_oauth_states").select("organization_id,user_id,data_center,provider,created_at,used_at").eq("state", state).maybeSingle();
+    if (!st || (st.provider ?? "zoho") !== "zoho" || st.used_at || deps.now() - new Date(st.created_at).getTime() > STATE_TTL_MS || !isDataCenter(st.data_center)) {
       return new Response("This connection attempt has expired or was already used. Go back to Intelligence settings and try again.", { status: 401 });
     }
     const { data: claimed } = await deps.service.from("intel_oauth_states").update({ used_at: new Date(deps.now()).toISOString() }).eq("state", state).is("used_at", null).select("state").maybeSingle();
@@ -111,7 +111,8 @@ export async function handleToken(req: Request, deps: Deps): Promise<Response> {
 
   const { data: s } = await deps.service.from("intel_settings").select("organization_id,agent_user_id,kill_switch").eq("agent_user_id", uid).maybeSingle();
   if (!s || s.agent_user_id !== uid) return json({ error: "Not allowed" }, 403);     // admins and everyone else are refused here too
-  const { data: acct } = await deps.service.from("intel_mail_account").select("data_center,account_id,refresh_token_enc,status").eq("organization_id", s.organization_id).maybeSingle();
+  const { data: acct } = await deps.service.from("intel_mail_account").select("provider,data_center,account_id,refresh_token_enc,status").eq("organization_id", s.organization_id).maybeSingle();
+  if (acct && (acct.provider ?? "zoho") !== "zoho") return json({ error: "Zoho is not the connected mailbox" }, 409);
   if (!acct || acct.status === "disconnected" || !acct.refresh_token_enc || !isDataCenter(acct.data_center)) return json({ error: "Zoho is not connected" }, 409);
 
   let refresh: string;

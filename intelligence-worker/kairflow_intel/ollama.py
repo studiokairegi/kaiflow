@@ -82,3 +82,23 @@ class OllamaClient:
         except (ValueError, KeyError, TypeError) as exc:
             raise TransientError(f"model returned invalid JSON: {exc}") from exc  # retried; never trusted
         return out
+
+    def chat_json(self, system: str, messages: list[dict], schema: dict, *, num_ctx: int = 8192, timeout: int = 300) -> dict:
+        """Planner call for Agent Chat. `system` and the administrator's own messages are instructions; tool results must be
+        passed inside <untrusted> tags by the caller. Output is schema-constrained and validated; the model has no tools of its own."""
+        payload = {"model": self.cfg.ollama_model, "stream": False, "format": schema, "options": {"temperature": 0, "num_ctx": num_ctx},
+                   "messages": [{"role": "system", "content": system}, *messages]}
+        try:
+            r = self.s.post(f"{self.cfg.ollama_url}/api/chat", json=payload, timeout=timeout)
+        except requests.RequestException as exc:
+            raise TransientError(f"Ollama unavailable: {exc}") from exc
+        if r.status_code >= 500 or r.status_code == 429:
+            raise TransientError(f"Ollama {r.status_code}")
+        if r.status_code >= 400:
+            raise PermanentError(f"Ollama rejected the request ({r.status_code})")
+        try:
+            out = json.loads(r.json()["message"]["content"])
+            validate(schema, out)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise TransientError(f"model returned invalid JSON: {exc}") from exc
+        return out

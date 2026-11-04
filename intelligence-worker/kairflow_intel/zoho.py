@@ -8,11 +8,11 @@ import time
 
 import requests
 
-from .errors import PermanentError, TransientError
+from .errors import MailRejected, PermanentError, TransientError
 from .safety import html_to_text
 
 
-class ZohoRejected(Exception):
+class ZohoRejected(MailRejected):
     """Zoho definitively refused the request (4xx). The message was NOT sent."""
 
 
@@ -20,15 +20,15 @@ class EdgeTokenProvider:
     """Short-lived Zoho access tokens come from the intel-zoho-token Edge Function, which holds the refresh token.
     The worker authenticates to it with the agent's own JWT; Zoho secrets never reach this machine."""
 
-    def __init__(self, cfg, supa, session: requests.Session | None = None, clock=time.time):
-        self.cfg, self.supa, self.s, self.clock = cfg, supa, session or requests.Session(), clock
+    def __init__(self, cfg, supa, session: requests.Session | None = None, clock=time.time, function: str = "intel-zoho-token"):
+        self.cfg, self.supa, self.s, self.clock, self.function = cfg, supa, session or requests.Session(), clock, function
         self._tok = None
 
     def get(self, force: bool = False) -> dict:
         if self._tok and not force and self.clock() < self._tok["exp"]:
             return self._tok
         try:
-            r = self.s.post(f"{self.cfg.supabase_url}/functions/v1/intel-zoho-token", json={}, timeout=20,
+            r = self.s.post(f"{self.cfg.supabase_url}/functions/v1/{self.function}", json={}, timeout=20,
                             headers={"apikey": self.cfg.supabase_anon_key, "Authorization": f"Bearer {self.supa.token()}"})
         except requests.RequestException as exc:
             raise TransientError(f"token function unreachable: {exc}") from exc
@@ -37,7 +37,7 @@ class EdgeTokenProvider:
         if r.status_code != 200:
             raise PermanentError(f"Zoho is not connected or the agent is not allowed to use it ({r.status_code})")
         d = r.json()
-        self._tok = {"access_token": d["access_token"], "base": d["api_base"].rstrip("/"), "account_id": str(d["account_id"]), "exp": self.clock() + int(d.get("expires_in", 3000)) - 120}
+        self._tok = {"access_token": d["access_token"], "base": d["api_base"].rstrip("/"), "account_id": str(d["account_id"]), "mailbox": str(d.get("mailbox") or ""), "exp": self.clock() + int(d.get("expires_in", 3000)) - 120}
         return self._tok
 
 
@@ -74,10 +74,21 @@ class ZohoClient:
             raise PermanentError(f"Zoho folder {kind!r} not found")
         return self._folders[kind.lower()]
 
-    def send(self, from_addr: str, to_addr: str, subject: str, body: str, *, in_reply_to_zoho_id: str | None = None) -> dict:
+    def send(self, from_addr: str, to_addr: str, subject: str, body: str, *, reply_to_zoho_id: str | None = None, in_reply_to: str | None = None, references: str | None = None) -> dict:
+        """Send plain text. (`in_reply_to`/`references` are accepted for interface parity with Gmail and ignored: Zoho sets them itself.) When `reply_to_zoho_id` is given, use Zoho's reply action so Zoho itself sets In-Reply-To and
+        References and the message lands in the same thread. If Zoho definitively refuses the reply action (4xx: nothing
+        was sent), fall back ONCE to a normal send with the same subject: still duplicate-safe, just threaded by subject.
+        Network errors and 429/5xx are never retried here (outcome unknown: the caller marks the message `unknown`).
+        NOT verified against a live Zoho account: see docs/ZOHO_COMPATIBILITY.md."""
         payload = {"fromAddress": from_addr, "toAddress": to_addr, "subject": subject, "content": body, "mailFormat": "plaintext", "askReceipt": "no"}
+        if reply_to_zoho_id and re.fullmatch(r"\d{6,30}", str(reply_to_zoho_id)):
+            try:
+                d = self._call("POST", f"/messages/{reply_to_zoho_id}", json={**payload, "action": "reply"}).get("data") or {}
+                return {"zoho_message_id": str(d.get("messageId", "")), "thread_id": str(d.get("threadId", "") or ""), "threaded": True}
+            except ZohoRejected:
+                pass
         d = self._call("POST", "/messages", json=payload).get("data") or {}
-        return {"zoho_message_id": str(d.get("messageId", "")), "thread_id": str(d.get("threadId", "") or "")}
+        return {"zoho_message_id": str(d.get("messageId", "")), "thread_id": str(d.get("threadId", "") or ""), "threaded": False}
 
     def list_messages(self, folder: str, limit: int = 50, start: int = 1) -> list[dict]:
         rows = self._call("GET", "/messages/view", params={"folderId": self.folder_id(folder), "limit": limit, "start": start, "sortBy": "date", "sortorder": "false"}).get("data") or []
@@ -114,3 +125,8 @@ class ZohoClient:
                 h = self.rfc_headers(m["folder_id"], m["id"])
                 return {"zoho_message_id": m["id"], "rfc_message_id": h.get("Message-ID", "").strip(), "thread_id": m["thread_id"], "time_ms": m["time_ms"]}
         return None
+
+    def check(self) -> tuple[bool, str]:
+        """Read-only self-test: both folders must be listable. Never sends."""
+        ok = bool(self.folder_id("inbox")) and bool(self.folder_id("sent"))
+        return ok, "inbox and sent folders readable"

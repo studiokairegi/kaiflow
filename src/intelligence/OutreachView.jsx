@@ -57,7 +57,7 @@ function Thread({ conv, supabase, onChanged }) {
       {conv.inbound && p && (
         <div style={S.card}>
           <h3 style={S.h3}>Reply yourself</h3>
-          <Muted>Sent from your Zoho mailbox as soon as sending is on. Pricing, scheduling and commitments are always yours to answer.</Muted>
+          <Muted>Sent from your connected mailbox as soon as sending is on. Pricing, scheduling and commitments are always yours to answer.</Muted>
           <Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Subject" />
           <TextArea rows={7} value={body} onChange={(e) => setBody(e.target.value)} placeholder="Write your reply" />
           <div><Btn kind="primary" disabled={busy || !body.trim()} onClick={() => run(async () => { await intelApi.composeReply(supabase, p.id, subject, body); setBody(""); await onChanged(); })}>Queue reply</Btn></div>

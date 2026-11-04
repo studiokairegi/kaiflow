@@ -9,13 +9,16 @@ from .jobs import Deps, Worker
 from .ollama import OllamaClient
 from .safety import Fetcher
 from .supa import SupabaseAgent
+from .apis import ApiClient
+from .gmail import GmailClient
 from .zoho import EdgeTokenProvider, ZohoClient
 
 
 def build(cfg):
     supa = SupabaseAgent(cfg)
-    zoho = ZohoClient(EdgeTokenProvider(cfg, supa))
-    return supa, Deps(cfg=cfg, rpc=supa.rpc, fetcher=Fetcher(cfg), zoho=zoho, llm=OllamaClient(cfg))
+    # `Deps.zoho` is the historical name of the mail client; it is Gmail or Zoho depending on KAIRFLOW_MAIL_PROVIDER.
+    zoho = GmailClient(EdgeTokenProvider(cfg, supa, function="intel-gmail-token")) if cfg.mail_provider == "gmail" else ZohoClient(EdgeTokenProvider(cfg, supa))
+    return supa, Deps(cfg=cfg, rpc=supa.rpc, fetcher=Fetcher(cfg), zoho=zoho, llm=OllamaClient(cfg), api=ApiClient(cfg))
 
 
 def selftest(cfg, what: str) -> int:
@@ -34,11 +37,16 @@ def selftest(cfg, what: str) -> int:
             line("agent sign-in and settings", True, f"autonomy={st['autonomy']} sending={'OFF' if st['kill_switch'] else 'ON'}")
         except Exception as exc:
             line("agent sign-in and settings", False, str(exc))
-    if what in ("all", "zoho"):
-        try:  # read-only: lists folders, never sends
-            line("zoho folders readable", bool(d.zoho.folder_id("inbox")) and bool(d.zoho.folder_id("sent")))
-        except Exception as exc:
-            line("zoho folders readable", False, str(exc))
+    if what in ("all", "mail", "zoho", "gmail"):
+        label = f"{cfg.mail_provider} mailbox"
+        if what in ("zoho", "gmail") and what != cfg.mail_provider:
+            line(label, False, f"KAIRFLOW_MAIL_PROVIDER is {cfg.mail_provider}, not {what}")
+        else:
+            try:  # read-only: reads labels/folders and the newest inbox entry, never sends
+                good, detail = d.zoho.check()
+                line(label + " readable", good, detail)
+            except Exception as exc:
+                line(label + " readable", False, str(exc))
     return 0 if ok else 1
 
 

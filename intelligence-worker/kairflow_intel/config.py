@@ -26,6 +26,7 @@ class Config:
     max_fetch_bytes: int = 1_500_000
     per_host_delay: float = 2.0
     contact_url: str = ""
+    mail_provider: str = "zoho"       # "zoho" or "gmail": must match the mailbox connected in KairFlow Settings
 
     @property
     def user_agent(self) -> str:
@@ -74,7 +75,10 @@ def load(env: dict | None = None) -> Config:
         worker_id=e.get("KAIRFLOW_WORKER_ID") or f"{socket.gethostname()}-{os.getpid()}",
         poll_seconds=int(e.get("KAIRFLOW_POLL_SECONDS") or 15),
         contact_url=e.get("KAIRFLOW_CONTACT_URL") or "",
+        mail_provider=(e.get("KAIRFLOW_MAIL_PROVIDER") or "zoho").strip().lower(),
     )
+    if cfg.mail_provider not in ("zoho", "gmail"):
+        raise ConfigError("KAIRFLOW_MAIL_PROVIDER must be zoho or gmail")
     if not cfg.supabase_url.startswith("https://"):
         raise ConfigError("KAIRFLOW_SUPABASE_URL must be https")
     _loopback_only(cfg.ollama_url)

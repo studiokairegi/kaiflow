@@ -30,6 +30,24 @@ export const intelApi = {
   upsertKb: (s, k) => call(s, "intel_admin_upsert_kb", { p_key: k.key, p_kind: k.kind, p_title: k.title, p_body: k.body }),
   approveKb: (s, key, approved) => call(s, "intel_admin_approve_kb", { p_key: key, p_approved: approved }),
 
+  disconnectMail: (s) => call(s, "intel_admin_disconnect_mail"),
+  updateSource: (s, key, patch) => call(s, "intel_admin_update_source", { p_key: key, p_enabled: patch.enabled ?? null, p_tos_status: patch.tosStatus ?? null, p_daily_budget: patch.dailyBudget ?? null }),
+  setProfile: (s, type, p) => call(s, "intel_admin_set_profile", { p_type: type, p_description: p.description, p_terms_en: p.termsEn, p_terms_ja: p.termsJa, p_exclude: p.exclude }),
+  approveProfile: (s, type, approved) => call(s, "intel_admin_approve_profile", { p_type: type, p_approved: approved }),
+  addManualPost: (s, type, url, text) => call(s, "intel_admin_add_manual_post", { p_type: type, p_url: url || "", p_text: text || "" }),
+  discoveryStats: (s) => call(s, "intel_admin_discovery_stats"),
+
+  crmReview: (s, limit = 400) => call(s, "intel_admin_crm_review", { p_limit: limit }),
+  crmAdopt: (s, ids, type) => call(s, "intel_admin_crm_adopt", { p_lead_ids: ids, p_type: type }),
+  chatNewThread: (s, title) => call(s, "intel_admin_chat_new_thread", { p_title: title || "New chat" }),
+  chatSend: (s, threadId, text, clientKey) => call(s, "intel_admin_chat_send", { p_thread_id: threadId, p_text: text, p_client_key: clientKey }),
+  chatThreads: (s) => read(s.from("intel_chat_threads").select("id,title,updated_at").order("updated_at", { ascending: false }).limit(30)),
+  chatMessages: (s, threadId) => read(s.from("intel_chat_messages").select("id,role,content,status,tool_name,reply_to,created_at").eq("thread_id", threadId).order("id").limit(300)),
+
+  chatActions: (s, threadId) => read(s.from("intel_chat_actions").select("id,message_id,tool,summary,status,result,created_at,expires_at").eq("thread_id", threadId).order("created_at").limit(100)),
+  chatConfirm: (s, actionId) => call(s, "intel_admin_chat_confirm", { p_action_id: actionId }),
+  chatCancel: (s, actionId) => call(s, "intel_admin_chat_cancel", { p_action_id: actionId }),
+
   settings: async (s) => (await read(s.from("intel_settings").select("*").limit(1)))[0] || null,
   campaigns: (s) => read(s.from("intel_campaigns").select("*").order("type")),
   prospects: (s) => read(s.from("intel_prospects").select("*").order("updated_at", { ascending: false }).limit(500)),
@@ -40,4 +58,6 @@ export const intelApi = {
   kb: (s) => read(s.from("intel_kb").select("*").order("key")),
   suppressions: (s) => read(s.from("intel_suppressions").select("*").order("created_at", { ascending: false }).limit(500)),
   leadsFor: async (s, ids) => (ids.length ? read(s.from("leads").select("id,stage,source_kind,company_name").in("id", ids)) : []),
+  sources: (s) => read(s.from("intel_sources").select("*").order("key")),
+  sourceItems: (s) => read(s.from("intel_source_items").select("id,source_key,item_type,url,title,snippet,prospect_id,meta,last_seen").order("last_seen", { ascending: false }).limit(60)),
 };

@@ -20,7 +20,7 @@ test("the UI duplicate check agrees with the shared fixtures", () => {
 });
 
 test("the SQL port uses the same normalization words and rules as the UI", () => {
-  const sql = read("../../supabase/migrations/20261108100000_intelligence_crm_notifications.sql");
+  const sql = read("../../supabase/migrations/20261109110000_intelligence_crm_notifications.sql");
   const jsWords = /\\b\(([a-z|]+)\)\\b/.exec(app.slice(start, end))[1];
   const sqlWords = /\\m\(([a-z|]+)\)\\M/.exec(sql)[1];
   assert.equal(sqlWords, jsWords, "company suffix words are identical");

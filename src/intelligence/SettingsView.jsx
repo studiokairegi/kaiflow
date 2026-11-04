@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, useBusy } from "../finance/ui.jsx";
 import { intelApi } from "./api.js";
-import { AUTONOMY, KB_KINDS, fmtWhen, missingKb } from "./logic.js";
+import { AUTONOMY, KB_KINDS, MAIL_PROVIDERS, fmtWhen, mailProviderName, missingKb, sourceState } from "./logic.js";
 import { Input, Muted, Section, Select, TextArea, useLoad, confirmAction } from "./kit.jsx";
 
 const ZOHO_DCS = [["com", "zoho.com (US)"], ["eu", "zoho.eu (Europe)"], ["in", "zoho.in (India)"], ["com.au", "zoho.com.au (Australia)"], ["jp", "zoho.jp (Japan)"], ["ca", "zoho.ca (Canada)"], ["sa", "zoho.sa (Saudi Arabia)"], ["com.cn", "zoho.com.cn (China)"]];
@@ -9,15 +9,15 @@ const ZOHO_DCS = [["com", "zoho.com (US)"], ["eu", "zoho.eu (Europe)"], ["in", "
 function SafetyCard({ s, supabase, onSaved }) {
   const [f, setF] = useState(null);
   const { busy, error, run } = useBusy();
-  useEffect(() => { if (s && !f) setF({ autonomy: s.autonomy, daily_initial_cap: s.daily_initial_cap, daily_followup_cap: s.daily_followup_cap, followup_business_days: s.followup_business_days, max_followups: s.max_followups, warmup_enabled: s.warmup_enabled, allow_cap_shift: s.allow_cap_shift, timezone: s.timezone, max_auto_replies_per_thread: s.max_auto_replies_per_thread }); }, [s, f]);
+  useEffect(() => { if (s && !f) setF({ autonomy: s.autonomy, daily_initial_cap: s.daily_initial_cap, daily_followup_cap: s.daily_followup_cap, followup_business_days: s.followup_business_days, max_followups: s.max_followups, warmup_enabled: s.warmup_enabled, allow_cap_shift: s.allow_cap_shift, timezone: s.timezone, max_auto_replies_per_thread: s.max_auto_replies_per_thread, send_start_hour: s.send_start_hour, send_end_hour: s.send_end_hour, send_weekdays_only: s.send_weekdays_only }); }, [s, f]);
   if (!f) return null;
   const set = (k) => (e) => setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
   const save = () => run(async () => {
-    await intelApi.updateSettings(supabase, { ...f, daily_initial_cap: Number(f.daily_initial_cap), daily_followup_cap: Number(f.daily_followup_cap), followup_business_days: Number(f.followup_business_days), max_followups: Number(f.max_followups), max_auto_replies_per_thread: Number(f.max_auto_replies_per_thread) });
+    await intelApi.updateSettings(supabase, { ...f, daily_initial_cap: Number(f.daily_initial_cap), daily_followup_cap: Number(f.daily_followup_cap), followup_business_days: Number(f.followup_business_days), max_followups: Number(f.max_followups), max_auto_replies_per_thread: Number(f.max_auto_replies_per_thread), send_start_hour: Number(f.send_start_hour), send_end_hour: Number(f.send_end_hour) });
     await onSaved();
   });
   return (
-    <Section title="Autonomy and limits" hint="Introductions can never exceed 30 a day. Zoho's own sending limits still apply and may be lower.">
+    <Section title="Autonomy and limits" hint="Introductions can never exceed 30 a day. The mail provider's own sending limits still apply and may be lower.">
       {error && <Banner tone="bad">{error}</Banner>}
       <Field label="How much the agent may do on its own" hint={AUTONOMY[f.autonomy]}><Select value={f.autonomy} onChange={set("autonomy")} options={Object.entries(AUTONOMY).map(([k, v]) => [k, v.split(":")[0]])} /></Field>
       <div style={S.grid(190)}>
@@ -27,7 +27,10 @@ function SafetyCard({ s, supabase, onSaved }) {
         <Field label="Follow-ups per prospect (0-3)"><Input type="number" min="0" max="3" value={f.max_followups} onChange={set("max_followups")} /></Field>
         <Field label="Automatic replies per conversation"><Input type="number" min="0" max="5" value={f.max_auto_replies_per_thread} onChange={set("max_auto_replies_per_thread")} /></Field>
         <Field label="Studio time zone" hint="Defines the day for limits"><Input value={f.timezone} onChange={set("timezone")} /></Field>
+        <Field label="Send from (hour, 0-23)" hint="Local studio time"><Input type="number" min="0" max="23" value={f.send_start_hour} onChange={set("send_start_hour")} /></Field>
+        <Field label="Send until (hour, 1-24)" hint="Exclusive"><Input type="number" min="1" max="24" value={f.send_end_hour} onChange={set("send_end_hour")} /></Field>
       </div>
+      <label style={S.row}><input type="checkbox" checked={f.send_weekdays_only} onChange={set("send_weekdays_only")} /> Send introductions and follow-ups on weekdays only</label>
       <label style={S.row}><input type="checkbox" checked={f.warmup_enabled} onChange={set("warmup_enabled")} /> Warm up gradually (5 a day, rising by 5 each week, up to your limit). Recommended for a mailbox that has not sent cold email before.</label>
       <label style={S.row}><input type="checkbox" checked={f.allow_cap_shift} onChange={set("allow_cap_shift")} /> Let one campaign use the other's unused share of the daily limit</label>
       <div><Btn kind="primary" disabled={busy} onClick={save}>Save</Btn></div>
@@ -46,7 +49,7 @@ function SenderCard({ s, supabase, onSaved }) {
       {error && <Banner tone="bad">{error}</Banner>}
       <div style={S.grid(240)}>
         <Field label="Sender name"><Input value={f.sender_name} onChange={set("sender_name")} /></Field>
-        <Field label="Sender email (your Zoho address)"><Input type="email" value={f.sender_email} onChange={set("sender_email")} /></Field>
+        <Field label="Sender email (the connected mailbox address)"><Input type="email" value={f.sender_email} onChange={set("sender_email")} /></Field>
       </div>
       <Field label="Postal address"><Input value={f.physical_address} onChange={set("physical_address")} /></Field>
       <Field label="Opt-out sentence" hint="Replies containing words like unsubscribe, remove me or stop are always honored automatically."><TextArea rows={2} value={f.opt_out_text} onChange={set("opt_out_text")} /></Field>
@@ -57,13 +60,16 @@ function SenderCard({ s, supabase, onSaved }) {
 
 function AccessCard({ s, mail, supabase, onSaved }) {
   const [agent, setAgent] = useState("");
-  const [dc, setDc] = useState(mail?.data_center || "com");
+  const [provider, setProvider] = useState(mail?.provider || "gmail");
+  const [dc, setDc] = useState(mail?.data_center && mail.data_center !== "google" ? mail.data_center : "com");
   const { busy, error, run } = useBusy();
   const connect = () => run(async () => {
-    const { data, error: e } = await supabase.functions.invoke("intel-zoho-connect", { body: { data_center: dc } });
-    if (e || !data?.url) throw new Error(e?.message || "Could not start the Zoho connection.");
+    const fn = provider === "gmail" ? "intel-gmail-connect" : "intel-zoho-connect";
+    const { data, error: e } = await supabase.functions.invoke(fn, { body: provider === "gmail" ? {} : { data_center: dc } });
+    if (e || !data?.url) throw new Error(e?.message || `Could not start the ${MAIL_PROVIDERS[provider]} connection.`);
     window.location.href = data.url;
   });
+  const connected = mail?.status === "connected";
   return (
     <Section title="Connections" hint="The worker signs in as its own limited account and can only run the agent functions. It is never an administrator.">
       {error && <Banner tone="bad">{error}</Banner>}
@@ -72,13 +78,18 @@ function AccessCard({ s, mail, supabase, onSaved }) {
         <Input style={{ maxWidth: 380 }} placeholder="Agent user id (UUID from Supabase Auth)" value={agent} onChange={(e) => setAgent(e.target.value.trim())} />
         <Btn disabled={busy || !agent} onClick={() => run(async () => { await intelApi.registerAgent(supabase, agent); setAgent(""); await onSaved(); })}>{s.agent_user_id ? "Replace agent account" : "Register agent account"}</Btn>
       </div>
-      <div style={S.row}><b>Zoho Mail</b><Pill tone={mail?.status === "connected" ? "ok" : "warn"}>{mail?.status || "disconnected"}</Pill>{mail?.mailbox && <span style={{ color: T.muted }}>{mail.mailbox}</span>}{mail?.last_sync_at && <span style={{ color: T.faint, fontSize: 12 }}>last sync {fmtWhen(mail.last_sync_at)}</span>}</div>
+      <div style={S.row}><b>Mailbox</b><Pill tone={connected ? "ok" : "warn"}>{mail?.status || "disconnected"}</Pill>{connected && <span style={{ color: T.muted }}>{mailProviderName(mail)}: {mail.mailbox}</span>}{mail?.last_sync_at && <span style={{ color: T.faint, fontSize: 12 }}>last sync {fmtWhen(mail.last_sync_at)}</span>}</div>
       {mail?.last_error && <Banner tone="bad">{mail.last_error}</Banner>}
       <div style={S.row}>
-        <Select value={dc} onChange={(e) => setDc(e.target.value)} style={{ maxWidth: 240 }} options={ZOHO_DCS} />
-        <Btn disabled={busy} onClick={connect}>{mail?.status === "connected" ? "Reconnect Zoho Mail" : "Connect Zoho Mail"}</Btn>
+        <Select value={provider} onChange={(e) => setProvider(e.target.value)} style={{ maxWidth: 200 }} options={Object.entries(MAIL_PROVIDERS)} />
+        {provider === "zoho" && <Select value={dc} onChange={(e) => setDc(e.target.value)} style={{ maxWidth: 240 }} options={ZOHO_DCS} />}
+        <Btn disabled={busy} onClick={connect}>{connected && mail.provider === provider ? `Reconnect ${MAIL_PROVIDERS[provider]}` : `Connect ${MAIL_PROVIDERS[provider]}`}</Btn>
+        {connected && <Btn kind="danger" disabled={busy} onClick={() => confirmAction(`Disconnect ${mailProviderName(mail)}? Sending is switched off and the stored connection is deleted. Also remove KairFlow under connected apps / third-party access in your mail account.`) && run(async () => { await intelApi.disconnectMail(supabase); await onSaved(); })}>Disconnect</Btn>}
       </div>
-      <Muted>Pick the data center your Zoho account lives on (the address you see when signed in to Zoho Mail). Only mail read and send permissions are requested. API access depends on your Zoho plan.</Muted>
+      {connected && mail.provider !== provider && <Muted>Connecting {MAIL_PROVIDERS[provider]} replaces the current {mailProviderName(mail)} connection. There is one mailbox per studio.</Muted>}
+      {provider === "gmail"
+        ? <Muted>Use a dedicated Gmail account, not your personal one. Send and read-replies permissions are requested, nothing else. The sender email above must equal this Gmail address. Set KAIRFLOW_MAIL_PROVIDER=gmail on the worker.</Muted>
+        : <Muted>Pick the data center your Zoho account lives on (the address you see when signed in to Zoho Mail). Only mail read and send permissions are requested. API access depends on your Zoho plan. Set KAIRFLOW_MAIL_PROVIDER=zoho on the worker.</Muted>}
     </Section>
   );
 }
@@ -139,6 +150,30 @@ function SuppressionCard({ supabase }) {
   );
 }
 
+function SourcesCard({ supabase }) {
+  const src = useLoad(() => intelApi.sources(supabase), [supabase]);
+  const { busy, error, run } = useBusy();
+  const upd = (key, patch) => run(async () => { await intelApi.updateSource(supabase, key, patch); await src.reload(); });
+  return (
+    <Section title="Discovery sources" hint="Where the agent looks. A source runs only when it is on AND you have confirmed its terms of use. A source that keeps failing pauses itself.">
+      {error && <Banner tone="bad">{error}</Banner>}
+      <Table rowKey={(r) => r.key} empty={src.loading ? "Loading…" : "No sources yet. Finish setup first."} rows={src.data || []}
+        columns={[
+          { key: "label", label: "Source", render: (r) => <span><b>{r.label}</b><div style={{ color: T.faint, fontSize: 12 }}>{r.tos_note}</div></span> },
+          { key: "state", label: "State", render: (r) => { const st = sourceState(r); return <Pill tone={st.tone}>{st.label}</Pill>; } },
+          { key: "budget", label: "Today", num: true, render: (r) => `${r.used_today}/${r.daily_budget}` },
+          { key: "last_error", label: "Last problem", render: (r) => <span style={{ color: T.muted, fontSize: 12 }}>{r.last_error || "-"}</span> },
+          { key: "act", label: "", render: (r) => (
+            <span style={S.row}>
+              {r.tos_status !== "confirmed" && r.tos_status !== "excluded" && <Btn small disabled={busy} onClick={() => confirmAction(`I have read the terms of use for "${r.label}" and automated, commercial use is permitted.\n\n${r.tos_note}`) && upd(r.key, { tosStatus: "confirmed", enabled: true })}>Terms confirmed, turn on</Btn>}
+              {r.tos_status === "confirmed" && <Btn small kind="link" disabled={busy} onClick={() => upd(r.key, { enabled: !r.enabled })}>{r.enabled ? "Turn off" : "Turn on"}</Btn>}
+              {r.tos_status !== "excluded" && <Btn small kind="link" disabled={busy} onClick={() => confirmAction("Exclude this source permanently?") && run(async () => { await intelApi.updateSource(supabase, r.key, { enabled: false }); await intelApi.updateSource(supabase, r.key, { tosStatus: "excluded" }); await src.reload(); })}>Exclude</Btn>}
+            </span>) },
+        ]} />
+    </Section>
+  );
+}
+
 export default function SettingsView({ supabase, tick, mail, onChanged }) {
   const st = useLoad(() => intelApi.settings(supabase), [supabase, tick]);
   if (st.loading) return <Muted>Loading…</Muted>;
@@ -149,6 +184,7 @@ export default function SettingsView({ supabase, tick, mail, onChanged }) {
       <SafetyCard s={st.data} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />
       <SenderCard s={st.data} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />
       <AccessCard s={st.data} mail={mail} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />
+      <SourcesCard supabase={supabase} />
       <KbCard supabase={supabase} />
       <SuppressionCard supabase={supabase} />
     </div>

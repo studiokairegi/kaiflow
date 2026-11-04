@@ -10,8 +10,7 @@ import re
 import time
 from datetime import datetime, timezone
 
-from .errors import PermanentError, RpcError, TransientError
-from .zoho import ZohoRejected
+from .errors import MailRejected, PermanentError, RpcError, TransientError
 
 TOKEN_RE = re.compile(r"\bkf[0-9a-f]{32}\b")
 
@@ -24,6 +23,21 @@ def with_ref(body: str, token: str) -> str:
     return body if token in body else body.rstrip() + f"\n\nRef: {token}\n"
 
 
+def parent_zoho_id(rpc, m: dict) -> str | None:
+    """Zoho id of the message this one replies to (matched by RFC Message-ID). Best effort: None means a plain, unthreaded send."""
+    ref = (m.get("in_reply_to") or "").strip()
+    if not ref or not m.get("prospect_id"):
+        return None
+    try:
+        ctx = rpc("intel_agent_context", {"p_prospect_id": m["prospect_id"]}) or {}
+    except Exception:
+        return None
+    for x in ctx.get("messages", []):
+        if x.get("rfc_message_id") == ref and x.get("zoho_message_id"):
+            return str(x["zoho_message_id"])
+    return None
+
+
 def send_message(rpc, zoho, message_id: str) -> dict:
     res = rpc("intel_agent_reserve_send", {"p_message_id": message_id})
     if not res.get("ok"):
@@ -32,18 +46,20 @@ def send_message(rpc, zoho, message_id: str) -> dict:
     if not rpc("intel_agent_mark_sending", {"p_message_id": m["id"]}):
         return {"sent": False, "reason": "not_reserved"}
     try:
-        out = zoho.send(m["from_email"], m["to_email"], m["subject"], with_ref(m["body_text"], m["token"]))
-    except ZohoRejected as exc:                       # definitive: Zoho said no, nothing was sent
+        parent = parent_zoho_id(rpc, m)
+        out = zoho.send(m["from_email"], m["to_email"], m["subject"], with_ref(m["body_text"], m["token"]),
+                        reply_to_zoho_id=parent, in_reply_to=m.get("in_reply_to") or None, references=m.get("references_ids") or None)
+    except MailRejected as exc:                       # definitive: the provider said no, nothing was sent
         permanent = bool(re.search(r"invalid|not a valid|mailbox|recipient", str(exc), re.I))
         rpc("intel_agent_fail_send", {"p_message_id": m["id"], "p_error": str(exc)[:300], "p_permanent": permanent})
         return {"sent": False, "reason": "rejected"}
     except (TransientError, Exception) as exc:        # outcome unknown: the message may have gone out
         rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": f"{type(exc).__name__}: {exc}"[:300]})
         return {"sent": False, "reason": "unknown"}
-    rfc = ""
+    rfc = out.get("rfc_message_id") or ""               # Gmail returns the Message-ID we generated; Zoho does not
     try:
-        found = zoho.find_sent(m["token"], m["to_email"], int(time.time() * 1000) - 600_000)
-        rfc = (found or {}).get("rfc_message_id", "")
+        found = None if rfc else zoho.find_sent(m["token"], m["to_email"], int(time.time() * 1000) - 600_000)
+        rfc = rfc or (found or {}).get("rfc_message_id", "")
     except Exception:
         pass                                           # headers are an optional extra: the token still matches replies
     try:

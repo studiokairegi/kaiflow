@@ -86,7 +86,7 @@ begin
   perform ti.as_user(ADMIN);
   perform ti.ok((intel_admin_set_kill_switch(false) ->> 'kill_switch')::boolean is false, 'sending can be enabled once identity, Zoho and agent are set');
   perform intel_admin_update_campaign('indie_game_developer', '{"status":"active"}'::jsonb);
-  perform intel_admin_update_settings('{"daily_initial_cap": 1}'::jsonb);
+  perform intel_admin_update_settings('{"daily_initial_cap": 1, "send_start_hour": 0, "send_end_hour": 24, "send_weekdays_only": false}'::jsonb);
 
   perform ti.as_user(AGENT);
   d := intel_agent_upsert_draft(p1, 'initial', 0, 'Hello Pixel Moon', 'Hello Rina, intro.' || foot, 'draft:p1:initial', 'rina@pixelmoon.com');
@@ -107,6 +107,12 @@ begin
   perform intel_admin_set_kill_switch(true);
   perform ti.as_user(AGENT);
   perform ti.ok(intel_agent_reserve_send(mid) ->> 'reason' = 'kill_switch', 'emergency stop blocks sending inside the database');
+  perform ti.as_user(ADMIN); perform intel_admin_set_kill_switch(false);
+  -- window that excludes the current hour: refused; then reopened
+  perform intel_admin_update_settings(format('{"send_start_hour": %s, "send_end_hour": %s, "send_weekdays_only": false}', ((extract(hour from now() at time zone 'Africa/Nairobi')::int + 2) % 22), ((extract(hour from now() at time zone 'Africa/Nairobi')::int + 2) % 22) + 1)::jsonb);
+  perform ti.as_user(AGENT);
+  perform ti.ok(intel_agent_reserve_send(mid) ->> 'reason' = 'outside_send_hours', 'introductions are refused outside the sending window');
+  perform ti.as_user(ADMIN); perform intel_admin_update_settings('{"send_start_hour": 0, "send_end_hour": 24}'::jsonb); perform intel_admin_set_kill_switch(true);
   perform ti.as_user(ADMIN); perform intel_admin_set_kill_switch(false);
   perform ti.as_user(AGENT);
   r := intel_agent_reserve_send(mid);
@@ -166,5 +172,64 @@ begin
   perform ti.ok(j2 ->> 'id' = j ->> 'id' and (j2 ->> 'attempts')::int = 2 and j2 ->> 'locked_by' = 'w2', 'an expired lease returns the job to the queue after a crash');
   perform ti.ok(not intel_agent_complete_job((j ->> 'id')::uuid, 'w1', '{}'::jsonb), 'a worker that lost its lease cannot complete the job');
   perform ti.ok(intel_agent_complete_job((j2 ->> 'id')::uuid, 'w2', '{}'::jsonb), 'the current owner completes it');
+  perform ti.as_super();
+end $$;
+
+-- Discovery: sources need confirmed terms, budgets, circuit breaker, aliases, profile approval -------------------
+do $$
+declare
+  ADMIN uuid := '00000000-0000-0000-0000-0000000000e1'; AGENT uuid := '00000000-0000-0000-0000-0000000000f0'; orgA uuid := '20000000-0000-0000-0000-00000000000a';
+  r jsonb; pid uuid; i int;
+begin
+  perform ti.ok((select count(*) from intel_sources where organization_id = orgA) = 9, 'nine discovery sources are seeded');
+  perform ti.ok((select count(*) from intel_sources where organization_id = orgA and tos_status = 'confirmed') = 4, 'only the four reviewed sources start confirmed');
+  perform ti.ok(not exists (select 1 from intel_sources where organization_id = orgA and tos_status = 'unverified' and enabled), 'unverified sources start OFF');
+
+  perform ti.as_user(ADMIN);
+  perform ti.throws($q$select intel_admin_update_source('gdelt', true)$q$, 'Confirm the source', 'an unconfirmed source cannot be switched on');
+  perform ti.ok((intel_admin_update_source('gdelt', true, 'confirmed') ->> 'enabled')::boolean, 'confirming the terms allows enabling');
+  perform intel_admin_update_source('gdelt', false);
+
+  perform ti.as_user(AGENT);
+  r := intel_agent_sources();
+  perform ti.ok(r ? 'wikidata' and r ? 'site_crawler' and not (r ? 'gdelt') and not (r ? 'anilist') and not (r ? 'steam'), 'the worker sees only enabled, confirmed sources');
+  perform ti.ok(intel_agent_source_use('wikidata', 39) = 1 and intel_agent_source_use('wikidata', 1) = 0, 'the daily budget is counted and runs out');
+  perform ti.ok(not (intel_agent_sources() ? 'wikidata'), 'a source over budget disappears from the list');
+  for i in 1..5 loop perform intel_agent_source_report('rss', false, 'boom'); end loop;
+  perform ti.ok(not (intel_agent_sources() ? 'rss'), 'five failures in a row open the circuit');
+  perform intel_agent_source_report('rss', true);
+  perform ti.ok(intel_agent_sources() ? 'rss', 'a success closes the circuit');
+
+  -- entity resolution: one studio, several names and domains ---------------------------------------------------
+  pid := (intel_agent_upsert_prospect('animation_studio_support', 'Studio Ex', 'https://studio-ex.co.jp', '', '', '', 'JP', 'ja') ->> 'prospect_id')::uuid;
+  perform intel_agent_add_alias(pid, 'name', 'studioex'); perform intel_agent_add_alias(pid, 'domain', 'studio-ex.com');
+  perform ti.ok((intel_agent_resolve_entity('studio-ex.com', '') ->> 'prospect_id')::uuid = pid, 'a second domain resolves to the same prospect');
+  perform ti.ok((intel_agent_resolve_entity('', 'studioex') ->> 'match') = 'name', 'a second name resolves to the same prospect');
+  perform ti.ok((intel_agent_resolve_entity('other.jp', 'other') ->> 'prospect_id') is null, 'unrelated entity does not match');
+  r := intel_agent_record_item('rss', 'feed', 'https://studio-ex.co.jp/feed', 'feed', '', '', pid);
+  perform ti.ok((r ->> 'new')::boolean and not (intel_agent_record_item('rss', 'feed', 'https://studio-ex.co.jp/feed', 'feed', '', '', pid) ->> 'new')::boolean, 'discovered items are de-duplicated by URL');
+  perform intel_agent_flag_prospect(pid, 'official website not found');
+  perform ti.as_super();
+  perform ti.ok((select status = 'needs_review' from intel_prospects where id = pid), 'a prospect discovery cannot finish is held for review');
+
+  -- discovery profile: the model proposes, only the administrator approves -------------------------------------
+  perform ti.as_user(ADMIN);
+  perform intel_admin_set_profile('animation_studio_support', 'JP 2D studios', '["key animation"]'::jsonb, '["原画募集"]'::jsonb, '["school"]'::jsonb);
+  perform ti.ok(not (select (criteria -> 'profile' ->> 'approved')::boolean from intel_campaigns where organization_id = orgA and type = 'animation_studio_support'), 'a new profile starts unapproved');
+  perform intel_admin_approve_profile('animation_studio_support', true);
+  perform ti.as_user(AGENT);
+  perform intel_agent_propose_terms('animation_studio_support', '["hijack"]'::jsonb, '[]'::jsonb, '[]'::jsonb);
+  perform ti.as_super();
+  perform ti.ok((select not (criteria -> 'profile' ? 'proposed_en') and (criteria -> 'profile' ->> 'approved')::boolean from intel_campaigns where organization_id = orgA and type = 'animation_studio_support'), 'the model cannot change approved terms');
+  perform ti.as_user(ADMIN);
+  perform intel_admin_set_profile('animation_studio_support', 'edited', '["key animation"]'::jsonb, '[]'::jsonb, '[]'::jsonb);
+  perform ti.ok(not (select (criteria -> 'profile' ->> 'approved')::boolean from intel_campaigns where organization_id = orgA and type = 'animation_studio_support'), 'any edit un-approves the profile');
+
+  -- manual X post assist: queued for the worker, nothing fetched ----------------------------------------------------
+  perform intel_admin_add_manual_post('animation_studio_support', 'https://x.com/a/status/1', '原画募集 https://sample.co.jp');
+  perform ti.as_super();
+  perform ti.ok(exists (select 1 from intel_jobs where kind = 'manual_post' and state = 'queued') and exists (select 1 from intel_source_items where item_type = 'manual_post' and source_key = 'x_manual'), 'a pasted post becomes an item and a worker job');
+  perform ti.as_user(AGENT);
+  perform ti.throws($q$select intel_admin_update_source('gdelt', true, 'confirmed')$q$, 'restricted', 'the agent cannot confirm a source''s terms');
   perform ti.as_super();
 end $$;

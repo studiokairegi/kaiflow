@@ -12,9 +12,12 @@ import ProspectsView from "./ProspectsView.jsx";
 import OutreachView from "./OutreachView.jsx";
 import LogsView from "./LogsView.jsx";
 import SettingsView from "./SettingsView.jsx";
+import { oauthResult } from "./logic.js";
+import ChatView from "./ChatView.jsx";
+import CrmFollowupView from "./CrmFollowupView.jsx";
 
 export const INTELLIGENCE_SECTIONS = Object.freeze([
-  "Overview", "Indie Game Developers", "Animation Studio Support", "Discovered Prospects",
+  "Overview", "Agent Chat", "Existing Leads", "Indie Game Developers", "Animation Studio Support", "Discovered Prospects",
   "Qualified Leads", "Outreach and Conversations", "Agent Activity Logs", "Settings",
 ]);
 
@@ -27,7 +30,7 @@ function Setup({ supabase, onDone }) {
       {error && <Banner tone="bad">{error}</Banner>}
       <div style={S.grid(240)}>
         <Field label="Sender name"><Input value={f.senderName} onChange={set("senderName")} /></Field>
-        <Field label="Sender email (your Zoho address)"><Input type="email" value={f.senderEmail} onChange={set("senderEmail")} /></Field>
+        <Field label="Sender email (the connected mailbox address)"><Input type="email" value={f.senderEmail} onChange={set("senderEmail")} /></Field>
       </div>
       <Field label="Postal address (shown in every email)"><Input value={f.physicalAddress} onChange={set("physicalAddress")} /></Field>
       <Field label="Studio time zone"><Input value={f.timezone} onChange={set("timezone")} /></Field>
@@ -40,6 +43,15 @@ function Shell({ supabase, target, onOpenLead }) {
   const [tab, setTab] = useState("overview");
   const [tick, setTick] = useState(0);
   const [focus, setFocus] = useState(null);
+  const [flash, setFlash] = useState(null);   // result of a Gmail/Zoho connection attempt (?intelligence=<flag>)
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      const result = oauthResult(url.searchParams.get("intelligence"));
+      if (result) { setFlash(result); setTab("settings"); }
+      if (url.searchParams.has("intelligence")) { url.searchParams.delete("intelligence"); window.history.replaceState({}, "", url.toString()); }
+    } catch { /* no window (tests/SSR): nothing to read */ }
+  }, []);
   useEffect(() => {
     const id = setInterval(() => { if (document.visibilityState === "visible") setTick((t) => t + 1); }, 30000);
     return () => clearInterval(id);
@@ -56,6 +68,8 @@ function Shell({ supabase, target, onOpenLead }) {
 
   const tabs = [
     { id: "overview", label: "Overview" },
+    { id: "chat", label: "Agent Chat" },
+    { id: "crm", label: "Existing Leads" },
     { id: "indie", label: "Indie Game Developers" },
     { id: "studio", label: "Animation Studio Support" },
     { id: "prospects", label: "Discovered Prospects" },
@@ -70,8 +84,11 @@ function Shell({ supabase, target, onOpenLead }) {
       <div style={{ ...S.row, justifyContent: "space-between" }}>
         <div><h2 style={S.h2}>Intelligence</h2><p style={S.sub}>Finds, researches and contacts prospects for the studio. Private to you.</p></div>
       </div>
+      {flash && <Banner tone={flash.tone} action={<Btn small onClick={() => setFlash(null)}>Dismiss</Btn>}>{flash.text}</Banner>}
       <Tabs tabs={tabs} value={tab} onChange={setTab} />
       {tab === "overview" && <OverviewView o={o} mail={mail.data} supabase={supabase} onChanged={refresh} setTab={setTab} />}
+      {tab === "chat" && <ChatView supabase={supabase} tick={tick} workerSeconds={o.worker_last_seen_seconds} onChanged={refresh} />}
+      {tab === "crm" && <CrmFollowupView {...common} />}
       {tab === "indie" && <CampaignView type="indie_game_developer" {...common} />}
       {tab === "studio" && <CampaignView type="animation_studio_support" {...common} />}
       {tab === "prospects" && <ProspectsView mode="all" {...common} />}

@@ -41,15 +41,19 @@ test("guardIntelligenceWorkspace: direct entry falls back to the dashboard unles
 });
 
 // ------------------------------------------------------------ wiring in App.jsx
-test("App.jsx: Intelligence tab sits immediately after Leads and renders only when authorized", () => {
+test("App.jsx: Intelligence lives INSIDE the CRM module (a CRM sub-tab), not as a top-level module, and renders only when authorized", () => {
   const app = read("../App.jsx");
-  const leads = app.indexOf("            Leads\n          </button>}");
-  const intel = app.indexOf("{canAccessIntelligence(intelAccess) && <button");
-  assert.ok(leads > 0 && intel > leads, "Intelligence button follows the Leads button");
-  const between = app.slice(leads, intel);
-  assert.ok(!/<button/.test(between.replace("</button>}", "")), "no other tab between Leads and Intelligence");
-  assert.match(app, /workspace === "intelligence" && canAccessIntelligence\(intelAccess\) && <IntelligenceModule/);
-  assert.match(app, /workspace === "intelligence" && intelAccess === false\) setWorkspace\("dashboard"\)/);
+  // not a top-level workspace tab any more
+  assert.ok(!/workspace === "intelligence"/.test(app), "no top-level 'intelligence' workspace remains");
+  assert.ok(!/setWorkspace\("intelligence"\)/.test(app));
+  // the CRM sub-tab bar offers it only to the authorized admin
+  assert.match(app, /\["portfolio", "Portfolio"\], \.\.\.\(canAccessIntelligence\(intelAccess\) \? \[\["intelligence", "Intelligence"\]\] : \[\]\)/);
+  // rendered only on the leads (CRM) workspace, on its own sub-tab, and only when allowed
+  assert.match(app, /workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence\(intelAccess\) && <IntelligenceModule/);
+  // a denied or revoked permission can never leave the user parked on that sub-tab
+  assert.match(app, /crmTab === "intelligence" && intelAccess === false\) setCrmTab\("pipeline"\)/);
+  // notification click-through opens CRM > Intelligence
+  assert.match(app, /setWorkspace\("leads"\);\s*setCrmTab\("intelligence"\);/);
   assert.match(app, /loadIntelligenceAccess\(supabase, userId\)/);
 });
 
@@ -64,7 +68,7 @@ test("existing permissions: Payments and studio module keys are unchanged", () =
 
 // ------------------------------------------------------------ migration contract
 test("migration: strict AND rule, fail-closed, locked-down grants, no data changes", () => {
-  const sql = read("../../supabase/migrations/20261107090000_intelligence_authorization.sql");
+  const sql = read("../../supabase/migrations/20261109090000_intelligence_authorization.sql");
   const code = sql.replace(/--.*$/gm, "");
   assert.match(code, /s\.is_admin is true/);
   assert.match(code, /m\.role = 'master_user'/);

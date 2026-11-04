@@ -40,8 +40,9 @@ class FakeRpc:
 
 class FakeZoho:
     def __init__(self): self.sent, self.sent_folder, self.inbox, self.raise_on_send = [], [], [], None
-    def send(self, frm, to, subject, body):
+    def send(self, frm, to, subject, body, reply_to_zoho_id=None, in_reply_to=None, references=None):
         if self.raise_on_send: raise self.raise_on_send
+        self.parents = getattr(self, 'parents', []) + [reply_to_zoho_id]; self.headers = getattr(self, 'headers', []) + [(in_reply_to, references)]
         self.sent.append((frm, to, subject, body)); return {"zoho_message_id": f"z{len(self.sent)}", "thread_id": "t"}
     def find_sent(self, token, to, since): return next((m for m in self.sent_folder if m["token"] == token), None)
     def list_messages(self, folder, limit=50): return self.inbox

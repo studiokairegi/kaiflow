@@ -1951,6 +1951,7 @@ function computeDashboardStats(projects, cards, leads) {
   // mirrors ACTIVE_OUTREACH_STAGE_IDS, the same definition the dashboard's
   // active-outreach breakdown already uses.
   const activeLeads = leads.filter((l) => !l.archivedAt && ACTIVE_OUTREACH_STAGE_IDS.includes(l.stage));
+  const aiGeneratedLeadsCount = leads.filter((l) => !l.archivedAt && isAiGeneratedLead(l)).length;
   const dealsWon = leads.filter((l) => l.stage === "won").length;
   const dealsLost = leads.filter((l) => l.stage === "lost").length;
 
@@ -1992,6 +1993,7 @@ function computeDashboardStats(projects, cards, leads) {
 
   return {
     activeLeadsCount: activeLeads.length,
+    aiGeneratedLeadsCount,
     activeProjectsCount: activeProjects.length,
     nearDeadline,
     overdueProjects,
@@ -2907,10 +2909,11 @@ export default function ShotTracker() {
   const [dragOverStage, setDragOverStage] = useState(null);
   const [leadChannelFilter, setLeadChannelFilter] = useState("all");
   const [leadSearch, setLeadSearch] = useState("");
-  const [crmTab, setCrmTab] = useState("pipeline"); // "pipeline" | "contacts" | "portfolio"
+  const [crmTab, setCrmTab] = useState("pipeline"); // "pipeline" | "contacts" | "portfolio" | "intelligence" (CRM Intelligence lives inside the CRM module, only for the authorized admin)
   const [leadStatusFilter, setLeadStatusFilter] = useState("all");
   const [leadPriorityFilter, setLeadPriorityFilter] = useState("all");
   const [leadFollowupFilter, setLeadFollowupFilter] = useState("all");
+  const [leadSourceFilter, setLeadSourceFilter] = useState("all"); // "all" | "ai" (leads created by KairFlow Intelligence)
   const [showArchivedLeads, setShowArchivedLeads] = useState(false);
   const [leadError, setLeadError] = useState(""); // last lead save/move failure, shown until dismissed
 
@@ -2921,6 +2924,7 @@ export default function ShotTracker() {
     if (leadChannelFilter !== "all" && l.channel !== leadChannelFilter) return false;
     if (leadPriorityFilter !== "all" && l.priority !== leadPriorityFilter) return false;
     if (leadStatusFilter !== "all" && l.stage !== leadStatusFilter) return false;
+    if (leadSourceFilter === "ai" && !isAiGeneratedLead(l)) return false;
     const searchText = leadSearch.trim().toLowerCase();
     if (searchText) {
       const haystack = [l.companyName, l.contactPerson, l.email, l.website, l.notes]
@@ -3193,10 +3197,10 @@ export default function ShotTracker() {
     document.addEventListener("visibilitychange", onVisible);
     return () => { cancelled = true; document.removeEventListener("visibilitychange", onVisible); };
   }, [userId, activeStudioOrganizationId]);
-  // Direct entry (default landing tab, tutorial, stale state) can never land on Intelligence unless allowed.
+  // Direct entry (stale state, a remembered tab) can never land on CRM Intelligence unless allowed: fall back to the pipeline.
   useEffect(() => {
-    if (workspace === "intelligence" && intelAccess === false) setWorkspace("dashboard");
-  }, [workspace, intelAccess]);
+    if (crmTab === "intelligence" && intelAccess === false) setCrmTab("pipeline");
+  }, [crmTab, intelAccess]);
   // Global activity notifications (bell in the header). Disposes its realtime channel/timers on sign-out.
   const notifications = useNotifications(userId);
   // Timer changes made on the dashboard are saved to the account (debounced) so they
@@ -5459,7 +5463,8 @@ export default function ShotTracker() {
       if (intelAccess !== true) return { ok: false, message: "KairFlow Intelligence is restricted." };
       setIntelTarget({ prospectId: n.conversationId || null, leadId: n.leadId || null, messageId: n.messageId || null, nonce: Date.now() });
       setView("projects");
-      setWorkspace("intelligence");
+      setWorkspace("leads");
+      setCrmTab("intelligence");
       return { ok: true };
     }
     if (n?.type === "chat_message" && n.conversationId) {
@@ -5979,7 +5984,7 @@ export default function ShotTracker() {
               <BackIcon />
               All plans
             </button>
-          ) : workspace === "dashboard" || workspace === "payments" || workspace === "intelligence" ? null : (
+          ) : workspace === "dashboard" || workspace === "payments" ? null : (
             <button
               className="kf-header-primary" style={styles.newButton}
               onClick={() => setEditingProject(emptyProject({ currency: settings.currencySymbol }))}
@@ -6017,12 +6022,6 @@ export default function ShotTracker() {
             onClick={() => setWorkspace("leads")}
           >
             Leads
-          </button>}
-          {canAccessIntelligence(intelAccess) && <button
-            style={{ ...styles.tabButton, ...(workspace === "intelligence" ? styles.tabButtonActive : {}) }}
-            onClick={() => setWorkspace("intelligence")}
-          >
-            Intelligence
           </button>}
           {visibleWorkspaces.includes("planner") && <button
             style={{ ...styles.tabButton, ...(workspace === "planner" ? styles.tabButtonActive : {}) }}
@@ -6205,8 +6204,10 @@ export default function ShotTracker() {
             setLeadStatusFilter(filters.status || "all");
             setLeadPriorityFilter(filters.priority || "all");
             setLeadFollowupFilter(filters.followup || "all");
+            setLeadSourceFilter(filters.source === "ai" ? "ai" : "all");
             setLeadChannelFilter("all");
             setShowArchivedLeads(false);
+            setCrmTab("pipeline");
             setWorkspace("leads");
           }}
           user={session?.user}
@@ -6233,7 +6234,7 @@ export default function ShotTracker() {
 
       {view === "projects" && workspace === "leads" && (
         <div className="kf-secondary-tabs" style={styles.subTabRow} role="tablist" aria-label="CRM sections">
-          {[["pipeline", "Pipeline"], ["contacts", "Contacts"], ["portfolio", "Portfolio"]].map(([id, label]) => (
+          {[["pipeline", "Pipeline"], ["contacts", "Contacts"], ["portfolio", "Portfolio"], ...(canAccessIntelligence(intelAccess) ? [["intelligence", "Intelligence"]] : [])].map(([id, label]) => (
             <button
               key={id}
               type="button"
@@ -6363,6 +6364,21 @@ export default function ShotTracker() {
               </button>
             ))}
             <span style={{ width: 1, background: border, margin: "0 4px" }} />
+            {(leads.some(isAiGeneratedLead) || leadSourceFilter === "ai") && (
+              <button
+                type="button"
+                aria-pressed={leadSourceFilter === "ai"}
+                style={{
+                  ...styles.reviewStatusButton,
+                  borderColor: leadSourceFilter === "ai" ? teal : border,
+                  color: leadSourceFilter === "ai" ? tealLight : textMuted,
+                  background: leadSourceFilter === "ai" ? "rgba(47,191,166,0.1)" : "transparent",
+                }}
+                onClick={() => setLeadSourceFilter(leadSourceFilter === "ai" ? "all" : "ai")}
+              >
+                AI Generated
+              </button>
+            )}
             <button
               type="button"
               style={{
@@ -6517,7 +6533,8 @@ export default function ShotTracker() {
         </>
       )}
 
-      {view === "projects" && workspace === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setWorkspace("leads"); setEditingLead(l); } }} />}
+      {view === "projects" && workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
+
       {view === "projects" && workspace === "payments" && !canAccessPayments(settings) && <PaymentsRestricted />}
       {view === "projects" && workspace === "payments" && canAccessPayments(settings) && (
         <PaymentsModule
@@ -9639,6 +9656,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       chips: [
         { icon: "check", label: "won", value: stats.dealsWon, tone: "good", onClick: () => onGoToLeads({ status: "won" }) },
         { icon: "x", label: "lost", value: stats.dealsLost, tone: "bad", onClick: () => onGoToLeads({ status: "lost" }) },
+        ...(stats.aiGeneratedLeadsCount ? [{ icon: "target", label: "AI generated", value: stats.aiGeneratedLeadsCount, onClick: () => onGoToLeads({ source: "ai" }) }] : []),
       ],
     },
     {

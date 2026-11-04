@@ -10,3 +10,7 @@ class RpcError(Exception):
     def __init__(self, message: str, code: str = "", status: int = 0):
         super().__init__(message)
         self.code, self.status = code, status
+
+
+class MailRejected(Exception):
+    """The mail provider definitively refused the request (4xx). The message was NOT sent."""
