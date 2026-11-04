@@ -67,11 +67,25 @@ export function makeWebhookStore(service: any): WebhookStore {
     async finishWebhook(svixId, status, error = "") {
       must(await service.from("email_webhook_events").update({ status, error, processed_at: new Date().toISOString() }).eq("svix_id", svixId), "webhook log");
     },
-    async findAccount(addresses) {
+    async findAccount(addresses, inboundDomain = "") {
       const wanted = [...new Set(addresses.map(baseAddress))];
       if (!wanted.length) return null;
       const { data } = await service.from("email_accounts").select("id,organization_id,address,is_default").eq("status", "active").in("address", wanted).limit(1);
       if (data?.length) return data[0];
+      // Replies arrive on the inbound domain (e.g. <id>.resend.app): match the part before the @ to a sending address, else use the default inbox.
+      if (inboundDomain) {
+        const atInbound = wanted.filter((a) => a.endsWith(`@${inboundDomain}`));
+        for (const a of atInbound) {
+          const local = a.split("@")[0].replace(/[%_\\]/g, "");
+          if (!local) continue;
+          const { data: rows } = await service.from("email_accounts").select("id,organization_id,address,is_default").eq("status", "active").like("address", `${local}@%`).limit(1);
+          if (rows?.length) return rows[0];
+        }
+        if (atInbound.length) {
+          const { data: rows } = await service.from("email_accounts").select("id,organization_id,address,is_default").eq("status", "active").order("is_default", { ascending: false }).limit(1);
+          if (rows?.length) return rows[0];
+        }
+      }
       // Catch-all: mail to any address at a domain we send from goes to that domain's default inbox.
       const domains = [...new Set(wanted.map((a) => a.split("@")[1]).filter(Boolean))];
       for (const dom of domains) {

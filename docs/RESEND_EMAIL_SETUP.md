@@ -31,6 +31,7 @@ supabase secrets set RESEND_API_KEY=...            # Resend > API Keys (sending 
 supabase secrets set RESEND_WEBHOOK_SECRET=whsec_...   # Resend > Webhooks > your endpoint > Signing secret
 supabase secrets set EMAIL_DAILY_LIMIT=100         # optional; free plan allows 100 a day
 supabase secrets set EMAIL_THREAD_TOKENS=on        # optional; "off" disables the reply-to plus-address (see section 7)
+supabase secrets set EMAIL_INBOUND_DOMAIN=<id>.resend.app   # where replies arrive; REQUIRED when another provider (Zoho) owns the sending domain's MX
 ```
 
 The sender address and display name are not environment variables: they are stored per studio in `email_accounts` (CRM > Inbox > "Add your sending address"). The suggested first address is `john@studiokairegi.com`, which is only a placeholder until you verify the domain. `RESEND_FROM_EMAIL` / `RESEND_FROM_NAME` from the original brief are therefore replaced by that table so the address is never hardcoded.
@@ -65,7 +66,9 @@ Before adding anything, open Cloudflare > DNS > Records for `studiokairegi.com` 
 | Inbound MX | the domain Resend shows for receiving | See the choice below. Priority and host come from Resend. |
 | DMARC (TXT) | `_dmarc` | Start monitor-only, e.g. `v=DMARC1; p=none; rua=mailto:<an address you read>`. Tighten later once reports look clean. Skip if you already have one. |
 
-**Inbound choice.** Receiving on the root domain makes Resend receive mail for *every* address at `studiokairegi.com`. That is fine today (the address is a placeholder with no mailbox), but if you later want ordinary mailboxes on that domain, receive on a subdomain instead (for example `mail.studiokairegi.com`) and use an address on it as the sending address. Do not enable Cloudflare Email Routing for any address Resend receives, and keep MX/TXT records "DNS only" (they cannot be proxied anyway).
+**Studio Kairegi setup (Zoho owns the root MX).** The root `MX` records of `studiokairegi.com` point to Zoho, so do **not** add Resend's root receiving record: it would split Zoho mail. Mail is *sent* as `john@studiokairegi.com` (verified through the `resend._domainkey`, `send` and `rsend` records), while replies are routed to a Resend-only address: in Resend open Emails > Receiving > (three dots) > Receiving address to get `<id>.resend.app`, and set it as `EMAIL_INBOUND_DOMAIN`. Every outgoing message then carries `Reply-To: john+k<token>@<id>.resend.app`; the webhook matches that address to your sending address. Leave the root SPF (`include:zohomail.com`) and DMARC alone: Resend mail passes DMARC through its DKIM key. Later you can switch to a branded subdomain (add `mail.studiokairegi.com` in Resend, add its records, set `EMAIL_INBOUND_DOMAIN=mail.studiokairegi.com`).
+
+**Inbound choice (only if nothing else owns the root MX).** Receiving on the root domain makes Resend receive mail for *every* address at `studiokairegi.com`. That is fine today (the address is a placeholder with no mailbox), but if you later want ordinary mailboxes on that domain, receive on a subdomain instead (for example `mail.studiokairegi.com`) and use an address on it as the sending address. Do not enable Cloudflare Email Routing for any address Resend receives, and keep MX/TXT records "DNS only" (they cannot be proxied anyway).
 
 ## 7. How threading works
 

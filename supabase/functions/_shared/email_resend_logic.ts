@@ -49,10 +49,15 @@ export function buildThreadHeaders(parent: { rfc_message_id?: string | null; ref
 
 /** Plus-address token: replies to john+k1a2b3c4d5e6f@domain land in the right conversation even if a mail server rewrites Message-ID. */
 export const threadToken = (conversationId: string): string => conversationId.replace(/-/g, "").slice(0, 12).toLowerCase();
-export function withThreadToken(address: string, conversationId: string): string {
+/** `inboundDomain` lets replies land on a different domain than the one mail is sent from (for example when Zoho owns the root domain's MX). */
+export function withThreadToken(address: string, conversationId: string, inboundDomain = ""): string {
   const [local, domain] = address.toLowerCase().split("@");
-  return `${local.split("+")[0]}+k${threadToken(conversationId)}@${domain}`;
+  return `${local.split("+")[0]}+k${threadToken(conversationId)}@${inboundDomain || domain}`;
 }
+export const cleanInboundDomain = (v: unknown): string => {
+  const d = String(v ?? "").trim().toLowerCase();
+  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(d) ? d : "";
+};
 export const baseAddress = (address: string): string => {
   const [local, domain] = String(address).toLowerCase().trim().split("@");
   return domain ? `${local.split("+")[0]}@${domain}` : String(address).toLowerCase();
@@ -318,7 +323,9 @@ export async function handleSend(req: Request, deps: SendDeps): Promise<Response
 
   // Replies to this message come back to a plus-address that names the conversation, unless the person chose their own reply-to.
   const tokens = (deps.env("EMAIL_THREAD_TOKENS") || "on").toLowerCase() !== "off";
-  const replyTo = r.reply_to || (tokens ? withThreadToken(account.address, created.conversation_id) : "");
+  // EMAIL_INBOUND_DOMAIN: where replies should arrive (Resend receives there). Needed when another provider (Zoho) owns the sending domain's MX.
+  const inboundDomain = cleanInboundDomain(deps.env("EMAIL_INBOUND_DOMAIN"));
+  const replyTo = r.reply_to || (tokens ? withThreadToken(account.address, created.conversation_id, inboundDomain) : "");
   await deps.store.markResult(created.message_id, { status: "sending", reply_to: replyTo });
 
   const payload = buildResendPayload({ fromEmail: account.address, fromName: account.display_name, req: r, thread, replyTo });
@@ -349,7 +356,7 @@ export interface WebhookStore {
   providerEnabled(): Promise<boolean>;
   beginWebhook(svixId: string, type: string, payload: unknown): Promise<"new" | "done" | "retry">;
   finishWebhook(svixId: string, status: "processed" | "failed" | "ignored", error?: string): Promise<void>;
-  findAccount(addresses: string[]): Promise<{ id: string; organization_id: string; address: string } | null>;
+  findAccount(addresses: string[], inboundDomain?: string): Promise<{ id: string; organization_id: string; address: string } | null>;
   threadLookup(orgId: string, q: { token: string | null; rfcIds: string[]; normalizedSubject: string; sender: string }): Promise<{ tokenConversationId: string | null; rfcMap: Record<string, string>; candidates: SubjectCandidate[] }>;
   uploadAttachment(path: string, bytes: Uint8Array, contentType: string): Promise<void>;
   ingestInbound(p: Record<string, unknown>): Promise<{ duplicate: boolean; message_id: string; conversation_id?: string }>;
@@ -386,7 +393,7 @@ export async function processInbound(d: WebhookDeps, apiKey: string, data: any):
   for (const [k, v] of Object.entries(full?.headers || {})) headers[k.toLowerCase()] = Array.isArray(v) ? v.join(" ") : String(v);
 
   const to = addressList(full?.to ?? data?.to), cc = addressList(full?.cc ?? data?.cc), bcc = addressList(full?.bcc ?? data?.bcc);
-  const account = await d.store.findAccount([...to, ...cc, ...bcc]);
+  const account = await d.store.findAccount([...to, ...cc, ...bcc], cleanInboundDomain(d.env("EMAIL_INBOUND_DOMAIN")));
   if (!account) return "ignored";                                    // not addressed to one of our inboxes
 
   const from = parseAddress(headers["from"] || full?.from || data?.from);

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
   parseAddress, normalizeSubject, buildThreadHeaders, withThreadToken, extractThreadToken, baseAddress, threadToken, parseMessageIds, pickConversation,
-  verifySvixSignature, validateSendRequest, buildResendPayload, sendViaResend, handleSend, handleWebhook, statusForEvent, htmlToText, safeFileName,
+  verifySvixSignature, cleanInboundDomain, validateSendRequest, buildResendPayload, sendViaResend, handleSend, handleWebhook, statusForEvent, htmlToText, safeFileName,
 } from "../../supabase/functions/_shared/email_resend_logic.ts";
 import { providerPausedResponse } from "../../supabase/functions/_shared/provider_guard.ts";
 import { parseRecipients, replyRecipients, buildReply, buildForward, composeProblem, participantLabel, activeMailProviders, normalizeSubject as uiNorm, attachmentProblem, statusLabel } from "./logic.js";
@@ -201,6 +201,23 @@ test("email-send: a chosen reply-to wins; EMAIL_THREAD_TOKENS=off disables the t
   assert.equal("reply_to" in JSON.parse(b.log.fetches[0].init.body), false);
 });
 
+test("replies can be routed to a separate inbound domain (when Zoho owns the root MX)", async () => {
+  assert.equal(withThreadToken("john@studiokairegi.com", CONV, "abc123.resend.app"), `john+k${threadToken(CONV)}@abc123.resend.app`);
+  assert.equal(cleanInboundDomain(" Mail.StudioKairegi.com "), "mail.studiokairegi.com");
+  assert.equal(cleanInboundDomain("x@y.com"), ""); assert.equal(cleanInboundDomain("nodot"), ""); assert.equal(cleanInboundDomain("a b.com"), "");
+  const { deps, log } = sendHarness({ env: { EMAIL_INBOUND_DOMAIN: "abc123.resend.app" } });
+  await handleSend(post(goodReq()), deps);
+  const sent = JSON.parse(log.fetches[0].init.body);
+  assert.equal(sent.from, "Studio Kairegi <john@studiokairegi.com>");                  // still sent from the verified domain
+  assert.match(sent.reply_to, /^john\+k[0-9a-f]{12}@abc123\.resend\.app$/);              // replies come back through Resend, not Zoho
+  const bad = sendHarness({ env: { EMAIL_INBOUND_DOMAIN: "not a domain" } });
+  await handleSend(post(goodReq()), bad.deps);
+  assert.match(JSON.parse(bad.log.fetches[0].init.body).reply_to, /@studiokairegi\.com$/);   // an invalid setting is ignored, never used
+  const hk = hookHarness({ env: { EMAIL_INBOUND_DOMAIN: "abc123.resend.app" }, lookup: { tokenConversationId: CONV, rfcMap: {}, candidates: [] } });
+  await hook(receivedEvent, hk.deps);
+  assert.equal(hk.log.inboundDomain, "abc123.resend.app");
+});
+
 test("email-send: double submit with the same key sends once", async () => {
   const { deps, log } = sendHarness();
   const r1 = await handleSend(post(goodReq()), deps);
@@ -264,7 +281,7 @@ function hookHarness(over = {}) {
       return ex ? "retry" : "new";
     },
     finishWebhook: async (id, status, error) => { log.webhooks.set(id, { ...log.webhooks.get(id), status, error }); },
-    findAccount: async (addrs) => (addrs.map(baseAddress).includes("john@studiokairegi.com") ? { id: ACC, organization_id: ORG, address: "john@studiokairegi.com" } : null),
+    findAccount: async (addrs, inbound) => { log.inboundDomain = inbound; return (addrs.map(baseAddress).includes("john@studiokairegi.com") ? { id: ACC, organization_id: ORG, address: "john@studiokairegi.com" } : null); },
     threadLookup: async (_o, q) => { log.lookup = q; return over.lookup || { tokenConversationId: null, rfcMap: {}, candidates: [] }; },
     uploadAttachment: async (path, bytes, type) => { log.uploads.push({ path, size: bytes.length, type }); },
     ingestInbound: async (p) => { log.ingested.push(p); return { duplicate: false, message_id: "IN1", conversation_id: p.conversation_id || "NEWCONV" }; },
