@@ -61,6 +61,7 @@ const FinanceModule = lazyWithSuspense(() => import("./finance/FinanceModule.jsx
 const PortfolioTab = lazyWithSuspense(() => import("./portfolio/PortfolioTab.jsx"), { label: "Loading portfolio…" });
 const PaymentsModule = lazyWithSuspense(() => import("./payments/PaymentsModule.jsx"), { label: "Loading payments…", logo: true });
 const IntelligenceModule = lazyWithSuspense(() => import("./intelligence/IntelligenceModule.jsx"), { label: "Loading intelligence…" });
+const InboxModule = lazyWithSuspense(() => import("./email/InboxModule.jsx"), { label: "Loading inbox…" });
 const ChatPage = lazyWithSuspense(() => import("./chat/ChatPage.jsx"), { label: "Loading studio chat…" });
 const DonutBreakdown = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "DonutBreakdown", label: "" });
 const HoursTrendChart = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "HoursTrendChart", label: "" });
@@ -3199,7 +3200,7 @@ export default function ShotTracker() {
   }, [userId, activeStudioOrganizationId]);
   // Direct entry (stale state, a remembered tab) can never land on CRM Intelligence unless allowed: fall back to the pipeline.
   useEffect(() => {
-    if (crmTab === "intelligence" && intelAccess === false) setCrmTab("pipeline");
+    if ((crmTab === "intelligence" || crmTab === "inbox") && intelAccess === false) setCrmTab("pipeline");
   }, [crmTab, intelAccess]);
   // Global activity notifications (bell in the header). Disposes its realtime channel/timers on sign-out.
   const notifications = useNotifications(userId);
@@ -6234,7 +6235,7 @@ export default function ShotTracker() {
 
       {view === "projects" && workspace === "leads" && (
         <div className="kf-secondary-tabs" style={styles.subTabRow} role="tablist" aria-label="CRM sections">
-          {[["pipeline", "Pipeline"], ["contacts", "Contacts"], ["portfolio", "Portfolio"], ...(canAccessIntelligence(intelAccess) ? [["intelligence", "Intelligence"]] : [])].map(([id, label]) => (
+          {[["pipeline", "Pipeline"], ["contacts", "Contacts"], ["portfolio", "Portfolio"], ...(canAccessIntelligence(intelAccess) ? [["inbox", "Inbox"], ["intelligence", "Intelligence"]] : [])].map(([id, label]) => (
             <button
               key={id}
               type="button"
@@ -6533,6 +6534,7 @@ export default function ShotTracker() {
         </>
       )}
 
+      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessIntelligence(intelAccess) && <InboxModule access={intelAccess} supabase={supabase} leads={leads} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
       {view === "projects" && workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
 
       {view === "projects" && workspace === "payments" && !canAccessPayments(settings) && <PaymentsRestricted />}

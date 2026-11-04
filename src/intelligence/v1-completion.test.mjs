@@ -119,7 +119,8 @@ test("migration order: Intelligence follows the newest pre-existing migration, s
   const stamp = (n) => n.split("_")[0];
   const intel = names.filter((n) => n.includes("_intelligence_")).sort();
   assert.equal(intel.length, 9);
-  const others = names.filter((n) => !n.includes("_intelligence_")).map(stamp).sort();
+  // The Resend email migration (20261110*) deliberately comes AFTER Intelligence: it extends it and is checked in src/email.
+  const others = names.filter((n) => !n.includes("_intelligence_") && !n.includes("_email_resend_")).map(stamp).sort();
   assert.ok(stamp(intel[0]) > others[others.length - 1], "Intelligence migrations come after every other migration");
   assert.deepEqual(intel.map(stamp), [...new Set(intel.map(stamp))]);
   assert.deepEqual(intel.map((n) => n.replace(/^\d+_/, "")), ["intelligence_authorization.sql", "intelligence_core_tables.sql", "intelligence_crm_notifications.sql", "intelligence_rpcs.sql", "intelligence_zoho_oauth.sql", "intelligence_v1_completion.sql", "intelligence_gmail_provider.sql", "intelligence_chat_actions.sql", "intelligence_discovery.sql"]);

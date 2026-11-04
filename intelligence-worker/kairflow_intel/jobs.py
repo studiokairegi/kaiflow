@@ -130,7 +130,13 @@ def h_draft(d: Deps, job):
     return r
 
 
+def _mail_paused(d: Deps) -> bool:
+    return bool(getattr(d.zoho, "disabled", False))
+
+
 def h_send(d: Deps, job):
+    if _mail_paused(d):
+        return {"sent": False, "reason": "mail_provider_paused"}     # stays approved; nothing is reserved or sent
     # Gentle pacing between sends so 30 a day never goes out as a burst.
     last = getattr(d, "_last_send", 0)
     gap = d.rand(45, 120)
@@ -142,6 +148,8 @@ def h_send(d: Deps, job):
 
 
 def h_sync_mail(d: Deps, job):
+    if _mail_paused(d):
+        return {"skipped": "mail provider paused"}
     st = d.rpc("intel_agent_settings", {})
     try:
         return mailops.sync_inbox(d.rpc, d.zoho, {st["sender_email"].lower()} if st["sender_email"] else set())
@@ -178,6 +186,8 @@ def h_chat(d: Deps, job):
 
 
 def h_reconcile(d: Deps, job):
+    if _mail_paused(d):
+        return {"skipped": "mail provider paused"}
     try:
         return mailops.reconcile(d.rpc, d.zoho)
     except PermanentError as exc:

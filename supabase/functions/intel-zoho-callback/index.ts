@@ -3,11 +3,15 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { encryptText, decryptText } from "../_shared/crypto.ts";
 import { handleCallback } from "../_shared/intel_zoho_logic.ts";
+import { providerPausedResponse } from "../_shared/provider_guard.ts";
+
+// PAUSED by flag (public.email_provider_flags): every request is refused with 410 until the flag is turned back on.
+const pauseGuard = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
 
 const key = () => Deno.env.get("INTEL_TOKEN_ENCRYPTION_KEY")!;   // a NEW secret: do not reuse the Drive key
 
-Deno.serve((req) =>
-  handleCallback(req, {
+Deno.serve(async (req) =>
+  (await providerPausedResponse(pauseGuard, "zoho")) ?? handleCallback(req, {
     env: (k) => Deno.env.get(k),
     createClient,
     service: createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } }),

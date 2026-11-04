@@ -47,11 +47,11 @@ test("App.jsx: Intelligence lives INSIDE the CRM module (a CRM sub-tab), not as 
   assert.ok(!/workspace === "intelligence"/.test(app), "no top-level 'intelligence' workspace remains");
   assert.ok(!/setWorkspace\("intelligence"\)/.test(app));
   // the CRM sub-tab bar offers it only to the authorized admin
-  assert.match(app, /\["portfolio", "Portfolio"\], \.\.\.\(canAccessIntelligence\(intelAccess\) \? \[\["intelligence", "Intelligence"\]\] : \[\]\)/);
+  assert.match(app, /\["portfolio", "Portfolio"\], \.\.\.\(canAccessIntelligence\(intelAccess\) \? \[\["inbox", "Inbox"\], \["intelligence", "Intelligence"\]\] : \[\]\)/);   // Inbox shares the same authorization rule
   // rendered only on the leads (CRM) workspace, on its own sub-tab, and only when allowed
   assert.match(app, /workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence\(intelAccess\) && <IntelligenceModule/);
   // a denied or revoked permission can never leave the user parked on that sub-tab
-  assert.match(app, /crmTab === "intelligence" && intelAccess === false\) setCrmTab\("pipeline"\)/);
+  assert.match(app, /crmTab === "intelligence" \|\| crmTab === "inbox"\) && intelAccess === false\) setCrmTab\("pipeline"\)/);
   // notification click-through opens CRM > Intelligence
   assert.match(app, /setWorkspace\("leads"\);\s*setCrmTab\("intelligence"\);/);
   assert.match(app, /loadIntelligenceAccess\(supabase, userId\)/);

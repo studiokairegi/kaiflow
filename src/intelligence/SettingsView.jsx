@@ -3,6 +3,8 @@ import { S, T, Btn, Pill, Banner, Field, Modal, Table, useBusy } from "../financ
 import { intelApi } from "./api.js";
 import { AUTONOMY, KB_KINDS, MAIL_PROVIDERS, fmtWhen, mailProviderName, missingKb, sourceState } from "./logic.js";
 import { Input, Muted, Section, Select, TextArea, useLoad, confirmAction } from "./kit.jsx";
+import { emailApi } from "../email/api.js";
+import { activeMailProviders } from "../email/logic.js";
 
 const ZOHO_DCS = [["com", "zoho.com (US)"], ["eu", "zoho.eu (Europe)"], ["in", "zoho.in (India)"], ["com.au", "zoho.com.au (Australia)"], ["jp", "zoho.jp (Japan)"], ["ca", "zoho.ca (Canada)"], ["sa", "zoho.sa (Saudi Arabia)"], ["com.cn", "zoho.com.cn (China)"]];
 
@@ -63,6 +65,10 @@ function AccessCard({ s, mail, supabase, onSaved }) {
   const [provider, setProvider] = useState(mail?.provider || "gmail");
   const [dc, setDc] = useState(mail?.data_center && mail.data_center !== "google" ? mail.data_center : "com");
   const { busy, error, run } = useBusy();
+  // Gmail and Zoho are PAUSED by a database flag (public.email_provider_flags); email runs through Resend. Unknown or still loading = paused.
+  const flags = useLoad(() => emailApi.providerFlags(supabase).catch(() => ({})), [supabase]);
+  const active = activeMailProviders(flags.data, MAIL_PROVIDERS);
+  useEffect(() => { if (active.length && !active.some(([k]) => k === provider)) setProvider(active[0][0]); }, [flags.data]);   // eslint-disable-line react-hooks/exhaustive-deps
   const connect = () => run(async () => {
     const fn = provider === "gmail" ? "intel-gmail-connect" : "intel-zoho-connect";
     const { data, error: e } = await supabase.functions.invoke(fn, { body: provider === "gmail" ? {} : { data_center: dc } });
@@ -80,8 +86,12 @@ function AccessCard({ s, mail, supabase, onSaved }) {
       </div>
       <div style={S.row}><b>Mailbox</b><Pill tone={connected ? "ok" : "warn"}>{mail?.status || "disconnected"}</Pill>{connected && <span style={{ color: T.muted }}>{mailProviderName(mail)}: {mail.mailbox}</span>}{mail?.last_sync_at && <span style={{ color: T.faint, fontSize: 12 }}>last sync {fmtWhen(mail.last_sync_at)}</span>}</div>
       {mail?.last_error && <Banner tone="bad">{mail.last_error}</Banner>}
+      {active.length === 0 ? (
+        <Muted>Gmail and Zoho Mail connections are paused. Email now runs through Resend: use CRM &gt; Inbox. Existing connections and history are kept.</Muted>
+      ) : (
+      <>
       <div style={S.row}>
-        <Select value={provider} onChange={(e) => setProvider(e.target.value)} style={{ maxWidth: 200 }} options={Object.entries(MAIL_PROVIDERS)} />
+        <Select value={provider} onChange={(e) => setProvider(e.target.value)} style={{ maxWidth: 200 }} options={active} />
         {provider === "zoho" && <Select value={dc} onChange={(e) => setDc(e.target.value)} style={{ maxWidth: 240 }} options={ZOHO_DCS} />}
         <Btn disabled={busy} onClick={connect}>{connected && mail.provider === provider ? `Reconnect ${MAIL_PROVIDERS[provider]}` : `Connect ${MAIL_PROVIDERS[provider]}`}</Btn>
         {connected && <Btn kind="danger" disabled={busy} onClick={() => confirmAction(`Disconnect ${mailProviderName(mail)}? Sending is switched off and the stored connection is deleted. Also remove KairFlow under connected apps / third-party access in your mail account.`) && run(async () => { await intelApi.disconnectMail(supabase); await onSaved(); })}>Disconnect</Btn>}
@@ -90,6 +100,8 @@ function AccessCard({ s, mail, supabase, onSaved }) {
       {provider === "gmail"
         ? <Muted>Use a dedicated Gmail account, not your personal one. Send and read-replies permissions are requested, nothing else. The sender email above must equal this Gmail address. Set KAIRFLOW_MAIL_PROVIDER=gmail on the worker.</Muted>
         : <Muted>Pick the data center your Zoho account lives on (the address you see when signed in to Zoho Mail). Only mail read and send permissions are requested. API access depends on your Zoho plan. Set KAIRFLOW_MAIL_PROVIDER=zoho on the worker.</Muted>}
+      </>
+      )}
     </Section>
   );
 }

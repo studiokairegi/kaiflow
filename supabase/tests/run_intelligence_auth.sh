@@ -30,6 +30,7 @@ run "$root/supabase/migrations/20261109090000_intelligence_authorization.sql"   
 for m in 20261109100000_intelligence_core_tables 20261109110000_intelligence_crm_notifications 20261109120000_intelligence_rpcs 20261109130000_intelligence_zoho_oauth 20261109140000_intelligence_v1_completion 20261109150000_intelligence_gmail_provider 20261109160000_intelligence_chat_actions 20261109170000_intelligence_discovery; do
   run "$root/supabase/migrations/$m.sql"; run "$root/supabase/migrations/$m.sql"   # applied twice: idempotent
 done
+run "$root/supabase/migrations/20261110090000_email_resend_core.sql"; run "$root/supabase/migrations/20261110090000_email_resend_core.sql"   # Resend email: applied twice, idempotent
 echo "migrations applied (authorization migration applied twice)"
 out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/intelligence_authorization.test.sql" 2>&1)"; code=$?
 echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
@@ -46,3 +47,7 @@ echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
 out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/intelligence_chat_actions.test.sql" 2>&1)"; code=$?
 echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
 [ $code -eq 0 ] || { echo "TEST FILE FAILED: intelligence_chat_actions.test.sql"; exit 1; }
+out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/email_resend.test.sql" 2>&1)"; code=$?
+echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
+[ $code -eq 0 ] || { echo "TEST FILE FAILED: email_resend.test.sql"; exit 1; }
+

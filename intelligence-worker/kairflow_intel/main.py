@@ -12,12 +12,18 @@ from .supa import SupabaseAgent
 from .apis import ApiClient
 from .gmail import GmailClient
 from .zoho import EdgeTokenProvider, ZohoClient
+from .mail_disabled import DisabledMail
 
 
 def build(cfg):
     supa = SupabaseAgent(cfg)
     # `Deps.zoho` is the historical name of the mail client; it is Gmail or Zoho depending on KAIRFLOW_MAIL_PROVIDER.
-    zoho = GmailClient(EdgeTokenProvider(cfg, supa, function="intel-gmail-token")) if cfg.mail_provider == "gmail" else ZohoClient(EdgeTokenProvider(cfg, supa))
+    if cfg.mail_provider == "none":
+        zoho = DisabledMail()          # Gmail and Zoho are paused: neither client is created and no token is requested
+    elif cfg.mail_provider == "gmail":
+        zoho = GmailClient(EdgeTokenProvider(cfg, supa, function="intel-gmail-token"))
+    else:
+        zoho = ZohoClient(EdgeTokenProvider(cfg, supa))
     return supa, Deps(cfg=cfg, rpc=supa.rpc, fetcher=Fetcher(cfg), zoho=zoho, llm=OllamaClient(cfg), api=ApiClient(cfg))
 
 
