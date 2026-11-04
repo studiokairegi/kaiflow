@@ -117,7 +117,7 @@ test("migration order: Intelligence follows the newest pre-existing migration, s
   const dir = new URL("../../supabase/migrations/", import.meta.url);
   const names = readdirSync(dir).filter((n) => n.endsWith(".sql"));
   const stamp = (n) => n.split("_")[0];
-  const intel = names.filter((n) => n.includes("_intelligence_")).sort();
+  const intel = names.filter((n) => n.startsWith("20261109") && n.includes("_intelligence_")).sort();
   assert.equal(intel.length, 9);
   // The Resend email migration (20261110*) deliberately comes AFTER Intelligence: it extends it and is checked in src/email.
   const others = names.filter((n) => !n.includes("_intelligence_") && !n.includes("_email_resend_")).map(stamp).sort();

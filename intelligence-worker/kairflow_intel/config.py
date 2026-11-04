@@ -26,7 +26,7 @@ class Config:
     max_fetch_bytes: int = 1_500_000
     per_host_delay: float = 2.0
     contact_url: str = ""
-    mail_provider: str = "none"       # "none" (default: Gmail and Zoho paused), or "zoho"/"gmail" to resume that provider
+    mail_provider: str = "none"       # none (safe default), zoho, gmail, or resend
 
     @property
     def user_agent(self) -> str:
@@ -77,8 +77,8 @@ def load(env: dict | None = None) -> Config:
         contact_url=e.get("KAIRFLOW_CONTACT_URL") or "",
         mail_provider=(e.get("KAIRFLOW_MAIL_PROVIDER") or "none").strip().lower(),
     )
-    if cfg.mail_provider not in ("none", "zoho", "gmail"):
-        raise ConfigError("KAIRFLOW_MAIL_PROVIDER must be none, zoho or gmail")
+    if cfg.mail_provider not in ("none", "zoho", "gmail", "resend"):
+        raise ConfigError("KAIRFLOW_MAIL_PROVIDER must be none, zoho, gmail or resend")
     if not cfg.supabase_url.startswith("https://"):
         raise ConfigError("KAIRFLOW_SUPABASE_URL must be https")
     _loopback_only(cfg.ollama_url)

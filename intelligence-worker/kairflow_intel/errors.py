@@ -1,5 +1,5 @@
 class TransientError(Exception):
-    """Worth retrying later: network, 429/5xx, Ollama or Zoho temporarily down."""
+    """Worth retrying later: network, 429/5xx, Ollama or a mail provider temporarily unavailable."""
 
 
 class PermanentError(Exception):

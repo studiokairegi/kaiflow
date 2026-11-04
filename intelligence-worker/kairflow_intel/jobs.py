@@ -136,18 +136,26 @@ def _mail_paused(d: Deps) -> bool:
 
 def h_send(d: Deps, job):
     if _mail_paused(d):
-        return {"sent": False, "reason": "mail_provider_paused"}     # stays approved; nothing is reserved or sent
+        return {"sent": False, "reason": "mail_provider_paused"}
+
+    # Fail closed: never send if settings cannot confirm sending is enabled.
+    st = d.rpc("intel_agent_settings", {})
+    if st.get("kill_switch", True):
+        return {"sent": False, "reason": "kill_switch"}
+
     # Gentle pacing between sends so 30 a day never goes out as a burst.
     last = getattr(d, "_last_send", 0)
     gap = d.rand(45, 120)
     if d.clock() - last < gap:
         d.sleep(max(0, gap - (d.clock() - last)))
+
     r = mailops.send_message(d.rpc, d.zoho, job["payload"]["message_id"])
     d._last_send = d.clock()
     return r
 
-
 def h_sync_mail(d: Deps, job):
+    if getattr(d.zoho, "provider", "") == "resend":
+        return {"skipped": "Resend inbound is handled by the signed Supabase webhook"}
     if _mail_paused(d):
         return {"skipped": "mail provider paused"}
     st = d.rpc("intel_agent_settings", {})

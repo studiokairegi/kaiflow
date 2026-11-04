@@ -1,7 +1,7 @@
 # KairFlow Intelligence worker (Windows)
 
 A background process on your own computer. It signs in to Supabase as its own limited **agent account**, reads public pages,
-asks your **local Ollama** model to read and draft, and talks to Zoho Mail through your server-side connection. It never holds
+asks your **local Ollama** model to read and draft, and talks to the selected mail provider through server-side connections. Resend credentials remain in Supabase Edge Function secrets. It never holds
 the Supabase service-role key or any Zoho secret. It can only call `intel_agent_*` functions (enforced here and in the database).
 
 ## 1. One-time setup
@@ -17,7 +17,16 @@ the Supabase service-role key or any Zoho secret. It can only call `intel_agent_
    password, prefer Windows Credential Manager: `pip install keyring`, then
    `python -c "import keyring; keyring.set_password('kairflow-intelligence','AGENT_EMAIL','PASSWORD')"` and leave `KAIRFLOW_AGENT_PASSWORD` unset.
 5. Check everything without sending anything: `python -m kairflow_intel selftest`
-   (`selftest zoho` is read-only: it lists Zoho folders, nothing else).
+   (`selftest zoho` is read-only: it lists Zoho folders, nothing else. `selftest resend` checks local provider selection only; it does not send email.)
+
+## Resend provider (server-side only)
+
+- Keep `KAIRFLOW_MAIL_PROVIDER=none` until the local migration has been reviewed/applied and both Intelligence Edge Functions have been deployed.
+- Configure `RESEND_API_KEY` and `RESEND_WEBHOOK_SECRET` as Supabase Edge Function secrets; never add them to the worker environment.
+- Configure a Resend webhook subscription for `email.received` to `/functions/v1/intel-resend-webhook`. Keep the existing `/functions/v1/resend-webhook` subscription for the normal Inbox.
+- The worker calls `/functions/v1/intel-resend-send` using its limited agent JWT. That function loads the reserved/sending message from the agent RPC and refuses sends while the database kill switch is ON.
+- Resend has no Sent mailbox. A saved Resend email id can be checked through the server-side verification proxy. If the id was not saved or cannot be verified, the message remains `unknown` for manual resolution; it is never automatically resent.
+- `python -m kairflow_intel selftest resend` is read-only and does not contact Resend or send a message.
 
 ## Agent Chat and existing leads
 The worker also answers Agent Chat messages and prepares follow-up drafts for existing CRM leads you bring in. Neither can send email: sending is only ever
@@ -35,8 +44,7 @@ done from an approved message in the Outreach tab, subject to the daily limits, 
   `nssm set KairFlowIntelligence AppDirectory C:\path\intelligence-worker`
   `nssm set KairFlowIntelligence AppExit Default Restart`
   Also turn off sleep and hibernate while plugged in. A crash, reboot or lost connection is safe: the job queue lives in Supabase,
-  unfinished jobs return to the queue when their lease expires, and a message that might have been sent is **never** sent again
-  (the worker checks Zoho's Sent folder first; if it cannot tell, it stays "Delivery unverified" until you decide).
+  unfinished jobs return to the queue when their lease expires, and a message that might have been sent is **never** sent again. Mailbox providers use their Sent folder; Resend uses a saved provider id through the server-side verification proxy. If delivery cannot be verified, it stays "Delivery unverified" until you decide.
 
 ## 3. Phase 0 feasibility spike (once, optional but recommended)
 `python spikes/phase0_feasibility.py` makes about 60 small, polite, read-only requests to Wikidata, AniList, GDELT and Common Crawl, checks robots.txt on sample studios, and writes `phase0_report.json`. It needs no keys and does not touch Supabase.
@@ -45,5 +53,5 @@ done from an approved message in the Outreach tab, subject to the daily limits, 
 `python -m unittest discover -s tests -t .`
 
 ## What is NOT verified here
-The Zoho Mail endpoints in `kairflow_intel/zoho.py` follow Zoho's public documentation but have not been run against a real account.
+The Zoho Mail endpoints in `kairflow_intel/zoho.py` follow Zoho's public documentation but have not been run against a real account. The Resend Intelligence transport uses `intel-resend-send` and `intel-resend-webhook`; its live API behavior must be verified against the actual Resend account before enabling it.
 Run `selftest zoho` after connecting and adjust response parsing in that one file if anything differs.

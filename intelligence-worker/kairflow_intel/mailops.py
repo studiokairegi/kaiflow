@@ -1,9 +1,8 @@
-"""Sending and reading mail with crash-safe, never-duplicating semantics.
+"""Provider-neutral crash-safe mail operations.
 
-Send is two-phase and the database is the arbiter:
-  reserve (kill switch, caps, suppression, compliance all checked atomically)  ->  mark_sending  ->  Zoho  ->  confirm.
-If the process dies or the network drops after Zoho may have accepted the message, the message stays `sending`/`unknown`.
-It is NEVER resent: reconcile() looks for our token in Zoho's Sent folder and only then settles it."""
+The database reserves and marks a message before the provider call. Uncertain outcomes
+are never resent. Mailbox providers reconcile against Sent; Resend reconciles only by a
+saved provider id through its server-side verification proxy, otherwise stays unknown."""
 from __future__ import annotations
 
 import re
@@ -47,8 +46,10 @@ def send_message(rpc, zoho, message_id: str) -> dict:
         return {"sent": False, "reason": "not_reserved"}
     try:
         parent = parent_zoho_id(rpc, m)
-        out = zoho.send(m["from_email"], m["to_email"], m["subject"], with_ref(m["body_text"], m["token"]),
-                        reply_to_zoho_id=parent, in_reply_to=m.get("in_reply_to") or None, references=m.get("references_ids") or None)
+        send_args = {"reply_to_zoho_id": parent, "in_reply_to": m.get("in_reply_to") or None, "references": m.get("references_ids") or None}
+        if getattr(zoho, "provider", "") == "resend":
+            send_args["message_id"] = m["id"]
+        out = zoho.send(m["from_email"], m["to_email"], m["subject"], with_ref(m["body_text"], m["token"]), **send_args)
     except MailRejected as exc:                       # definitive: the provider said no, nothing was sent
         permanent = bool(re.search(r"invalid|not a valid|mailbox|recipient", str(exc), re.I))
         rpc("intel_agent_fail_send", {"p_message_id": m["id"], "p_error": str(exc)[:300], "p_permanent": permanent})
@@ -56,9 +57,17 @@ def send_message(rpc, zoho, message_id: str) -> dict:
     except (TransientError, Exception) as exc:        # outcome unknown: the message may have gone out
         rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": f"{type(exc).__name__}: {exc}"[:300]})
         return {"sent": False, "reason": "unknown"}
-    rfc = out.get("rfc_message_id") or ""               # Gmail returns the Message-ID we generated; Zoho does not
+    rfc = out.get("rfc_message_id") or ""
+    if getattr(zoho, "provider", "") == "resend":
+        try:
+            saved = rpc("intel_agent_record_resend_acceptance", {"p_message_id": m["id"], "p_provider_message_id": out["zoho_message_id"]})
+            if not saved:
+                raise RuntimeError("provider id was not persisted")
+        except Exception as exc:
+            rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": f"Resend accepted but provider id could not be saved: {type(exc).__name__}"[:300]})
+            return {"sent": False, "reason": "unknown"}
     try:
-        found = None if rfc else zoho.find_sent(m["token"], m["to_email"], int(time.time() * 1000) - 600_000)
+        found = None if rfc or getattr(zoho, "provider", "") == "resend" else zoho.find_sent(m["token"], m["to_email"], int(time.time() * 1000) - 600_000)
         rfc = rfc or (found or {}).get("rfc_message_id", "")
     except Exception:
         pass                                           # headers are an optional extra: the token still matches replies
@@ -71,19 +80,35 @@ def send_message(rpc, zoho, message_id: str) -> dict:
 
 
 def reconcile(rpc, zoho) -> dict:
-    """Settle messages stuck in sending/unknown by checking Zoho's Sent folder. Never resends."""
+    """Settle unresolved sends using provider-specific evidence. Never resends."""
     counts = {"confirmed": 0, "absent": 0, "left": 0}
     for m in rpc("intel_agent_stale_sends", {"p_older_than_seconds": 600}) or []:
         try:
-            since = int((datetime.fromisoformat(m["reserved_at"].replace("Z", "+00:00")).timestamp() - 300) * 1000) if m.get("reserved_at") else 0
-            found = zoho.find_sent(m["token"], m["to_email"], since)
-        except Exception:
+            if getattr(zoho, "provider", "") == "resend":
+                provider_id = m.get("provider_message_id") or m.get("zoho_message_id")
+                if not provider_id:
+                    rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": "Resend may have accepted the message, but no provider id was saved; manual resolution required"})
+                    counts["left"] += 1
+                    continue
+                found = zoho.verify_sent(provider_id, m["id"])
+            else:
+                since = int((datetime.fromisoformat(m["reserved_at"].replace("Z", "+00:00")).timestamp() - 300) * 1000) if m.get("reserved_at") else 0
+                found = zoho.find_sent(m["token"], m["to_email"], since)
+        except Exception as exc:
+            if getattr(zoho, "provider", "") == "resend":
+                try:
+                    rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": f"Resend verification unavailable: {type(exc).__name__}; manual resolution required"})
+                except Exception:
+                    pass
             counts["left"] += 1                        # cannot verify: stays unknown, administrator is notified
             continue
         if found:
             rpc("intel_agent_confirm_send", {"p_message_id": m["id"], "p_zoho_message_id": found["zoho_message_id"], "p_rfc_message_id": found["rfc_message_id"],
                                              "p_thread_id": found["thread_id"], "p_sent_at": _iso(found["time_ms"])})
             counts["confirmed"] += 1
+        elif getattr(zoho, "provider", "") == "resend":
+            rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": "Resend provider id could not be verified; manual resolution required"})
+            counts["left"] += 1
         else:
             rpc("intel_agent_fail_send", {"p_message_id": m["id"], "p_error": "verified absent from Sent folder", "p_permanent": False})
             counts["absent"] += 1
