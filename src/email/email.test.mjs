@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
   parseAddress, normalizeSubject, buildThreadHeaders, withThreadToken, extractThreadToken, baseAddress, threadToken, parseMessageIds, pickConversation,
-  verifySvixSignature, cleanInboundDomain, validateSendRequest, buildResendPayload, sendViaResend, handleSend, handleWebhook, statusForEvent, htmlToText, safeFileName,
+  verifySvixSignature, cleanInboundDomain, resolveInboundAccount, routingRecipients, safeSegment, readCapped, validateSendRequest, buildResendPayload, sendViaResend, handleSend, handleWebhook, statusForEvent, htmlToText, safeFileName,
 } from "../../supabase/functions/_shared/email_resend_logic.ts";
+import { normalizeReceivedEmail, normalizeAttachment, normalizeHeaders } from "../../supabase/functions/_shared/email_resend_logic.ts";
 import { providerPausedResponse } from "../../supabase/functions/_shared/provider_guard.ts";
+import { makeWebhookStore } from "../../supabase/functions/_shared/email_resend_store.ts";
 import { parseRecipients, replyRecipients, buildReply, buildForward, composeProblem, participantLabel, activeMailProviders, normalizeSubject as uiNorm, attachmentProblem, statusLabel } from "./logic.js";
 
 const ORG = "20000000-0000-0000-0000-00000000000a";
@@ -270,22 +272,44 @@ test("email-send: attachments are copied after sending and a storage failure can
 });
 
 // ---------------------------------------------------------------- handleWebhook end to end with a fake store
-function hookHarness(over = {}) {
-  const log = { webhooks: new Map(), ingested: [], uploads: [], events: [], fetches: [] };
-  const store = {
-    providerEnabled: async () => over.enabled ?? true,
-    beginWebhook: async (id, type) => {
-      const ex = log.webhooks.get(id);
-      if (ex && ["processed", "ignored"].includes(ex.status)) return "done";
-      log.webhooks.set(id, { type, status: "received" });
-      return ex ? "retry" : "new";
+/** In-memory model of public.email_webhook_claim / email_webhook_finish (same states and rules as the SQL). JS is single threaded, so each call is atomic like the row lock. */
+function claimModel(nowFn, { leaseMs = 300_000, max = 12 } = {}) {
+  const rows = new Map();
+  let seq = 0;
+  return {
+    rows,
+    claim(id, type) {
+      const r = rows.get(id);
+      if (!r) { const row = { type, status: "processing", attempts: 1, token: `t${++seq}`, lease: nowFn() + leaseMs, error: "" }; rows.set(id, row); return { state: "claimed", token: row.token, attempts: 1 }; }
+      if (["processed", "ignored"].includes(r.status)) return { state: "done" };
+      if (r.status === "processing" && r.lease > nowFn()) return { state: "busy" };
+      if (r.attempts >= max) { r.status = "failed"; r.token = null; return { state: "exhausted" }; }
+      r.status = "processing"; r.attempts++; r.token = `t${++seq}`; r.lease = nowFn() + leaseMs;
+      return { state: "claimed", token: r.token, attempts: r.attempts };
     },
-    finishWebhook: async (id, status, error) => { log.webhooks.set(id, { ...log.webhooks.get(id), status, error }); },
-    findAccount: async (addrs, inbound) => { log.inboundDomain = inbound; return (addrs.map(baseAddress).includes("john@studiokairegi.com") ? { id: ACC, organization_id: ORG, address: "john@studiokairegi.com" } : null); },
-    threadLookup: async (_o, q) => { log.lookup = q; return over.lookup || { tokenConversationId: null, rfcMap: {}, candidates: [] }; },
+    finish(id, token, status, error = "") {
+      const r = rows.get(id);
+      if (!r || !token || r.status !== "processing" || r.token !== token) return false;
+      Object.assign(r, { status, error, token: null, lease: null });
+      return true;
+    },
+  };
+}
+
+function hookHarness(over = {}) {
+  const clock = over.clock || (() => NOW);
+  const model = claimModel(clock, over.claimOpts);
+  const log = { webhooks: model.rows, ingested: [], uploads: [], events: [], fetches: [], finishCalls: [] };
+  const accountsByAddress = over.accounts || { "john@studiokairegi.com": [{ id: ACC, organization_id: ORG, address: "john@studiokairegi.com" }] };
+  const store = {
+    providerEnabled: async () => { if (over.flagError) throw new Error("flag read failed"); return over.enabled ?? true; },
+    claimWebhook: async (id, type) => { if (over.claimError) throw new Error("claim failed"); return model.claim(id, type); },
+    finishWebhook: async (id, token, status, error) => { log.finishCalls.push([id, status]); if (over.finishError) throw new Error("finish failed"); return model.finish(id, token, status, error); },
+    accountsForRecipient: async (addr, inbound) => { log.inboundDomain = inbound; if (over.accountError) throw new Error("account lookup failed"); return accountsByAddress[baseAddress(addr)] || []; },
+    threadLookup: async (orgId, accountId, q) => { log.lookup = q; log.lookupScope = [orgId, accountId]; if (over.threadError) throw new Error("thread lookup failed"); return over.lookup || { tokenConversationId: null, rfcMap: {}, candidates: [] }; },
     uploadAttachment: async (path, bytes, type) => { log.uploads.push({ path, size: bytes.length, type }); },
-    ingestInbound: async (p) => { log.ingested.push(p); return { duplicate: false, message_id: "IN1", conversation_id: p.conversation_id || "NEWCONV" }; },
-    applyDeliveryEvent: async (a) => { log.events.push(a); return over.eventFound ?? true; },
+    ingestInbound: async (p) => { if (over.ingestError) throw new Error("ingest failed"); log.ingested.push(p); return { duplicate: false, message_id: "IN1", conversation_id: p.conversation_id || "NEWCONV" }; },
+    applyDeliveryEvent: async (a) => { log.events.push(a); return over.applyResult || { found: over.eventFound ?? true }; },
   };
   const received = { id: "rx_1", to: ["John <john+kaaaaaaaa1111@studiokairegi.com>"], cc: [], bcc: [], from: "Ada <ada@client.com>", subject: "Re: Quote", message_id: "<abc@client.com>",
     created_at: new Date(NOW).toISOString(), html: "<p>Thanks!</p>", text: null,
@@ -298,11 +322,11 @@ function hookHarness(over = {}) {
     if (url === "https://files.example/att1") return new Response(new Uint8Array([1, 2, 3, 4]));
     return json({ message: "unexpected " + url }, 404);
   });
-  return { deps: { env: (k) => ({ RESEND_API_KEY: "re_secret_key", RESEND_WEBHOOK_SECRET: SECRET, ...(over.env || {}) })[k], fetch: fetchFn, now: () => NOW, sleep: noSleep, store }, log };
+  return { model, deps: { env: (k) => ({ RESEND_API_KEY: "re_secret_key", RESEND_WEBHOOK_SECRET: SECRET, ...(over.env || {}) })[k], fetch: fetchFn, now: clock, sleep: noSleep, store }, log };
 }
 async function hook(event, deps, opts = {}) {
   const body = JSON.stringify(event);
-  const headers = opts.headers || (await sign(body, { id: opts.id || "msg_1" }));
+  const headers = opts.headers || (await sign(body, { id: opts.id || "msg_1", ts: opts.ts }));
   return handleWebhook(new Request("https://x/functions/v1/resend-webhook", { method: "POST", headers, body }), deps);
 }
 const receivedEvent = { type: "email.received", created_at: new Date(NOW).toISOString(), data: { email_id: "rx_1", to: ["john+kaaaaaaaa1111@studiokairegi.com"], attachments: [{ id: "att1" }] } };
@@ -437,12 +461,14 @@ test("the migration seeds Resend on and Gmail/Zoho off, never flips an existing 
   assert.match(sql, /svix_id text not null unique/);
 });
 
-test("the Resend migration follows every Intelligence migration", () => {
+test("the Resend migrations follow every Intelligence migration and use unique new timestamps", () => {
   const names = fs.readdirSync(new URL("../../supabase/migrations/", import.meta.url)).filter((n) => n.endsWith(".sql"));
   const intelLast = names.filter((n) => n.includes("_intelligence_")).map((n) => n.split("_")[0]).sort().at(-1);
   const email = names.filter((n) => n.includes("_email_resend_")).map((n) => n.split("_")[0]);
-  assert.equal(email.length, 1);
-  assert.ok(email[0] > intelLast);
+  assert.ok(email.length >= 2);
+  assert.ok(email.every((e) => e > intelLast));
+  assert.equal(new Set(email).size, email.length, "email migration timestamps must be unique");
+  for (const e of email) assert.equal(names.filter((n) => n.startsWith(e + "_")).length, 1, `timestamp ${e} is used by exactly one file`);
 });
 
 test("browser code never contains provider secrets and Settings offers only providers the database flag enabled", () => {
@@ -489,4 +515,443 @@ test("the Inbox is wired into the CRM tabs only for people allowed into Intellig
   assert.match(app, /canAccessIntelligence\(intelAccess\) \? \[\["inbox", "Inbox"\], \["intelligence", "Intelligence"\]\]/);
   assert.match(app, /crmTab === "inbox" && canAccessIntelligence\(intelAccess\) && <InboxModule/);
   assert.match(app, /\(crmTab === "intelligence" \|\| crmTab === "inbox"\) && intelAccess === false/);
+});
+
+// =================================================================================================================
+// HARDENING: organization isolation, atomic claims, database errors, delivery rules, signatures, attachments
+// =================================================================================================================
+const mkAcc = (id, org, address) => ({ id, organization_id: org, address });
+
+test("account resolution is deterministic and never crosses an organization", () => {
+  const a1 = mkAcc("a1", "orgA", "john@x.com"), b1 = mkAcc("b1", "orgB", "john@x.com"), a2 = mkAcc("a2", "orgA", "sales@x.com");
+  assert.deepEqual(resolveInboundAccount([]), { status: "none" });
+  assert.deepEqual(resolveInboundAccount([[], []]), { status: "none" });
+  assert.equal(resolveInboundAccount([[a1]]).account.id, "a1");
+  assert.equal(resolveInboundAccount([[a1], [a2]]).account.id, "a1");        // same organization: the first recipient wins, always the same answer
+  assert.equal(resolveInboundAccount([[a2], [a1]]).account.id, "a2");
+  assert.equal(resolveInboundAccount([[a1, a1]]).account.id, "a1");          // the same account twice is not ambiguity
+  assert.equal(resolveInboundAccount([[a1, b1]]).status, "ambiguous");       // one recipient, two organizations
+  assert.equal(resolveInboundAccount([[a1], [b1]]).status, "ambiguous");     // two recipients, two organizations
+  assert.equal(resolveInboundAccount([[a1, a2]]).status, "ambiguous");       // one recipient, two accounts: never guessed
+});
+
+test("routing recipients are validated, plus-tags removed, de-duplicated and capped", () => {
+  assert.deepEqual(routingRecipients(["John+k1@X.com", "john@x.com", "not-an-email", "a b@x.com"], ["c@y.org"]), ["john@x.com", "c@y.org"]);
+  assert.equal(routingRecipients(Array.from({ length: 40 }, (_, i) => `u${i}@x.com`)).length, 20);
+  assert.equal(safeSegment("../a/b c"), "___a_b_c");
+  assert.equal(safeSegment(""), "x");
+});
+
+// A tiny in-memory Supabase stand-in: enough query-builder surface for the store, with injectable errors.
+function fakeService(tables, { rpc = {}, errors = {} } = {}) {
+  const calls = [];
+  const like = (pat) => new RegExp("^" + pat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%/g, ".*") + "$");
+  const from = (name) => {
+    const q = { filters: [], lim: null };
+    const run = () => {
+      if (errors[name]) return { data: null, error: { message: errors[name] } };
+      const rows = (tables[name] || []).filter((r) => q.filters.every((f) => f(r)));
+      return { data: q.lim == null ? rows : rows.slice(0, q.lim), error: null };
+    };
+    const api = {
+      select: () => api,
+      eq: (c, v) => { calls.push([name, "eq", c, v]); q.filters.push((r) => r[c] === v); return api; },
+      neq: (c, v) => { q.filters.push((r) => r[c] !== v); return api; },
+      in: (c, vs) => { q.filters.push((r) => vs.includes(r[c])); return api; },
+      like: (c, pat) => { calls.push([name, "like", c, pat]); q.filters.push((r) => like(pat).test(String(r[c]))); return api; },
+      order: () => api,
+      limit: (n) => { q.lim = n; return api; },
+      maybeSingle: async () => { const r = run(); return { data: r.data?.[0] ?? null, error: r.error }; },
+      then: (res, rej) => Promise.resolve(run()).then(res, rej),
+    };
+    return api;
+  };
+  const rpcFn = async (name, args) => { calls.push(["rpc", name, args]); const h = rpc[name]; return typeof h === "function" ? h(args) : (h ?? { data: null, error: null }); };
+  return { from, rpc: rpcFn, calls, storage: { from: () => ({ upload: async () => ({ data: {}, error: null }) }) } };
+}
+const ORG_B = "20000000-0000-0000-0000-00000000000b";
+const ACC_B = "30000000-0000-0000-0000-0000000000bb";
+const accountTable = () => [
+  { id: ACC, organization_id: ORG, address: "john@studiokairegi.com", status: "active", provider: "resend", is_default: true },
+  { id: "30000000-0000-0000-0000-0000000000c1", organization_id: ORG_B, address: "paused@studiokairegi.com", status: "paused", provider: "resend", is_default: true },
+  { id: ACC_B, organization_id: ORG_B, address: "sales@studiokairegi.com", status: "active", provider: "resend", is_default: true },
+];
+
+test("store: an inbox is found only by exact address; no domain catch-all and no default-account fallback", async () => {
+  const store = makeWebhookStore(fakeService({ email_accounts: accountTable() }));
+  assert.deepEqual((await store.accountsForRecipient("John+kabc@StudioKairegi.com", "")).map((a) => a.id), [ACC]);   // plus-tag removed
+  assert.deepEqual(await store.accountsForRecipient("anyone@studiokairegi.com", ""), []);                           // another organization's default is never used
+  assert.deepEqual(await store.accountsForRecipient("paused@studiokairegi.com", ""), []);                            // inactive accounts receive nothing
+  assert.deepEqual(await store.accountsForRecipient("nobody@elsewhere.org", ""), []);
+});
+
+test("store: on the inbound domain the same local part matches, and two matches are reported (so resolution is ambiguous), never one picked", async () => {
+  const tables = { email_accounts: [...accountTable(), { id: "30000000-0000-0000-0000-0000000000d1", organization_id: ORG_B, address: "john@other.com", status: "active", provider: "resend", is_default: false }] };
+  const store = makeWebhookStore(fakeService(tables));
+  const found = await store.accountsForRecipient("john+k1@abc.resend.app", "abc.resend.app");
+  assert.equal(found.length, 2);
+  assert.equal(resolveInboundAccount([found]).status, "ambiguous");
+  const unique = await makeWebhookStore(fakeService({ email_accounts: accountTable() })).accountsForRecipient("sales+k1@abc.resend.app", "abc.resend.app");
+  assert.deepEqual(unique.map((a) => a.id), [ACC_B]);
+  assert.deepEqual(await makeWebhookStore(fakeService({ email_accounts: accountTable() })).accountsForRecipient("sales@abc.resend.app", ""), []);   // no inbound domain configured: no local-part matching
+  assert.deepEqual(await makeWebhookStore(fakeService({ email_accounts: accountTable() })).accountsForRecipient("sa_es@abc.resend.app", "abc.resend.app"), []);   // LIKE wildcards cannot widen the match
+});
+
+test("store: thread lookups are scoped to the organization AND the account", async () => {
+  const tables = {
+    email_messages: [
+      { rfc_message_id: "<x@y>", conversation_id: "C-A", organization_id: ORG, account_id: ACC },
+      { rfc_message_id: "<x@y>", conversation_id: "C-B", organization_id: ORG_B, account_id: ACC_B },
+    ],
+    email_conversations: [
+      { id: "C-A", organization_id: ORG, account_id: ACC, normalized_subject: "quote", last_message_at: "2026-11-01T00:00:00Z" },
+      { id: "C-B", organization_id: ORG_B, account_id: ACC_B, normalized_subject: "quote", last_message_at: "2026-11-02T00:00:00Z" },
+    ],
+    email_participants: [{ conversation_id: "C-A", email: "ada@x.com" }, { conversation_id: "C-B", email: "ada@x.com" }],
+  };
+  const svc = fakeService(tables, { rpc: { email_find_conversation_by_token: (a) => ({ data: a.p_account_id === ACC ? "C-A" : null, error: null }) } });
+  const store = makeWebhookStore(svc);
+  const q = { token: "aaaaaaaaaaaa", rfcIds: ["<x@y>"], normalizedSubject: "quote", sender: "ada@x.com" };
+  const a = await store.threadLookup(ORG, ACC, q);
+  assert.deepEqual(a.rfcMap, { "<x@y>": "C-A" });
+  assert.deepEqual(a.candidates.map((c) => c.conversation_id), ["C-A"]);
+  assert.equal(a.tokenConversationId, "C-A");
+  const b = await store.threadLookup(ORG_B, ACC_B, q);
+  assert.deepEqual(b.rfcMap, { "<x@y>": "C-B" });
+  assert.equal(b.tokenConversationId, null);
+  const wrongAccount = await store.threadLookup(ORG, "30000000-0000-0000-0000-0000000000ee", q);
+  assert.deepEqual(wrongAccount.rfcMap, {}); assert.deepEqual(wrongAccount.candidates, []);
+  const tokenCall = svc.calls.find((c) => c[0] === "rpc" && c[1] === "email_find_conversation_by_token");
+  assert.deepEqual([tokenCall[2].p_organization_id, tokenCall[2].p_account_id], [ORG, ACC]);
+});
+
+test("store: every database error is raised, never read as an empty result", async () => {
+  const fails = (svc, fn, re) => assert.rejects(() => fn(makeWebhookStore(svc)), re);
+  await fails(fakeService({}, { rpc: { email_provider_enabled: { data: null, error: { message: "db down" } } } }), (s) => s.providerEnabled(), /provider flag/);
+  await fails(fakeService({}, { rpc: { email_webhook_claim: { data: null, error: { message: "db down" } } } }), (s) => s.claimWebhook("m", "t", {}), /webhook claim/);
+  await fails(fakeService({}, { rpc: { email_webhook_claim: { data: { state: "weird" }, error: null } } }), (s) => s.claimWebhook("m", "t", {}), /unexpected answer/);
+  await fails(fakeService({}, { rpc: { email_webhook_finish: { data: null, error: { message: "db down" } } } }), (s) => s.finishWebhook("m", "tok", "processed"), /webhook finish/);
+  await fails(fakeService({}, { errors: { email_accounts: "db down" } }), (s) => s.accountsForRecipient("john@studiokairegi.com", ""), /account lookup/);
+  await fails(fakeService({}, { errors: { email_messages: "db down" } }), (s) => s.threadLookup(ORG, ACC, { token: null, rfcIds: ["<a@b>"], normalizedSubject: "", sender: "x@y.com" }), /thread headers/);
+  await fails(fakeService({}, { errors: { email_conversations: "db down" } }), (s) => s.threadLookup(ORG, ACC, { token: null, rfcIds: [], normalizedSubject: "q", sender: "x@y.com" }), /thread subject/);
+  await fails(fakeService({}, { rpc: { email_find_conversation_by_token: { data: null, error: { message: "db down" } } } }), (s) => s.threadLookup(ORG, ACC, { token: "aaaaaaaaaaaa", rfcIds: [], normalizedSubject: "", sender: "x@y.com" }), /thread token/);
+  await fails(fakeService({}, { rpc: { email_ingest_inbound: { data: null, error: { message: "Inbound account is not active" } } } }), (s) => s.ingestInbound({}), /not active/);
+  await fails(fakeService({}, { rpc: { email_apply_delivery_event: { data: null, error: { message: "Unsupported delivery status" } } } }), (s) => s.applyDeliveryEvent({}), /Unsupported/);
+  const ok = makeWebhookStore(fakeService({}, { rpc: { email_webhook_finish: { data: { ok: false }, error: null }, email_webhook_claim: { data: { state: "claimed", token: "T", attempts: 2 }, error: null } } }));
+  assert.equal(await ok.finishWebhook("m", "tok", "processed"), false);                       // a lost claim is reported, not hidden
+  assert.deepEqual(await ok.claimWebhook("m", "t", {}), { state: "claimed", token: "T", attempts: 2 });
+});
+
+test("webhook + real store: an address owned by two organizations is ignored, nothing is stored", async () => {
+  const tables = { email_accounts: [
+    { id: ACC, organization_id: ORG, address: "john@studiokairegi.com", status: "active", provider: "resend" },
+    { id: ACC_B, organization_id: ORG_B, address: "john@studiokairegi.com", status: "active", provider: "resend" },
+  ] };
+  const claims = claimModel(() => NOW);
+  const svc = fakeService(tables, { rpc: {
+    email_provider_enabled: { data: true, error: null },
+    email_webhook_claim: (a) => ({ data: claims.claim(a.p_svix_id, a.p_type), error: null }),
+    email_webhook_finish: (a) => ({ data: { ok: claims.finish(a.p_svix_id, a.p_token, a.p_status, a.p_error) }, error: null }),
+    email_ingest_inbound: () => { throw new Error("must not be called"); },
+  } });
+  const h = hookHarness();
+  const deps = { ...h.deps, store: makeWebhookStore(svc) };
+  const res = await hook(receivedEvent, deps);
+  assert.equal(res.status, 200);
+  assert.equal(claims.rows.get("msg_1").status, "ignored");
+  assert.match(claims.rows.get("msg_1").error, /ambiguous inbox/);
+  assert.equal(svc.calls.some((c) => c[1] === "email_ingest_inbound"), false);
+});
+
+test("webhook: ambiguous or unmatched inboxes are ignored with a reason and nothing is ingested", async () => {
+  const two = { "john@studiokairegi.com": [mkAcc(ACC, ORG, "john@studiokairegi.com"), mkAcc(ACC_B, ORG_B, "john@studiokairegi.com")] };
+  const amb = hookHarness({ accounts: two });
+  assert.equal((await hook(receivedEvent, amb.deps)).status, 200);
+  assert.equal(amb.log.ingested.length, 0);
+  assert.equal(amb.log.webhooks.get("msg_1").status, "ignored");
+  assert.match(amb.log.webhooks.get("msg_1").error, /ambiguous inbox/);
+  const none = hookHarness({ accounts: {} });
+  await hook(receivedEvent, none.deps);
+  assert.equal(none.log.webhooks.get("msg_1").error, "no matching inbox");
+  assert.deepEqual(amb.log.lookupScope, undefined);                                       // no thread lookup before an account is settled
+});
+
+test("webhook: thread lookups use the resolved organization and account", async () => {
+  const h = hookHarness({ lookup: { tokenConversationId: CONV, rfcMap: {}, candidates: [] } });
+  await hook(receivedEvent, h.deps);
+  assert.deepEqual(h.log.lookupScope, [ORG, ACC]);
+  assert.equal(h.log.ingested[0].organization_id, ORG); assert.equal(h.log.ingested[0].account_id, ACC);
+});
+
+// ---------------------------------------------------------------- claims and concurrency
+test("claim state machine: completed, failed, busy, expired, stale owner, exhausted", () => {
+  let t = NOW;
+  const m = claimModel(() => t, { leaseMs: 100_000, max: 3 });
+  const c1 = m.claim("e", "email.received");
+  assert.equal(c1.state, "claimed");
+  assert.equal(m.claim("e", "email.received").state, "busy");                 // a second delivery while the first is running
+  t += 100_001;                                                              // the first worker crashed: its lease expired
+  const c2 = m.claim("e", "email.received");
+  assert.equal(c2.state, "claimed"); assert.equal(c2.attempts, 2);
+  assert.equal(m.finish("e", c1.token, "processed"), false);                  // the old owner cannot overwrite the newer claim
+  assert.equal(m.rows.get("e").status, "processing");
+  assert.equal(m.finish("e", c2.token, "failed", "boom"), true);
+  assert.equal(m.finish("e", c2.token, "processed"), false);                  // a claim can finish only once
+  const c3 = m.claim("e", "email.received");                                  // failed events are retryable
+  assert.equal(c3.state, "claimed"); assert.equal(c3.attempts, 3);
+  assert.equal(m.finish("e", c3.token, "failed", "boom"), true);
+  assert.equal(m.claim("e", "email.received").state, "exhausted");            // bounded: attempts reached the limit
+  assert.equal(m.claim("other", "x").state, "claimed");
+  const done = m.claim("d", "x"); m.finish("d", done.token, "processed");
+  assert.equal(m.claim("d", "x").state, "done");
+  assert.equal(m.finish("d", null, "processed"), false);
+});
+
+test("webhook: two simultaneous deliveries of one event process it once (the second is told to retry later)", async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const base = hookHarness();
+  const inner = base.deps.fetch;
+  base.deps.fetch = async (url, init) => { if (String(url).endsWith("/rx_1")) await gate; return inner(url, init); };
+  const first = hook(receivedEvent, base.deps, { id: "msg_same" });
+  for (let i = 0; i < 50 && base.log.webhooks.size === 0; i++) await new Promise((r) => setImmediate(r));
+  const second = await hook(receivedEvent, base.deps, { id: "msg_same" });
+  assert.equal(second.status, 409);                                           // busy: not 2xx, so a crash of the first still gets retried
+  release();
+  assert.equal((await first).status, 200);
+  assert.equal(base.log.ingested.length, 1);
+  assert.equal(base.log.webhooks.get("msg_same").status, "processed");
+  const third = await hook(receivedEvent, base.deps, { id: "msg_same" });
+  assert.equal((await third.json()).duplicate, true);                         // completed: idempotent success, nothing runs again
+  assert.equal(base.log.ingested.length, 1);
+});
+
+test("webhook: a crashed worker's claim is recovered after the lease, not before", async () => {
+  let t = NOW;
+  const h = hookHarness({ clock: () => t, lookup: { tokenConversationId: CONV, rfcMap: {}, candidates: [] } });
+  h.model.claim("msg_crash", "email.received");                               // worker A claims and dies
+  assert.equal((await hook(receivedEvent, h.deps, { id: "msg_crash" })).status, 409);
+  t += 301_000;
+  const res = await hook(receivedEvent, h.deps, { id: "msg_crash", ts: Math.floor(t / 1000) });
+  assert.equal(res.status, 200);
+  assert.equal(h.log.webhooks.get("msg_crash").status, "processed");
+  assert.equal(h.log.webhooks.get("msg_crash").attempts, 2);
+});
+
+test("webhook: a slow worker whose claim was taken over cannot overwrite the newer result", async () => {
+  let t = NOW; let release; const gate = new Promise((r) => { release = r; });
+  const h = hookHarness({ clock: () => t });
+  const inner = h.deps.fetch; let slow = true;
+  h.deps.fetch = async (url, init) => { if (slow && String(url).endsWith("/rx_1")) { slow = false; await gate; } return inner(url, init); };
+  const first = hook(receivedEvent, h.deps, { id: "msg_slow" });
+  for (let i = 0; i < 50 && h.log.webhooks.size === 0; i++) await new Promise((r) => setImmediate(r));
+  t += 301_000;                                                               // the first worker is still running but its lease has expired
+  const second = await hook(receivedEvent, h.deps, { id: "msg_slow", ts: Math.floor(t / 1000) });
+  assert.equal(second.status, 200);
+  release();
+  const late = await first;
+  assert.equal(late.status, 409);                                             // its finish was refused: the claim is no longer its own
+  assert.equal(h.log.webhooks.get("msg_slow").status, "processed");
+  assert.equal(h.log.webhooks.get("msg_slow").attempts, 2);
+});
+
+test("webhook: failed events are retried, then stop at the attempt limit with an explicit acknowledgement", async () => {
+  const h = hookHarness({ claimOpts: { max: 2 }, ingestError: true });
+  assert.equal((await hook(receivedEvent, h.deps, { id: "msg_bad" })).status, 500);
+  assert.equal((await hook(receivedEvent, h.deps, { id: "msg_bad" })).status, 500);
+  assert.equal(h.log.webhooks.get("msg_bad").attempts, 2);
+  const fetchesBefore = h.log.fetches.length;
+  const third = await hook(receivedEvent, h.deps, { id: "msg_bad" });
+  assert.equal(third.status, 200); assert.equal((await third.json()).exhausted, true);
+  assert.equal(h.log.fetches.length, fetchesBefore);                          // nothing is processed once exhausted
+  assert.equal(h.log.webhooks.get("msg_bad").status, "failed");
+});
+
+// ---------------------------------------------------------------- database failures are never acknowledged as success
+test("webhook: a database failure at any step answers 500, never success", async () => {
+  const cases = [
+    ["flag read", { flagError: true }, 0],
+    ["claim", { claimError: true }, 0],
+    ["account lookup", { accountError: true }, 1],
+    ["thread lookup", { threadError: true }, 1],
+    ["ingest", { ingestError: true }, 1],
+  ];
+  for (const [name, over, claimedRows] of cases) {
+    const h = hookHarness(over);
+    const res = await hook(receivedEvent, h.deps);
+    assert.equal(res.status, 500, `${name} must answer 500`);
+    assert.equal(JSON.stringify(await res.json()).includes("re_secret_key"), false);
+    assert.equal(h.log.webhooks.size, claimedRows, `${name}: claim rows`);
+    if (claimedRows) assert.equal(h.log.webhooks.get("msg_1").status, "failed", `${name}: recorded as failed, retryable`);
+    assert.equal(h.log.ingested.length, 0);
+  }
+  const fin = hookHarness({ finishError: true, lookup: { tokenConversationId: CONV, rfcMap: {}, candidates: [] } });
+  assert.equal((await hook(receivedEvent, fin.deps)).status, 500);            // the work ran but its completion could not be recorded: not acknowledged
+});
+
+// ---------------------------------------------------------------- signatures at the HTTP boundary
+test("webhook signatures: missing headers, wrong secret, stale timestamp, altered body and odd timestamps all fail before any database work", async () => {
+  const body = JSON.stringify(receivedEvent);
+  const good = await sign(body, { id: "msg_sig" });
+  const run = async (headers, b = body, over = {}) => {
+    const h = hookHarness({ flagError: true, ...over });               // flagError proves no database call happens before verification
+    const res = await handleWebhook(new Request("https://x", { method: "POST", headers, body: b }), h.deps);
+    return { status: res.status, h };
+  };
+  for (const drop of ["svix-id", "svix-timestamp", "svix-signature"]) {
+    const headers = { ...good }; delete headers[drop];
+    assert.equal((await run(headers)).status, 401, `missing ${drop}`);
+  }
+  assert.equal((await run(await sign(body, { id: "msg_sig", secret: "whsec_" + Buffer.from("a-different-secret-a-different-12").toString("base64") }))).status, 401);
+  assert.equal((await run(await sign(body, { id: "msg_sig", ts: Math.floor(NOW / 1000) - 400 }))).status, 401);          // expired
+  assert.equal((await run(await sign(body, { id: "msg_sig", ts: Math.floor(NOW / 1000) + 400 }))).status, 401);          // too far in the future
+  assert.equal((await run(good, body.replace("rx_1", "rx_2"))).status, 401);                                             // modified body
+  assert.equal((await run({ ...good, "svix-timestamp": "1e3" })).status, 401);
+  assert.equal((await run({ ...good, "svix-timestamp": "0x10" })).status, 401);
+  const r = await run(good);
+  assert.equal(r.status, 500);                                            // a VALID signature reaches the database layer (here a simulated failure)
+  assert.equal((await run(good, body, { env: { RESEND_WEBHOOK_SECRET: "" } })).status, 503);                             // missing secret fails closed
+  assert.equal((await run(good, body, { env: { RESEND_API_KEY: "" } })).status, 503);
+  const big = "x".repeat(1_000_001);
+  assert.equal((await run(await sign(big, { id: "m" }), big)).status, 413);                                             // size limit
+  assert.equal((await handleWebhook(new Request("https://x", { method: "POST", headers: { ...good, "content-length": "2000000" }, body }), hookHarness().deps)).status, 413);
+  for (const method of ["GET", "PUT", "DELETE", "PATCH"]) assert.equal((await handleWebhook(new Request("https://x", { method }), hookHarness().deps)).status, 405);
+});
+
+// ---------------------------------------------------------------- delivery events
+test("delivery: every supported event maps to the right status; unsupported or id-less events never touch the store", async () => {
+  const map = { "email.sent": "sent", "email.delivered": "delivered", "email.delivery_delayed": "delivery_delayed", "email.bounced": "bounced", "email.complained": "complained", "email.failed": "failed", "email.suppressed": "rejected", "email.rejected": "rejected" };
+  for (const [type, status] of Object.entries(map)) assert.equal(statusForEvent(type), status);
+  const h = hookHarness();
+  const ev = (type, data) => ({ type, created_at: new Date(NOW).toISOString(), data });
+  for (const [i, e] of [ev("email.opened", { email_id: "re_1" }), ev("email.clicked", { email_id: "re_1" }), ev("email.scheduled", { email_id: "re_1" }), ev("something.else", { email_id: "re_1" }), ev("email.delivered", {}), ev("email.delivered", { email_id: "" })].entries()) {
+    assert.equal((await hook(e, h.deps, { id: `u${i}` })).status, 200);
+    assert.equal(h.log.webhooks.get(`u${i}`).status, "ignored");
+  }
+  assert.equal(h.log.events.length, 0);
+  assert.equal(h.log.webhooks.get("u4").error, "missing email id");
+  assert.equal(h.log.webhooks.get("u0").error, "unsupported event type");
+});
+
+test("delivery: ambiguous ids are ignored and logged, duplicate event ids are harmless, the event id is the Svix id", async () => {
+  const ev = { type: "email.delivered", created_at: new Date(NOW).toISOString(), data: { email_id: "re_dup" } };
+  const amb = hookHarness({ applyResult: { found: false, ambiguous: true } });
+  assert.equal((await hook(ev, amb.deps, { id: "d1" })).status, 200);
+  assert.equal(amb.log.webhooks.get("d1").status, "ignored");
+  assert.equal(amb.log.webhooks.get("d1").error, "ambiguous provider message id");
+  const dup = hookHarness({ applyResult: { found: true, duplicate: true, applied: false } });
+  assert.equal((await hook(ev, dup.deps, { id: "d2" })).status, 200);
+  assert.equal(dup.log.webhooks.get("d2").status, "processed");
+  assert.equal(dup.log.events[0].provider_event_id, "d2");
+  assert.equal(dup.log.events[0].status, "delivered");
+});
+
+// ---------------------------------------------------------------- attachments
+test("attachments: size caps, safe storage paths, and a failed download leaves the event retryable", async () => {
+  const mk = (n, headers = {}) => new Response(new ReadableStream({ start(c) { c.enqueue(new Uint8Array(n)); c.close(); } }), { headers });
+  assert.equal(await readCapped(mk(10), 100) instanceof Uint8Array, true);
+  assert.equal(await readCapped(mk(200), 100), null);                                   // stream exceeds the cap
+  assert.equal(await readCapped(mk(10, { "content-length": "500" }), 100), null);       // declared size over the cap: never read
+  assert.equal((await readCapped(mk(100), 100)).length, 100);
+
+  const weird = hookHarness({ lookup: { tokenConversationId: CONV, rfcMap: {}, candidates: [] } });
+  const innerFetch = weird.deps.fetch;
+  weird.deps.fetch = async (url, init) => String(url).endsWith("/attachments")
+    ? json({ data: [{ id: "a/../b", filename: "../../etc/passwd", content_type: "text/plain", size: 4, download_url: "https://files.example/att1" }] })
+    : innerFetch(url, init);
+  await hook(receivedEvent, weird.deps);
+  const path = weird.log.uploads[0].path;
+  assert.equal(path.startsWith(`${ORG}/rx_1/`), true);
+  const parts = path.split("/");
+  assert.equal(parts.length, 3);                                                       // no extra folders can be smuggled in
+  assert.equal(parts.some((x) => x === "." || x === ".." || x === ""), false);         // no traversal segment
+
+  const over = hookHarness({ lookup: { tokenConversationId: CONV, rfcMap: {}, candidates: [] } });
+  const f2 = over.deps.fetch; const seen = [];
+  over.deps.fetch = async (url, init) => { seen.push(String(url)); return String(url).endsWith("/attachments") ? json({ data: [{ id: "big", filename: "huge.bin", size: 30 * 1024 * 1024, download_url: "https://files.example/huge" }] }) : f2(url, init); };
+  await hook(receivedEvent, over.deps);
+  assert.equal(seen.includes("https://files.example/huge"), false);                    // too big: not downloaded
+  assert.equal(over.log.ingested[0].attachments[0].storage_path, null);                // recorded without a stored copy
+  assert.equal(over.log.uploads.length, 0);
+
+  const failing = hookHarness({ lookup: { tokenConversationId: CONV, rfcMap: {}, candidates: [] } });
+  const f3 = failing.deps.fetch;
+  failing.deps.fetch = async (url, init) => (String(url) === "https://files.example/att1" ? new Response("gone", { status: 404 }) : f3(url, init));
+  assert.equal((await hook(receivedEvent, failing.deps)).status, 500);
+  assert.equal(failing.log.ingested.length, 0);                                        // nothing stored without its attachment
+  assert.equal(failing.log.webhooks.get("msg_1").status, "failed");                    // so the event is retried, not completed
+});
+
+// ---------------------------------------------------------------- sending never turns a database error into a false answer
+test("email-send: a database failure is a safe 500, and a sent mail whose status could not be saved still reports success", async () => {
+  const h = sendHarness();
+  h.deps.store.getAccount = async () => { throw new Error("db down"); };
+  const res = await handleSend(post(goodReq()), h.deps);
+  assert.equal(res.status, 500);
+  assert.equal(h.log.fetches.length, 0);
+  assert.equal(JSON.stringify(await res.json()).includes("db down"), false);
+  const s = sendHarness();
+  const mark = s.deps.store.markResult;
+  s.deps.store.markResult = async (id, patch) => { if (patch.status === "sent") throw new Error("db down"); return mark(id, patch); };
+  const out = await handleSend(post(goodReq()), s.deps);
+  assert.equal(out.status, 200);
+  const body = await out.json();
+  assert.equal(body.status, "sent"); assert.equal(body.warning, "sent_status_not_saved");
+  assert.equal(s.log.fetches.length, 1);
+});
+
+// ---------------------------------------------------------------- migration contents (static; the SQL itself is exercised by supabase/tests/email_resend_hardening.test.sql)
+test("hardening migration: ownership validation, strict delivery rules, atomic claims, service-only access, nothing destructive", () => {
+  const dir = new URL("../../supabase/migrations/", import.meta.url);
+  const sql = fs.readFileSync(new URL("20261111090000_email_resend_hardening.sql", dir), "utf8");
+  const code = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
+  const original = fs.readFileSync(new URL("20261110090000_email_resend_core.sql", dir), "utf8");
+  assert.equal(original.includes("email_webhook_claim"), false, "the first migration must stay untouched");
+  for (const must of ["does not belong to this organization", "is not active", "is not a Resend account", "belongs to a different sender address", "Invalid inbound payload"]) assert.ok(code.includes(must), `ingest must check: ${must}`);
+  assert.match(code, /provider = 'resend' and direction = 'outbound'/);
+  assert.match(code, /Unsupported delivery status/);
+  assert.match(code, /> public\._email_status_rank\(m\.status\)/);              // strictly forward
+  assert.match(code, /'ambiguous', true/);
+  assert.match(code, /for update/);
+  assert.match(code, /claim_token is not distinct from p_token/);
+  assert.match(code, /lease_expires_at > now\(\)/);
+  assert.match(code, /not valid/);                                                // new constraints do not scan or rewrite existing rows
+  assert.match(code, /status in \('received', 'processing', 'processed', 'failed', 'ignored'\)/);
+  assert.match(code, /grant execute on function public\.%s to service_role/);
+  const grants = code.match(/grant\s+[^;]*?\bto\s+\w+/gi) || [];
+  assert.ok(grants.length >= 1 && grants.every((g) => /to service_role$/i.test(g)), "the only grants are to service_role");
+  assert.match(code, /revoke all on function public\.%s from public, anon, authenticated/);
+  assert.equal(/\bdrop\s+table\b|\btruncate\b|\bdelete\s+from\b/i.test(code), false);
+  assert.equal(/intel_mail_account|intel_mail_oauth/.test(code), false);
+});
+
+// ---------------------------------------------------------------- tolerant reading of Resend's response (shapes are from the docs, never verified live)
+test("received-email parsing accepts header objects or lists, recipient strings or objects, and snake or camel case names", () => {
+  const base = { id: "rx_9", from: "Ada <ada@client.com>", to: ["john@studiokairegi.com"], subject: "Hi", message_id: "<m1@client.com>", created_at: "2026-11-04T10:00:00Z", text: "yo" };
+  const a = normalizeReceivedEmail({ ...base, headers: { "In-Reply-To": "<p@x>", References: "<a@x> <p@x>", "List-Unsubscribe": "<u>" } }, {});
+  const b = normalizeReceivedEmail({ ...base, headers: [{ name: "In-Reply-To", value: "<p@x>" }, { name: "References", value: "<a@x> <p@x>" }, { key: "List-Unsubscribe", value: "<u>" }] }, {});
+  assert.deepEqual([a.inReplyTo, a.references, a.listUnsubscribe], ["<p@x>", "<a@x> <p@x>", "<u>"]);
+  assert.deepEqual(b.headers, a.headers);
+  const c = normalizeReceivedEmail({ ...base, to: [{ email: "John@StudioKairegi.com", name: "John" }], cc: "x@y.com, z@y.com", messageId: undefined, createdAt: "2026-11-04T11:00:00Z", created_at: undefined, from: { email: "ada@client.com", name: "Ada" } }, {});
+  assert.deepEqual(c.to, ["john@studiokairegi.com"]); assert.deepEqual(c.cc, ["x@y.com", "z@y.com"]);
+  assert.equal(c.createdAt, "2026-11-04T11:00:00Z"); assert.equal(parseAddress(c.fromRaw).email, "ada@client.com");
+  assert.equal(normalizeReceivedEmail({ ...base, message_id: undefined, headers: { "message-id": "<h@x>" } }, {}).messageId, "<h@x>");
+  assert.equal(normalizeReceivedEmail(base, { email_id: "rx_77" }).emailId, "rx_77");
+  assert.deepEqual(normalizeHeaders(null), {});
+  const att = normalizeAttachment({ attachment_id: "a1", name: "../x.pdf", contentType: "application/pdf", size_bytes: "12", downloadUrl: "https://f/x", contentDisposition: "inline", contentId: "cid1" });
+  assert.deepEqual(att, { id: "a1", filename: "_x.pdf", contentType: "application/pdf", size: 12, contentId: "cid1", inline: true, url: "https://f/x" });
+});
+
+test("an unexpected received-email shape fails loudly with field NAMES only, and the event is retryable and not completed", () => {
+  assert.throws(() => normalizeReceivedEmail({ foo: 1, secretBody: "do not leak" }, {}), (e) => /Unexpected received-email shape/.test(e.message) && /foo,secretBody/.test(e.message) && !e.message.includes("do not leak"));
+  assert.throws(() => normalizeReceivedEmail({ from: "not-an-address", to: ["a@b.com"] }, {}), /Unexpected received-email shape/);
+  assert.throws(() => normalizeReceivedEmail({ from: "a@b.com", to: [] }, {}), /Unexpected received-email shape/);
+});
+
+test("webhook: an odd-shaped Resend answer is recorded as failed (with a readable reason) instead of storing a blank message", async () => {
+  const h = hookHarness({ received: { id: "rx_1", unexpected: true } });
+  const res = await hook(receivedEvent, h.deps);
+  assert.equal(res.status, 500);
+  assert.equal(h.log.ingested.length, 0);
+  assert.equal(h.log.webhooks.get("msg_1").status, "failed");
+  assert.match(h.log.webhooks.get("msg_1").error, /Unexpected received-email shape/);
 });

@@ -5,6 +5,7 @@
 import { corsHeaders } from "./cors.ts";
 
 export const RESEND_API = "https://api.resend.com";
+const safeMsg = (e: unknown): string => String((e as Error)?.message || "error").replace(/\s+/g, " ").slice(0, 200);   // never includes request bodies or keys
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
@@ -126,10 +127,25 @@ const EVENT_STATUS: Record<string, string> = {
 };
 export const statusForEvent = (type: string): string | null => EVENT_STATUS[type] || null;
 
+export async function handleSend(req: Request, deps: SendDeps): Promise<Response> {
+  try {
+    return await sendInner(req, deps);
+  } catch (e) {
+    // Any unexpected failure (for example a database error) is a safe 500, never an unhandled crash and never a false "sent".
+    console.error("email-send failed:", safeMsg(e));
+    return json({ error: "Could not send right now. Check the Sent folder before trying again." }, 500);
+  }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Webhook signature (Svix scheme, which Resend uses): HMAC-SHA256 over "<id>.<timestamp>.<body>", base64.
 // ---------------------------------------------------------------------------------------------------------------
-const b64ToBytes = (b64: string): Uint8Array => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+const b64ToBytes = (b64: string) => {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+};
 const bytesToB64 = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes));
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -141,6 +157,7 @@ function constantTimeEqual(a: string, b: string): boolean {
 export async function verifySvixSignature(o: { secret: string; id: string; timestamp: string; signature: string; body: string; nowMs: number; toleranceSec?: number }): Promise<boolean> {
   try {
     if (!o.secret || !o.id || !o.timestamp || !o.signature) return false;
+    if (!/^\d{1,12}$/.test(o.timestamp)) return false;                 // plain integer seconds only
     const ts = Number(o.timestamp);
     if (!Number.isFinite(ts) || Math.abs(o.nowMs / 1000 - ts) > (o.toleranceSec ?? 300)) return false;
     const key = await crypto.subtle.importKey("raw", b64ToBytes(o.secret.replace(/^whsec_/, "")), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -284,7 +301,7 @@ export interface SendDeps {
   store: SendStore;
 }
 
-export async function handleSend(req: Request, deps: SendDeps): Promise<Response> {
+async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
   const auth = await deps.authenticate(req);
@@ -332,7 +349,13 @@ export async function handleSend(req: Request, deps: SendDeps): Promise<Response
   const out = await sendViaResend(deps.fetch, apiKey, payload, r.idempotency_key, { sleep: deps.sleep });
 
   if (out.ok) {
-    await deps.store.markResult(created.message_id, { status: "sent", provider_message_id: out.id, sent_at: new Date(deps.now()).toISOString(), error: "" });
+    try {
+      await deps.store.markResult(created.message_id, { status: "sent", provider_message_id: out.id, sent_at: new Date(deps.now()).toISOString(), error: "" });
+    } catch (e) {
+      // The provider accepted the mail. Never turn that into an error the person might retry: report success and flag the bookkeeping gap.
+      console.error("email-send: sent but status update failed", safeMsg(e));
+      return json({ ok: true, message_id: created.message_id, conversation_id: created.conversation_id, status: "sent", warning: "sent_status_not_saved" });
+    }
     if (r.attachments.length) {
       try { await deps.store.saveAttachments(auth.organizationId, created.message_id, r.attachments.map((a) => ({ filename: a.filename, content_type: a.content_type || "application/octet-stream", base64: a.content_base64 }))); }
       catch (e) { console.error("email-send: attachment copy failed", (e as Error)?.message); }        // the mail is already sent; never report failure for this
@@ -352,15 +375,47 @@ export async function handleSend(req: Request, deps: SendDeps): Promise<Response
 // ---------------------------------------------------------------------------------------------------------------
 // Webhook
 // ---------------------------------------------------------------------------------------------------------------
+/** An account a received message may be filed under. */
+export interface AccountRef { id: string; organization_id: string; address: string }
+export type AccountResolution = { status: "found"; account: AccountRef } | { status: "none" } | { status: "ambiguous"; reason: string };
+
+/** Deterministic account choice from per-recipient matches (recipient order: To, Cc, Bcc).
+ *  - a recipient that matches more than one account is ambiguous (nothing is guessed);
+ *  - matches that span more than one organization are ambiguous (mail is never filed across an organization boundary);
+ *  - within one organization the first matching recipient wins. */
+export function resolveInboundAccount(matches: AccountRef[][]): AccountResolution {
+  const hits: AccountRef[] = [];
+  for (const list of matches) {
+    const uniq = list.filter((a, i) => list.findIndex((b) => b.id === a.id) === i);
+    if (uniq.length > 1) return { status: "ambiguous", reason: "a recipient matches more than one account" };
+    if (uniq.length === 1) hits.push(uniq[0]);
+  }
+  if (!hits.length) return { status: "none" };
+  if (new Set(hits.map((h) => h.organization_id)).size > 1) return { status: "ambiguous", reason: "recipients belong to different organizations" };
+  return { status: "found", account: hits[0] };
+}
+
+/** Valid, de-duplicated routing addresses (plus-tags removed), at most 20. */
+export const routingRecipients = (...lists: string[][]): string[] =>
+  [...new Set(lists.flat().filter(isValidEmail).map(baseAddress))].slice(0, 20);
+
+export const safeSegment = (v: unknown): string => String(v ?? "").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128) || "x";
+
+export type ClaimResult = { state: "claimed"; token: string; attempts: number } | { state: "done" } | { state: "busy" } | { state: "exhausted" };
 export interface WebhookStore {
+  /** Throws on any database error: a failure must never look like "provider disabled". */
   providerEnabled(): Promise<boolean>;
-  beginWebhook(svixId: string, type: string, payload: unknown): Promise<"new" | "done" | "retry">;
-  finishWebhook(svixId: string, status: "processed" | "failed" | "ignored", error?: string): Promise<void>;
-  findAccount(addresses: string[], inboundDomain?: string): Promise<{ id: string; organization_id: string; address: string } | null>;
-  threadLookup(orgId: string, q: { token: string | null; rfcIds: string[]; normalizedSubject: string; sender: string }): Promise<{ tokenConversationId: string | null; rfcMap: Record<string, string>; candidates: SubjectCandidate[] }>;
+  /** Atomic claim (see the claim state machine in the hardening migration). */
+  claimWebhook(svixId: string, type: string, payload: unknown): Promise<ClaimResult>;
+  /** Records the outcome only while `token` still owns the claim. Returns false when the claim was lost. */
+  finishWebhook(svixId: string, token: string, status: "processed" | "failed" | "ignored", error?: string): Promise<boolean>;
+  /** Active Resend accounts for one recipient address, exact match (plus-tag removed) or, for the configured inbound domain, same local part. Throws on database errors. */
+  accountsForRecipient(address: string, inboundDomain: string): Promise<AccountRef[]>;
+  /** Scoped to the organization AND the account. Throws on database errors. */
+  threadLookup(orgId: string, accountId: string, q: { token: string | null; rfcIds: string[]; normalizedSubject: string; sender: string }): Promise<{ tokenConversationId: string | null; rfcMap: Record<string, string>; candidates: SubjectCandidate[] }>;
   uploadAttachment(path: string, bytes: Uint8Array, contentType: string): Promise<void>;
   ingestInbound(p: Record<string, unknown>): Promise<{ duplicate: boolean; message_id: string; conversation_id?: string }>;
-  applyDeliveryEvent(a: { provider_message_id: string; status: string; event_type: string; provider_event_id: string; occurred_at: string | null; detail: Record<string, unknown> }): Promise<boolean>;
+  applyDeliveryEvent(a: { provider_message_id: string; status: string; event_type: string; provider_event_id: string; occurred_at: string | null; detail: Record<string, unknown> }): Promise<{ found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean }>;
 }
 export interface WebhookDeps {
   env: (k: string) => string | undefined;
@@ -371,6 +426,7 @@ export interface WebhookDeps {
 }
 
 const MAX_ATTACHMENT_DOWNLOAD = 25 * 1024 * 1024;
+const MAX_WEBHOOK_BODY = 1_000_000;
 
 async function resendGet(d: WebhookDeps, apiKey: string, path: string): Promise<any> {
   const sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -379,54 +435,139 @@ async function resendGet(d: WebhookDeps, apiKey: string, path: string): Promise<
     const res = await d.fetch(`${RESEND_API}${path}`, { headers: { Authorization: `Bearer ${apiKey}` } });
     if (res.ok) return await res.json();
     lastStatus = res.status;
-    if (res.status !== 429 && res.status < 500) break;
+    if (res.status !== 429 && res.status < 500) break;       // 4xx (including "not available yet") ends here; the webhook retry handles it, bounded by the claim attempt limit
     await sleep(400 * 2 ** i);
   }
   throw new Error(`Resend ${path.split("/").slice(0, 3).join("/")} failed (${lastStatus})`);   // path without ids: safe to log
 }
 
-export async function processInbound(d: WebhookDeps, apiKey: string, data: any): Promise<"processed" | "ignored"> {
-  const emailId = String(data?.email_id || "");
-  if (!emailId) return "ignored";
+/** Reads a download but gives up (null) as soon as it would exceed `cap` bytes, so a huge file is never held in memory. */
+export async function readCapped(res: Response, cap: number): Promise<Uint8Array | null> {
+  if (Number(res.headers.get("content-length") || 0) > cap) { try { await res.body?.cancel(); } catch { /* ignore */ } return null; }
+  if (!res.body) { const b = new Uint8Array(await res.arrayBuffer()); return b.length <= cap ? b : null; }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > cap) { try { await reader.cancel(); } catch { /* ignore */ } return null; }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.length; }
+  return out;
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------
+// Tolerant reading of Resend's "received email" response. Field names follow Resend's public docs but were never checked against a real
+// account, so common variants are accepted (headers as an object or a list, recipients as strings or objects, snake/camel case names).
+// If the essentials are missing the event FAILS with the field names we did see (names only, never values) so the problem is visible in
+// email_webhook_events.error instead of silently storing a blank message.
+// ---------------------------------------------------------------------------------------------------------------
+const asText = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : Array.isArray(v) ? v.map(asText).join(" ") : String(v));
+const addrText = (x: unknown): string => {
+  if (typeof x === "string") return x;
+  const o = (x ?? {}) as Record<string, unknown>;
+  const email = asText(o.email ?? o.address ?? "");
+  const name = asText(o.name ?? "");
+  return email ? (name ? `${name} <${email}>` : email) : "";
+};
+const addrs = (v: unknown): string[] => (Array.isArray(v) ? v : v ? [v] : []).flatMap((x) => (typeof x === "string" ? x.split(",") : [addrText(x)])).map((x) => parseAddress(x).email).filter(Boolean);
+
+export function normalizeHeaders(h: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (Array.isArray(h)) {
+    for (const e of h) { const k = asText((e as any)?.name ?? (e as any)?.key); if (k) out[k.toLowerCase()] = asText((e as any)?.value); }
+  } else if (h && typeof h === "object") {
+    for (const [k, v] of Object.entries(h as Record<string, unknown>)) out[k.toLowerCase()] = asText(v);
+  }
+  return out;
+}
+
+export interface ReceivedEmail {
+  emailId: string; fromRaw: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; subject: string; messageId: string;
+  inReplyTo: string; references: string; listUnsubscribe: string; html: string; text: string; createdAt: string | null; authentication: unknown; headers: Record<string, string>;
+}
+export function normalizeReceivedEmail(full: any, data: any): ReceivedEmail {
+  const headers = normalizeHeaders(full?.headers);
+  const fromRaw = asText(headers["from"] || addrText(full?.from) || addrText(data?.from));
+  const to = addrs(full?.to ?? data?.to ?? headers["to"]);
+  const cc = addrs(full?.cc ?? data?.cc ?? headers["cc"]);
+  const bcc = addrs(full?.bcc ?? data?.bcc);
+  if (!isValidEmail(parseAddress(fromRaw).email) || !(to.length + cc.length + bcc.length)) {
+    const seen = Object.keys(full && typeof full === "object" ? full : {}).slice(0, 30).join(",");
+    throw new Error(`Unexpected received-email shape (missing sender or recipients). Fields seen: ${seen || "none"}`);
+  }
+  return {
+    emailId: asText(data?.email_id ?? data?.id ?? full?.id), fromRaw, to, cc, bcc,
+    replyTo: addrs(full?.reply_to ?? full?.replyTo ?? headers["reply-to"]),
+    subject: asText(full?.subject ?? data?.subject ?? headers["subject"]),
+    messageId: parseMessageIds(full?.message_id ?? full?.messageId ?? data?.message_id ?? headers["message-id"])[0] || "",
+    inReplyTo: parseMessageIds(headers["in-reply-to"])[0] || "",
+    references: headers["references"] || "",
+    listUnsubscribe: headers["list-unsubscribe"] || "",
+    html: asText(full?.html), text: asText(full?.text),
+    createdAt: asText(full?.created_at ?? full?.createdAt ?? data?.created_at) || null,
+    authentication: full?.authentication ?? null, headers,
+  };
+}
+export function normalizeAttachment(a: any) {
+  return {
+    id: asText(a?.id ?? a?.attachment_id), filename: safeFileName(a?.filename ?? a?.name), contentType: asText(a?.content_type ?? a?.contentType) || "application/octet-stream",
+    size: Number(a?.size ?? a?.size_bytes ?? 0) || 0, contentId: asText(a?.content_id ?? a?.contentId) || null,
+    inline: asText(a?.content_disposition ?? a?.contentDisposition) === "inline", url: asText(a?.download_url ?? a?.downloadUrl ?? a?.url),
+  };
+}
+
+export type Outcome = { result: "processed" | "ignored"; reason?: string };
+
+export async function processInbound(d: WebhookDeps, apiKey: string, data: any): Promise<Outcome> {
+  const emailId = String(data?.email_id ?? data?.id ?? "");
+  if (!emailId) return { result: "ignored", reason: "missing email id" };
   const full = await resendGet(d, apiKey, `/emails/receiving/${encodeURIComponent(emailId)}`);
-  const headers: Record<string, string> = {};
-  for (const [k, v] of Object.entries(full?.headers || {})) headers[k.toLowerCase()] = Array.isArray(v) ? v.join(" ") : String(v);
+  const m = normalizeReceivedEmail(full, data);
+  const { to, cc, bcc } = m;
+  const inboundDomain = cleanInboundDomain(d.env("EMAIL_INBOUND_DOMAIN"));
 
-  const to = addressList(full?.to ?? data?.to), cc = addressList(full?.cc ?? data?.cc), bcc = addressList(full?.bcc ?? data?.bcc);
-  const account = await d.store.findAccount([...to, ...cc, ...bcc], cleanInboundDomain(d.env("EMAIL_INBOUND_DOMAIN")));
-  if (!account) return "ignored";                                    // not addressed to one of our inboxes
+  // Which inbox? Decided only from the recipients, per recipient, never from a global search or a default account.
+  const matches: AccountRef[][] = [];
+  for (const r of routingRecipients(to, cc, bcc)) matches.push(await d.store.accountsForRecipient(r, inboundDomain));
+  const resolved = resolveInboundAccount(matches);
+  if (resolved.status === "none") return { result: "ignored", reason: "no matching inbox" };
+  if (resolved.status === "ambiguous") { console.error("resend-webhook: ambiguous inbox:", resolved.reason); return { result: "ignored", reason: `ambiguous inbox: ${resolved.reason}` }; }
+  const account = resolved.account;
 
-  const from = parseAddress(headers["from"] || full?.from || data?.from);
-  const subject = String(full?.subject ?? data?.subject ?? "");
-  const rfc = parseMessageIds(full?.message_id ?? data?.message_id)[0] || "";
-  const inReplyTo = parseMessageIds(headers["in-reply-to"])[0] || "";
-  const references = headers["references"] || "";
-  const normalizedSubject = normalizeSubject(subject);
+  const from = parseAddress(m.fromRaw);
+  const normalizedSubject = normalizeSubject(m.subject);
 
-  const lookup = await d.store.threadLookup(account.organization_id, {
-    token: extractThreadToken([...to, ...cc]), rfcIds: [...parseMessageIds(inReplyTo), ...parseMessageIds(references)], normalizedSubject, sender: from.email,
+  const lookup = await d.store.threadLookup(account.organization_id, account.id, {
+    token: extractThreadToken([...to, ...cc]), rfcIds: [...parseMessageIds(m.inReplyTo), ...parseMessageIds(m.references)], normalizedSubject, sender: from.email,
   });
-  const picked = pickConversation({ tokenConversationId: lookup.tokenConversationId, inReplyTo, references, rfcMap: lookup.rfcMap, normalizedSubject, sender: from.email, candidates: lookup.candidates, nowMs: d.now() });
+  const picked = pickConversation({ tokenConversationId: lookup.tokenConversationId, inReplyTo: m.inReplyTo, references: m.references, rfcMap: lookup.rfcMap, normalizedSubject, sender: from.email, candidates: lookup.candidates, nowMs: d.now() });
 
-  const bodyHtml = String(full?.html ?? "");
-  const bodyText = String(full?.text ?? "") || htmlToText(bodyHtml);
+  const bodyText = m.text || htmlToText(m.html);
 
-  // Attachments: the webhook only carries metadata; download each file now (links expire in an hour) and keep our own copy.
+  // Attachments: the webhook only carries metadata; download each file now (links expire) with a hard size cap and keep our own copy.
+  // Any failure here throws, so the event is NOT marked complete and Resend retries it.
   const files: Record<string, unknown>[] = [];
   const declared = (full?.attachments?.length || data?.attachments?.length || 0) > 0;
   if (declared) {
     const listed = await resendGet(d, apiKey, `/emails/receiving/${encodeURIComponent(emailId)}/attachments`);
     const items: any[] = Array.isArray(listed) ? listed : Array.isArray(listed?.data) ? listed.data : [];
-    for (const a of items) {
-      const meta = { provider_attachment_id: String(a.id || ""), filename: safeFileName(a.filename), content_type: String(a.content_type || "application/octet-stream"),
-                     size_bytes: Number(a.size || 0), content_id: a.content_id || null, is_inline: String(a.content_disposition || "") === "inline" };
+    for (const raw of items) {
+      const a = normalizeAttachment(raw);
+      const meta = { provider_attachment_id: a.id, filename: a.filename, content_type: a.contentType, size_bytes: a.size, content_id: a.contentId, is_inline: a.inline };
       let storagePath: string | null = null;
-      if (a.download_url && meta.size_bytes <= MAX_ATTACHMENT_DOWNLOAD) {
-        const res = await d.fetch(String(a.download_url));
+      if (a.url && meta.size_bytes <= MAX_ATTACHMENT_DOWNLOAD) {
+        const res = await d.fetch(a.url);
         if (!res.ok) throw new Error(`Attachment download failed (${res.status})`);
-        const bytes = new Uint8Array(await res.arrayBuffer());
-        if (bytes.length <= MAX_ATTACHMENT_DOWNLOAD) {
-          storagePath = `${account.organization_id}/${emailId}/${meta.provider_attachment_id}-${meta.filename}`;
+        const bytes = await readCapped(res, MAX_ATTACHMENT_DOWNLOAD);
+        if (bytes) {
+          storagePath = `${account.organization_id}/${safeSegment(emailId)}/${safeSegment(meta.provider_attachment_id)}-${meta.filename}`;
           await d.store.uploadAttachment(storagePath, bytes, meta.content_type);
           meta.size_bytes = bytes.length;
         }
@@ -438,26 +579,29 @@ export async function processInbound(d: WebhookDeps, apiKey: string, data: any):
   const participants = [{ email: from.email, name: from.name }, ...to.map((e) => ({ email: e, name: "" })), ...cc.map((e) => ({ email: e, name: "" }))];
   await d.store.ingestInbound({
     organization_id: account.organization_id, account_id: account.id, conversation_id: picked.conversationId, normalized_subject: normalizedSubject,
-    provider_message_id: emailId, rfc_message_id: rfc, in_reply_to: inReplyTo, references_ids: references,
-    from_email: from.email, from_name: from.name, to_emails: to, cc_emails: cc, bcc_emails: bcc, reply_to: addressList(full?.reply_to).join(", "),
-    subject, body_text: bodyText, body_html: bodyHtml, received_at: full?.created_at || data?.created_at || new Date(d.now()).toISOString(),
-    headers: { "in-reply-to": inReplyTo, references, "message-id": rfc, "list-unsubscribe": headers["list-unsubscribe"] || "" },
-    auth_results: full?.authentication ?? null, participants, attachments: files,
+    provider_message_id: emailId, rfc_message_id: m.messageId, in_reply_to: m.inReplyTo, references_ids: m.references,
+    from_email: from.email, from_name: from.name, to_emails: to, cc_emails: cc, bcc_emails: bcc, reply_to: m.replyTo.join(", "),
+    subject: m.subject, body_text: bodyText, body_html: m.html, received_at: m.createdAt || new Date(d.now()).toISOString(),
+    headers: { "in-reply-to": m.inReplyTo, references: m.references, "message-id": m.messageId, "list-unsubscribe": m.listUnsubscribe },
+    auth_results: m.authentication, participants, attachments: files,
   });
-  return "processed";
+  return { result: "processed" };
 }
 
-export async function processDeliveryEvent(d: WebhookDeps, svixId: string, event: any): Promise<"processed" | "ignored"> {
+/** Rule for events we cannot apply: no email id or an unsupported type -> ignored; an id that matches two messages -> ignored and logged (never guessed);
+ *  an unknown id on a RECENT event -> retried (our own database write of the Resend id may not have landed yet); on an old event -> ignored. */
+export async function processDeliveryEvent(d: WebhookDeps, svixId: string, event: any): Promise<Outcome> {
   const status = statusForEvent(String(event?.type));
+  if (!status) return { result: "ignored", reason: "unsupported event type" };
   const emailId = String(event?.data?.email_id || "");
-  if (!status || !emailId) return "ignored";
+  if (!emailId) return { result: "ignored", reason: "missing email id" };
   const detail = { reason: String(event?.data?.bounce?.message || event?.data?.failed?.reason || event?.data?.reason || "").slice(0, 400), type: event?.data?.bounce?.type || null };
-  const found = await d.store.applyDeliveryEvent({ provider_message_id: emailId, status, event_type: String(event.type), provider_event_id: svixId, occurred_at: event?.created_at || null, detail });
-  if (found) return "processed";
-  // The event can beat our own database write of the Resend id by a moment: fail so Resend retries. Old events for mail we never sent are ignored.
-  const age = d.now() - Date.parse(String(event?.created_at || "")) ;
+  const out = await d.store.applyDeliveryEvent({ provider_message_id: emailId, status, event_type: String(event.type), provider_event_id: svixId, occurred_at: event?.created_at || null, detail });
+  if (out.ambiguous) { console.error("resend-webhook: provider message id matches several messages; not updated"); return { result: "ignored", reason: "ambiguous provider message id" }; }
+  if (out.found) return { result: "processed" };
+  const age = d.now() - Date.parse(String(event?.created_at || ""));
   if (Number.isFinite(age) && age < 120_000) throw new Error("Message not recorded yet");
-  return "ignored";
+  return { result: "ignored", reason: "unknown provider message id" };
 }
 
 export async function handleWebhook(req: Request, d: WebhookDeps): Promise<Response> {
@@ -466,28 +610,40 @@ export async function handleWebhook(req: Request, d: WebhookDeps): Promise<Respo
   const apiKey = d.env("RESEND_API_KEY");
   if (!secret || !apiKey) return json({ error: "Webhook is not configured" }, 503);
 
-  const body = await req.text();
-  if (body.length > 1_000_000) return json({ error: "Too large" }, 413);
+  if (Number(req.headers.get("content-length") || 0) > MAX_WEBHOOK_BODY) return json({ error: "Too large" }, 413);
+  const body = await req.text();                                  // the RAW body: the signature covers these exact bytes
+  if (body.length > MAX_WEBHOOK_BODY) return json({ error: "Too large" }, 413);
   const id = req.headers.get("svix-id") || "";
   const valid = await verifySvixSignature({ secret, id, timestamp: req.headers.get("svix-timestamp") || "", signature: req.headers.get("svix-signature") || "", body, nowMs: d.now() });
-  if (!valid) return json({ error: "Invalid signature" }, 401);
+  if (!valid) return json({ error: "Invalid signature" }, 401);   // rejected before any database work
+  if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(id)) return json({ error: "Invalid payload" }, 400);
 
   let event: any;
   try { event = JSON.parse(body); } catch { return json({ error: "Invalid payload" }, 400); }
   const type = String(event?.type || "");
 
-  if (!(await d.store.providerEnabled())) return json({ ok: true, ignored: "provider disabled" });   // acknowledge so Resend stops retrying
-  const begin = await d.store.beginWebhook(id, type, event);
-  if (begin === "done") return json({ ok: true, duplicate: true });
-
   try {
-    const result = type === "email.received" ? await processInbound(d, apiKey, event.data) : await processDeliveryEvent(d, id, event);
-    await d.store.finishWebhook(id, result);
-    return json({ ok: true, result });
+    if (!(await d.store.providerEnabled())) return json({ ok: true, ignored: "provider disabled" });   // acknowledged on purpose so Resend stops retrying
+    const claim = await d.store.claimWebhook(id, type, event);
+    if (claim.state === "done") return json({ ok: true, duplicate: true });
+    if (claim.state === "busy") return json({ error: "Already being processed" }, 409);              // not 2xx: if the owner crashes, the sender's retry recovers the event
+    if (claim.state === "exhausted") { console.error("resend-webhook: retry limit reached for", type); return json({ ok: false, exhausted: true }); }
+
+    let outcome: Outcome;
+    try {
+      outcome = type === "email.received" ? await processInbound(d, apiKey, event.data) : await processDeliveryEvent(d, id, event);
+    } catch (e) {
+      const message = safeMsg(e);
+      console.error("resend-webhook failed:", type, message);
+      try { await d.store.finishWebhook(id, claim.token, "failed", message); }
+      catch (fe) { console.error("resend-webhook: could not record failure:", safeMsg(fe)); }      // the lease simply expires; the 500 still triggers a retry
+      return json({ error: "Processing failed" }, 500);
+    }
+    const owned = await d.store.finishWebhook(id, claim.token, outcome.result, outcome.reason || "");
+    if (!owned) return json({ error: "Processing claim was lost" }, 409);                              // another worker owns this event now
+    return json({ ok: true, result: outcome.result });
   } catch (e) {
-    const message = String((e as Error)?.message || "failed").slice(0, 300);
-    console.error("resend-webhook failed:", type, message);
-    try { await d.store.finishWebhook(id, "failed", message); } catch { /* the 500 below still makes Resend retry */ }
+    console.error("resend-webhook error:", type, safeMsg(e));                                           // database failures are never acknowledged as success
     return json({ error: "Processing failed" }, 500);
   }
 }
