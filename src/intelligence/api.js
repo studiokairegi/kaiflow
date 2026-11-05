@@ -26,6 +26,7 @@ export const intelApi = {
   reviewMessage: (s, id, action, subject, body) => call(s, "intel_admin_review_message", { p_message_id: id, p_action: action, p_subject: subject ?? null, p_body: body ?? null }),
   resolveUnknown: (s, id, outcome) => call(s, "intel_admin_resolve_unknown", { p_message_id: id, p_outcome: outcome }),
   composeReply: (s, prospectId, subject, body) => call(s, "intel_admin_compose_reply", { p_prospect_id: prospectId, p_subject: subject, p_body: body }),
+  composeLeadMessage: (s, leadId, subject, body) => call(s, "intel_admin_compose_lead_message", { p_lead_id: leadId, p_subject: subject, p_body: body }),
   addSuppression: (s, value, reason) => call(s, "intel_admin_add_suppression", { p_value: value, p_reason: reason || "" }),
   removeSuppression: (s, id) => call(s, "intel_admin_remove_suppression", { p_id: id }),
   upsertKb: (s, k) => call(s, "intel_admin_upsert_kb", { p_key: k.key, p_kind: k.kind, p_title: k.title, p_body: k.body }),

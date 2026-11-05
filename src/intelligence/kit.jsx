@@ -37,8 +37,15 @@ export const Section = ({ title, hint, action, children }) => (
     {children}
   </div>
 );
-export const Kpi = ({ label, value, sub, tone }) => (
-  <div style={{ ...S.card, gap: 4, borderLeft: `3px solid ${tone === "bad" ? T.bad : tone === "warn" ? T.warn : T.ok}` }}>
+export const Kpi = ({ label, value, sub, tone, onClick }) => (
+  <div
+    role={onClick ? "button" : undefined}
+    tabIndex={onClick ? 0 : undefined}
+    onClick={onClick}
+    onKeyDown={onClick ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
+    style={{ ...S.card, gap: 4, textAlign: "left", borderLeft: `3px solid ${tone === "bad" ? T.bad : tone === "warn" ? T.warn : T.ok}`, cursor: onClick ? "pointer" : undefined }}
+    aria-label={onClick ? `${label}: ${value}. Open related items` : undefined}
+  >
     <span style={S.sub}>{label}</span>
     <span style={{ fontSize: 24, fontWeight: 800 }}>{value}</span>
     {sub && <span style={S.sub}>{sub}</span>}

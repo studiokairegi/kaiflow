@@ -9,7 +9,7 @@ const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { sta
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
-  const secret = Deno.env.get("RESEND_WEBHOOK_SECRET"), apiKey = Deno.env.get("RESEND_API_KEY");
+  const secret = Deno.env.get("INTEL_RESEND_WEBHOOK_SECRET"), apiKey = Deno.env.get("RESEND_API_KEY");
   if (!secret || !apiKey) return json({ error: "Webhook is not configured" }, 503);
   if (Number(req.headers.get("content-length") || 0) > 1_000_000) return json({ error: "Payload too large" }, 413);
   const raw = await req.text();

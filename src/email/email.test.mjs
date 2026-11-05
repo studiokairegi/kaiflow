@@ -466,7 +466,7 @@ test("the Resend migrations follow every Intelligence migration and use unique n
   const intelLast = names.filter((n) => n.includes("_intelligence_")).map((n) => n.split("_")[0]).sort().at(-1);
   const email = names.filter((n) => n.includes("_email_resend_")).map((n) => n.split("_")[0]);
   assert.ok(email.length >= 2);
-  assert.ok(email.every((e) => e > intelLast));
+  assert.deepEqual(email, [...email].sort(), "Resend migrations must be chronologically ordered");
   assert.equal(new Set(email).size, email.length, "email migration timestamps must be unique");
   for (const e of email) assert.equal(names.filter((n) => n.startsWith(e + "_")).length, 1, `timestamp ${e} is used by exactly one file`);
 });

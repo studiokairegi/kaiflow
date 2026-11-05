@@ -8,11 +8,11 @@ import AiGeneratedBadge from "./AiGeneratedBadge.jsx";
 
 const LEAD_STATUSES = ["lead_linked", "contacted", "replied", "closed"];
 
-export default function ProspectsView({ mode, supabase, tick, onChanged, onOpenLead }) {
+export default function ProspectsView({ mode, supabase, tick, onChanged, onOpenLead, initialStatus = "" }) {
   const pros = useLoad(() => intelApi.prospects(supabase), [supabase, tick]);
   const [q, setQ] = useState("");
   const [type, setType] = useState("");
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState(initialStatus);
   const [open, setOpen] = useState(null);
   const ids = useMemo(() => (pros.data || []).filter((p) => p.lead_id).map((p) => p.lead_id), [pros.data]);
   const leads = useLoad(() => intelApi.leadsFor(supabase, ids), [supabase, ids.join(",")]);

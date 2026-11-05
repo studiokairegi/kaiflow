@@ -67,11 +67,51 @@ function Thread({ conv, supabase, onChanged }) {
   );
 }
 
+function NewConversationModal({ supabase, prospects, onClose, onCreated }) {
+  const { busy, error, run } = useBusy();
+  const [leads, setLeads] = useState([]);
+  const [leadId, setLeadId] = useState("");
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const { data, error: e } = await supabase.from("leads")
+        .select("id,company_name,email,intel_prospect_id,stage")
+        .not("intel_prospect_id", "is", null)
+        .order("company_name", { ascending: true });
+      if (!alive) return;
+      if (e) { setLoading(false); return; }
+      const linked = (data || []).filter((l) => prospects.some((p) => p.id === l.intel_prospect_id && p.lead_id === l.id) && l.email);
+      setLeads(linked);
+      if (linked.length) setLeadId(linked[0].id);
+      setLoading(false);
+    })();
+    return () => { alive = false; };
+  }, [supabase, prospects]);
+  const selected = leads.find((l) => l.id === leadId);
+  return (
+    <Modal title="New conversation" onClose={onClose} width={720}
+      footer={<><Btn onClick={onClose} disabled={busy}>Cancel</Btn><Btn kind="primary" disabled={busy || loading || !selected || !subject.trim() || !body.trim()} onClick={() => run(async () => { await intelApi.composeLeadMessage(supabase, leadId, subject, body); await onCreated(); onClose(); })}>Create for review</Btn></>}>
+      {error && <Banner tone="bad">{error}</Banner>}
+      <Muted>This creates an outbound draft for your approval. It does not send immediately.</Muted>
+      {loading ? <Muted>Loading linked leads…</Muted> : leads.length === 0 ? <Banner tone="warn">No CRM leads linked to an Intelligence prospect with an email address were found.</Banner> : <>
+        <Field label="CRM lead"><select value={leadId} onChange={(e) => setLeadId(e.target.value)} style={{ width: "100%", padding: 10, borderRadius: 8, border: `1px solid ${T.border}`, background: T.raised, color: T.text }}>{leads.map((l) => <option key={l.id} value={l.id}>{l.company_name} — {l.email}</option>)}</select></Field>
+        {selected && <Muted>Recipient: {selected.email}</Muted>}
+        <Field label="Subject"><Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Subject" /></Field>
+        <Field label="Message"><TextArea rows={12} value={body} onChange={(e) => setBody(e.target.value)} placeholder="Write your message" /></Field>
+      </>}
+    </Modal>
+  );
+}
+
 export default function OutreachView({ supabase, tick, onChanged, focus }) {
   const msgs = useLoad(() => intelApi.messages(supabase), [supabase, tick]);
   const pros = useLoad(() => intelApi.prospects(supabase), [supabase, tick]);
   const [sel, setSel] = useState(null);
   const [review, setReview] = useState(null);
+  const [newConversation, setNewConversation] = useState(false);
   const convs = useMemo(() => conversations(msgs.data, pros.data), [msgs.data, pros.data]);
   useEffect(() => {
     if (!focus || !msgs.data || !pros.data) return;
@@ -84,6 +124,7 @@ export default function OutreachView({ supabase, tick, onChanged, focus }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {(msgs.error || pros.error) && <Banner tone="bad">{msgs.error || pros.error}</Banner>}
+      <div style={S.row}><Btn kind="primary" onClick={() => setNewConversation(true)}>New conversation</Btn></div>
       {pending.length > 0 && (
         <Section title={`Waiting for your approval (${pending.length})`} hint="Nothing here is sent until you approve it.">
           {pending.map((m) => (
@@ -111,6 +152,7 @@ export default function OutreachView({ supabase, tick, onChanged, focus }) {
         </div>
       </div>
       {review && <ReviewModal m={review} supabase={supabase} onClose={() => setReview(null)} onDone={reload} />}
+      {newConversation && <NewConversationModal supabase={supabase} prospects={pros.data || []} onClose={() => setNewConversation(false)} onCreated={reload} />}
     </div>
   );
 }

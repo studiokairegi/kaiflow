@@ -43,6 +43,7 @@ function Shell({ supabase, target, onOpenLead }) {
   const [tab, setTab] = useState("overview");
   const [tick, setTick] = useState(0);
   const [focus, setFocus] = useState(null);
+  const [prospectStatusFocus, setProspectStatusFocus] = useState("");
   const [flash, setFlash] = useState(null);   // result of a Gmail/Zoho connection attempt (?intelligence=<flag>)
   useEffect(() => {
     try {
@@ -86,12 +87,12 @@ function Shell({ supabase, target, onOpenLead }) {
       </div>
       {flash && <Banner tone={flash.tone} action={<Btn small onClick={() => setFlash(null)}>Dismiss</Btn>}>{flash.text}</Banner>}
       <Tabs tabs={tabs} value={tab} onChange={setTab} />
-      {tab === "overview" && <OverviewView o={o} mail={mail.data} supabase={supabase} onChanged={refresh} setTab={setTab} />}
+      {tab === "overview" && <OverviewView o={o} mail={mail.data} supabase={supabase} onChanged={refresh} setTab={setTab} onNeedsDecision={() => { setProspectStatusFocus("needs_review"); setTab("prospects"); }} />}
       {tab === "chat" && <ChatView supabase={supabase} tick={tick} workerSeconds={o.worker_last_seen_seconds} onChanged={refresh} />}
       {tab === "crm" && <CrmFollowupView {...common} />}
       {tab === "indie" && <CampaignView type="indie_game_developer" {...common} />}
       {tab === "studio" && <CampaignView type="animation_studio_support" {...common} />}
-      {tab === "prospects" && <ProspectsView mode="all" {...common} />}
+      {tab === "prospects" && <ProspectsView mode="all" initialStatus={prospectStatusFocus} {...common} />}
       {tab === "qualified" && <ProspectsView mode="qualified" {...common} />}
       {tab === "outreach" && <OutreachView {...common} focus={focus} />}
       {tab === "logs" && <LogsView supabase={supabase} tick={tick} />}

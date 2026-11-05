@@ -4,7 +4,7 @@ import { intelApi } from "./api.js";
 import { AUTONOMY, attentionItems, workerState, mailStatusLabel } from "./logic.js";
 import { Kpi, Section, Muted, confirmAction } from "./kit.jsx";
 
-export default function OverviewView({ o, mail, supabase, onChanged, setTab }) {
+export default function OverviewView({ o, mail, supabase, onChanged, setTab, onNeedsDecision }) {
   const { busy, error, run } = useBusy();
   const w = workerState(o.worker_last_seen_seconds);
   const items = attentionItems(o);
@@ -36,10 +36,10 @@ export default function OverviewView({ o, mail, supabase, onChanged, setTab }) {
       <div style={S.grid(190)}>
         <Kpi label="Introductions today" value={`${o.initial_sent_today} / ${o.initial_cap}`} sub={o.initial_cap < o.initial_cap_configured ? `warm-up limit (setting: ${o.initial_cap_configured})` : "daily limit"} />
         <Kpi label="Follow-ups today" value={`${o.followup_sent_today} / ${o.followup_cap}`} />
-        <Kpi label="Waiting for approval" value={o.pending_approval} tone={o.pending_approval ? "warn" : "ok"} />
-        <Kpi label="Qualified, not yet leads" value={st.qualified || 0} />
-        <Kpi label="Need a decision" value={st.needs_review || 0} tone={st.needs_review ? "warn" : "ok"} />
-        <Kpi label="Replies" value={st.replied || 0} />
+        <Kpi label="Waiting for approval" value={o.pending_approval} tone={o.pending_approval ? "warn" : "ok"} onClick={() => setTab("outreach")} />
+        <Kpi label="Qualified, not yet leads" value={st.qualified || 0} onClick={() => setTab("qualified")} />
+        <Kpi label="Need a decision" value={st.needs_review || 0} tone={st.needs_review ? "warn" : "ok"} onClick={onNeedsDecision} />
+        <Kpi label="Replies" value={st.replied || 0} onClick={() => setTab("outreach")} />
       </div>
       <div style={S.grid(300)}>
         <Section title="By campaign" hint="Prospects discovered so far.">
