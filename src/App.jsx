@@ -2652,6 +2652,20 @@ const ClapperIcon = () => (
   </svg>
 );
 
+const HeaderNameIcon = () => (
+  <svg className="kf-header-meta-icon" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="8" r="3.25" />
+    <path d="M5 20a7 7 0 0 1 14 0" />
+  </svg>
+);
+
+const HeaderEmailIcon = () => (
+  <svg className="kf-header-meta-icon" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <path d="m4 7 8 6 8-6" />
+  </svg>
+);
+
 const PlusIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
     <path d="M12 5v14M5 12h14" />
@@ -5822,7 +5836,7 @@ export default function ShotTracker() {
         </div>
       )}
 
-      <header className="kf-app-header" style={styles.header}>
+      <header className={showTabs ? "kf-app-header kf-app-header-with-tabs" : "kf-app-header"} style={styles.header}>
         <div className="kf-app-header-left" style={styles.headerLeft}>
           {view === "board" ? (
             <button style={styles.backButton} onClick={() => setView("projects")}>
@@ -5837,13 +5851,15 @@ export default function ShotTracker() {
           )}
           <div>
             <h1 style={styles.title}>
+              {view === "projects" && <HeaderNameIcon />}
               {view === "board"
                 ? selectedProject?.name || "Project"
                 : view === "settings"
                 ? "Settings"
-                : settings.studioName || "Kairil"}
+                : settings.displayName || getDisplayName(session.user) || settings.studioName || "Kairil"}
             </h1>
             <p style={styles.subtitle}>
+              {view === "projects" && <HeaderEmailIcon />}
               {view === "board"
                 ? selectedProject?.client || settings.studioName
                 : view === "settings"
@@ -5852,6 +5868,72 @@ export default function ShotTracker() {
             </p>
           </div>
         </div>
+        {showTabs && (
+          <nav className="kf-primary-tabs" style={{ ...styles.tabRow, borderBottom: "none", padding: 0, marginBottom: 0 }} aria-label="Main modules">
+          <button
+            className={tutorialHighlightTarget === "dashboard" ? "kf-tutorial-highlight" : undefined}
+            style={{ ...styles.tabButton, ...(workspace === "dashboard" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("dashboard")}
+          >
+            Dashboard
+          </button>
+          {visibleWorkspaces.includes("leads") && <button
+            className={tutorialHighlightTarget === "leads" ? "kf-tutorial-highlight" : undefined}
+            style={{ ...styles.tabButton, ...(workspace === "leads" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("leads")}
+          >
+            Leads
+          </button>}
+          {visibleWorkspaces.includes("planner") && <button
+            style={{ ...styles.tabButton, ...(workspace === "planner" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("planner")}
+          >
+            Planner
+          </button>}
+          {visibleWorkspaces.includes("projects") && <button
+            className={tutorialHighlightTarget === "projects" ? "kf-tutorial-highlight" : undefined}
+            style={{ ...styles.tabButton, ...(workspace === "projects" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("projects")}
+          >
+            Projects
+          </button>}
+          {visibleWorkspaces.includes("teams") && <button
+            className={tutorialHighlightTarget === "teams" ? "kf-tutorial-highlight" : undefined}
+            style={{ ...styles.tabButton, ...(workspace === "teams" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("teams")}
+          >
+            Teams{showProBadge && <> <span style={styles.proBadge}>PRO</span></>}
+          </button>}
+          {visibleWorkspaces.includes("finance") && <button
+            className={tutorialHighlightTarget === "finance" ? "kf-tutorial-highlight" : undefined}
+            style={{ ...styles.tabButton, ...(workspace === "finance" ? styles.tabButtonActive : {}) }}
+            onClick={() => setWorkspace("finance")}
+          >
+            Finance
+          </button>}
+          {visibleWorkspaces.includes("payments") && (canAccessPayments(settings) ? (
+            <button
+              className={tutorialHighlightTarget === "payments" ? "kf-tutorial-highlight" : undefined}
+              style={{ ...styles.tabButton, ...(workspace === "payments" ? styles.tabButtonActive : {}) }}
+              onClick={() => setWorkspace("payments")}
+            >
+              Payments
+            </button>
+          ) : (
+            // Non-admins see Payments, locked. aria-disabled (not disabled) so a click can explain why.
+            <button
+              type="button"
+              aria-disabled="true"
+              title="Coming Soon"
+              style={{ ...styles.tabButton, opacity: 0.5, cursor: "not-allowed", display: "inline-flex", alignItems: "center", gap: 8 }}
+              onClick={() => setShowPaymentsLocked(true)}
+            >
+              <span>Payments</span>
+              <span style={{ fontSize: 10, fontWeight: 600, padding: "1px 7px", borderRadius: 99, border: "1px solid currentColor" }}>Soon</span>
+            </button>
+          ))}
+          </nav>
+        )}
         <div className="kf-app-header-right" style={styles.headerRight}>
           {studioMemberships.length > 1 && (
             <label style={{ display: "flex", alignItems: "center", gap: 7, color: "var(--kf-muted, #9caeb5)", fontSize: 12 }}>
@@ -6019,72 +6101,6 @@ export default function ShotTracker() {
           tile showing only on the Dashboard, matching the old layout. */}
       <StudioTimeCard userId={userId} visible={view === "projects" && workspace === "dashboard"} accountConfig={settings.userPrefs?.focusTimer} />
 
-      {showTabs && (
-        <div className="kf-primary-tabs" style={styles.tabRow}>
-          <button
-            className={tutorialHighlightTarget === "dashboard" ? "kf-tutorial-highlight" : undefined}
-            style={{ ...styles.tabButton, ...(workspace === "dashboard" ? styles.tabButtonActive : {}) }}
-            onClick={() => setWorkspace("dashboard")}
-          >
-            Dashboard
-          </button>
-          {visibleWorkspaces.includes("leads") && <button
-            className={tutorialHighlightTarget === "leads" ? "kf-tutorial-highlight" : undefined}
-            style={{ ...styles.tabButton, ...(workspace === "leads" ? styles.tabButtonActive : {}) }}
-            onClick={() => setWorkspace("leads")}
-          >
-            Leads
-          </button>}
-          {visibleWorkspaces.includes("planner") && <button
-            style={{ ...styles.tabButton, ...(workspace === "planner" ? styles.tabButtonActive : {}) }}
-            onClick={() => setWorkspace("planner")}
-          >
-            Planner
-          </button>}
-          {visibleWorkspaces.includes("projects") && <button
-            className={tutorialHighlightTarget === "projects" ? "kf-tutorial-highlight" : undefined}
-            style={{ ...styles.tabButton, ...(workspace === "projects" ? styles.tabButtonActive : {}) }}
-            onClick={() => setWorkspace("projects")}
-          >
-            Projects
-          </button>}
-          {visibleWorkspaces.includes("teams") && <button
-            className={tutorialHighlightTarget === "teams" ? "kf-tutorial-highlight" : undefined}
-            style={{ ...styles.tabButton, ...(workspace === "teams" ? styles.tabButtonActive : {}) }}
-            onClick={() => setWorkspace("teams")}
-          >
-            Teams{showProBadge && <> <span style={styles.proBadge}>PRO</span></>}
-          </button>}
-          {visibleWorkspaces.includes("finance") && <button
-            className={tutorialHighlightTarget === "finance" ? "kf-tutorial-highlight" : undefined}
-            style={{ ...styles.tabButton, ...(workspace === "finance" ? styles.tabButtonActive : {}) }}
-            onClick={() => setWorkspace("finance")}
-          >
-            Finance
-          </button>}
-          {visibleWorkspaces.includes("payments") && (canAccessPayments(settings) ? (
-            <button
-              className={tutorialHighlightTarget === "payments" ? "kf-tutorial-highlight" : undefined}
-              style={{ ...styles.tabButton, ...(workspace === "payments" ? styles.tabButtonActive : {}) }}
-              onClick={() => setWorkspace("payments")}
-            >
-              Payments
-            </button>
-          ) : (
-            // Non-admins see Payments, locked. aria-disabled (not disabled) so a click can explain why.
-            <button
-              type="button"
-              aria-disabled="true"
-              title="Coming Soon"
-              style={{ ...styles.tabButton, opacity: 0.5, cursor: "not-allowed", display: "inline-flex", alignItems: "center", gap: 8 }}
-              onClick={() => setShowPaymentsLocked(true)}
-            >
-              <span>Payments</span>
-              <span style={{ fontSize: 10, fontWeight: 600, padding: "1px 7px", borderRadius: 99, border: "1px solid currentColor" }}>Soon</span>
-            </button>
-          ))}
-        </div>
-      )}
 
       {view === "board" && (
         <div className="kf-secondary-tabs" style={styles.tabRow}>

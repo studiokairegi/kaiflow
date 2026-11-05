@@ -133,7 +133,7 @@ export function missingKb(entries) {
   return REQUIRED_KB.filter((r) => !ok.has(r.key));
 }
 
-export const REQUIRED_JAPANESE_KB = Object.freeze([{ key: "studio.about.ja", kind: "studio", label: "Japanese studio description" }, { key: "services.animation_studio_support.ja", kind: "service", label: "Japanese animation-studio services" }, { key: "portfolio.main.ja", kind: "portfolio", label: "Japanese portfolio link(s)" }, { key: "policy.opt_out.ja", kind: "policy", label: "Japanese opt-out policy" }]);
+export const REQUIRED_JAPANESE_KB = Object.freeze([{ key: "studio.about.ja", kind: "studio", label: "Japanese studio description" }, { key: "services.animation_studio_support.ja", kind: "service", label: "Japanese animation-studio services" }, { key: "portfolio.main.ja", kind: "portfolio", label: "Japanese portfolio link(s)" }]);
 export function missingJapaneseKb(entries) {
  const ok = new Set((entries || []).filter(e => e.approved && String(e.body || "").trim()).map(e => e.key));
  return REQUIRED_JAPANESE_KB.filter(r => !ok.has(r.key));

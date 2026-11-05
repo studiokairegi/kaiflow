@@ -60,6 +60,17 @@ body { font-family: 'Inter', system-ui, sans-serif; font-variant-numeric: tabula
 }
 
 /* Mobile header: title and utility icons share one row; the primary action drops below at full width. */
+@media (max-width: 900px) {
+  .kf-app-header-with-tabs { flex-wrap: wrap !important; border-bottom: 0 !important; }
+  .kf-app-header-with-tabs .kf-app-header-left { order: 0; flex: 1 1 100%; transform: none !important; }
+  .kf-app-header-with-tabs .kf-primary-tabs { order: 2; flex: 1 0 100%; width: 100%; min-width: 0; justify-content: flex-start !important; padding: 0 12px 12px !important; margin: 0 !important; border: 0 !important; }
+  .kf-app-header-with-tabs .kf-app-header-right { order: 3; }
+  .kf-app-header-with-tabs .kf-app-header-left > div:last-child { display: block; }
+  .kf-app-header-with-tabs .kf-app-header-left h1,
+  .kf-app-header-with-tabs .kf-app-header-left p { display: block; }
+  .kf-app-header-with-tabs .kf-header-meta-icon { display: none; }
+}
+
 @media (max-width: 600px) {
   .kf-app-header { flex-wrap: wrap !important; align-items: center; row-gap: var(--kf-space-3); padding-block: var(--kf-space-3) !important; }
   .kf-app-header-left { order: 0; flex: 1 1 0; min-width: 0; }
@@ -153,9 +164,9 @@ body { font-family: 'Inter', system-ui, sans-serif; font-variant-numeric: tabula
 /* CRM section navigation: a compact left rail; only the selected item shows its name. */
 .kf-crm-layout { display: flex; align-items: flex-start; gap: 14px; width: 100%; min-width: 0; }
 .kf-crm-sidebar { display: flex; flex: 0 0 142px; flex-direction: column; align-items: stretch; gap: 7px; padding: 8px 0 8px 16px; }
-.kf-crm-nav-item { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; min-height: 44px; padding: 10px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: #9fb0ac; cursor: pointer; font: 500 13px/1.2 Inter, sans-serif; text-align: left; transition: background .15s ease, color .15s ease, border-color .15s ease; }
-.kf-crm-nav-item:hover { background: rgba(255,255,255,.045); color: #e6ecea; }
-.kf-crm-nav-item.is-active { justify-content: flex-start; background: rgba(47,191,166,.11); border-color: rgba(47,191,166,.24); color: #7FE0D0; font-weight: 650; }
+.kf-crm-nav-item { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; min-height: 44px; padding: 10px; border: 0; border-radius: 0; background: transparent; color: #9fb0ac; cursor: pointer; font: 500 13px/1.2 Inter, sans-serif; text-align: left; transition: color .15s ease; }
+.kf-crm-nav-item:hover { background: transparent; color: #e6ecea; }
+.kf-crm-nav-item.is-active { justify-content: flex-start; background: transparent; border: 0; border-radius: 0; color: #7FE0D0; font-weight: 650; }
 .kf-crm-nav-item svg { flex: 0 0 20px; }
 .kf-crm-content { flex: 1 1 auto; min-width: 0; width: 0; }
 @media (max-width: 900px) {
@@ -164,10 +175,86 @@ body { font-family: 'Inter', system-ui, sans-serif; font-variant-numeric: tabula
   .kf-crm-nav-item { min-height: 42px; padding: 8px; font-size: 12px; }
 }
 
-/* Slightly lower the brand and account identity to visually align with the module navigation row. */
+/* On desktop, the studio identity and all seven workspace tabs share one clean header row. */
 @media (min-width: 901px) {
-  .kf-app-header-left { transform: translateY(8px); }
+  .kf-app-header-with-tabs {
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    gap: 12px !important;
+    border-bottom: 0 !important;
+    padding-block: 12px !important;
+  }
+  .kf-app-header-with-tabs .kf-app-header-left {
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 9px !important;
+    min-width: 0;
+    transform: none !important;
+  }
+  .kf-app-header-with-tabs .kf-app-header-left > div:last-child {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    max-width: none !important;
+  }
+  .kf-app-header-with-tabs .kf-app-header-left h1 {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+    font-size: 14px !important;
+    line-height: 1.2 !important;
+  }
+  .kf-app-header-with-tabs .kf-app-header-left p {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+    margin: 0 !important;
+    font-size: 11.5px !important;
+    line-height: 1.2 !important;
+  }
+  .kf-header-meta-icon { display: inline-block; flex: 0 0 14px; color: #2FBFA6; }
+  .kf-app-header-with-tabs .kf-primary-tabs {
+    display: flex;
+    flex: 1 1 auto;
+    justify-content: center !important;
+    align-items: center;
+    gap: 0 !important;
+    min-width: 0;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  .kf-app-header-with-tabs .kf-primary-tabs > button {
+    flex: 0 0 auto;
+    margin: 0 !important;
+    padding: 8px 8px !important;
+    font-size: 12px !important;
+  }
+  .kf-app-header-with-tabs .kf-app-header-right {
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 8px !important;
+  }
 }
+
+@media (min-width: 901px) and (max-width: 1200px) {
+  .kf-app-header-with-tabs { gap: 7px !important; padding-inline: 16px !important; }
+  .kf-app-header-with-tabs .kf-app-header-left > div:last-child { gap: 7px; }
+  .kf-app-header-with-tabs .kf-app-header-left h1 { font-size: 12.5px !important; }
+  .kf-app-header-with-tabs .kf-app-header-left p { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+  .kf-app-header-with-tabs .kf-primary-tabs > button { padding-inline: 5px !important; font-size: 11px !important; }
+  .kf-app-header-with-tabs .kf-app-header-right { gap: 5px !important; }
+}
+
+/* The tab strip no longer needs its own separator: it now lives inside the header row. */
+.kf-app-header-with-tabs { border-bottom: 0 !important; }
+.kf-app-header-with-tabs .kf-primary-tabs { border-top: 0 !important; border-bottom: 0 !important; }
 
 /* KairFlow Intelligence: a calmer, dashboard-led presentation. These rules are
    deliberately scoped to the Intelligence workspace; its data and workflows stay unchanged. */
