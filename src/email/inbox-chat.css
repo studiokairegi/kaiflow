@@ -1,0 +1,25 @@
+/* Email conversations borrow the main KairFlow chat palette and compact bubble silhouette. */
+.inbox-chat-shell { --inbox-sent: #6A47F2; --inbox-received: #3B74F4; --inbox-line: #3a484d; }
+.inbox-chat-shell .inbox-chat-layout { align-items: stretch; }
+.inbox-chat-shell .inbox-chat-thread { min-height: 420px; padding: 12px; border-radius: 16px; background: var(--c-bg, #101719); border: 1px solid var(--c-line, #2a3539); }
+.inbox-message-row { display: flex; width: 100%; min-width: 0; }
+.inbox-message-row.incoming { justify-content: flex-start; }
+.inbox-message-row.outgoing { justify-content: flex-end; }
+.inbox-message-bubble { width: fit-content; max-width: min( min(82%, 720px), 100% ); min-width: 180px; padding: 11px 13px 8px; border-radius: 18px; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgba(0,0,0,.10); }
+.inbox-message-bubble.inbound { background: var(--inbox-received); color: #fff; border: 1px solid var(--inbox-line); border-bottom-left-radius: 6px; }
+.inbox-message-bubble.outbound { background: linear-gradient(135deg, #6A47F2 0%, #795cf4 100%); color: #fff; border: 1px solid rgba(255,255,255,.12); border-bottom-right-radius: 6px; }
+.inbox-message-meta { display: grid; gap: 3px; padding-bottom: 7px; margin-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,.22); }
+.inbox-message-meta strong { font-size: 12px; font-weight: 700; line-height: 1.35; }
+.inbox-message-meta span, .inbox-message-meta small { font-size: 10.5px; opacity: .82; overflow-wrap: anywhere; }
+.inbox-message-body { white-space: pre-wrap; line-height: 1.5; font-size: 13.5px; }
+.inbox-message-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.inbox-message-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin-top: 8px; font-size: 10px; opacity: .88; }
+.inbox-message-footer > span:first-child { margin-right: auto; }
+.inbox-message-error { margin-top: 8px; padding: 7px 9px; border-radius: 9px; background: rgba(190,50,60,.18); font-size: 11px; }
+.inbox-message-bubble.outbound button { color: #fff; border-color: rgba(255,255,255,.3); background: rgba(255,255,255,.12); }
+.inbox-message-bubble.outbound button:hover { background: rgba(255,255,255,.2); }
+@media (max-width: 760px) {
+  .inbox-chat-shell .inbox-chat-layout { grid-template-columns: minmax(0, 1fr) !important; }
+  .inbox-chat-shell .inbox-chat-thread { min-height: 320px; padding: 8px; }
+  .inbox-message-bubble { max-width: 94%; min-width: 0; }
+}
