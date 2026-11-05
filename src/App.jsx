@@ -51,6 +51,17 @@ function emptyWorkspaceData() {
   return { projects: [], cards: [], leads: [], invoices: [], expenses: [], teamMembers: [], activity: [], budgetPlanners: [], plannerTemplates: [], pipelineLibrary: [] };
 }
 
+function CrmSectionIcon({ id }) {
+  const paths = {
+    pipeline: <><rect x="3" y="4" width="5" height="6" rx="1" /><rect x="10" y="4" width="5" height="6" rx="1" /><rect x="17" y="4" width="4" height="6" rx="1" /><path d="M3 14h5v6H3zM10 14h5v6h-5zM17 14h4v6h-4z" /></>,
+    contacts: <><circle cx="9" cy="8" r="3" /><path d="M3 20v-1a6 6 0 0 1 12 0v1z" /><path d="M16 5.5a3 3 0 0 1 0 5.8M18 14a5 5 0 0 1 3 4.6V20" /></>,
+    portfolio: <><rect x="3" y="7" width="18" height="13" rx="2" /><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M3 12h18M10 12v2h4v-2" /></>,
+    inbox: <><path d="M4 4h16l2 11v5H2v-5L4 4z" /><path d="M2 15h6l2 3h4l2-3h6" /></>,
+    intelligence: <><path d="M12 3a4 4 0 0 0-7 2.6A4.5 4.5 0 0 0 4 14a4 4 0 0 0 4 6h4z" /><path d="M12 3a4 4 0 0 1 7 2.6A4.5 4.5 0 0 1 20 14a4 4 0 0 1-4 6h-4zM8 9h.01M16 9h.01M8 15h.01M16 15h.01M12 3v18" /></>,
+  };
+  return <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{paths[id]}</svg>;
+}
+
 // Code-split screens and the charting library: fetched on first use instead of at startup.
 const CutWorkflowPanel = lazyWithSuspense(() => import("./CutWorkflowPanel.jsx"));
 const ContactsPage = lazyWithSuspense(() => import("./ContactsPage.jsx"), { label: "Loading contacts…" });
@@ -6235,21 +6246,25 @@ export default function ShotTracker() {
       )}
 
       {view === "projects" && workspace === "leads" && (
-        <div className="kf-secondary-tabs" style={styles.subTabRow} role="tablist" aria-label="CRM sections">
-          {[["pipeline", "Pipeline"], ["contacts", "Contacts"], ["portfolio", "Portfolio"], ...(canAccessIntelligence(intelAccess) ? [["inbox", "Inbox"], ["intelligence", "Intelligence"]] : [])].map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              role="tab"
-              aria-selected={crmTab === id}
-              style={{ ...styles.tabButton, ...(crmTab === id ? styles.tabButtonActive : {}) }}
-              onClick={() => setCrmTab(id)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
+        <div className="kf-crm-layout">
+          <nav className="kf-crm-sidebar" role="tablist" aria-label="CRM sections">
+            {[ ["pipeline", "Pipeline"], ["contacts", "Contacts"], ["portfolio", "Portfolio"], ...(canAccessIntelligence(intelAccess) ? [["inbox", "Inbox"], ["intelligence", "Intelligence"]] : []) ].map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-label={label}
+                aria-selected={crmTab === id}
+                title={label}
+                className={crmTab === id ? "kf-crm-nav-item is-active" : "kf-crm-nav-item"}
+                onClick={() => setCrmTab(id)}
+              >
+                {crmTab === id ? <span>{label}</span> : <CrmSectionIcon id={id} />}
+              </button>
+            ))}
+          </nav>
+          <div className="kf-crm-content">
+
 
       {view === "projects" && workspace === "leads" && leadError && (
         <div role="alert" style={{ margin: "0 0 10px", padding: "10px 14px", borderRadius: 8, background: "rgba(255,77,77,0.12)", border: "1px solid rgba(255,77,77,0.35)", color: "#FF9A9A", fontSize: 13, display: "flex", gap: 10, alignItems: "center" }}>
@@ -6537,6 +6552,9 @@ export default function ShotTracker() {
 
       {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessIntelligence(intelAccess) && <InboxModule access={intelAccess} supabase={supabase} leads={leads} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
       {view === "projects" && workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
+          </div>
+        </div>
+      )}
 
       {view === "projects" && workspace === "payments" && !canAccessPayments(settings) && <PaymentsRestricted />}
       {view === "projects" && workspace === "payments" && canAccessPayments(settings) && (

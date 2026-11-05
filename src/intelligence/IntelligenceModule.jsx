@@ -65,7 +65,7 @@ function Shell({ supabase, target, onOpenLead }) {
   if (ov.loading) return <Muted>Loading…</Muted>;
   if (ov.error && !ov.data) return <Banner tone="bad">{ov.error}</Banner>;
   const o = ov.data || {};
-  if (!o.configured) return <div style={S.page}><h2 style={S.h2}>KairFlow Intelligence</h2><Setup supabase={supabase} onDone={refresh} /></div>;
+  if (!o.configured) return <div className="kf-intelligence" style={S.page}><h2 style={S.h2}>KairFlow Intelligence</h2><Setup supabase={supabase} onDone={refresh} /></div>;
 
   const tabs = [
     { id: "overview", label: "Overview" },
@@ -81,12 +81,12 @@ function Shell({ supabase, target, onOpenLead }) {
   ];
   const common = { supabase, tick, onChanged: refresh, onOpenLead };
   return (
-    <div style={S.page}>
-      <div style={{ ...S.row, justifyContent: "space-between" }}>
+    <div className="kf-intelligence" style={S.page}>
+      <div className="kf-intel-heading" style={{ ...S.row, justifyContent: "space-between" }}>
         <div><h2 style={S.h2}>Intelligence</h2><p style={S.sub}>Finds, researches and contacts prospects for the studio. Private to you.</p></div>
       </div>
       {flash && <Banner tone={flash.tone} action={<Btn small onClick={() => setFlash(null)}>Dismiss</Btn>}>{flash.text}</Banner>}
-      <Tabs tabs={tabs} value={tab} onChange={setTab} />
+      <div className="kf-intel-tabs"><Tabs tabs={tabs} value={tab} onChange={setTab} /></div>
       {tab === "overview" && <OverviewView o={o} mail={mail.data} supabase={supabase} onChanged={refresh} setTab={setTab} onNeedsDecision={() => { setProspectStatusFocus("needs_review"); setTab("prospects"); }} />}
       {tab === "chat" && <ChatView supabase={supabase} tick={tick} workerSeconds={o.worker_last_seen_seconds} onChanged={refresh} />}
       {tab === "crm" && <CrmFollowupView {...common} />}

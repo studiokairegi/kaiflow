@@ -29,7 +29,7 @@ export function useLoad(fn, deps) {
 
 export const Muted = ({ children, style }) => <p style={{ ...S.sub, ...style }}>{children}</p>;
 export const Section = ({ title, hint, action, children }) => (
-  <div style={S.card}>
+  <div className="kf-intel-section" style={S.card}>
     <div style={{ ...S.row, justifyContent: "space-between" }}>
       <div><h3 style={S.h3}>{title}</h3>{hint && <p style={S.sub}>{hint}</p>}</div>
       {action}
@@ -43,6 +43,7 @@ export const Kpi = ({ label, value, sub, tone, onClick }) => (
     tabIndex={onClick ? 0 : undefined}
     onClick={onClick}
     onKeyDown={onClick ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
+    className="kf-intel-kpi"
     style={{ ...S.card, gap: 4, textAlign: "left", borderLeft: `3px solid ${tone === "bad" ? T.bad : tone === "warn" ? T.warn : T.ok}`, cursor: onClick ? "pointer" : undefined }}
     aria-label={onClick ? `${label}: ${value}. Open related items` : undefined}
   >
