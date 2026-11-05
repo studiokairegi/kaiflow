@@ -46,7 +46,7 @@ export const quoteBody = (message, when) => {
 
 export function buildReply(message, ownAddresses, { all = false, when = "" } = {}) {
   const { to, cc } = replyRecipients(message, ownAddresses, { all });
-  return { to: to.join(", "), cc: cc.join(", "), subject: replySubject(message.subject), body: quoteBody(message, when) };
+  return { to: to.join(", "), cc: cc.join(", "), subject: replySubject(message.subject), body: "" };
 }
 
 export function buildForward(message, when = "") {

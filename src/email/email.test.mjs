@@ -493,7 +493,7 @@ test("composer helpers: recipients, replies, forwards, validation", () => {
   assert.deepEqual(replyRecipients(inbound, own, { all: true }), { to: ["ada@client.com"], cc: ["team@client.com", "boss@client.com"] });
   const r = buildReply(inbound, own, { all: false, when: "Nov 4" });
   assert.equal(r.subject, "Re: Quote");
-  assert.match(r.body, /Ada <ada@client.com> wrote:\n> Hi\n> there/);
+  assert.equal(r.body, "");
   assert.equal(buildReply({ ...inbound, subject: "Re: Quote" }, own).subject, "Re: Quote");
   assert.equal(buildForward(inbound).subject, "Fwd: Quote");
   assert.deepEqual(replyRecipients({ direction: "outbound", to_emails: ["ada@client.com"], cc_emails: [] }, own), { to: ["ada@client.com"], cc: [] });

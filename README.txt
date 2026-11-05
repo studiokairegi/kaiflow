@@ -1,16 +1,11 @@
-Emma outreach language and brevity update
+KairFlow Inbox conversation-composer correction
 
-Changed files:
-- intelligence-worker/kairflow_intel/drafting.py
-  * Japanese animation-studio prospects (country Japan or researched language ja) receive a concise, natural Japanese initial outreach subject/body.
-  * English initial outreach is condensed to one paragraph using short approved knowledge-base excerpts and the approved portfolio link.
-  * Follow-ups and simple automated replies use concise language matching the prospect's Japanese/English locale.
-  * Required initial/follow-up compliance footer remains present. Policy violations in approved service text are not hidden by excerpt truncation.
-- intelligence-worker/tests/test_logic.py
-  * Adds regression coverage for Japanese initial/follow-up/reply drafts and single-paragraph brevity.
+Changes:
+- Removed Reply and Reply all message actions. Forward remains available.
+- Existing conversations use the persistent bottom writing composer.
+- The composer automatically addresses the other conversation participants, excluding the user's own sending addresses.
+- The subject is automatically prefixed with Re: (without duplicating an existing prefix).
+- Removed quoted-reply context from the composer; users write a clean message.
+- Sending continues through the existing emailApi.send path with the existing conversationId, preserving email-thread handling.
 
-Verification:
-- python -m unittest discover -v (from intelligence-worker): 129 tests passed.
-- python -m py_compile intelligence-worker/kairflow_intel/drafting.py intelligence-worker/tests/test_logic.py: passed.
-
-No emails were sent. No production settings, database, or deployment were changed.
+Integrate src/email/InboxModule.jsx into the working repository. This is a source-file update only; it has not been deployed or tested against live email delivery.

@@ -6,10 +6,8 @@ import { canAccessIntelligence } from "../intelligence/access.js";
 import { Input, Muted, Section, Select, TextArea, useLoad, confirmAction } from "../intelligence/kit.jsx";
 import { emailApi } from "./api.js";
 import { usePolling } from "../chat/hooks.js";
-import ChatComposer from "../chat/Composer.jsx";
-import "../chat/chat.css";
 import "./inbox-chat.css";
-import { FOLDERS, attachmentProblem, buildForward, composeProblem, fmtSize, isProblem, parseRecipients, participantLabel, replySubject, statusLabel, textToHtml } from "./logic.js";
+import { FOLDERS, attachmentProblem, buildForward, buildReply, composeProblem, fmtSize, isProblem, parseRecipients, participantLabel, statusLabel, textToHtml } from "./logic.js";
 
 const newKey = () => `kf-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
 const when = (iso) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "");
@@ -30,7 +28,7 @@ function SetupAccount({ supabase, onDone }) {
   );
 }
 
-function ComposeModal({ supabase, accounts, initial, onClose, onSent }) {
+function Composer({ supabase, accounts, initial, onClose, onSent }) {
   const [f, setF] = useState({ accountId: initial.accountId || accounts[0]?.id || "", to: initial.to || "", cc: initial.cc || "", bcc: initial.bcc || "", subject: initial.subject || "", body: initial.body || "" });
   const [files, setFiles] = useState([]);
   const [showCc, setShowCc] = useState(Boolean(initial.cc || initial.bcc));
@@ -89,86 +87,7 @@ function ComposeModal({ supabase, accounts, initial, onClose, onSent }) {
   );
 }
 
-function InlineEmailComposer({ supabase, accountId, conversationId, initial, onSent }) {
-  const [to, setTo] = useState(initial?.to || "");
-  const [cc, setCc] = useState(initial?.cc || "");
-  const [subject, setSubject] = useState(initial?.subject || "");
-  const [body, setBody] = useState("");
-  const [files, setFiles] = useState([]);
-  const [showCc, setShowCc] = useState(Boolean(initial?.cc));
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState("");
-  const key = useRef(newKey());
-
-  useEffect(() => {
-    setTo(initial?.to || "");
-    setCc(initial?.cc || "");
-    setSubject(initial?.subject || "");
-    setBody("");
-    setFiles([]);
-    setShowCc(Boolean(initial?.cc));
-    setError("");
-    key.current = newKey();
-  }, [initial?.messageId, initial?.to, initial?.cc, initial?.subject]);
-
-  const send = async () => {
-    const fields = { accountId, to, cc, bcc: "", subject, body };
-    const problem = composeProblem(fields) || attachmentProblem(files);
-    if (problem) { setError(problem); return; }
-    setSending(true);
-    setError("");
-    try {
-      await emailApi.send(supabase, {
-        accountId,
-        to: parseRecipients(to).valid,
-        cc: parseRecipients(cc).valid,
-        bcc: [],
-        subject: subject.trim(),
-        text: body,
-        html: textToHtml(body),
-        conversationId,
-        draftId: null,
-        key: key.current,
-        files,
-      });
-      setBody("");
-      setFiles([]);
-      key.current = newKey();
-      onSent();
-    } catch (e) {
-      setError(e?.message || "Message could not be sent.");
-      key.current = newKey();
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <section className="inbox-inline-composer" aria-label="Write a message">
-      <div className="inbox-inline-fields">
-        <label><span>To</span><Input value={to} onChange={(e) => setTo(e.target.value)} placeholder="Recipient email address" /></label>
-        <label><span>Subject</span><Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Email subject" /></label>
-        {showCc && <label><span>Cc</span><Input value={cc} onChange={(e) => setCc(e.target.value)} placeholder="Optional CC recipients" /></label>}
-        {!showCc && <button type="button" className="inbox-add-cc" onClick={() => setShowCc(true)}>Add Cc</button>}
-      </div>
-      <ChatComposer
-        value={body}
-        onChange={setBody}
-        onSend={send}
-        sending={sending}
-        files={files}
-        onFilesChange={setFiles}
-        accept="*/*"
-        placeholder="Write a message…"
-        label="Write a message"
-        footerNote="Enter to send · Shift+Enter for a new line"
-        error={error}
-      />
-    </section>
-  );
-}
-
-function MessageCard({ m, supabase, onEditDraft, onForward }) {
+function MessageCard({ m, supabase, onEditDraft, onReply, onReplyAll, onForward }) {
   const [label, tone] = statusLabel(m.status);
   const inbound = m.direction === "inbound";
   const open = async (att) => {
@@ -192,7 +111,11 @@ function MessageCard({ m, supabase, onEditDraft, onForward }) {
           <span>{when(m.received_at || m.sent_at || m.created_at)}</span>
           {m.ai_generated && <Pill tone="warn">AI draft: review before sending</Pill>}
           {m.direction === "outbound" && <Pill tone={tone}>{label}</Pill>}
-          {m.status === "draft" ? <Btn small kind="primary" onClick={() => onEditDraft(m)}>Edit draft</Btn> : <Btn small onClick={() => onForward(m)}>Forward</Btn>}
+          {m.status === "draft" ? <Btn small kind="primary" onClick={() => onEditDraft(m)}>Edit draft</Btn> : <>
+            <Btn small onClick={() => onReply(m)}>Reply</Btn>
+            <Btn small onClick={() => onReplyAll(m)}>Reply all</Btn>
+            <Btn small onClick={() => onForward(m)}>Forward</Btn>
+          </>}
         </footer>
       </article>
     </div>
@@ -229,6 +152,7 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead }
 
   const t = thread.data;
   const convo = t?.conversation;
+  const reply = (m, all) => setComposer({ title: all ? "Reply all" : "Reply", ...buildReply(m, own, { all, when: when(m.received_at || m.sent_at) }), conversationId: convo.id, accountId: convo.account_id });
   const forward = (m) => setComposer({ title: "Forward", ...buildForward(m, when(m.received_at || m.sent_at)), accountId: convo.account_id });
   const editDraft = (m) => setComposer({ title: "Draft", draftId: m.id, conversationId: m.conversation_id, accountId: m.account_id, to: (m.to_emails || []).join(", "), cc: (m.cc_emails || []).join(", "), bcc: (m.bcc_emails || []).join(", "), subject: m.subject, body: m.body_text });
 
@@ -286,21 +210,13 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead }
                 {convo.lead_id && onOpenLead && <div><Btn small onClick={() => onOpenLead(convo.lead_id)}>Open lead</Btn></div>}
               </div>
               {(t.messages || []).map((m) => (
-                <MessageCard key={m.id} m={m} supabase={supabase} onEditDraft={editDraft} onForward={forward} />
+                <MessageCard key={m.id} m={m} supabase={supabase} onEditDraft={editDraft} onReply={(x) => reply(x, false)} onReplyAll={(x) => reply(x, true)} onForward={forward} />
               ))}
-              <InlineEmailComposer
-                key={selected}
-                supabase={supabase}
-                accountId={convo.account_id}
-                conversationId={convo.id}
-                initial={{ to: (convo.participants || []).map((p) => p.email).filter((email) => email && !own.some((address) => address.toLowerCase() === email.toLowerCase())).join(", "), subject: replySubject(convo.subject || "") }}
-                onSent={refresh}
-              />
             </>
           )}
         </div>
       </div>
-      {composer && <ComposeModal supabase={supabase} accounts={accts} initial={composer} onClose={() => setComposer(null)} onSent={() => { setComposer(null); refresh(); }} />}
+      {composer && <Composer supabase={supabase} accounts={accts} initial={composer} onClose={() => setComposer(null)} onSent={() => { setComposer(null); refresh(); }} />}
     </div>
   );
 }
