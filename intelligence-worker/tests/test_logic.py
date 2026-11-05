@@ -136,34 +136,6 @@ class Drafting(unittest.TestCase):
         self.assertTrue(m["body"].startswith("Hello Rina,"))
         self.assertIn(SETTINGS["opt_out_text"], m["body"]); self.assertIn(SETTINGS["physical_address"], m["body"])
 
-    def test_japanese_animation_studio_outreach_is_short_and_japanese(self):
-        prospect = {**P, "type": "animation_studio_support", "country": "Japan", "language": "ja", "name": "株式会社サンプル"}
-        mail = drafting.build_initial(prospect, EV, KB, SETTINGS)
-        self.assertIn("アニメーション制作協力", mail["subject"])
-        self.assertIn("突然のご連絡失礼いたします", mail["body"])
-        self.assertIn("レイアウト・原画・動画", mail["body"])
-        self.assertIn("https://studio.test/portfolio", mail["body"])
-        message = mail["body"].split("\n--\n", 1)[0]
-        self.assertEqual(len(message.splitlines()), 1)
-        self.assertLess(len(message), 400)
-        self.assertEqual(policy.validate_outbound(mail["subject"], mail["body"], SETTINGS, drafting.approved_urls(KB), "initial", "pixelmoon.com"), [])
-
-    def test_all_generated_outreach_is_one_concise_paragraph_before_compliance_footer(self):
-        initial = drafting.build_initial(P, EV, KB, SETTINGS)
-        followup = drafting.build_followup(P, KB, SETTINGS, "2026-11-05")
-        for mail in (initial, followup):
-            message = mail["body"].split("\n--\n", 1)[0]
-            self.assertEqual(len(message.splitlines()), 1)
-            self.assertLess(len(message), 700)
-
-    def test_japanese_followup_and_simple_reply_use_japanese(self):
-        prospect = {**P, "country": "Japan", "language": "ja"}
-        followup = drafting.build_followup(prospect, KB, SETTINGS, "2026-11-05")
-        reply = drafting.build_auto_reply("portfolio_request", prospect, KB, SETTINGS, "Re: ご相談")
-        self.assertIn("先日ご連絡", followup["body"])
-        self.assertIn("ご返信ありがとうございます", reply["body"])
-        self.assertIn("https://studio.test/portfolio", reply["body"])
-
     def test_model_hook_rejected_when_ungrounded_or_unsafe(self):
         for bad in ("We watched your trailer ten times and loved the 50 frames of animation in it!", "Check https://x.test for our amazing offers and more things", "Great game", "I love how you built the intergalactic submarine fleet economy"):
             self.assertIsNone(drafting.model_hook(P, EV, lambda n, s, b=bad: {"sentence": b}), bad)
@@ -175,6 +147,44 @@ class Drafting(unittest.TestCase):
         self.assertIn("https://studio.test/portfolio", r["body"])
         self.assertIsNone(drafting.build_auto_reply("pricing", P, KB, SETTINGS, "x"))
         self.assertIsNone(drafting.build_auto_reply("positive", P, {}, SETTINGS, "x"))
+
+    def test_japanese_animation_outreach_uses_only_approved_japanese_entries(self):
+        ja_kb = {**KB,
+            "studio.about.ja": {"key": "studio.about.ja", "body": "Studio Kairegiは、2Dアニメーション制作スタジオです。"},
+            "services.animation_studio_support.ja": {"key": "services.animation_studio_support.ja", "body": "レイアウト（LO）、原画（Genga）、動画（Douga）、クリーンアップに対応しています。"},
+            "portfolio.main.ja": {"key": "portfolio.main.ja", "body": "制作実績：https://studio.test/portfolio"},
+            "policy.opt_out.ja": {"key": "policy.opt_out.ja", "body": "今後のご案内が不要な場合は、このメールに「配信停止」とご返信ください。"},
+        }
+        japan = {**P, "type": "animation_studio_support", "country": "Japan", "language": "en", "name": "Tokyo Studio"}
+        m = drafting.build_initial(japan, EV, ja_kb, SETTINGS, llm=lambda *_: self.fail("Japanese outreach must not use the English hook model"))
+        self.assertTrue(m["subject"].startswith("アニメーション制作協力"))
+        self.assertIn("ご担当者様", m["body"])
+        self.assertIn("レイアウト（LO）", m["body"])
+        self.assertIn("制作実績：https://studio.test/portfolio", m["body"])
+        self.assertIn(ja_kb["policy.opt_out.ja"]["body"], m["body"])
+        self.assertNotIn(SETTINGS["opt_out_text"], m["body"])
+        self.assertEqual(policy.validate_outbound(m["subject"], m["body"], SETTINGS, drafting.approved_urls(ja_kb), "initial", "tokyo-studio.jp", opt_out_text=ja_kb["policy.opt_out.ja"]["body"]), [])
+        self.assertNotIn("Hello", m["body"])
+        main_text, footer = m["body"].split("\n--\n", 1)
+        self.assertEqual(len([x for x in main_text.split("\n\n") if x.strip()]), 2)
+        self.assertIn(SETTINGS["physical_address"], footer)
+        self.assertIn(ja_kb["policy.opt_out.ja"]["body"], footer)
+        with self.assertRaises(PermanentError): drafting.build_initial(japan, EV, KB, SETTINGS)
+
+    def test_japanese_followup_and_auto_reply_use_japanese_copy(self):
+        ja_kb = {**KB,
+            "studio.about.ja": {"key": "studio.about.ja", "body": "Studio Kairegiは、2Dアニメーション制作スタジオです。"},
+            "services.animation_studio_support.ja": {"key": "services.animation_studio_support.ja", "body": "レイアウト、原画、動画、クリーンアップに対応しています。"},
+            "portfolio.main.ja": {"key": "portfolio.main.ja", "body": "制作実績：https://studio.test/portfolio"},
+            "policy.opt_out.ja": {"key": "policy.opt_out.ja", "body": "今後のご案内が不要な場合は、このメールに「配信停止」とご返信ください。"},
+        }
+        japan = {**P, "type": "animation_studio_support", "country": "日本", "language": "ja", "name": "Tokyo Studio"}
+        f = drafting.build_followup(japan, ja_kb, SETTINGS, "2026-11-05")
+        self.assertIn("先日お送りした", f["body"])
+        self.assertIn("制作実績：https://studio.test/portfolio", f["body"])
+        r = drafting.build_auto_reply("portfolio_request", japan, ja_kb, SETTINGS, "Re: ご提案")
+        self.assertIn("ご返信いただき", r["body"])
+        self.assertNotIn("Thank you", r["body"])
 
 
 class Schema(unittest.TestCase):

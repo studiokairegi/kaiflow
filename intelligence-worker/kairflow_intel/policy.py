@@ -82,14 +82,14 @@ def hard_class(hits: set[str]) -> str | None:
     return None
 
 
-def compliance_footer(settings: dict, token: str | None = None) -> str:
-    lines = ["", "--", settings.get("sender_name", "").strip(), settings.get("physical_address", "").strip(), "", settings.get("opt_out_text", "").strip()]
+def compliance_footer(settings: dict, token: str | None = None, opt_out_text: str | None = None) -> str:
+    lines = ["", "--", settings.get("sender_name", "").strip(), settings.get("physical_address", "").strip(), "", (opt_out_text if opt_out_text is not None else settings.get("opt_out_text", "")).strip()]
     if token:
         lines += ["", f"Ref: {token}"]
     return "\n".join(x for x in lines if x is not None).rstrip() + "\n"
 
 
-def validate_outbound(subject: str, body: str, settings: dict, allowed_urls: set[str], kind: str, prospect_domain: str = "") -> list[str]:
+def validate_outbound(subject: str, body: str, settings: dict, allowed_urls: set[str], kind: str, prospect_domain: str = "", opt_out_text: str | None = None) -> list[str]:
     """Violations that must block a draft. Empty list = acceptable."""
     v: list[str] = []
     if not subject.strip() or "\n" in subject or len(subject) > 160:
@@ -97,7 +97,8 @@ def validate_outbound(subject: str, body: str, settings: dict, allowed_urls: set
     if len(body) > 3200:
         v.append("too long")
     if kind in ("initial", "followup"):
-        if settings.get("opt_out_text", "").strip().lower() not in body.lower():
+        required_opt_out = (opt_out_text if opt_out_text is not None else settings.get("opt_out_text", "")).strip()
+        if not required_opt_out or required_opt_out.lower() not in body.lower():
             v.append("missing opt-out sentence")
         if not settings.get("physical_address", "").strip() or settings["physical_address"].strip().lower() not in body.lower():
             v.append("missing postal address")

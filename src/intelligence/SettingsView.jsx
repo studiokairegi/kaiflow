@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, useBusy } from "../finance/ui.jsx";
 import { intelApi } from "./api.js";
-import { AUTONOMY, KB_KINDS, MAIL_PROVIDERS, fmtWhen, mailProviderName, missingKb, sourceState } from "./logic.js";
+import { AUTONOMY, KB_KINDS, MAIL_PROVIDERS, fmtWhen, mailProviderName, missingJapaneseKb, missingKb, sourceState } from "./logic.js";
 import { Input, Muted, Section, Select, TextArea, useLoad, confirmAction } from "./kit.jsx";
 import { emailApi } from "../email/api.js";
 import { activeMailProviders } from "../email/logic.js";
@@ -151,12 +151,14 @@ function KbCard({ supabase }) {
   const [edit, setEdit] = useState(null);
   const { busy, error, run } = useBusy();
   const missing = missingKb(kb.data);
+  const missingJa = missingJapaneseKb(kb.data);
   const save = () => run(async () => { await intelApi.upsertKb(supabase, edit); setEdit(null); await kb.reload(); });
   return (
     <Section title="Knowledge base" hint="The only studio facts the agent may use. It never invents services, prices, availability or portfolio. Editing an entry un-approves it."
       action={<Btn small onClick={() => setEdit({ key: "", kind: "studio", title: "", body: "" })}>Add entry</Btn>}>
       {error && <Banner tone="bad">{error}</Banner>}
       {missing.length > 0 && <Banner tone="warn">The agent will not draft any email until these are written and approved: {missing.map((m) => m.label).join("; ")}.</Banner>}
+      <Banner tone={missingJa.length === 0 ? "ok" : "info"}>Japanese animation-studio outreach uses separate approved Japanese entries. {missingJa.length ? `Still needed: ${missingJa.map((m) => `${m.key} (${m.label})`).join("; ")}. Add each entry below and approve it. Japanese prospects will not receive an English fallback.` : "All three Japanese entries are approved."}</Banner>
       <Table rowKey={(r) => r.key} empty={kb.loading ? "Loading…" : "No entries yet."} rows={kb.data || []}
         columns={[
           { key: "key", label: "Key", render: (r) => <code>{r.key}</code> },
@@ -170,7 +172,7 @@ function KbCard({ supabase }) {
       {edit && (
         <Modal title="Knowledge base entry" onClose={() => setEdit(null)} width={640} footer={<Btn kind="primary" disabled={busy || !edit.key || !edit.body.trim()} onClick={save}>Save (needs re-approval)</Btn>}>
           <div style={S.grid(220)}>
-            <Field label="Key" hint="e.g. studio.about, services.indie_game_developer, portfolio.main"><Input value={edit.key} onChange={(e) => setEdit({ ...edit, key: e.target.value.toLowerCase() })} /></Field>
+            <Field label="Key" hint="e.g. studio.about, services.indie_game_developer, portfolio.main, studio.about.ja"><Input value={edit.key} onChange={(e) => setEdit({ ...edit, key: e.target.value.toLowerCase() })} /></Field>
             <Field label="Kind"><Select value={edit.kind} onChange={(e) => setEdit({ ...edit, kind: e.target.value })} options={KB_KINDS.map((k) => [k, k])} /></Field>
           </div>
           <Field label="Title"><Input value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} /></Field>

@@ -11,7 +11,9 @@ from .safety import norm
 HOOK_SCHEMA = {"type": "object", "required": ["sentence"], "properties": {"sentence": {"type": "string", "maxLength": 240}}}
 TYPE_KEY = {"indie_game_developer": "services.indie_game_developer", "animation_studio_support": "services.animation_studio_support"}
 SUBJECT = {"indie_game_developer": "2D animation for {name}", "animation_studio_support": "Animation production support for {name}"}
+SUBJECT_JA = "アニメーション制作協力のご提案｜{name}"
 REQUIRED = ("studio.about", "portfolio.main")
+JAPANESE_REQUIRED = ("studio.about.ja", "services.animation_studio_support.ja", "portfolio.main.ja", "policy.opt_out.ja")
 
 
 def kb_map(kb: list[dict]) -> dict[str, dict]:
@@ -25,7 +27,24 @@ def require_kb(kb: dict, ptype: str) -> None:
         raise PermanentError(f"approved knowledge base is missing: {', '.join(missing)}")
 
 
+def is_japanese_animation_prospect(prospect: dict) -> bool:
+    """Japanese copy is used for animation-support prospects whose site language is Japanese or country is Japan."""
+    if prospect.get("type") != "animation_studio_support":
+        return False
+    language = str(prospect.get("language") or "").strip().lower()
+    country = str(prospect.get("country") or "").strip().lower()
+    return language in {"ja", "japanese", "日本語"} or country in {"japan", "jp", "jpn", "日本", "日本国"}
+
+
+def require_japanese_kb(kb: dict) -> None:
+    missing = [k for k in JAPANESE_REQUIRED if not (kb.get(k) and kb[k]["body"].strip())]
+    if missing:
+        raise PermanentError(f"approved Japanese knowledge base is missing: {', '.join(missing)}")
+
+
 def greeting(prospect: dict) -> str:
+    if is_japanese_animation_prospect(prospect):
+        return "ご担当者様"
     n = (prospect.get("contact_name") or "").strip()
     first = n.split()[0] if n else ""
     return f"Hello {first}," if first and re.fullmatch(r"[\w'\-\.]{2,30}", first, re.U) else "Hello,"
@@ -59,53 +78,21 @@ def model_hook(prospect: dict, evidence: list[dict], llm) -> str | None:
     return s
 
 
-def is_japanese_prospect(prospect: dict) -> bool:
-    """Japanese outreach is selected from researched language or an explicit Japan country."""
-    language = str(prospect.get("language") or "").strip().lower()
-    country = str(prospect.get("country") or "").strip().lower()
-    return language in {"ja", "japanese"} or country in {"japan", "日本", "jp"}
-
-
-def _short_excerpt(value: str, limit: int = 150) -> str:
-    """Keep one complete approved sentence; never splice or invent studio claims."""
-    text = re.sub(r"\s+", " ", (value or "")).strip()
-    if not text:
-        return ""
-    match = re.search(r"^.{1,}?([.!?](?:\s|$))", text)
-    sentence = text[:match.end(1)].strip() if match else text
-    if len(sentence) <= limit:
-        return sentence
-    clipped = sentence[:limit].rsplit(" ", 1)[0].rstrip(" ,;:")
-    return clipped + "…"
-
-
-def _portfolio_url(kb: dict) -> str:
-    urls = policy.URL.findall(kb["portfolio.main"]["body"])
-    return urls[0].rstrip(".,)") if urls else ""
-
-
 def build_initial(prospect: dict, evidence: list[dict], kb: dict, settings: dict, llm=None) -> dict:
     ptype = prospect["type"]
     require_kb(kb, ptype)
-    name = prospect["name"]
-    portfolio = _portfolio_url(kb)
-    if is_japanese_prospect(prospect):
-        # Japanese business inquiry: concise, natural, and not a literal English translation.
-        subject = f"アニメーション制作協力のご提案｜{name}"
-        body = (f"突然のご連絡失礼いたします。Studio Kairegiと申します。貴社のアニメーション制作において、"
-                f"レイアウト・原画・動画などの制作協力ができればと思い、ご連絡いたしました。"
-                f"制作実績はこちらです：<{portfolio}>。外部スタッフをお探しの際は、ぜひお気軽にご相談ください。")
-    else:
-        about = _short_excerpt(kb["studio.about"]["body"], 120)
-        service_source = kb[TYPE_KEY[ptype]]["body"]
-        # Never hide a policy violation by clipping a risky approved KB entry; let the
-        # final outbound validator block it for administrator review.
-        service = service_source if policy.PRICE_IN_DRAFT.search(service_source) else _short_excerpt(service_source, 150)
-        hook = model_hook(prospect, evidence, llm) or plain_hook(prospect, evidence)
-        body = " ".join(part for part in (greeting(prospect), hook, about, service, f"Portfolio: {portfolio}. Let me know if you may need animation support.") if part)
-        subject = SUBJECT[ptype].format(name=name)[:120]
-    body += policy.compliance_footer(settings)
-    return {"subject": subject[:120], "body": body}
+    if is_japanese_animation_prospect(prospect):
+        require_japanese_kb(kb)
+        paragraph = "突然のご連絡失礼いたします。" + " ".join(kb[k]["body"].strip() for k in JAPANESE_REQUIRED[:3])
+        paragraph += " ご関心がございましたら、お気軽にご返信いただけますと幸いです。"
+        body = greeting(prospect) + "\n\n" + paragraph
+        body += "\n" + policy.compliance_footer(settings, opt_out_text=kb["policy.opt_out.ja"]["body"].strip())
+        return {"subject": SUBJECT_JA.format(name=prospect["name"])[:120], "body": body}
+    hook = model_hook(prospect, evidence, llm) or plain_hook(prospect, evidence)
+    body = "\n\n".join([greeting(prospect), hook, kb["studio.about"]["body"].strip(), kb[TYPE_KEY[ptype]]["body"].strip(),
+                        kb["portfolio.main"]["body"].strip(), "If it would be useful, I would be glad to share more or answer any questions."])
+    body += "\n" + policy.compliance_footer(settings)
+    return {"subject": SUBJECT[ptype].format(name=prospect["name"])[:120], "body": body}
 
 
 MAX_STEP = 3
@@ -136,36 +123,45 @@ def thread_parent(messages: list[dict]) -> dict | None:
 
 def build_followup(prospect: dict, kb: dict, settings: dict, sent_on: str, parent_subject: str | None = None) -> dict:
     require_kb(kb, prospect["type"])
-    if is_japanese_prospect(prospect):
-        body = ("先日ご連絡いたしました件で、念のため簡単にフォローアップさせていただきました。"
-                "現在アニメーション制作の外部協力がご不要でしたら、どうぞお気になさらないでください。")
-        fallback_subject = f"アニメーション制作協力のご提案｜{prospect['name']}"
+    if is_japanese_animation_prospect(prospect):
+        require_japanese_kb(kb)
+        paragraph = f"先日お送りしたアニメーション制作協力のご案内について、改めてご連絡いたしました。" \
+                    f"現在は外部スタッフのご協力が不要でしたら、どうぞご放念ください。{kb['portfolio.main.ja']['body'].strip()}"
+        body = greeting(prospect) + "\n\n" + paragraph + "\n" + policy.compliance_footer(settings, opt_out_text=kb["policy.opt_out.ja"]["body"].strip())
     else:
-        body = (f"{greeting(prospect)} I wanted to briefly follow up on my note from {sent_on}. "
-                "If animation support is not a priority right now, no problem at all.")
-        fallback_subject = SUBJECT[prospect["type"]].format(name=prospect["name"])
-    if parent_subject:
+        body = "\n\n".join([greeting(prospect),
+                            f"I wanted to follow up briefly on the note I sent on {sent_on}. If animation support is not a priority right now, no problem at all.",
+                            kb["portfolio.main"]["body"].strip()]) + "\n" + policy.compliance_footer(settings)
+    if parent_subject:   # joining a real thread: keep its subject, add Re: once
         subject = parent_subject if re.match(r"(?i)^re:", parent_subject) else f"Re: {parent_subject}"
-    else:
-        subject = f"Following up: {fallback_subject}"
-    return {"subject": subject[:120], "body": body + policy.compliance_footer(settings)}
-
+    else:                # no thread to join (e.g. an email sent from the CRM by hand): do not fake a reply
+        base_subject = SUBJECT_JA.format(name=prospect["name"]) if is_japanese_animation_prospect(prospect) else SUBJECT[prospect['type']].format(name=prospect['name'])
+        subject = f"Following up: {base_subject}" if not is_japanese_animation_prospect(prospect) else f"再度のご連絡｜{base_subject}"
+    return {"subject": subject[:120], "body": body}
 
 
 def build_auto_reply(label: str, prospect: dict, kb: dict, settings: dict, inbound_subject: str) -> dict | None:
-    """Short acknowledgement for simple replies only; substantive questions remain human-reviewed."""
-    if label not in ("positive", "portfolio_request") or not kb.get("portfolio.main"):
+    """Only for simple replies, built entirely from approved text. Returns None when the knowledge base cannot cover it."""
+    if label not in ("positive", "portfolio_request") or not kb.get("portfolio.main") or not kb.get("studio.about"):
         return None
-    portfolio = _portfolio_url(kb)
-    if is_japanese_prospect(prospect):
-        body = f"ご返信ありがとうございます。Studio Kairegiの制作実績はこちらからご覧いただけます：<{portfolio}>。具体的なご相談については、担当者より改めてご連絡いたします。"
-        fallback = "アニメーション制作について"
-    else:
-        body = f"{greeting(prospect)} Thanks for getting back to me. You can view our animation portfolio here: {portfolio}. I will follow up personally on any specific questions."
-        fallback = "your reply"
-    subj = inbound_subject if re.match(r"(?i)^re:", inbound_subject or "") else f"Re: {inbound_subject or fallback}"
-    return {"subject": subj[:120], "body": body + "\n"}
-
+    if is_japanese_animation_prospect(prospect):
+        try:
+            require_japanese_kb(kb)
+        except PermanentError:
+            return None
+        paragraph = "ご返信いただき、ありがとうございます。" + " ".join(kb[k]["body"].strip() for k in JAPANESE_REQUIRED[:3])
+        paragraph += " 具体的なご相談については、改めてこちらからご連絡いたします。"
+        subj = inbound_subject if re.match(r"(?i)^re:", inbound_subject or "") else f"Re: {inbound_subject or 'ご返信'}"
+        footer = settings.get("sender_name", "").strip()
+        return {"subject": subj[:120], "body": greeting(prospect) + "\n\n" + paragraph + ("\n\n" + footer if footer else "") + "\n"}
+    parts = [greeting(prospect), "Thank you for getting back to me." , kb["portfolio.main"]["body"].strip()]
+    if kb.get(TYPE_KEY.get(prospect["type"], "")):
+        parts.append(kb[TYPE_KEY[prospect["type"]]]["body"].strip())
+    if kb.get("faq.intro_question"):
+        parts.append(kb["faq.intro_question"]["body"].strip())
+    parts.append(f"I will follow up personally on anything specific.\n\n{settings.get('sender_name', '').strip()}")
+    subj = inbound_subject if re.match(r"(?i)^re:", inbound_subject or "") else f"Re: {inbound_subject or 'your reply'}"
+    return {"subject": subj[:120], "body": "\n\n".join(parts) + "\n"}
 
 
 def approved_urls(kb: dict) -> set[str]:

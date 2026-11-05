@@ -118,7 +118,8 @@ def h_draft(d: Deps, job):
         anchor = ((initial or {}).get("sent_at") or (initial or {}).get("created_at") or "")[:10] or "recently"
         mail = drafting.build_followup(p, kb, st, anchor, parent["subject"] if parent else None)
         thread = parent
-    bad = policy.validate_outbound(mail["subject"], mail["body"], st, drafting.approved_urls(kb), kind, p.get("domain", ""))
+    localized_opt_out = kb.get("policy.opt_out.ja", {}).get("body", "").strip() if drafting.is_japanese_animation_prospect(p) else None
+    bad = policy.validate_outbound(mail["subject"], mail["body"], st, drafting.approved_urls(kb), kind, p.get("domain", ""), opt_out_text=localized_opt_out)
     if bad:
         d.rpc("intel_agent_log", {"p_action": "draft_blocked", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"violations": bad}})
         raise PermanentError("draft failed policy: " + "; ".join(bad))

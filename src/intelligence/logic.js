@@ -126,11 +126,21 @@ export const REQUIRED_KB = Object.freeze([
   { key: "services.animation_studio_support", kind: "service", label: "Services for animation studios" },
   { key: "portfolio.main", kind: "portfolio", label: "Approved portfolio link(s)" },
 ]);
+export const JAPANESE_KB = Object.freeze([
+  { key: "studio.about.ja", kind: "studio", label: "Japanese studio description" },
+  { key: "services.animation_studio_support.ja", kind: "service", label: "Japanese animation support services" },
+  { key: "portfolio.main.ja", kind: "portfolio", label: "Japanese portfolio introduction and approved link" },
+  { key: "policy.opt_out.ja", kind: "policy", label: "Japanese opt-out sentence" },
+]);
 export const KB_KINDS = Object.freeze(["studio", "service", "portfolio", "faq", "policy", "template", "pricing_guidance", "availability"]);
 
 export function missingKb(entries) {
   const ok = new Set((entries || []).filter((e) => e.approved && String(e.body || "").trim()).map((e) => e.key));
   return REQUIRED_KB.filter((r) => !ok.has(r.key));
+}
+export function missingJapaneseKb(entries) {
+  const ok = new Set((entries || []).filter((e) => e.approved && String(e.body || "").trim()).map((e) => e.key));
+  return JAPANESE_KB.filter((r) => !ok.has(r.key));
 }
 
 export const AI_SOURCE_KIND = "ai_intelligence";
