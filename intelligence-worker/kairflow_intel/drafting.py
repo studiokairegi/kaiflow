@@ -59,14 +59,53 @@ def model_hook(prospect: dict, evidence: list[dict], llm) -> str | None:
     return s
 
 
+def is_japanese_prospect(prospect: dict) -> bool:
+    """Japanese outreach is selected from researched language or an explicit Japan country."""
+    language = str(prospect.get("language") or "").strip().lower()
+    country = str(prospect.get("country") or "").strip().lower()
+    return language in {"ja", "japanese"} or country in {"japan", "日本", "jp"}
+
+
+def _short_excerpt(value: str, limit: int = 150) -> str:
+    """Keep one complete approved sentence; never splice or invent studio claims."""
+    text = re.sub(r"\s+", " ", (value or "")).strip()
+    if not text:
+        return ""
+    match = re.search(r"^.{1,}?([.!?](?:\s|$))", text)
+    sentence = text[:match.end(1)].strip() if match else text
+    if len(sentence) <= limit:
+        return sentence
+    clipped = sentence[:limit].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return clipped + "…"
+
+
+def _portfolio_url(kb: dict) -> str:
+    urls = policy.URL.findall(kb["portfolio.main"]["body"])
+    return urls[0].rstrip(".,)") if urls else ""
+
+
 def build_initial(prospect: dict, evidence: list[dict], kb: dict, settings: dict, llm=None) -> dict:
     ptype = prospect["type"]
     require_kb(kb, ptype)
-    hook = model_hook(prospect, evidence, llm) or plain_hook(prospect, evidence)
-    body = "\n\n".join([greeting(prospect), hook, kb["studio.about"]["body"].strip(), kb[TYPE_KEY[ptype]]["body"].strip(),
-                        kb["portfolio.main"]["body"].strip(), "If it would be useful, I would be glad to share more or answer any questions."])
-    body += "\n" + policy.compliance_footer(settings)
-    return {"subject": SUBJECT[ptype].format(name=prospect["name"])[:120], "body": body}
+    name = prospect["name"]
+    portfolio = _portfolio_url(kb)
+    if is_japanese_prospect(prospect):
+        # Japanese business inquiry: concise, natural, and not a literal English translation.
+        subject = f"アニメーション制作協力のご提案｜{name}"
+        body = (f"突然のご連絡失礼いたします。Studio Kairegiと申します。貴社のアニメーション制作において、"
+                f"レイアウト・原画・動画などの制作協力ができればと思い、ご連絡いたしました。"
+                f"制作実績はこちらです：<{portfolio}>。外部スタッフをお探しの際は、ぜひお気軽にご相談ください。")
+    else:
+        about = _short_excerpt(kb["studio.about"]["body"], 120)
+        service_source = kb[TYPE_KEY[ptype]]["body"]
+        # Never hide a policy violation by clipping a risky approved KB entry; let the
+        # final outbound validator block it for administrator review.
+        service = service_source if policy.PRICE_IN_DRAFT.search(service_source) else _short_excerpt(service_source, 150)
+        hook = model_hook(prospect, evidence, llm) or plain_hook(prospect, evidence)
+        body = " ".join(part for part in (greeting(prospect), hook, about, service, f"Portfolio: {portfolio}. Let me know if you may need animation support.") if part)
+        subject = SUBJECT[ptype].format(name=name)[:120]
+    body += policy.compliance_footer(settings)
+    return {"subject": subject[:120], "body": body}
 
 
 MAX_STEP = 3
@@ -97,28 +136,36 @@ def thread_parent(messages: list[dict]) -> dict | None:
 
 def build_followup(prospect: dict, kb: dict, settings: dict, sent_on: str, parent_subject: str | None = None) -> dict:
     require_kb(kb, prospect["type"])
-    body = "\n\n".join([greeting(prospect),
-                        f"I wanted to follow up briefly on the note I sent on {sent_on}. If animation support is not a priority right now, no problem at all.",
-                        kb["portfolio.main"]["body"].strip()]) + "\n" + policy.compliance_footer(settings)
-    if parent_subject:   # joining a real thread: keep its subject, add Re: once
+    if is_japanese_prospect(prospect):
+        body = ("先日ご連絡いたしました件で、念のため簡単にフォローアップさせていただきました。"
+                "現在アニメーション制作の外部協力がご不要でしたら、どうぞお気になさらないでください。")
+        fallback_subject = f"アニメーション制作協力のご提案｜{prospect['name']}"
+    else:
+        body = (f"{greeting(prospect)} I wanted to briefly follow up on my note from {sent_on}. "
+                "If animation support is not a priority right now, no problem at all.")
+        fallback_subject = SUBJECT[prospect["type"]].format(name=prospect["name"])
+    if parent_subject:
         subject = parent_subject if re.match(r"(?i)^re:", parent_subject) else f"Re: {parent_subject}"
-    else:                # no thread to join (e.g. an email sent from the CRM by hand): do not fake a reply
-        subject = f"Following up: {SUBJECT[prospect['type']].format(name=prospect['name'])}"
-    return {"subject": subject[:120], "body": body}
+    else:
+        subject = f"Following up: {fallback_subject}"
+    return {"subject": subject[:120], "body": body + policy.compliance_footer(settings)}
+
 
 
 def build_auto_reply(label: str, prospect: dict, kb: dict, settings: dict, inbound_subject: str) -> dict | None:
-    """Only for simple replies, built entirely from approved text. Returns None when the knowledge base cannot cover it."""
-    if label not in ("positive", "portfolio_request") or not kb.get("portfolio.main") or not kb.get("studio.about"):
+    """Short acknowledgement for simple replies only; substantive questions remain human-reviewed."""
+    if label not in ("positive", "portfolio_request") or not kb.get("portfolio.main"):
         return None
-    parts = [greeting(prospect), "Thank you for getting back to me." , kb["portfolio.main"]["body"].strip()]
-    if kb.get(TYPE_KEY.get(prospect["type"], "")):
-        parts.append(kb[TYPE_KEY[prospect["type"]]]["body"].strip())
-    if kb.get("faq.intro_question"):
-        parts.append(kb["faq.intro_question"]["body"].strip())
-    parts.append(f"I will follow up personally on anything specific.\n\n{settings.get('sender_name', '').strip()}")
-    subj = inbound_subject if re.match(r"(?i)^re:", inbound_subject or "") else f"Re: {inbound_subject or 'your reply'}"
-    return {"subject": subj[:120], "body": "\n\n".join(parts) + "\n"}
+    portfolio = _portfolio_url(kb)
+    if is_japanese_prospect(prospect):
+        body = f"ご返信ありがとうございます。Studio Kairegiの制作実績はこちらからご覧いただけます：<{portfolio}>。具体的なご相談については、担当者より改めてご連絡いたします。"
+        fallback = "アニメーション制作について"
+    else:
+        body = f"{greeting(prospect)} Thanks for getting back to me. You can view our animation portfolio here: {portfolio}. I will follow up personally on any specific questions."
+        fallback = "your reply"
+    subj = inbound_subject if re.match(r"(?i)^re:", inbound_subject or "") else f"Re: {inbound_subject or fallback}"
+    return {"subject": subj[:120], "body": body + "\n"}
+
 
 
 def approved_urls(kb: dict) -> set[str]:

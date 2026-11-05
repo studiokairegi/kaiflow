@@ -5,7 +5,9 @@ import path from "node:path";
 
 const read = (p) => fs.readFileSync(new URL(p, import.meta.url), "utf8");
 const migration = read("../../supabase/migrations/20261112090000_email_resend_intelligence.sql");
+const auditMigration = read("../../supabase/migrations/20261115100000_intelligence_resend_audit.sql");
 const sendEdge = read("../../supabase/functions/intel-resend-send/index.ts");
+const settingsView = read("./SettingsView.jsx");
 const webhook = read("../../supabase/functions/intel-resend-webhook/index.ts");
 const inboundLogic = read("../../supabase/functions/_shared/intel_resend_logic.ts");
 const worker = read("../../intelligence-worker/kairflow_intel/resend.py");
@@ -26,6 +28,23 @@ test("server-side send proxy loads only a database-authorized sending message an
   assert.match(migration, /state = 'sending'/);
   assert.match(migration, /intel_agent_record_resend_acceptance/);
   assert.match(migration, /add column if not exists provider_message_id/);
+});
+
+test("Resend sent records can be verified against the exact configured Resend account", () => {
+  assert.match(auditMigration, /intel_admin_org\(\)/);
+  assert.match(auditMigration, /m\.organization_id = v_org/);
+  assert.match(auditMigration, /m\.direction = 'outbound'/);
+  assert.match(auditMigration, /m\.state = 'sent'/);
+  assert.match(auditMigration, /limit greatest\(1, least\(coalesce\(p_limit, 20\), 100\)\)/);
+  assert.match(auditMigration, /revoke all on function public\.intel_admin_resend_recent_sent\(int\) from public, anon/);
+  assert.match(auditMigration, /grant execute on function public\.intel_admin_resend_recent_sent\(int\) to authenticated/);
+  assert.match(auditMigration, /intel_admin_resend_recent_sent/);
+  assert.match(sendEdge, /action === "audit_recent"/);
+  assert.match(sendEdge, /api\.resend\.com\/emails/);
+  assert.match(sendEdge, /resend_send_accepted/);
+  assert.match(sendEdge, /Access-Control-Allow-Methods/);
+  assert.match(settingsView, /Resend delivery verification/);
+  assert.match(settingsView, /action: "audit_recent"/);
 });
 
 test("Resend inbound webhook verifies raw Svix signature and only routes exact Intelligence tokens", () => {

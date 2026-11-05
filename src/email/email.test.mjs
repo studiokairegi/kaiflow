@@ -739,11 +739,18 @@ test("webhook: a crashed worker's claim is recovered after the lease, not before
 
 test("webhook: a slow worker whose claim was taken over cannot overwrite the newer result", async () => {
   let t = NOW; let release; const gate = new Promise((r) => { release = r; });
+  let markFetchStarted;
+  const fetchStarted = new Promise((r) => { markFetchStarted = r; });
   const h = hookHarness({ clock: () => t });
   const inner = h.deps.fetch; let slow = true;
-  h.deps.fetch = async (url, init) => { if (slow && String(url).endsWith("/rx_1")) { slow = false; await gate; } return inner(url, init); };
+  h.deps.fetch = async (url, init) => {
+    if (slow && String(url).endsWith("/rx_1")) { slow = false; markFetchStarted(); await gate; }
+    return inner(url, init);
+  };
   const first = hook(receivedEvent, h.deps, { id: "msg_slow" });
-  for (let i = 0; i < 50 && h.log.webhooks.size === 0; i++) await new Promise((r) => setImmediate(r));
+  // Wait for the first owner to enter its deliberately blocked provider call. Merely
+  // observing the inserted claim row can race the first request's post-claim continuation.
+  await fetchStarted;
   t += 301_000;                                                               // the first worker is still running but its lease has expired
   const second = await hook(receivedEvent, h.deps, { id: "msg_slow", ts: Math.floor(t / 1000) });
   assert.equal(second.status, 200);

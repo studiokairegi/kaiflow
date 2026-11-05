@@ -7,13 +7,13 @@ export { AI_SOURCE_KIND, isAiGeneratedLead };
 export default function AiGeneratedBadge({ style }) {
   return (
     <span
-      title="Created by KairFlow Intelligence"
+      title="Created by Emma · KairFlow Intelligence"
       style={{
         display: "inline-block", marginLeft: 8, padding: "1px 7px", borderRadius: 999, fontSize: 10, fontWeight: 600,
         letterSpacing: 0.3, verticalAlign: "middle", border: "1px solid currentColor", opacity: 0.85, whiteSpace: "nowrap", ...style,
       }}
     >
-      AI Generated
+      Emma
     </span>
   );
 }

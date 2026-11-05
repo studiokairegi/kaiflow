@@ -6377,7 +6377,7 @@ export default function ShotTracker() {
                 }}
                 onClick={() => setLeadSourceFilter(leadSourceFilter === "ai" ? "all" : "ai")}
               >
-                AI Generated
+                Emma's leads
               </button>
             )}
             <button
@@ -9658,7 +9658,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       chips: [
         { icon: "check", label: "won", value: stats.dealsWon, tone: "good", onClick: () => onGoToLeads({ status: "won" }) },
         { icon: "x", label: "lost", value: stats.dealsLost, tone: "bad", onClick: () => onGoToLeads({ status: "lost" }) },
-        ...(stats.aiGeneratedLeadsCount ? [{ icon: "target", label: "AI generated", value: stats.aiGeneratedLeadsCount, onClick: () => onGoToLeads({ source: "ai" }) }] : []),
+        ...(stats.aiGeneratedLeadsCount ? [{ icon: "target", label: "Emma's leads", value: stats.aiGeneratedLeadsCount, onClick: () => onGoToLeads({ source: "ai" }) }] : []),
       ],
     },
     {

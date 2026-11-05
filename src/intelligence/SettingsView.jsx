@@ -106,6 +106,46 @@ function AccessCard({ s, mail, supabase, onSaved }) {
   );
 }
 
+function ResendAuditCard({ supabase }) {
+  const [audit, setAudit] = useState(null);
+  const { busy, error, run } = useBusy();
+  const verify = () => run(async () => {
+    const { data, error: invokeError } = await supabase.functions.invoke("intel-resend-send", {
+      body: { action: "audit_recent" },
+    });
+    if (invokeError) throw new Error(invokeError.message || "Could not verify Resend sends.");
+    if (!data?.ok || !Array.isArray(data.results)) throw new Error(data?.error || "Resend audit returned an invalid response.");
+    setAudit(data);
+  });
+  const rows = audit?.results || [];
+  const verified = rows.filter((r) => r.verification === "verified_in_configured_resend_account").length;
+  return (
+    <Section title="Resend delivery verification" hint="Checks recent KairFlow sent records against the exact Resend API key configured in Supabase. Read-only: this never sends email."
+      action={<Btn disabled={busy} onClick={verify}>{busy ? "Checking…" : "Verify recent sends"}</Btn>}>
+      {error && <Banner tone="bad">{error}</Banner>}
+      {audit && (
+        <>
+          <Banner tone={verified === rows.length && rows.length > 0 ? "ok" : "warn"}>
+            Verified {verified} of {rows.length} recent KairFlow sent records in the configured Resend account.
+            {rows.length === 0 ? " No sent records were returned." : ""}
+          </Banner>
+          <Table rowKey={(r) => r.message_id} rows={rows} empty="No sent records."
+            columns={[
+              { key: "message_id", label: "KairFlow message", render: (r) => <code>{String(r.message_id || "").slice(0, 8)}…</code> },
+              { key: "provider_message_id", label: "Resend ID", render: (r) => <code>{r.provider_message_id || "—"}</code> },
+              { key: "verification", label: "Result", render: (r) => {
+                const ok = r.verification === "verified_in_configured_resend_account";
+                const bad = r.verification === "provider_id_mismatch";
+                return <Pill tone={ok ? "ok" : bad ? "bad" : "warn"}>{r.verification}</Pill>;
+              } },
+              { key: "resend_last_event", label: "Resend event", render: (r) => r.resend_last_event || "—" },
+            ]} />
+        </>
+      )}
+    </Section>
+  );
+}
+
 function KbCard({ supabase }) {
   const kb = useLoad(() => intelApi.kb(supabase), [supabase]);
   const [edit, setEdit] = useState(null);
@@ -196,6 +236,7 @@ export default function SettingsView({ supabase, tick, mail, onChanged }) {
       <SafetyCard s={st.data} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />
       <SenderCard s={st.data} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />
       <AccessCard s={st.data} mail={mail} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />
+      <ResendAuditCard supabase={supabase} />
       <SourcesCard supabase={supabase} />
       <KbCard supabase={supabase} />
       <SuppressionCard supabase={supabase} />

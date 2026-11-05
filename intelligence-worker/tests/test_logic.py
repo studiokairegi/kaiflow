@@ -136,6 +136,34 @@ class Drafting(unittest.TestCase):
         self.assertTrue(m["body"].startswith("Hello Rina,"))
         self.assertIn(SETTINGS["opt_out_text"], m["body"]); self.assertIn(SETTINGS["physical_address"], m["body"])
 
+    def test_japanese_animation_studio_outreach_is_short_and_japanese(self):
+        prospect = {**P, "type": "animation_studio_support", "country": "Japan", "language": "ja", "name": "株式会社サンプル"}
+        mail = drafting.build_initial(prospect, EV, KB, SETTINGS)
+        self.assertIn("アニメーション制作協力", mail["subject"])
+        self.assertIn("突然のご連絡失礼いたします", mail["body"])
+        self.assertIn("レイアウト・原画・動画", mail["body"])
+        self.assertIn("https://studio.test/portfolio", mail["body"])
+        message = mail["body"].split("\n--\n", 1)[0]
+        self.assertEqual(len(message.splitlines()), 1)
+        self.assertLess(len(message), 400)
+        self.assertEqual(policy.validate_outbound(mail["subject"], mail["body"], SETTINGS, drafting.approved_urls(KB), "initial", "pixelmoon.com"), [])
+
+    def test_all_generated_outreach_is_one_concise_paragraph_before_compliance_footer(self):
+        initial = drafting.build_initial(P, EV, KB, SETTINGS)
+        followup = drafting.build_followup(P, KB, SETTINGS, "2026-11-05")
+        for mail in (initial, followup):
+            message = mail["body"].split("\n--\n", 1)[0]
+            self.assertEqual(len(message.splitlines()), 1)
+            self.assertLess(len(message), 700)
+
+    def test_japanese_followup_and_simple_reply_use_japanese(self):
+        prospect = {**P, "country": "Japan", "language": "ja"}
+        followup = drafting.build_followup(prospect, KB, SETTINGS, "2026-11-05")
+        reply = drafting.build_auto_reply("portfolio_request", prospect, KB, SETTINGS, "Re: ご相談")
+        self.assertIn("先日ご連絡", followup["body"])
+        self.assertIn("ご返信ありがとうございます", reply["body"])
+        self.assertIn("https://studio.test/portfolio", reply["body"])
+
     def test_model_hook_rejected_when_ungrounded_or_unsafe(self):
         for bad in ("We watched your trailer ten times and loved the 50 frames of animation in it!", "Check https://x.test for our amazing offers and more things", "Great game", "I love how you built the intergalactic submarine fleet economy"):
             self.assertIsNone(drafting.model_hook(P, EV, lambda n, s, b=bad: {"sentence": b}), bad)

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { attentionItems, conversations, criteriaPatch, findTargetProspect, missingKb, splitLines, workerState, statusInfo, isHttpUrl, isAiGeneratedLead } from "./logic.js";
@@ -59,6 +60,14 @@ test("missingKb lists exactly the approved entries the agent still needs", () =>
 test("the AI badge is driven only by the immutable source_kind", () => {
   assert.equal(isAiGeneratedLead({ sourceKind: "ai_intelligence" }), true);
   for (const l of [{ sourceKind: "manual" }, {}, null, { channel: "Cold Email" }, { notes: "AI generated" }]) assert.equal(isAiGeneratedLead(l), false);
+});
+
+
+test("intelligence-created CRM leads are visibly attributed to Emma", () => {
+  const badge = readFileSync(new URL("./AiGeneratedBadge.jsx", import.meta.url), "utf8");
+  assert.match(badge, /title="Created by Emma · KairFlow Intelligence"/);
+  assert.match(badge, />\s*Emma\s*</);
+  assert.match(badge, /isAiGeneratedLead/);
 });
 
 test("api: writes only call intel_admin_* functions, reads only intel tables", async () => {
