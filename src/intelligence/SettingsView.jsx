@@ -6,6 +6,79 @@ import { Input, Muted, Section, Select, TextArea, useLoad, confirmAction } from 
 import { emailApi } from "../email/api.js";
 import { activeMailProviders } from "../email/logic.js";
 
+const WORKER_CONTROL_URL = "http://127.0.0.1:17843";
+
+function WorkerControlCard() {
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [checkedAt, setCheckedAt] = useState(null);
+
+  const request = async (path, method = "GET") => {
+    const response = await fetch(`${WORKER_CONTROL_URL}${path}`, {
+      method, mode: "cors", credentials: "omit", cache: "no-store",
+      ...(method === "POST" ? { headers: { "Content-Type": "application/json" }, body: "{}" } : {}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || `Local controller returned ${response.status}.`);
+    return data;
+  };
+
+  const refresh = async (preserveError = false) => {
+    try {
+      const data = await request("/api/status");
+      setStatus(data); if (!preserveError) setError(""); setCheckedAt(new Date());
+    } catch (e) {
+      setStatus(null); setError(e?.message || "Local controller is not reachable.");
+    }
+  };
+
+  useEffect(() => {
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const act = async (action) => {
+    if (action === "start" && !confirmAction("Start Emma on this computer? The worker will resume its configured queue. If email sending is enabled and the emergency stop is OFF, approved messages may be sent under your existing limits.")) return;
+    setBusy(true); setError("");
+    try {
+      const data = await request(`/api/${action}`, "POST");
+      setStatus(data); setCheckedAt(new Date());
+    } catch (e) {
+      setError(e?.message || `Could not ${action} Emma.`);
+    } finally {
+      setBusy(false); refresh(true);
+    }
+  };
+
+  const online = Boolean(status);
+  const running = Boolean(status?.worker_running);
+  return (
+    <Section title="Emma" hint="Controls the local Python worker on this computer. A small loopback-only controller must be installed once because the browser cannot launch local processes by itself.">
+      <div style={{ ...S.row, justifyContent: "space-between", flexWrap: "wrap" }}>
+        <div style={S.row}>
+          <Pill tone={!online ? "warn" : running ? "ok" : "muted"}>{!online ? "Emma status unavailable" : running ? "Emma is online" : "Emma is offline"}</Pill>
+          {running && status?.worker_pid && <span style={{ color: T.muted, fontSize: 12 }}>PID {status.worker_pid}</span>}
+          {checkedAt && <span style={{ color: T.faint, fontSize: 12 }}>Checked {checkedAt.toLocaleTimeString()}</span>}
+        </div>
+        <div style={S.row}>
+          {running
+            ? <Btn disabled={busy || !online} onClick={() => act("stop")}>{busy ? "Working…" : "Stop Emma"}</Btn>
+            : <Btn kind="primary" disabled={busy || !online} onClick={() => act("start")}>{busy ? "Working…" : "Start Emma"}</Btn>}
+          <Btn kind="link" disabled={busy} onClick={refresh}>Refresh</Btn>
+        </div>
+      </div>
+      {!online && <Banner tone="warn">The local controller is not reachable. On this computer, run <code>intelligence-worker\windows\install-controller.ps1</code> once in PowerShell, then refresh. If Chrome asks to allow local network access, allow it for KairFlow.</Banner>}
+      {error && online && <Banner tone="bad">{error}</Banner>}
+      {status?.last_error && <Banner tone="bad">Worker restart problem: {status.last_error}</Banner>}
+      {online && !running && status?.last_exit_code !== null && status?.last_exit_code !== undefined && <Banner tone="warn">The worker exited with code {status.last_exit_code}. Check `%LOCALAPPDATA%\KairFlowIntelligence\worker.log` for details.</Banner>}
+      {online && !running && <p style={S.sub}>Emma is stopped. Starting her resumes queued discovery, research and drafting work. Email sending remains governed by the existing approval, autonomy, daily-limit and emergency-stop settings.</p>}
+      {running && <p style={S.sub}>Emma is running locally. Closing this browser tab will not stop the worker.</p>}
+    </Section>
+  );
+}
+
 const ZOHO_DCS = [["com", "zoho.com (US)"], ["eu", "zoho.eu (Europe)"], ["in", "zoho.in (India)"], ["com.au", "zoho.com.au (Australia)"], ["jp", "zoho.jp (Japan)"], ["ca", "zoho.ca (Canada)"], ["sa", "zoho.sa (Saudi Arabia)"], ["com.cn", "zoho.com.cn (China)"]];
 
 function SafetyCard({ s, supabase, onSaved }) {
@@ -235,6 +308,7 @@ export default function SettingsView({ supabase, tick, mail, onChanged }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {st.error && <Banner tone="bad">{st.error}</Banner>}
+      <WorkerControlCard />
       <SafetyCard s={st.data} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />
       <SenderCard s={st.data} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />
       <AccessCard s={st.data} mail={mail} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />

@@ -32,7 +32,20 @@ the Supabase service-role key or any Zoho secret. It can only call `intel_agent_
 The worker also answers Agent Chat messages and prepares follow-up drafts for existing CRM leads you bring in. Neither can send email: sending is only ever
 done from an approved message in the Outreach tab, subject to the daily limits, warm-up, suppression list and emergency stop.
 
-## 2. Run
+## 2. Run from the KairFlow app (Windows, recommended)
+
+The browser cannot launch a Python process on your computer by itself. Install the small local controller once; it runs on `127.0.0.1` only and accepts control requests only from `https://app.studiokairegi.com` (plus the local Vite development origin). It never returns or logs the worker credentials.
+
+1. Complete the Python environment setup above.
+2. In a normal PowerShell window, run `.\windows\install-controller.ps1` from this folder. It creates `%LOCALAPPDATA%\KairFlowIntelligence\worker.env`; fill in the Supabase URL, anon key and agent email. Prefer storing the agent password in Windows Credential Manager using the `keyring` instructions above, leaving `KAIRFLOW_AGENT_PASSWORD` blank. If you put the password in the file instead, keep the file private.
+3. The controller starts automatically at Windows sign-in. Open KairFlow → Intelligence → Settings and use **Start Emma** / **Stop Emma**. Chrome may ask permission for KairFlow to access your local network; allow it.
+4. Starting Emma resumes queued worker activity. If sending is enabled and the emergency stop is OFF, approved messages may be sent under the existing rules.
+
+Do not run the older `KairFlow Intelligence Worker` scheduled task at the same time as the controller-managed worker; that would create two workers. If you previously installed that task, disable it before using the in-app controls. The older `run-worker.ps1` console method remains available for troubleshooting, but do not use it while the in-app worker is running.
+
+To remove only the controller auto-start, run `.\windows\uninstall-controller.ps1`. This leaves the worker settings and logs in place.
+
+## 3. Run manually (troubleshooting)
 - Try it in a console: `python -m kairflow_intel run` (Ctrl+C stops it cleanly). `python -m kairflow_intel once` drains the queue once.
 - Keep it running across reboots (recommended, no extra software): in an Administrator PowerShell run
   `.\windows\install-task.ps1 -ManageOllama`, fill in `C:\ProgramData\KairFlowIntelligence\worker.env`, then
@@ -46,10 +59,10 @@ done from an approved message in the Outreach tab, subject to the daily limits, 
   Also turn off sleep and hibernate while plugged in. A crash, reboot or lost connection is safe: the job queue lives in Supabase,
   unfinished jobs return to the queue when their lease expires, and a message that might have been sent is **never** sent again. Mailbox providers use their Sent folder; Resend uses a saved provider id through the server-side verification proxy. If delivery cannot be verified, it stays "Delivery unverified" until you decide.
 
-## 3. Phase 0 feasibility spike (once, optional but recommended)
+## 4. Phase 0 feasibility spike (once, optional but recommended)
 `python spikes/phase0_feasibility.py` makes about 60 small, polite, read-only requests to Wikidata, AniList, GDELT and Common Crawl, checks robots.txt on sample studios, and writes `phase0_report.json`. It needs no keys and does not touch Supabase.
 
-## 4. Tests (no network, no Ollama, no Zoho or Gmail needed)
+## 5. Tests (no network, no Ollama, no Zoho or Gmail needed)
 `python -m unittest discover -s tests -t .`
 
 ## What is NOT verified here
