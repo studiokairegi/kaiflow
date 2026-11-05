@@ -74,6 +74,7 @@ export default function ProspectModal({ prospect: p, supabase, onClose, onChange
       <div style={{ ...S.row, justifyContent: "space-between" }}>
         <span style={S.sub}>Last updated {fmtWhen(p.updated_at)}</span>
         <div style={S.row}>
+          {["discovered", "researched"].includes(p.status) && <Btn small disabled={busy} onClick={() => act(() => intelApi.markProspectForReview(supabase, p.id))}>Mark for review</Btn>}
           {p.status === "needs_review" && dups.length === 0 && <Btn kind="primary" disabled={busy} onClick={approve}>Approve for outreach</Btn>}
           {!["rejected", "closed", "suppressed"].includes(p.status) && <Btn kind="danger" disabled={busy} onClick={() => act(() => intelApi.reviewProspect(supabase, p.id, "reject"))}>Reject</Btn>}
         </div>
