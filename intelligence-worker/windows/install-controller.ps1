@@ -14,7 +14,11 @@ if ($manualWorker) {
 }
 $python = Join-Path $workerDir ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
-  throw "Python environment not found: $python. Create intelligence-worker\.venv and install requirements first."
+  $systemPython = Get-Command python -ErrorAction SilentlyContinue
+  if (-not $systemPython) {
+    throw "Python was not found. Install Python or create intelligence-worker\.venv."
+  }
+  $python = $systemPython.Source
 }
 $localDir = Join-Path $env:LOCALAPPDATA "KairFlowIntelligence"
 New-Item -ItemType Directory -Force $localDir | Out-Null

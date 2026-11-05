@@ -49,10 +49,10 @@ export const stateInfo = (s) => MESSAGE_STATE[s] || { label: s || "-", tone: "mu
 
 /** Worker health from the last heartbeat age in seconds (null = never seen). */
 export function workerState(seconds) {
-  if (seconds === null || seconds === undefined) return { tone: "warn", label: "Worker has never connected" };
-  if (seconds <= 120) return { tone: "ok", label: "Worker online" };
-  if (seconds <= 900) return { tone: "warn", label: `Worker quiet for ${Math.round(seconds / 60)} min` };
-  return { tone: "bad", label: "Worker offline" };
+  if (seconds === null || seconds === undefined) return { tone: "warn", label: "Emma has never connected" };
+  if (seconds <= 120) return { tone: "ok", label: "Emma is online" };
+  if (seconds <= 900) return { tone: "warn", label: `Emma is quiet for ${Math.round(seconds / 60)} min` };
+  return { tone: "bad", label: "Emma is offline" };
 }
 
 /** Everything that needs the administrator's attention, in order of urgency. */
@@ -126,21 +126,11 @@ export const REQUIRED_KB = Object.freeze([
   { key: "services.animation_studio_support", kind: "service", label: "Services for animation studios" },
   { key: "portfolio.main", kind: "portfolio", label: "Approved portfolio link(s)" },
 ]);
-export const JAPANESE_KB = Object.freeze([
-  { key: "studio.about.ja", kind: "studio", label: "Japanese studio description" },
-  { key: "services.animation_studio_support.ja", kind: "service", label: "Japanese animation support services" },
-  { key: "portfolio.main.ja", kind: "portfolio", label: "Japanese portfolio introduction and approved link" },
-  { key: "policy.opt_out.ja", kind: "policy", label: "Japanese opt-out sentence" },
-]);
 export const KB_KINDS = Object.freeze(["studio", "service", "portfolio", "faq", "policy", "template", "pricing_guidance", "availability"]);
 
 export function missingKb(entries) {
   const ok = new Set((entries || []).filter((e) => e.approved && String(e.body || "").trim()).map((e) => e.key));
   return REQUIRED_KB.filter((r) => !ok.has(r.key));
-}
-export function missingJapaneseKb(entries) {
-  const ok = new Set((entries || []).filter((e) => e.approved && String(e.body || "").trim()).map((e) => e.key));
-  return JAPANESE_KB.filter((r) => !ok.has(r.key));
 }
 
 export const AI_SOURCE_KIND = "ai_intelligence";

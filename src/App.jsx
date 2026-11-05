@@ -6211,6 +6211,7 @@ export default function ShotTracker() {
             setCrmTab("pipeline");
             setWorkspace("leads");
           }}
+          onGoToIntelligence={canAccessIntelligence(intelAccess) ? () => { setCrmTab("intelligence"); setWorkspace("leads"); } : undefined}
           user={session?.user}
           userId={userId}
         />
@@ -6377,7 +6378,7 @@ export default function ShotTracker() {
                 }}
                 onClick={() => setLeadSourceFilter(leadSourceFilter === "ai" ? "all" : "ai")}
               >
-                Emma's leads
+                AI Generated
               </button>
             )}
             <button
@@ -9404,7 +9405,7 @@ function computeNeedsAttentionCounts(leads, schedule) {
   return { followupsDueToday, hotAwaitingResponse, proposalsAwaitingResponse, approachingDeadline };
 }
 
-function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToPayments, onGoToFinance, onGoToLeads, onOpenLead, onOpenShot, onOpenContact, onNewProject, onNewLead, onNewInvoice, onNewExpense, user, userId }) {
+function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToPayments, onGoToFinance, onGoToLeads, onGoToIntelligence, onOpenLead, onOpenShot, onOpenContact, onNewProject, onNewLead, onNewInvoice, onNewExpense, user, userId }) {
   // Re-render when the calendar day rolls over so "today", the week strip and due dates never go stale.
   const [, setDayKey] = useState(todayInZone);
   useEffect(() => {
@@ -9658,7 +9659,7 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       chips: [
         { icon: "check", label: "won", value: stats.dealsWon, tone: "good", onClick: () => onGoToLeads({ status: "won" }) },
         { icon: "x", label: "lost", value: stats.dealsLost, tone: "bad", onClick: () => onGoToLeads({ status: "lost" }) },
-        ...(stats.aiGeneratedLeadsCount ? [{ icon: "target", label: "Emma's leads", value: stats.aiGeneratedLeadsCount, onClick: () => onGoToLeads({ source: "ai" }) }] : []),
+        ...(stats.aiGeneratedLeadsCount ? [{ icon: "target", label: "AI generated", value: stats.aiGeneratedLeadsCount, onClick: () => onGoToLeads({ source: "ai" }) }] : []),
       ],
     },
     {
@@ -9785,8 +9786,9 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
                 onNewLead && ["New lead", onNewLead],
                 onNewInvoice && ["New invoice", onNewInvoice],
                 onNewExpense && ["Log expense", onNewExpense],
+                onGoToIntelligence && ["Intelligence", onGoToIntelligence],
               ].filter(Boolean).map(([label, fn]) => (
-                <button key={label} type="button" onClick={fn} style={{ border: "1px solid rgba(255,255,255,0.14)", background: "transparent", color: "inherit", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "7px 12px", whiteSpace: "nowrap" }}>+ {label}</button>
+                <button key={label} type="button" onClick={fn} style={{ border: "1px solid rgba(255,255,255,0.14)", background: "transparent", color: "inherit", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "7px 12px", whiteSpace: "nowrap" }}>{label === "Intelligence" ? "↗" : "+"} {label}</button>
               ))}
             </div>
           </Panel>
