@@ -23,3 +23,12 @@
   .inbox-chat-shell .inbox-chat-thread { min-height: 320px; padding: 8px; }
   .inbox-message-bubble { max-width: 94%; min-width: 0; }
 }
+
+/* Keep the writing area persistent at the bottom of an open email conversation. */
+.inbox-inline-composer { position: sticky; bottom: 0; z-index: 2; margin-top: 8px; padding: 10px 0 0; background: var(--c-bg, #101719); border-top: 1px solid var(--c-line, #2a3539); }
+.inbox-inline-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 12px; padding: 0 12px 8px; }
+.inbox-inline-fields label { display: grid; gap: 4px; min-width: 0; }
+.inbox-inline-fields label > span { color: var(--c-mute); font-size: 11px; }
+.inbox-add-cc { justify-self: start; border: 0; padding: 2px 0; background: transparent; color: var(--c-accent); font: inherit; font-size: 12px; cursor: pointer; }
+.inbox-inline-composer .chat-composer { border-top: 0; padding-top: 4px; }
+@media (max-width: 760px) { .inbox-inline-fields { grid-template-columns: minmax(0, 1fr); } .inbox-inline-composer { position: sticky; bottom: 0; } }
