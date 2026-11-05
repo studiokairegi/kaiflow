@@ -145,3 +145,7 @@ body { font-family: 'Inter', system-ui, sans-serif; font-variant-numeric: tabula
 .kf-clock-pill.kf-clock-halted .kf-clock-label,
 .kf-clock-pill.kf-clock-halted .kf-clock-label + span { color: #FF7A7A !important; }
 .kf-clock-pill.kf-clock-halted .kf-clock-label { font-weight: 700 !important; }
+
+
+/* Center the primary module names to match the centered workspace content. */
+@media (min-width: 901px) { .kf-primary-tabs { justify-content: center; } }
