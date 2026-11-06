@@ -20,12 +20,11 @@ export default function EmailMessage({ m, convoSubject, supabase, active, onActi
     <article className={`chat-msg ${inbound ? "theirs" : "mine"}${active ? " active" : ""}`} onClick={onActivate}>
       {inbound && <span className="chat-msg-avatar" aria-hidden="true">{initialsOf(name)}</span>}
       <div className="chat-msg-main">
-        <div className="chat-msg-meta">
+        {(inbound || m.ai_generated) && <div className="chat-msg-meta">
           {inbound && <strong>{name}</strong>}
           {inbound && m.from_name && m.from_email && <span>{m.from_email}</span>}
           {m.ai_generated && <span className="chat-badge">AI draft · review before sending</span>}
-          <time dateTime={ts} title={when(ts)}>{formatChatTime(ts)}</time>
-        </div>
+        </div>}
         <div className="chat-bubble">
           {showSubject && <strong className="inbox-bubble-subject">{m.subject}</strong>}
           <div className="chat-body-text"><p>{m.body_text || "(no text content)"}</p></div>
@@ -36,6 +35,7 @@ export default function EmailMessage({ m, convoSubject, supabase, active, onActi
             </button>
           ))}</div>}
         </div>
+        {ts && <time className="chat-msg-time" dateTime={ts} title={when(ts)}>{formatChatTime(ts)}</time>}
         {m.cc_emails?.length > 0 && <span className="chat-msg-note">Cc: {m.cc_emails.join(", ")}</span>}
         {!inbound && m.bcc_emails?.length > 0 && <span className="chat-msg-note">Bcc: {m.bcc_emails.join(", ")}</span>}
         {!inbound && !isDraft && !isProblem(m.status) && <span className={`chat-msg-note inbox-status ${tone}`}>{label}</span>}

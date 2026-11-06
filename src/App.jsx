@@ -72,6 +72,7 @@ const FinanceModule = lazyWithSuspense(() => import("./finance/FinanceModule.jsx
 const PortfolioTab = lazyWithSuspense(() => import("./portfolio/PortfolioTab.jsx"), { label: "Loading portfolio…" });
 const PaymentsModule = lazyWithSuspense(() => import("./payments/PaymentsModule.jsx"), { label: "Loading payments…", logo: true });
 const IntelligenceModule = lazyWithSuspense(() => import("./intelligence/IntelligenceModule.jsx"), { label: "Loading intelligence…" });
+import { useEmailUnread } from "./email/lib/useEmailUnread.js";
 const InboxModule = lazyWithSuspense(() => import("./email/InboxModule.jsx"), { label: "Loading inbox…" });
 const ChatPage = lazyWithSuspense(() => import("./chat/ChatPage.jsx"), { label: "Loading studio chat…" });
 const DonutBreakdown = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "DonutBreakdown", label: "" });
@@ -3229,6 +3230,8 @@ export default function ShotTracker() {
   }, [crmTab, intelAccess]);
   // Global activity notifications (bell in the header). Disposes its realtime channel/timers on sign-out.
   const notifications = useNotifications(userId);
+  // New email without refreshing the app: background check (same poll as chat), chat message tone on arrival, badge on the CRM Inbox tab.
+  const emailInbox = useEmailUnread(supabase, Boolean(userId) && intelAccess === true, () => { playMessageTone(); });
   // Timer changes made on the dashboard are saved to the account (debounced) so they
   // follow the user to another device.
   const settingsRef = useRef(settings);
@@ -6276,6 +6279,7 @@ export default function ShotTracker() {
                 onClick={() => setCrmTab(id)}
               >
                 {crmTab === id ? <span>{label}</span> : <CrmSectionIcon id={id} />}
+                {id === "inbox" && emailInbox.unread > 0 && <span className="kf-crm-nav-badge" aria-label={`${emailInbox.unread} unread emails`}>{emailInbox.unread > 99 ? "99+" : emailInbox.unread}</span>}
               </button>
             ))}
           </nav>
@@ -6566,7 +6570,7 @@ export default function ShotTracker() {
         </>
       )}
 
-      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessIntelligence(intelAccess) && <InboxModule access={intelAccess} supabase={supabase} leads={leads} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
+      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessIntelligence(intelAccess) && <InboxModule access={intelAccess} supabase={supabase} leads={leads} onUnreadChanged={emailInbox.refresh} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
       {view === "projects" && workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
           </div>
         </div>

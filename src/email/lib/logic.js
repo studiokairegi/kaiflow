@@ -106,3 +106,9 @@ export function composeProblem({ accountId, to, cc, bcc, subject, body }) {
 export function activeMailProviders(flags, all) {
   return Object.entries(all).filter(([key]) => flags && flags[key] === true);
 }
+
+/** How many new unread emails arrived between two polls. The first poll (prev == null) only sets the baseline, so opening the app is silent. */
+export function newArrivals(prev, next) {
+  if (prev == null) return 0;
+  return Math.max(0, (Number(next) || 0) - (Number(prev) || 0));
+}

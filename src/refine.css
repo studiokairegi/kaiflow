@@ -372,3 +372,7 @@ body { font-family: 'Inter', system-ui, sans-serif; font-variant-numeric: tabula
   .kf-intel-tabs [role="tab"] { flex: 0 0 auto; }
   .kf-intelligence .kf-intel-section { padding: 14px !important; }
 }
+
+/* Unread email count on the CRM Inbox tab */
+.kf-crm-nav-item { position: relative; }
+.kf-crm-nav-badge { position: absolute; top: 3px; right: 3px; min-width: 18px; height: 18px; padding: 0 5px; display: grid; place-items: center; border-radius: 10px; background: #e26f6f; color: #fff; font-size: 10px; font-weight: 800; line-height: 1; pointer-events: none; }

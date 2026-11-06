@@ -106,7 +106,7 @@
 .chat-msg-meta { display: flex; align-items: center; gap: 7px; padding: 0 4px; font-size: 11.5px; color: var(--c-mute); }
 .chat-msg-meta strong { color: var(--c-ink-2); font-weight: 650; }
 .chat-badge { padding: 1px 7px; border-radius: 6px; background: var(--c-accent-soft); color: var(--c-accent); font-size: 10px; font-weight: 700; letter-spacing: .02em; }
-.chat-bubble { position: relative; max-width: 100%; min-width: 0; padding: 8px 12px; border-radius: 16px; background: var(--c-theirs); color: var(--c-theirs-ink); overflow-wrap: anywhere; word-break: break-word; font-size: 14px; line-height: 1.45; }
+.chat-bubble { position: relative; max-width: 100%; min-width: 0; padding: 9px 14px; border-radius: 18px; background: var(--c-theirs); color: var(--c-theirs-ink); overflow-wrap: anywhere; word-break: break-word; font-size: 14px; line-height: 1.45; }
 .chat-msg.theirs:not(.grouped) .chat-bubble { border-bottom-left-radius: 5px; }
 .chat-msg.mine:not(.grouped) .chat-bubble { border-bottom-right-radius: 5px; }
 .chat-msg.mine .chat-bubble { background: var(--c-mine); color: var(--c-mine-ink); }
@@ -333,8 +333,8 @@
 .chat-live.on i { background: var(--c-brand); }
 
 /* Bubbles: Finance gradient for sent, Payments gradient for received. Squared-off, tail-free cards. */
-.chat-bubble { border-radius: 14px; border-bottom-left-radius: 14px; border-bottom-right-radius: 14px; font-weight: 500; text-shadow: 0 1px 1px rgba(10,14,40,.28); box-shadow: 0 2px 10px rgba(10,14,40,.18); }
-.chat-msg.theirs:not(.grouped) .chat-bubble, .chat-msg.mine:not(.grouped) .chat-bubble { border-radius: 14px; }
+.chat-bubble { border-radius: 18px; border-bottom-left-radius: 18px; border-bottom-right-radius: 18px; font-weight: 500; text-shadow: 0 1px 1px rgba(10,14,40,.28); box-shadow: 0 2px 10px rgba(10,14,40,.18); }
+.chat-msg.theirs:not(.grouped) .chat-bubble, .chat-msg.mine:not(.grouped) .chat-bubble { border-radius: 18px; }
 .chat-msg.theirs .chat-bubble { background: var(--g-recv); color: var(--c-theirs-ink); }
 .chat-msg.mine .chat-bubble { background: var(--g-sent); color: var(--c-mine-ink); }
 .chat-msg .chat-bubble.deleted { background: transparent; box-shadow: none; text-shadow: none; border: 1px dashed var(--c-line-strong); color: var(--c-mute); }
@@ -365,3 +365,7 @@
 .chat-emoji-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 1px; max-height: 190px; overflow-y: auto; }
 .chat-emoji-grid button { height: 32px; border: 0; border-radius: 8px; background: transparent; font-size: 19px; line-height: 1; }
 .chat-emoji-grid button:hover, .chat-emoji-grid button:focus-visible { background: var(--c-hover); }
+
+/* Bubble shape: soft, evenly rounded bubbles (pills for short text) with the time under the bubble, outside it. Colours stay Kairflow's. */
+.chat-msg-time { padding: 0 6px; font-size: 10.5px; line-height: 1.2; color: var(--c-mute); }
+.chat-msg-main { gap: 4px; }

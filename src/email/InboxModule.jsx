@@ -20,7 +20,7 @@ import ConversationList from "./components/ConversationList.jsx";
 import EmailMessage from "./components/EmailMessage.jsx";
 import InlineReply from "./components/InlineReply.jsx";
 
-export default function InboxModule({ supabase, access, leads = [], onOpenLead, theme = "dark" }) {
+export default function InboxModule({ supabase, access, leads = [], onOpenLead, onUnreadChanged, theme = "dark" }) {
   const [folder, setFolder] = useState("inbox");
   const [searchText, setSearchText] = useState("");
   const [search, setSearch] = useState("");
@@ -39,7 +39,7 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
   // Opening a conversation marks it read (the database keeps the counts).
   useEffect(() => {
     const c = thread.data?.conversation;
-    if (c && c.unread_count > 0) emailApi.markRead(supabase, c.id, true).then(() => setTick((t) => t + 1)).catch(() => {});
+    if (c && c.unread_count > 0) emailApi.markRead(supabase, c.id, true).then(() => { setTick((t) => t + 1); onUnreadChanged?.(); }).catch(() => {});
   }, [thread.data?.conversation?.id]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // Like the main chat: land on the newest message when a conversation opens or a new message arrives.
@@ -48,9 +48,10 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
     if (el) el.scrollTop = el.scrollHeight;
   }, [thread.data?.conversation?.id, thread.data?.messages?.length]);
 
-  const refresh = () => setTick((t) => t + 1);
+  const poll = () => setTick((t) => t + 1);
+  const refresh = () => { poll(); onUnreadChanged?.(); };   // after something the user did: also update the badge in the app
   // Match the main Chat module: refresh mounted conversations in the background and on tab visibility.
-  usePolling(refresh, 20000, allowed, { hidden: true });
+  usePolling(poll, 20000, allowed, { hidden: true });
   if (!allowed) return <Banner tone="warn">Email is restricted.</Banner>;
   const accts = accounts.data || [];
   const own = accts.map((a) => a.address);

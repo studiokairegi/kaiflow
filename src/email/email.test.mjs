@@ -8,7 +8,7 @@ import {
 import { normalizeReceivedEmail, normalizeAttachment, normalizeHeaders } from "../../supabase/functions/_shared/email_resend_logic.ts";
 import { providerPausedResponse } from "../../supabase/functions/_shared/provider_guard.ts";
 import { makeWebhookStore } from "../../supabase/functions/_shared/email_resend_store.ts";
-import { parseRecipients, replyRecipients, inlineReply, buildForward, composeProblem, participantLabel, activeMailProviders, normalizeSubject as uiNorm, attachmentProblem, statusLabel } from "./lib/logic.js";
+import { parseRecipients, replyRecipients, inlineReply, buildForward, composeProblem, participantLabel, activeMailProviders, normalizeSubject as uiNorm, attachmentProblem, statusLabel, newArrivals } from "./lib/logic.js";
 
 const ORG = "20000000-0000-0000-0000-00000000000a";
 const ACC = "30000000-0000-0000-0000-00000000000b";
@@ -963,4 +963,13 @@ test("webhook: an odd-shaped Resend answer is recorded as failed (with a readabl
   assert.equal(h.log.ingested.length, 0);
   assert.equal(h.log.webhooks.get("msg_1").status, "failed");
   assert.match(h.log.webhooks.get("msg_1").error, /Unexpected received-email shape/);
+});
+
+test("new-email detection: silent on the first poll, counts only increases", () => {
+  assert.equal(newArrivals(null, 5), 0);       // opening the app never beeps for old mail
+  assert.equal(newArrivals(2, 5), 3);
+  assert.equal(newArrivals(5, 5), 0);
+  assert.equal(newArrivals(5, 2), 0);          // reading mail lowers the count: no sound
+  assert.equal(newArrivals(0, "1"), 1);
+  assert.equal(newArrivals(undefined, 3), 0);
 });

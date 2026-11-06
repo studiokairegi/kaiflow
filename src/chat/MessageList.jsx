@@ -41,11 +41,10 @@ function Row({ message, grouped, actions, busyId, downloadBusyId, active, onActi
     >
       {!mine && <span className="chat-msg-avatar" aria-hidden="true">{grouped ? "" : message.avatar}</span>}
       <div className="chat-msg-main">
-        {!grouped && (
+        {!grouped && (!mine || message.badge || message.pinned) && (
           <div className="chat-msg-meta">
             {!mine && <strong>{message.senderName}</strong>}
             {message.badge && <span className="chat-badge">{message.badge}</span>}
-            <time dateTime={message.createdAt} title={message.createdAt ? new Date(message.createdAt).toLocaleString() : ""}>{formatChatTime(message.createdAt)}</time>
             {message.pinned && <span className="chat-pin-flag" title="Pinned"><IconPin size={12} filled /></span>}
           </div>
         )}
@@ -59,6 +58,7 @@ function Row({ message, grouped, actions, busyId, downloadBusyId, active, onActi
           {!message.deleted && <Attachments items={message.attachments} onOpen={actions.openAttachment} busyId={downloadBusyId} />}
           {grouped && message.pinned && <span className="chat-pin-flag inline" title="Pinned"><IconPin size={12} filled /></span>}
         </div>
+        {message.createdAt && !message.status && <time className="chat-msg-time" dateTime={message.createdAt} title={new Date(message.createdAt).toLocaleString()}>{formatChatTime(message.createdAt)}</time>}
         {(message.edited && !message.deleted) && <span className="chat-msg-note">edited</span>}
         {message.status === "sending" && <span className="chat-msg-note"><span className="chat-spinner xs" aria-hidden="true" /> Sending…</span>}
         {message.status === "failed" && (
