@@ -50,8 +50,11 @@ test("the email rule runs when a draft is created and again when a send is reser
   assert.match(draft, /when p\.origin = 'crm_existing' then 'pending_approval'/);
   const send = fn("intel_agent_reserve_send");
   const gate = send.indexOf("_intel_lead_email_gate(m.lead_id");
+  const resume = send.indexOf("if m.state = 'reserved' then");
+  const approved = send.indexOf("if m.state <> 'approved' then");
   const reserve = send.indexOf("set state = 'reserved'");
-  assert.ok(gate > 0 && reserve > gate, "gate comes before the message is reserved");
+  assert.ok(gate > 0 && resume > gate && approved > resume, "CRM gate precedes reserved recovery and approval check");
+  assert.ok(reserve > gate, "CRM gate comes before the message is reserved");
   assert.match(send, /error = 'CRM email check failed: ' \|\| v_gate/);
   assert.match(send, /m\.kind in \('initial','followup'\) and m\.lead_id is null then/);
 });

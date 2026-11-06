@@ -57,8 +57,8 @@ test("missingKb lists exactly the approved entries the agent still needs", () =>
 });
 
 test("Japanese outreach entries are tracked separately from the global required knowledge base", () => {
-  assert.equal(missingJapaneseKb([]).length, 4);
-  const ja = ["studio.about.ja", "services.animation_studio_support.ja", "portfolio.main.ja", "policy.opt_out.ja"].map((key) => ({ key, approved: true, body: "Japanese text" }));
+  assert.equal(missingJapaneseKb([]).length, 3);
+  const ja = ["studio.about.ja", "services.animation_studio_support.ja", "portfolio.main.ja"].map((key) => ({ key, approved: true, body: "Japanese text" }));
   assert.equal(missingJapaneseKb(ja).length, 0);
   assert.deepEqual(missingJapaneseKb([{ ...ja[0], approved: false }, ...ja.slice(1)]).map((x) => x.key), ["studio.about.ja"]);
 });
@@ -97,9 +97,9 @@ test("sourceState: a source with unconfirmed terms can never look as if it is ru
 });
 
 test("profile form round-trips, de-duplicates and refuses an empty profile", () => {
-  const form = { description: "d", termsEn: "key animation\nKey  animation\n", termsJa: "原画募集\n\n", exclude: "school", approved: false };
+  const form = { description: "d", termsEn: "key animation\nKey  animation\n", termsJa: "åŽŸç”»å‹Ÿé›†\n\n", exclude: "school", approved: false };
   const p = profileFromForm(form);
-  assert.deepEqual(p.termsEn, ["key animation", "Key animation"]); assert.deepEqual(p.termsJa, ["原画募集"]); assert.deepEqual(p.exclude, ["school"]);
+  assert.deepEqual(p.termsEn, ["key animation", "Key animation"]); assert.deepEqual(p.termsJa, ["åŽŸç”»å‹Ÿé›†"]); assert.deepEqual(p.exclude, ["school"]);
   assert.throws(() => profileFromForm({ description: "", termsEn: "", termsJa: "", exclude: "" }), /at least one/);
   assert.deepEqual(profileToForm({ description: "x", terms_en: ["a"], terms_ja: ["b"], exclude: ["c"], approved: true }), { description: "x", termsEn: "a", termsJa: "b", exclude: "c", approved: true });
   assert.equal(proposedTerms({}), null); assert.deepEqual(proposedTerms({ proposed_en: ["a"], proposed_ja: [], proposed_exclude: ["z"] }), { termsEn: "a", termsJa: "", exclude: "z" });

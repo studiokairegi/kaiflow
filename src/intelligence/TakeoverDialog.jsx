@@ -5,6 +5,7 @@ import React, { useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, useBusy } from "../finance/ui.jsx";
 import { intelApi } from "./api.js";
 import { PROSPECT_TYPES, fmtWhen } from "./logic.js";
+import { parseConversationZip } from "./conversation-zip.js";
 import { Input, Muted, Select, TextArea, useLoad, confirmAction } from "./kit.jsx";
 import {
   MAX_PASTE, cleanEntries, entryProblems, lastSpeaker, parseConversation, reverseEntries, suggestedLastContact, takeoverInfo, toIsoDate,
@@ -16,6 +17,9 @@ export default function TakeoverDialog({ supabase, row, takeover, onClose, onCha
   const { busy, error, run } = useBusy();
   const history = useLoad(() => intelApi.crmHistory(supabase, row.lead_id), [supabase, row.lead_id]);
   const [raw, setRaw] = useState("");
+  const [zipFile, setZipFile] = useState(null);
+  const [zipStatus, setZipStatus] = useState("");
+  const [zipBusy, setZipBusy] = useState(false);
   const [entries, setEntries] = useState(null);       // null = nothing read yet
   const [warnings, setWarnings] = useState([]);
   const [lastContact, setLastContact] = useState("");
@@ -32,6 +36,44 @@ export default function TakeoverDialog({ supabase, row, takeover, onClose, onCha
     setEntries(r.entries.map((e) => ({ ...e, direction: e.direction === "unknown" ? "" : e.direction, subject: e.subject || r.subject })));
     setWarnings(r.warnings);
     setLastContact(suggestedLastContact(r.entries, row.last_contact) || "");
+  };
+  const readZip = async () => {
+    if (!zipFile || zipBusy) return;
+    setZipBusy(true); setZipStatus("Validating and parsing archive…"); setWarnings([]);
+    try {
+      const parsed = await parseConversationZip(zipFile, lead);
+      let merged = parsed.entries;
+      if (raw.trim()) {
+        const pasted = parseConversation(raw, lead).entries;
+        const keys = new Set(merged.map((e) => `${e.direction}|${e.at || ""}|${e.subject}|${e.body.replace(/\\s+/g, " ").slice(0, 600)}`));
+        merged = [...merged, ...pasted.filter((e) => !keys.has(`${e.direction}|${e.at || ""}|${e.subject}|${e.body.replace(/\\s+/g, " ").slice(0, 600)}`))];
+      }
+      merged.sort((a, b) => (a.at || "9999-12-31").localeCompare(b.at || "9999-12-31"));
+      const normalized = merged.map((e) => ({ ...e, direction: e.direction === "unknown" ? "" : e.direction }));
+      setEntries(normalized);
+      const lastContactValue = suggestedLastContact(normalized, row.last_contact) || "";
+      setLastContact(lastContactValue);
+      const notes = [];
+      if (parsed.unsupported.length) notes.push(`Skipped ${parsed.unsupported.length} file(s): ${parsed.unsupported.map((x) => `${x.name} (${x.reason})`).join("; ")}`);
+      if (parsed.deduplicatedCount) notes.push(`Removed ${parsed.deduplicatedCount} duplicate message(s).`);
+      if (raw.trim()) notes.push("Pasted text was merged with ZIP messages; review for overlap.");
+      setWarnings(notes);
+      const validation = entryProblems(normalized);
+      const contactDate = toIsoDate(lastContactValue);
+      if (!validation.length && contactDate) {
+        setZipStatus(`Importing ${normalized.length} validated message(s) from ${zipFile.name}…`);
+        await run(async () => {
+          const res = await intelApi.crmImportHistory(supabase, { leadId: row.lead_id, type, entries: cleanEntries(normalized), raw: raw.slice(0, MAX_PASTE), lastContact: contactDate, sourceEmail });
+          setDone(res); setEntries(null); setRaw("");
+          await history.reload(); await onChanged();
+          setZipStatus(`Imported ${normalized.length} message(s) from ${zipFile.name}. Intelligence analysis is queued.`);
+        });
+      } else {
+        setZipStatus(`Parsed ${normalized.length} message(s) from ${zipFile.name}. Some metadata needs correction below before import.`);
+      }
+    } catch (e) {
+      setZipStatus(`Failed: ${String(e?.message || e).slice(0, 260)}`);
+    } finally { setZipBusy(false); }
   };
   const patch = (i, p) => setEntries((list) => list.map((e, k) => (k === i ? { ...e, ...p } : e)));
   const drop = (i) => setEntries((list) => list.filter((_, k) => k !== i));
@@ -104,10 +146,18 @@ export default function TakeoverDialog({ supabase, row, takeover, onClose, onCha
           headers and Japanese headers are recognised. You can fix anything before saving.
         </Muted>
         <TextArea rows={8} value={raw} onChange={(e) => setRaw(e.target.value)} maxLength={MAX_PASTE} placeholder="Paste the earlier emails here (oldest or newest first)…" aria-label="Pasted conversation" />
-        <div style={S.row}>
+        <div style={{ ...S.row, alignItems: "center", flexWrap: "wrap" }}>
           <Btn kind="primary" disabled={busy || !raw.trim()} onClick={read}>Read it</Btn>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, border: `1px solid ${T.border}`, borderRadius: 8, padding: "8px 12px", cursor: busy || zipBusy ? "not-allowed" : "pointer", opacity: busy || zipBusy ? .6 : 1 }}>
+            Attach ZIP
+            <input type="file" accept=".zip,application/zip" disabled={busy || zipBusy} onChange={(e) => { const f = e.target.files?.[0] || null; setZipFile(f); setZipStatus(f ? "ZIP selected. Click Parse ZIP to inspect its contents." : ""); }} style={{ display: "none" }} aria-label="Attach conversation ZIP" />
+          </label>
+          {zipFile && <span style={{ color: T.muted, fontSize: 13 }}>{zipFile.name} · {(zipFile.size / 1024 / 1024).toFixed(2)} MB</span>}
+          {zipFile && <Btn small kind="link" disabled={busy || zipBusy} onClick={() => { setZipFile(null); setZipStatus(""); }}>Remove ZIP</Btn>}
+          {zipFile && <Btn small kind="primary" disabled={busy || zipBusy} onClick={readZip}>{zipBusy ? "Parsing…" : "Parse ZIP"}</Btn>}
           {entries && <Btn disabled={busy} onClick={flip}>Reverse order</Btn>}
         </div>
+        {zipStatus && <Banner tone={zipStatus.startsWith("Failed:") ? "bad" : "info"}>{zipStatus}</Banner>}
       </div>
 
       {entries && (
