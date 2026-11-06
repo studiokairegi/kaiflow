@@ -28,3 +28,12 @@
 .inbox-inline-composer { position: sticky; bottom: 0; z-index: 2; margin-top: 8px; padding: 10px 0 0; background: var(--c-bg, #101719); border-top: 1px solid var(--c-line, #2a3539); }
 .inbox-inline-composer .chat-composer { border-top: 0; padding-top: 4px; }
 @media (max-width: 760px) {
+/* Forward: a round arrow that appears beside the bubble (outside it) on hover, like the main chat's message actions. */
+.inbox-message-hover { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+.inbox-message-row.outgoing .inbox-message-hover { flex-direction: row-reverse; }
+.inbox-message-hover .inbox-message-bubble { max-width: min(720px, calc(100% - 38px)); }
+.inbox-forward-btn { flex: none; display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 1px solid var(--c-line-strong, #3a484d); border-radius: 50%; background: var(--c-raise, #1b2528); color: var(--c-ink-2, #b4c0bc); cursor: pointer; opacity: 0; transition: opacity .12s; }
+.inbox-message-hover:hover .inbox-forward-btn, .inbox-forward-btn:focus-visible { opacity: 1; }
+.inbox-forward-btn:hover { background: var(--c-hover, #232f33); color: var(--c-ink, #edeae3); }
+@media (hover: none) { .inbox-forward-btn { opacity: .75; } }
+@media (max-width: 760px) { .inbox-message-hover .inbox-message-bubble { max-width: calc(100% - 38px); } }

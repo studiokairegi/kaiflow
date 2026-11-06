@@ -7,6 +7,7 @@ import { Input, Muted, Section, Select, TextArea, useLoad, confirmAction } from 
 import { emailApi } from "./api.js";
 import { usePolling } from "../chat/hooks.js";
 import ChatComposer from "../chat/Composer.jsx";
+import { IconForward } from "../chat/icons.jsx";
 import "../chat/chat.css";
 import "./inbox-chat.css";
 import { FOLDERS, attachmentProblem, buildForward, composeProblem, fmtSize, inlineReply, isProblem, parseRecipients, participantLabel, statusLabel, textToHtml } from "./logic.js";
@@ -97,6 +98,7 @@ function MessageCard({ m, supabase, onEditDraft, onForward }) {
   };
   return (
     <div className={`inbox-message-row ${inbound ? "incoming" : "outgoing"}`}>
+      <div className="inbox-message-hover">
       <article className={`inbox-message-bubble ${inbound ? "inbound" : "outbound"}`}>
         <header className="inbox-message-meta">
           <strong>{m.subject || "(no subject)"}</strong>
@@ -113,11 +115,11 @@ function MessageCard({ m, supabase, onEditDraft, onForward }) {
           <span>{when(m.received_at || m.sent_at || m.created_at)}</span>
           {m.ai_generated && <Pill tone="warn">AI draft: review before sending</Pill>}
           {m.direction === "outbound" && <Pill tone={tone}>{label}</Pill>}
-          {m.status === "draft" ? <Btn small kind="primary" onClick={() => onEditDraft(m)}>Edit draft</Btn> : <>
-            <Btn small onClick={() => onForward(m)}>Forward</Btn>
-          </>}
+          {m.status === "draft" && <Btn small kind="primary" onClick={() => onEditDraft(m)}>Edit draft</Btn>}
         </footer>
       </article>
+      {m.status !== "draft" && <button type="button" className="inbox-forward-btn" aria-label="Forward" title="Forward" onClick={() => onForward(m)}><IconForward size={16} /></button>}
+      </div>
     </div>
   );
 }
