@@ -145,7 +145,7 @@ class LegacyPreservation(unittest.TestCase):
         r = Rec(); res = research.qualify(r, ctx(), {})
         s = r.named("intel_agent_set_score")[0]
         self.assertEqual(s["p_estimates"]["scoring_model"], "studio-v2"); self.assertTrue(all(b["model"] == "studio-v2" for b in s["p_breakdown"]))
-        self.assertFalse(res.held); self.assertEqual(res.decision, "qualified")
+        self.assertFalse(res.held); self.assertEqual(res.decision, "needs_review")  # legacy contact has unknown provenance
 
     def test_legacy_score_is_not_overwritten_and_candidate_is_recorded(self):
         old = [{"criterion": "active_production", "points": 20, "max": 20, "why": "x"}]
@@ -179,6 +179,60 @@ class LegacyPreservation(unittest.TestCase):
         r = Rec(); res = research.qualify(r, ctx(ptype="indie_game_developer", score=75, breakdown=[{"criterion": "active_development"}]), {})
         self.assertEqual(len(r.named("intel_agent_set_score")), 1); self.assertFalse(res.held); self.assertEqual(res.model, "")
 
+
+class ResearchCorrections(unittest.TestCase):
+    def test_portfolio_and_services_rank_ahead_of_recruitment(self):
+        html = '''<a href="/careers">Careers</a><a href="/news">News</a>
+        <a href="/services">Services</a><a href="/works#top">Works</a><a href="https://other.example/portfolio">External portfolio</a>'''
+        pages = research.candidate_pages("https://studio.example/", html, limit=2)
+        self.assertEqual(pages, ["https://studio.example/works", "https://studio.example/services"])
+
+    def test_language_detection_does_not_default_missing_or_unknown_to_english(self):
+        self.assertEqual(research._page_language('<html><body><p>Hello world this is an animation studio website.</p></body></html>'), "en")
+        self.assertEqual(research._page_language('<html lang="ja"><body>アニメーション制作</body></html>'), "ja")
+        self.assertIsNone(research._page_language('<html><body>Studio</body></html>'))
+        self.assertEqual(research._validated_language("bad", [("https://x", '<html><body>Studio</body></html>')]), "other")
+
+    def test_language_model_failure_does_not_award_language_points(self):
+        r = scoring.score_studio({}, {"language": None}, None)
+        self.assertEqual(next(x for x in r.breakdown if x["criterion"] == "language_preference")["points"], 0)
+
+    def test_outsourcing_only_is_supplementary_not_confirmed(self):
+        r = scoring.score_studio({"outsourcing": "We work with outsourcing partner studios."}, {"language": "other"}, None)
+        row = next(x for x in r.breakdown if x["criterion"] == "external_collaboration")
+        self.assertEqual(row["status"], "uncertain")
+
+    def test_generic_japanese_tv_anime_does_not_confirm_2d(self):
+        detected = signals.detect_studio("\u30c6\u30ec\u30d3\u30a2\u30cb\u30e1\u306e\u4f5c\u753b\u3092\u62c5\u5f53\u3057\u3066\u3044\u307e\u3059\u3002")
+        self.assertNotIn("style_2d_anime", detected)
+        found = {k: [v] for k, v in detected.items()}
+        r = scoring.score_studio(found, {"language": "ja"}, None)
+        row = next(x for x in r.breakdown if x["criterion"] == "animation_2d")
+        self.assertEqual(row["status"], "uncertain")
+
+    def test_documented_2d_anime_can_confirm_2d(self):
+        r = scoring.score_studio({"style_2d_anime": "当社は手描きのテレビアニメを制作しています。", "anime_production": "当社はテレビアニメを制作しています。"}, {"language": "ja"}, None)
+        row = next(x for x in r.breakdown if x["criterion"] == "animation_2d")
+        self.assertEqual(row["status"], "confirmed")
+
+    def test_existing_email_not_relabelled_verified_and_evidence_keeps_page_urls(self):
+        home = '<html><body><a href="/works">Works</a><p>We are hiring key animators.</p><p>info@studio.example</p></body></html>'
+        works = '<html lang="en"><body><p>We produce 2D animation for television anime.</p><p>We do key animation for client projects.</p></body></html>'
+        class Fetch:
+            def fetch(self, url):
+                return (url, home if url.endswith("/") else works)
+        calls = []
+        def rpc(name, args): calls.append((name, args))
+        prospect = {"id":"p1", "type":"animation_studio_support", "website":"https://studio.example/", "domain":"studio.example", "name":"Studio", "contact_email":"old@studio.example", "contact_source_url":"https://old.example/contact", "facts":{"verified":{}}}
+        result = research.research(rpc, Fetch(), lambda _: {"language":"en"}, {"prospect":prospect})
+        evidence = [a for n,a in calls if n == "intel_agent_add_evidence"]
+        email_evidence = [e for e in evidence if e["p_fact_type"] == "contact_email"]
+        self.assertEqual(email_evidence, [])
+        self.assertTrue(any(e["p_url"] == "https://studio.example/works" for e in evidence if e["p_fact_type"] == "style_2d"))
+        upsert = next(a for n,a in calls if n == "intel_agent_upsert_prospect")
+        self.assertEqual(upsert["p_contact_email"], "")
+        self.assertEqual(upsert["p_verified"]["contact_verification"], "unknown_legacy")
+        self.assertEqual(result["contact_verified"], False)
 
 if __name__ == "__main__":
     unittest.main()

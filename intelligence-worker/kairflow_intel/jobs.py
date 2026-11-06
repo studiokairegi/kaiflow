@@ -50,9 +50,11 @@ def h_discover(d: Deps, job):
     for c in sources.discover(d.fetcher, t, camp["criteria"]):
         if limit is not None and new >= limit:
             break
-        meta = c.get("meta", {})
+        meta = c.get("meta") or {}
+        raw_language = meta.get("language")
+        language = raw_language if raw_language in ("en", "ja") else "other"
         r = d.rpc("intel_agent_upsert_prospect", {"p_type": t, "p_name": c["name"], "p_website": c["website"], "p_contact_name": "", "p_contact_email": c.get("contact_email", ""),
-                                                  "p_contact_source_url": c.get("contact_source_url", ""), "p_country": c.get("country", ""), "p_language": meta.get("language", "en"), "p_verified": meta})
+                                                  "p_contact_source_url": c.get("contact_source_url", ""), "p_country": c.get("country", ""), "p_language": language, "p_verified": meta})
         if r["created"] and not r.get("suppressed"):
             new += 1
             _enq(d, "research", {"prospect_id": r["prospect_id"]}, f"research:{r['prospect_id']}")

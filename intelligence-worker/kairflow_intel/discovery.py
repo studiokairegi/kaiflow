@@ -56,8 +56,10 @@ def ingest(d, ptype: str, cand: dict, via: str) -> tuple[str | None, bool]:
             d.rpc("intel_agent_add_alias", {"p_prospect_id": pid, "p_kind": "name", "p_value": nn})
         d.rpc("intel_agent_record_item", {"p_source": src, "p_type": "studio_entity", "p_url": website or "", "p_title": name, "p_snippet": "", "p_language": "", "p_prospect_id": pid, "p_meta": cand.get("meta") or {}})
         return pid, False
+    raw_language = (cand.get("meta") or {}).get("language")
+    language = raw_language if raw_language in ("en", "ja") else "other"
     res = d.rpc("intel_agent_upsert_prospect", {"p_type": ptype, "p_name": name or domain, "p_website": website if usable else "", "p_contact_name": "", "p_contact_email": "",
-                                                "p_contact_source_url": "", "p_country": cand.get("country", ""), "p_language": "ja" if cand.get("name_ja") else "en",
+                                                "p_contact_source_url": "", "p_country": cand.get("country", ""), "p_language": language,
                                                 "p_verified": {**(cand.get("meta") or {}), "discovered_via": via}})
     pid = res["prospect_id"]
     if nn:

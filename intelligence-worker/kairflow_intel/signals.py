@@ -32,10 +32,11 @@ STUDIO = {
     "business_inquiry": r"business (inquir|enquir)|contact us|お問い合わせ|ご依頼|work with us",
     # Phase 1 (studio-v2 scoring): evidence of what the studio actually produces and whether it works with outside parties.
     "role_character": r"character animation|characters? animators?|キャラクターアニメーション|作画",
-    "style_2d": r"\b2d\b|hand[- ]drawn|traditional animation|cel animation|セルアニメ|手描き|2Dアニメ",
+    "style_2d": r"\b2d\b|hand[- ]drawn|traditional animation|cel animation|セルアニメ|手描き|2Dアニメ|二次元アニメーション",
+    "style_2d_anime": r"2d.{0,24}anime|anime.{0,24}2d|2Dアニメ|手描き.{0,20}アニメ|セルアニメ",
     "style_3d": r"\b3d\b|3dcg|cg animation|cgアニメ",
-    "anime_production": r"\banime (production|studio|series|film|episode|title)s?|anime[- ]style|テレビアニメ|TVアニメ|劇場アニメ|アニメ(の)?(制作|作品|スタジオ|シリーズ)|アニメーション制作",
-    "external_collab": r"commissioned (work|projects?)|client work|work(ed|ing)? (for|with) (other )?(studios|clients|companies|partners)|service animation|contract animation|animation services?|production (support|assistance)|受託|制作協力|作画協力|グロス請け|元請|下請",
+    "anime_production": r"\banime (production|studio|series|film|episode|title)s?|anime[- ]style|テレビアニメ|TVアニメ|劇場アニメ|アニメ(の)?(制作|作品|スタジオ|シリーズ)|アニメーション制作|アニメ作品",
+    "external_collab": r"commissioned (work|projects?)|client work|work(ed|ing)? (for|with) (other )?(studios|clients|companies)|service animation|contract animation|animation services?|production (support|assistance)|受託|制作協力|作画協力|グロス請け|元請|下請",
 }
 
 # A sentence like this describes a vacancy or call for people, not the studio's own capability. Used only for the studio table.

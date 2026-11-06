@@ -129,7 +129,7 @@ def seeds(fetcher, urls: list[str], limit: int = MAX_PER_RUN) -> list[dict]:
         name = (og["content"].strip() if og and og.get("content") else (soup.title.get_text(strip=True) if soup.title else host)).split("|")[0].split(" - ")[0].strip()[:120]
         lang = (soup.html.get("lang", "") if soup.html else "")[:2].lower()
         out.append({"name": name or host, "website": f"{urlparse(final).scheme}://{urlparse(final).netloc}", "contact_email": "", "contact_source_url": "",
-                    "meta": {"language": lang or "en", "seed_url": final, "source": "seed"}})
+                    "meta": {"language": lang if lang in ("en", "ja") else "other", "seed_url": final, "source": "seed"}})
     return out
 
 

@@ -148,20 +148,20 @@ def score_studio(signals: dict, meta: dict, contact: dict | None, *, qualify_min
                   f"{len(caps)} production capabilities evidenced outside recruitment text ({', '.join(caps) or 'none'})" + ("" if p_ok else f"; need {MIN_CAPABILITIES_FOR_CERTAIN_PIPELINE}"))
 
     di = _items(signals, TWO_D_ITEMS)
-    d_ok = next(i for i in di if i["item"] == "style_2d")["evidence_context"] == "capability"
+    d_ok = any(i["evidence_context"] == "capability" for i in di if i["signal"] == "style_2d") or any(not RECRUIT_CONTEXT.search(x) for x in _snips(signals, "style_2d_anime"))
     if not d_ok:
         uncertain.append("animation_2d")
-    why2d = "explicit 2D / hand-drawn evidence" if d_ok else ("3D/CG wording only, no 2D evidence" if signals.get("style_3d") else "no explicit 2D evidence")
+    why2d = "explicit 2D / hand-drawn or 2D anime production evidence" if d_ok else ("3D/CG wording only, no 2D evidence" if signals.get("style_3d") else "no explicit 2D evidence")
     d2 = _group("animation_2d", di, "confirmed" if d_ok else "uncertain", why2d)
 
     ci = _items(signals, COLLAB_ITEMS, genuine_only={"business_inquiry"})
-    c_ok = any(i["evidence_context"] == "capability" and i["points"] > 0 for i in ci)
+    c_ok = any(i["evidence_context"] == "capability" and i["points"] > 0 for i in ci if i["signal"] == "external_collab" or (i["signal"] == "business_inquiry" and i["evidence"] and GENUINE_INQUIRY.search(i["evidence"])))
     if not c_ok:
         uncertain.append("external_collaboration")
     coll = _group("external_collaboration", ci, "confirmed" if c_ok else "uncertain",
                   "evidence the studio works with outside parties" if c_ok else "no evidence either way on working with outside parties")
 
-    lang = meta.get("language")
+    lang = meta.get("language") if meta.get("language") in ("en", "ja", "other") else "other"
     lp = 5 if lang in ("en", "ja") else 0
     lan = _group("language_preference", [{"item": "language", "signal": "language", "points": lp, "max": 5, "evidence_context": "capability" if lp else "none",
                                          "evidence": f"site language {lang}" if lp else ""}], "confirmed", f"site language {lang or 'unknown'} (a preference, never a requirement)")
