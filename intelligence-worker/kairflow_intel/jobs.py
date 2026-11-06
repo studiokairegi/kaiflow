@@ -206,9 +206,18 @@ def h_reconcile(d: Deps, job):
 def h_followup_scan(d: Deps, job):
     n = 0
     for c in d.rpc("intel_agent_followup_candidates", {"p_limit": 20}) or []:
-        _enq(d, "draft", {"prospect_id": c["prospect_id"], "kind": "followup"}, f"fuscan:{c['prospect_id']}:{int(d.clock() // 86400)}")
+        day = int(d.clock() // 86400)
+        if c.get("takeover"):      # a pasted conversation exists: the follow-up must continue THAT conversation, not use the generic template
+            _enq(d, "takeover", {"prospect_id": c["prospect_id"], "scheduled": True}, f"takeover-scan:{c['prospect_id']}:{day}")
+        else:
+            _enq(d, "draft", {"prospect_id": c["prospect_id"], "kind": "followup"}, f"fuscan:{c['prospect_id']}:{day}")
         n += 1
     return {"candidates": n}
+
+
+def h_takeover(d: Deps, job):
+    from . import takeover
+    return takeover.handle(d, job)
 
 
 def h_retention(d: Deps, job):
@@ -218,7 +227,7 @@ def h_retention(d: Deps, job):
 HANDLERS = {"seed_sources": discovery.h_seed_sources, "analyze_site": discovery.h_analyze_site, "news_scan": discovery.h_news_scan,
             "feed_poll": discovery.h_feed_poll, "crawl_index": discovery.h_crawl_index, "manual_post": discovery.h_manual_post,
             "profile_terms": discovery.h_profile_terms, "discover": h_discover, "research": h_research, "qualify": h_qualify, "resolve": h_resolve, "draft": h_draft, "send": h_send,
-            "sync_mail": h_sync_mail, "classify": h_classify, "reconcile": h_reconcile, "followup_scan": h_followup_scan, "retention": h_retention, "chat": h_chat}
+            "sync_mail": h_sync_mail, "classify": h_classify, "reconcile": h_reconcile, "followup_scan": h_followup_scan, "retention": h_retention, "chat": h_chat, "takeover": h_takeover}
 
 
 class _Lease:

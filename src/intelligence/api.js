@@ -41,6 +41,13 @@ export const intelApi = {
 
   crmReview: (s, limit = 400) => call(s, "intel_admin_crm_review", { p_limit: limit }),
   crmAdopt: (s, ids, type) => call(s, "intel_admin_crm_adopt", { p_lead_ids: ids, p_type: type }),
+  // Phase 1: take over an existing CRM lead from a pasted conversation. Nothing here sends email; drafts wait for approval.
+  crmImportHistory: (s, a) => call(s, "intel_admin_crm_import_history", { p_lead_id: a.leadId, p_type: a.type, p_entries: a.entries, p_raw: a.raw || "", p_last_contact: a.lastContact, p_source_email: a.sourceEmail || "" }),
+  crmRemoveHistory: (s, historyId) => call(s, "intel_admin_crm_remove_history", { p_history_id: historyId }),
+  crmTakeoverRefresh: (s, leadId) => call(s, "intel_admin_crm_takeover_refresh", { p_lead_id: leadId }),
+  crmIntroduce: (s, ids, type) => call(s, "intel_admin_crm_introduce", { p_lead_ids: ids, p_type: type }),
+  crmHistory: (s, leadId) => read(s.from("intel_lead_history").select("id,entries,last_contact,source_email,created_at").eq("lead_id", leadId).order("created_at", { ascending: false }).limit(20)),
+  takeoverStates: (s) => read(s.from("intel_prospects").select("id,lead_id,type,status,takeover").not("lead_id", "is", null).not("takeover->>state", "is", null).limit(1000)),
   chatNewThread: (s, title) => call(s, "intel_admin_chat_new_thread", { p_title: title || "New chat" }),
   chatSend: (s, threadId, text, clientKey) => call(s, "intel_admin_chat_send", { p_thread_id: threadId, p_text: text, p_client_key: clientKey }),
   chatThreads: (s) => read(s.from("intel_chat_threads").select("id,title,updated_at").order("updated_at", { ascending: false }).limit(30)),

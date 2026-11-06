@@ -32,6 +32,18 @@ the Supabase service-role key or any Zoho secret. It can only call `intel_agent_
 The worker also answers Agent Chat messages and prepares follow-up drafts for existing CRM leads you bring in. Neither can send email: sending is only ever
 done from an approved message in the Outreach tab, subject to the daily limits, warm-up, suppression list and emergency stop.
 
+## Taking over existing CRM leads from a pasted conversation (phase 1)
+Leads you already contacted by hand, or from another mailbox, have no history in Intelligence's own mailbox. In **Intelligence > Existing Leads**, use **Paste conversation** on a lead:
+1. Paste the earlier email thread. KairFlow splits it into messages (quoted replies, Outlook/Gmail headers and Japanese headers are recognised). You confirm who wrote each message and the date of the newest one.
+2. Saving stores the conversation and queues a `takeover` job. The worker reads the thread and decides one step: **follow up** (you wrote last and it is due), **reply** (they showed interest), **wait** (not due yet or an automatic reply), **needs you** (price, contract, meeting, deadline, availability or anything unclear) or **stop** (declined, opted out, or the 4-email sequence is finished). A pasted unsubscribe or complaint suppresses the address.
+3. The only text the model writes is one middle paragraph, which must refer to the real conversation and contain no link, price or unverifiable claim; otherwise a safe template is used. Greeting, studio facts, links, opt-out sentence, postal address and sign-off come from approved text. Take-over drafts always wait for your approval in Outreach, whatever the autonomy setting.
+4. Once a follow-up is due later, the hourly follow-up scan hands the lead back to the same take-over logic, so the draft continues your conversation instead of using the generic template.
+
+**Email rule:** a lead is only followed up or contacted if it has an email address in the CRM, and the message goes to exactly that address. This is enforced when a draft is created and again when a send is reserved. A lead whose email is removed or changed stops receiving anything until fixed.
+Never-contacted CRM leads with an email can also get an introduction draft from the same screen (**Draft introductions**).
+
+Apply `supabase/migrations/20261116090000_intelligence_crm_takeover.sql`, then restart the worker (Settings > Stop Emma / Start Emma). Needs Ollama running and the approved knowledge base filled in, as for other drafts.
+
 ## 2. Run from the KairFlow app (Windows, recommended)
 
 The browser cannot launch a Python process on your computer by itself. Install the small local controller once; it runs on `127.0.0.1` only and accepts control requests only from `https://app.studiokairegi.com` (plus the local Vite development origin). It never returns or logs the worker credentials.
