@@ -25,6 +25,7 @@ export const IconPaperclip = make(<path d="m20 11.4-8.2 8.2a5 5 0 0 1-7.1-7.1l8.
 export const IconSearch = make(<><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4.2 4.2" /></>);
 export const IconMembers = make(<><circle cx="9" cy="8.5" r="3.2" /><path d="M3.2 19.2c.5-3.2 2.9-5 5.8-5s5.3 1.8 5.8 5" /><circle cx="17" cy="9.5" r="2.4" /><path d="M16.8 14.4c2.3.1 3.7 1.5 4.1 3.8" /></>);
 export const IconReply = make(<><path d="m9 14-5-5 5-5" /><path d="M4 9h9a7 7 0 0 1 7 7v2" /></>);
+export const IconForward = make(<><path d="m15 14 5-5-5-5" /><path d="M20 9h-9a7 7 0 0 0-7 7v2" /></>);
 export const IconEdit = make(<><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4Z" /><path d="m13.5 6.5 4 4" /></>);
 export const IconTrash = make(<><path d="M4.5 7h15M9.5 7V4.8h5V7" /><path d="m6.5 7 .8 12.2h9.4L17.5 7M10 11v5M14 11v5" /></>);
 export const IconHistory = make(<><path d="M4 12a8 8 0 1 0 2.6-5.9L4 8.5" /><path d="M4 4v4.5h4.5M12 8v4.4l3 1.8" /></>);

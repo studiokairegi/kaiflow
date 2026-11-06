@@ -8,7 +8,7 @@ import {
 import { normalizeReceivedEmail, normalizeAttachment, normalizeHeaders } from "../../supabase/functions/_shared/email_resend_logic.ts";
 import { providerPausedResponse } from "../../supabase/functions/_shared/provider_guard.ts";
 import { makeWebhookStore } from "../../supabase/functions/_shared/email_resend_store.ts";
-import { parseRecipients, replyRecipients, inlineReply, buildForward, composeProblem, participantLabel, activeMailProviders, normalizeSubject as uiNorm, attachmentProblem, statusLabel } from "./logic.js";
+import { parseRecipients, replyRecipients, inlineReply, buildForward, composeProblem, participantLabel, activeMailProviders, normalizeSubject as uiNorm, attachmentProblem, statusLabel } from "./lib/logic.js";
 
 const ORG = "20000000-0000-0000-0000-00000000000a";
 const ACC = "30000000-0000-0000-0000-00000000000b";
@@ -472,7 +472,9 @@ test("the Resend migrations follow every Intelligence migration and use unique n
 });
 
 test("browser code never contains provider secrets and Settings offers only providers the database flag enabled", () => {
-  for (const f of ["logic.js", "api.js", "InboxModule.jsx"]) {
+  const browserFiles = ["InboxModule.jsx", ...["lib", "components"].flatMap((d) => fs.readdirSync(new URL(`./${d}/`, import.meta.url)).filter((n) => /\.(js|jsx)$/.test(n)).map((n) => `${d}/${n}`))];
+  assert.ok(browserFiles.length >= 8, "the Inbox browser code is scanned, including its subfolders");
+  for (const f of browserFiles) {
     const src = fs.readFileSync(new URL(`./${f}`, import.meta.url), "utf8");
     assert.equal(/RESEND_API_KEY|RESEND_WEBHOOK_SECRET|api\.resend\.com|SERVICE_ROLE/.test(src), false, `${f} must not reference provider secrets`);
   }

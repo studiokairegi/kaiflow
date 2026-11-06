@@ -1,0 +1,43 @@
+/* The Inbox uses the main Chat's layout and classes (chat.css). Only email-specific touches live here. */
+.inbox-page-wrap { width: 100%; min-width: 0; }
+.inbox-page { height: min(80vh, 880px); min-height: 520px; border: 1px solid var(--c-line); border-radius: 16px; }
+.inbox-accounts { margin: -4px 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-tabs { overflow-x: auto; scrollbar-width: none; }
+.inbox-tabs::-webkit-scrollbar { display: none; }
+.inbox-tabs button { flex: 1 0 auto; padding: 0 9px; }
+
+/* conversation list rows: sender, subject, snippet */
+.inbox-row { align-items: flex-start; }
+.inbox-row .chat-row-subject { font-size: 12px; font-weight: 600; color: var(--c-ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-row.unread .chat-row-title strong, .inbox-row.unread .chat-row-subject { color: var(--c-ink); font-weight: 750; }
+.inbox-row .chat-unread { align-self: center; }
+
+/* thread header tools and CRM lead strip */
+.inbox-thread-tools { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.inbox-thread-tools .chat-button { min-height: 30px; padding: 0 10px; font-size: 12px; }
+.inbox-thread-context { flex: none; display: flex; align-items: center; gap: 12px; padding: 6px 14px; border-bottom: 1px solid var(--c-line); background: var(--c-panel); }
+.inbox-lead-field { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.inbox-lead-field select { width: auto; max-width: 260px; min-height: 28px; padding: 3px 8px; font-size: 12px; }
+
+/* messages */
+.inbox-bubble-subject { display: block; margin-bottom: 4px; font-size: 12.5px; }
+.inbox-status.ok { color: var(--c-ok); }
+.inbox-status.bad { color: var(--c-danger); }
+.inbox-status.warn { color: var(--c-warn); }
+.chat-msg.theirs .chat-msg-meta span:not(.chat-badge) { overflow-wrap: anywhere; }
+
+/* New-message / forward / draft dialog */
+.inbox-compose { width: min(640px, 100%); }
+.inbox-compose-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.inbox-compose .chat-field input, .inbox-compose .chat-field select, .inbox-compose .chat-field textarea,
+.inbox-lead-field select { width: 100%; padding: 8px 10px; border: 1px solid var(--c-line-strong); border-radius: 10px; background: var(--c-field); color: var(--c-ink); font-weight: 400; }
+.inbox-compose .chat-field input[type="file"] { padding: 6px; }
+.inbox-compose .chat-field textarea { resize: vertical; min-height: 140px; line-height: 1.45; }
+
+@media (max-width: 760px) {
+  .inbox-page { height: calc(100dvh - 190px); min-height: 460px; border-radius: 12px; }
+  .inbox-thread-tools { width: 100%; justify-content: flex-start; }
+  .chat-header { flex-wrap: wrap; }
+  .inbox-thread-context { flex-wrap: wrap; }
+}
+@media (max-width: 480px) { .inbox-compose-two { grid-template-columns: 1fr; } }

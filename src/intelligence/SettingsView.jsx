@@ -3,8 +3,8 @@ import { S, T, Btn, Pill, Banner, Field, Modal, Table, useBusy } from "../financ
 import { intelApi } from "./api.js";
 import { AUTONOMY, KB_KINDS, MAIL_PROVIDERS, fmtWhen, mailProviderName, missingJapaneseKb, missingKb, sourceState } from "./logic.js";
 import { Input, Muted, Section, Select, TextArea, useLoad, confirmAction } from "./kit.jsx";
-import { emailApi } from "../email/api.js";
-import { activeMailProviders } from "../email/logic.js";
+import { emailApi } from "../email/lib/api.js";
+import { activeMailProviders } from "../email/lib/logic.js";
 
 const WORKER_CONTROL_URL = "http://127.0.0.1:17843";
 
