@@ -8,7 +8,7 @@ import {
 import { normalizeReceivedEmail, normalizeAttachment, normalizeHeaders } from "../../supabase/functions/_shared/email_resend_logic.ts";
 import { providerPausedResponse } from "../../supabase/functions/_shared/provider_guard.ts";
 import { makeWebhookStore } from "../../supabase/functions/_shared/email_resend_store.ts";
-import { parseRecipients, replyRecipients, buildReply, buildForward, composeProblem, participantLabel, activeMailProviders, normalizeSubject as uiNorm, attachmentProblem, statusLabel } from "./logic.js";
+import { parseRecipients, replyRecipients, inlineReply, buildForward, composeProblem, participantLabel, activeMailProviders, normalizeSubject as uiNorm, attachmentProblem, statusLabel } from "./logic.js";
 
 const ORG = "20000000-0000-0000-0000-00000000000a";
 const ACC = "30000000-0000-0000-0000-00000000000b";
@@ -489,14 +489,14 @@ test("composer helpers: recipients, replies, forwards, validation", () => {
   assert.deepEqual(parseRecipients("A@x.com, Bob <b@y.com>; bad, a@x.com"), { valid: ["a@x.com", "b@y.com"], invalid: ["bad"] });
   const inbound = { direction: "inbound", from_email: "ada@client.com", from_name: "Ada", to_emails: ["john@studiokairegi.com", "team@client.com"], cc_emails: ["boss@client.com"], subject: "Quote", body_text: "Hi\nthere" };
   const own = ["john@studiokairegi.com"];
-  assert.deepEqual(replyRecipients(inbound, own), { to: ["ada@client.com"], cc: [] });
-  assert.deepEqual(replyRecipients(inbound, own, { all: true }), { to: ["ada@client.com"], cc: ["team@client.com", "boss@client.com"] });
-  const r = buildReply(inbound, own, { all: false, when: "Nov 4" });
-  assert.equal(r.subject, "Re: Quote");
-  assert.equal(r.body, "");
-  assert.equal(buildReply({ ...inbound, subject: "Re: Quote" }, own).subject, "Re: Quote");
+  assert.deepEqual(replyRecipients(inbound, own), { to: ["ada@client.com"] });
+  // The inline reply box fills in recipients and "Re:" itself: the user only types the message.
+  assert.deepEqual(inlineReply([inbound], own, { subject: "Quote" }), { to: ["ada@client.com"], subject: "Re: Quote" });
+  assert.equal(inlineReply([inbound], own, { subject: "Re: Quote" }).subject, "Re: Quote");
+  assert.deepEqual(inlineReply([inbound, { direction: "outbound", status: "sent", to_emails: ["ada@client.com"] }], own, { subject: "Quote" }).to, ["ada@client.com"]);
+  assert.deepEqual(inlineReply([{ direction: "outbound", status: "draft", to_emails: ["x@y.com"] }], own, { subject: "Quote" }).to, []);
   assert.equal(buildForward(inbound).subject, "Fwd: Quote");
-  assert.deepEqual(replyRecipients({ direction: "outbound", to_emails: ["ada@client.com"], cc_emails: [] }, own), { to: ["ada@client.com"], cc: [] });
+  assert.deepEqual(replyRecipients({ direction: "outbound", to_emails: ["ada@client.com"], cc_emails: [] }, own), { to: ["ada@client.com"] });
   assert.equal(participantLabel({ participants: [{ email: "john@studiokairegi.com" }, { email: "ada@client.com", name: "Ada" }] }, own), "Ada");
   const ok = { accountId: ACC, to: "a@x.com", cc: "", bcc: "", subject: "S", body: "B" };
   assert.equal(composeProblem(ok), "");

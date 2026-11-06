@@ -6,8 +6,10 @@ import { canAccessIntelligence } from "../intelligence/access.js";
 import { Input, Muted, Section, Select, TextArea, useLoad, confirmAction } from "../intelligence/kit.jsx";
 import { emailApi } from "./api.js";
 import { usePolling } from "../chat/hooks.js";
+import ChatComposer from "../chat/Composer.jsx";
+import "../chat/chat.css";
 import "./inbox-chat.css";
-import { FOLDERS, attachmentProblem, buildForward, buildReply, composeProblem, fmtSize, isProblem, parseRecipients, participantLabel, statusLabel, textToHtml } from "./logic.js";
+import { FOLDERS, attachmentProblem, buildForward, composeProblem, fmtSize, inlineReply, isProblem, parseRecipients, participantLabel, statusLabel, textToHtml } from "./logic.js";
 
 const newKey = () => `kf-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
 const when = (iso) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "");
@@ -87,7 +89,7 @@ function Composer({ supabase, accounts, initial, onClose, onSent }) {
   );
 }
 
-function MessageCard({ m, supabase, onEditDraft, onReply, onReplyAll, onForward }) {
+function MessageCard({ m, supabase, onEditDraft, onForward }) {
   const [label, tone] = statusLabel(m.status);
   const inbound = m.direction === "inbound";
   const open = async (att) => {
@@ -112,12 +114,40 @@ function MessageCard({ m, supabase, onEditDraft, onReply, onReplyAll, onForward 
           {m.ai_generated && <Pill tone="warn">AI draft: review before sending</Pill>}
           {m.direction === "outbound" && <Pill tone={tone}>{label}</Pill>}
           {m.status === "draft" ? <Btn small kind="primary" onClick={() => onEditDraft(m)}>Edit draft</Btn> : <>
-            <Btn small onClick={() => onReply(m)}>Reply</Btn>
-            <Btn small onClick={() => onReplyAll(m)}>Reply all</Btn>
             <Btn small onClick={() => onForward(m)}>Forward</Btn>
           </>}
         </footer>
       </article>
+    </div>
+  );
+}
+
+// Texting-style reply box for an open conversation. Recipients and the "Re:" subject are filled in automatically from the
+// thread, so nothing is typed except the message itself. To/Subject are only asked for when composing a brand-new email.
+function InlineReply({ supabase, convo, messages, participants, own, onSent }) {
+  const [text, setText] = useState("");
+  const [files, setFiles] = useState([]);
+  const key = useRef(newKey());
+  const send = useBusy();
+  const target = inlineReply(messages, own, { subject: convo.subject, participants });
+  const problem = attachmentProblem(files);
+  if (!target.to.length) return <Muted>Nothing to reply to yet. Use Edit draft above to finish and send this email.</Muted>;
+  const submit = () => send.run(async () => {
+    if (problem) throw new Error(problem);
+    try {
+      await emailApi.send(supabase, { accountId: convo.account_id, to: target.to, cc: [], bcc: [], subject: target.subject, text, html: textToHtml(text), conversationId: convo.id, draftId: null, key: key.current, files });
+    } catch (e) {
+      key.current = newKey();           // the server keeps the old key's row; a retry needs a fresh key
+      throw e;
+    }
+    key.current = newKey();
+    setText(""); setFiles([]);
+    await onSent();
+  });
+  return (
+    <div className="inbox-inline-composer">
+      <ChatComposer value={text} onChange={setText} onSend={submit} sending={send.busy} files={files} onFilesChange={setFiles}
+        error={send.error || problem} placeholder={`Message ${target.to.join(", ")}…`} label="Reply" footerNote={`To ${target.to.join(", ")} · ${target.subject}`} />
     </div>
   );
 }
@@ -152,7 +182,6 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead }
 
   const t = thread.data;
   const convo = t?.conversation;
-  const reply = (m, all) => setComposer({ title: all ? "Reply all" : "Reply", ...buildReply(m, own, { all, when: when(m.received_at || m.sent_at) }), conversationId: convo.id, accountId: convo.account_id });
   const forward = (m) => setComposer({ title: "Forward", ...buildForward(m, when(m.received_at || m.sent_at)), accountId: convo.account_id });
   const editDraft = (m) => setComposer({ title: "Draft", draftId: m.id, conversationId: m.conversation_id, accountId: m.account_id, to: (m.to_emails || []).join(", "), cc: (m.cc_emails || []).join(", "), bcc: (m.bcc_emails || []).join(", "), subject: m.subject, body: m.body_text });
 
@@ -210,8 +239,9 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead }
                 {convo.lead_id && onOpenLead && <div><Btn small onClick={() => onOpenLead(convo.lead_id)}>Open lead</Btn></div>}
               </div>
               {(t.messages || []).map((m) => (
-                <MessageCard key={m.id} m={m} supabase={supabase} onEditDraft={editDraft} onReply={(x) => reply(x, false)} onReplyAll={(x) => reply(x, true)} onForward={forward} />
+                <MessageCard key={m.id} m={m} supabase={supabase} onEditDraft={editDraft} onForward={forward} />
               ))}
+              <InlineReply key={convo.id} supabase={supabase} convo={convo} messages={t.messages || []} participants={t.participants || convo.participants || []} own={own} onSent={refresh} />
             </>
           )}
         </div>

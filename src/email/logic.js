@@ -28,14 +28,13 @@ export const forwardSubject = (s) => (/^\s*fwd?\s*:/i.test(s || "") ? s : `Fwd: 
 
 const lc = (x) => String(x || "").toLowerCase();
 
-/** Who a reply goes to. Reply: the sender (or, for our own message, the people we wrote to). Reply all adds everyone else except us. */
-export function replyRecipients(message, ownAddresses, { all = false } = {}) {
+/** Who a reply goes to: the sender (or, for our own message, the people we wrote to). Never ourselves. */
+export function replyRecipients(message, ownAddresses) {
   const own = new Set((ownAddresses || []).map(lc));
   const inbound = message.direction === "inbound";
   const primary = inbound ? [lc(message.reply_to_address || message.from_email)] : (message.to_emails || []).map(lc);
   const to = primary.filter((a) => a && !own.has(a));
-  const cc = all ? [...(message.to_emails || []), ...(message.cc_emails || [])].map(lc).filter((a) => a && !own.has(a) && !to.includes(a)) : [];
-  return { to: [...new Set(to)], cc: [...new Set(cc)] };
+  return { to: [...new Set(to)] };
 }
 
 export const quoteBody = (message, when) => {
@@ -44,9 +43,13 @@ export const quoteBody = (message, when) => {
   return `\n\nOn ${when || ""}, ${who} wrote:\n${quoted}`;
 };
 
-export function buildReply(message, ownAddresses, { all = false, when = "" } = {}) {
-  const { to, cc } = replyRecipients(message, ownAddresses, { all });
-  return { to: to.join(", "), cc: cc.join(", "), subject: replySubject(message.subject), body: "" };
+/** What the inline reply box sends: recipients and "Re:" subject come from the thread, the user only types the message. */
+export function inlineReply(messages, ownAddresses, { subject = "", participants = [] } = {}) {
+  const own = new Set((ownAddresses || []).map(lc));
+  const last = [...(messages || [])].reverse().find((m) => m.status !== "draft");
+  let to = last ? replyRecipients(last, ownAddresses).to : [];
+  if (last && !to.length) to = [...new Set((participants || []).map((p) => lc(p.email)).filter((a) => a && !own.has(a)))];
+  return { to, subject: replySubject(subject || last?.subject || "") };
 }
 
 export function buildForward(message, when = "") {
