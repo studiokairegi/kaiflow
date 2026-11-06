@@ -2653,20 +2653,6 @@ const ClapperIcon = () => (
   </svg>
 );
 
-const HeaderNameIcon = () => (
-  <svg className="kf-header-meta-icon" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="8" r="3.25" />
-    <path d="M5 20a7 7 0 0 1 14 0" />
-  </svg>
-);
-
-const HeaderEmailIcon = () => (
-  <svg className="kf-header-meta-icon" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="3" y="5" width="18" height="14" rx="2" />
-    <path d="m4 7 8 6 8-6" />
-  </svg>
-);
-
 const PlusIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
     <path d="M12 5v14M5 12h14" />
@@ -5853,16 +5839,14 @@ export default function ShotTracker() {
             <div style={styles.logoMark}><img src="/logo.png" alt="Kairil" style={{ width: 24, height: 24, objectFit: "contain" }} /></div>
           )}
           <div>
-            <h1 style={styles.title}>
-              {view === "projects" && <HeaderNameIcon />}
-              {view === "board"
-                ? selectedProject?.name || "Project"
-                : view === "settings"
-                ? "Settings"
-                : settings.displayName || getDisplayName(session.user) || settings.studioName || "Kairil"}
-            </h1>
+            {view !== "projects" && (
+              <h1 style={styles.title}>
+                {view === "board"
+                  ? selectedProject?.name || "Project"
+                  : settings.displayName || getDisplayName(session.user) || settings.studioName || "Kairil"}
+              </h1>
+            )}
             <p style={styles.subtitle}>
-              {view === "projects" && <HeaderEmailIcon />}
               {view === "board"
                 ? selectedProject?.client || settings.studioName
                 : view === "settings"
