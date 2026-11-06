@@ -30,12 +30,53 @@ STUDIO = {
     "expansion": r"expand|expansion|new (studio|office|team)|scaling up|増員|拡大",
     "multiple_titles": r"our (works|productions|titles|projects)|filmography|works list|制作実績",
     "business_inquiry": r"business (inquir|enquir)|contact us|お問い合わせ|ご依頼|work with us",
+    # Phase 1 (studio-v2 scoring): evidence of what the studio actually produces and whether it works with outside parties.
+    "role_character": r"character animation|characters? animators?|キャラクターアニメーション|作画",
+    "style_2d": r"\b2d\b|hand[- ]drawn|traditional animation|cel animation|セルアニメ|手描き|2Dアニメ",
+    "style_3d": r"\b3d\b|3dcg|cg animation|cgアニメ",
+    "anime_production": r"\banime (production|studio|series|film|episode|title)s?|anime[- ]style|テレビアニメ|TVアニメ|劇場アニメ|アニメ(の)?(制作|作品|スタジオ|シリーズ)|アニメーション制作",
+    "external_collab": r"commissioned (work|projects?)|client work|work(ed|ing)? (for|with) (other )?(studios|clients|companies|partners)|service animation|contract animation|animation services?|production (support|assistance)|受託|制作協力|作画協力|グロス請け|元請|下請",
 }
+
+# A sentence like this describes a vacancy or call for people, not the studio's own capability. Used only for the studio table.
+RECRUIT_CONTEXT = re.compile(r"recruit|hiring|we are hiring|join (us|our team)|job openings?|careers?|\bapply\b|wanted|looking for|求人|募集|採用|応募", I)
+
+
+def _clip_ja(sentence: str, pat: str) -> str:
+    """sentence_around only splits on Western punctuation; cut a Japanese run at 。 so one matched term cannot borrow another clause's words."""
+    if "。" not in sentence:
+        return sentence
+    m = re.search(pat, sentence, I)
+    if not m:
+        return sentence
+    a = sentence.rfind("。", 0, m.start()) + 1
+    b = sentence.find("。", m.end())
+    return sentence[a: (b + 1) if b != -1 else len(sentence)].strip() or sentence
+
+
+def _studio_sentence(text: str, pat: str, scan: int = 25) -> str | None:
+    """Best evidence sentence for a studio signal: the first one that is NOT recruitment wording (that is capability evidence);
+    if every match is recruitment wording, the first match (the scorer treats it as supplementary)."""
+    first = None
+    for i, m in enumerate(re.finditer(pat, text, I)):
+        if i >= scan:
+            break
+        sent = _clip_ja(sentence_around(text, m.start(), m.end()), pat)
+        if first is None:
+            first = sent
+        if not RECRUIT_CONTEXT.search(sent):
+            return sent
+    return first
 
 
 def detect(text: str, table: dict[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for name, pat in table.items():
+        if table is STUDIO:
+            sent = _studio_sentence(text, pat)
+            if sent:
+                out[name] = sent
+            continue
         m = re.search(pat, text, I)
         if m:
             out[name] = sentence_around(text, m.start(), m.end())

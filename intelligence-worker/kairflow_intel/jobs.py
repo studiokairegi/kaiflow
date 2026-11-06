@@ -78,9 +78,9 @@ def h_qualify(d: Deps, job):
     ctx = d.rpc("intel_agent_context", {"p_prospect_id": pid})
     camp = next((c for c in d.rpc("intel_agent_settings", {})["campaigns"] if c["type"] == ctx["prospect"]["type"]), {"criteria": {}})
     res = research.qualify(d.rpc, ctx, camp["criteria"])
-    if res.decision == "qualified":
+    if res.decision == "qualified" and not res.held:       # held = older-model score kept as is; Phase 6 re-evaluates it
         _enq(d, "resolve", {"prospect_id": pid}, f"resolve:{pid}")
-    return {"score": res.score, "decision": res.decision}
+    return {"score": res.score, "decision": res.decision, **({"held": "older scoring model kept; candidate recorded"} if res.held else {})}
 
 
 def h_resolve(d: Deps, job):

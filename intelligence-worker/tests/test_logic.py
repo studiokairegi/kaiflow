@@ -33,11 +33,11 @@ class Scoring(unittest.TestCase):
         self.assertEqual((r.score, r.decision), (0, "rejected"))
         self.assertIn("NOT assumed", next(b for b in r.breakdown if b["criterion"] == "commercial")["why"])
 
-    def test_studio(self):
+    def test_studio_legacy_v1_still_reproducible(self):
         sig = {"recruit_page": "x", "outsourcing": "x", "role_layout": "x", "role_key": "x", "role_inbetween": "x", "production_active": "x", "expansion": "x", "multiple_titles": "x"}
-        r = scoring.score_studio(sig, {"language": "ja"}, {"email": "recruit@studio.jp", "name": "Sato", "role": "Producer"})
+        r = scoring.score_studio_v1(sig, {"language": "ja"}, {"email": "recruit@studio.jp", "name": "Sato", "role": "Producer"})
         self.assertEqual(r.decision, "qualified")
-        self.assertEqual(scoring.score_studio({}, {}, None).decision, "rejected")
+        self.assertEqual(scoring.score_studio_v1({}, {}, None).decision, "rejected")
 
 
 class Signals(unittest.TestCase):

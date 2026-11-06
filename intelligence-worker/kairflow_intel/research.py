@@ -3,6 +3,7 @@ model only helps identify a named contact, and its claims count only if the text
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -95,14 +96,53 @@ def research(rpc, fetcher, llm, ctx: dict) -> dict:
     return {"signals": len(found), "contact": bool(contact), "pages": len(pages)}
 
 
+def prior_studio_model(p: dict) -> str | None:
+    """Which model produced the score already stored on a studio prospect (None = never scored). Scores written before
+    Phase 1 carry no version marker and are studio-v1."""
+    if p.get("score") is None:
+        return None
+    rows = p.get("score_breakdown")
+    for r in rows if isinstance(rows, list) else []:
+        if isinstance(r, dict) and r.get("model"):
+            return r["model"]
+    return ((p.get("facts") or {}).get("estimates") or {}).get("scoring_model") or scoring.STUDIO_LEGACY_MODEL
+
+
+def _qualify_studio(rpc, ctx: dict, criteria: dict) -> scoring.Result:
+    p = ctx["prospect"]
+    sigs: dict[str, list[str]] = {}
+    for e in ctx["evidence"]:                          # every verified sentence, not just the last one per signal
+        if e["verified"] and e.get("snippet"):
+            sigs.setdefault(e["fact_type"], []).append(e["snippet"])
+    verified = (p.get("facts") or {}).get("verified", {})
+    meta = {"language": verified.get("language") or p.get("language")}
+    contact = {"email": p.get("contact_email") or "", "name": p.get("contact_name") or "", "role": verified.get("contact_role", "")} if p.get("contact_email") else None
+    res = scoring.score_studio(sigs, meta, contact, qualify_min=int(criteria.get("qualify_min", 70)), review_min=int(criteria.get("review_min", 50)))
+    prior = prior_studio_model(p)
+    if prior is not None and prior != scoring.STUDIO_MODEL:
+        # A score from an older model is never overwritten here. The new result is appended as UNVERIFIED evidence (append-only,
+        # never read by drafting or scoring) so it can be compared later; Phase 6 owns the actual re-evaluation.
+        snap = json.dumps({"model": res.model, "score": res.score, "decision": res.decision, "suitability": res.suitability, "uncertain": res.uncertain,
+                           "reason": res.reason, "points": {i["item"]: i["points"] for r in res.breakdown for i in r["items"]}}, sort_keys=True)
+        rpc("intel_agent_add_evidence", {"p_prospect_id": p["id"], "p_source": "scoring", "p_url": "", "p_fact_type": f"rescore_candidate_{scoring.STUDIO_MODEL}",
+                                         "p_snippet": snap, "p_content_hash": _h(snap), "p_verified": False})
+        res.held = True
+        return res
+    rpc("intel_agent_set_score", {"p_prospect_id": p["id"], "p_score": res.score, "p_breakdown": res.breakdown, "p_decision": res.decision, "p_reason": res.reason,
+                                  "p_estimates": {"decision_basis": "deterministic rubric over verified evidence", "scoring_model": res.model}})
+    return res
+
+
 def qualify(rpc, ctx: dict, criteria: dict) -> scoring.Result:
     p = ctx["prospect"]
+    if p["type"] != "indie_game_developer":
+        return _qualify_studio(rpc, ctx, criteria)
     sigs = {e["fact_type"]: e["snippet"] for e in ctx["evidence"] if e["verified"]}
     verified = (p.get("facts") or {}).get("verified", {})
     meta = {"recent_activity": bool(verified.get("recent_activity", False)), "coming_soon": verified.get("coming_soon", False),
             "price_present": verified.get("price_present", False), "language": verified.get("language") or p.get("language")}
     contact = {"email": p.get("contact_email") or "", "name": p.get("contact_name") or "", "role": verified.get("contact_role", "")} if p.get("contact_email") else None
-    fn = scoring.score_indie if p["type"] == "indie_game_developer" else scoring.score_studio
+    fn = scoring.score_indie
     res = fn(sigs, meta, contact, qualify_min=int(criteria.get("qualify_min", 70)), review_min=int(criteria.get("review_min", 50)))
     rpc("intel_agent_set_score", {"p_prospect_id": p["id"], "p_score": res.score, "p_breakdown": res.breakdown, "p_decision": res.decision, "p_reason": res.reason,
                                   "p_estimates": {"decision_basis": "deterministic rubric over verified evidence"}})
