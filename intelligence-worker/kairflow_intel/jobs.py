@@ -9,7 +9,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Callable
 
-from . import classify as cls, discovery, drafting, mailops, policy, research, sources
+from . import classify as cls, discovery, drafting, mailops, policy, research, sources, studio_reeval
 from .errors import PermanentError, RpcError, TransientError
 
 DEFER = {"daily_cap", "followup_cap", "campaign_cap", "followup_not_due", "campaign_paused", "kill_switch", "needs_reconcile"}
@@ -229,7 +229,8 @@ def h_retention(d: Deps, job):
 HANDLERS = {"seed_sources": discovery.h_seed_sources, "analyze_site": discovery.h_analyze_site, "news_scan": discovery.h_news_scan,
             "feed_poll": discovery.h_feed_poll, "crawl_index": discovery.h_crawl_index, "manual_post": discovery.h_manual_post,
             "profile_terms": discovery.h_profile_terms, "discover": h_discover, "research": h_research, "qualify": h_qualify, "resolve": h_resolve, "draft": h_draft, "send": h_send,
-            "sync_mail": h_sync_mail, "classify": h_classify, "reconcile": h_reconcile, "followup_scan": h_followup_scan, "retention": h_retention, "chat": h_chat, "takeover": h_takeover}
+            "sync_mail": h_sync_mail, "classify": h_classify, "reconcile": h_reconcile, "followup_scan": h_followup_scan, "retention": h_retention, "chat": h_chat, "takeover": h_takeover,
+            "reeval_studio": studio_reeval.h_reeval_studio}
 
 
 class _Lease:

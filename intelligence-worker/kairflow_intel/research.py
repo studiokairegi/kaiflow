@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -97,9 +99,21 @@ def choose_contact(emails: list[dict], domain: str, preset: str = "") -> dict | 
     return sorted(pool, key=rank)[0] if pool else None
 
 
-def research(rpc, fetcher, llm, ctx: dict) -> dict:
-    """Fetch, read, store evidence. Returns what was learned. Raises PermanentError when there is nothing to read."""
+def _evidence_writer(rpc, p: dict, run_id: str | None):
+    """Ordinary research writes through intel_agent_add_evidence (unchanged). A reevaluation writes through the run-scoped function, which
+    also refreshes fetched_at on a sentence that was already stored, so the row counts as collected in this run."""
+    if run_id is None:
+        return lambda url, fact, snippet, h: rpc("intel_agent_add_evidence", {"p_prospect_id": p["id"], "p_source": "web", "p_url": url, "p_fact_type": fact, "p_snippet": snippet, "p_content_hash": h, "p_verified": True})
+    return lambda url, fact, snippet, h: rpc("intel_agent_reeval_add_evidence", {"p_run_id": run_id, "p_prospect_id": p["id"], "p_source": "web", "p_url": url, "p_fact_type": fact, "p_snippet": snippet, "p_content_hash": h, "p_verified": True})
+
+
+def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict:
+    """Fetch, read, store evidence. Returns what was learned. Raises PermanentError when there is nothing to read.
+    run_id is set ONLY by the studio reevaluation: evidence and the learned facts then go through the run-scoped functions."""
     p = ctx["prospect"]
+    if run_id is not None and (p.get("type") != "animation_studio_support" or p.get("origin") != "discovered"):
+        raise PermanentError("a reevaluation only researches discovered animation_studio_support prospects")
+    add_evidence = _evidence_writer(rpc, p, run_id)
     site = p["website"] if p["website"].startswith("http") else (f"https://{p['website']}" if p["website"] else "")
     if not site:
         raise PermanentError("prospect has no website to research")
@@ -137,7 +151,7 @@ def research(rpc, fetcher, llm, ctx: dict) -> dict:
 
     for sig, evidence_rows in found.items():
         for sent, url in evidence_rows:
-            rpc("intel_agent_add_evidence", {"p_prospect_id": p["id"], "p_source": "web", "p_url": url, "p_fact_type": sig, "p_snippet": sent, "p_content_hash": _h(sent), "p_verified": True})
+            add_evidence(url, sig, sent, _h(sent))
     existing = (p.get("contact_email") or "").strip().lower()
     prior_verified = ((p.get("facts") or {}).get("verified") or {})
     prior_verified_email = (prior_verified.get("contact_email") or "").strip().lower()
@@ -151,7 +165,7 @@ def research(rpc, fetcher, llm, ctx: dict) -> dict:
     website_verified = bool(contact and contact.get("how") != "store" and (not existing or selected_is_existing))
     src = next((e["url"] for e in emails if contact and e["email"] == contact["email"]), "") if website_verified else ""
     if website_verified:
-        rpc("intel_agent_add_evidence", {"p_prospect_id": p["id"], "p_source": "web", "p_url": src, "p_fact_type": "contact_email", "p_snippet": contact["email"], "p_content_hash": _h(contact["email"]), "p_verified": True})
+        add_evidence(src, "contact_email", contact["email"], _h(contact["email"]))
     verified = {"signals": sorted(found), "language": language, "contact_role": role or "", "pages_read": len(pages)}
     if contact and contact.get("how") == "store" and p["type"] == "indie_game_developer":
         src = p.get("contact_source_url") or ""
@@ -162,9 +176,16 @@ def research(rpc, fetcher, llm, ctx: dict) -> dict:
         verified.update({"contact_verification": "website_extracted", "contact_email": contact["email"], "contact_source_url": src})
     elif existing:
         verified.update({"contact_verification": "unknown_legacy", "contact_email": existing})
+    elif run_id is not None:       # a reevaluation must not inherit an older run's "website_extracted": nothing was re-verified now
+        verified.update({"contact_verification": "not_verified_this_run", "contact_email": ""})
+    if run_id is not None:
+        # By id, never through the canonical-key upsert: after a website recovery that upsert would derive a different key and create a duplicate prospect.
+        rpc("intel_agent_reeval_record_research", {"p_run_id": run_id, "p_prospect_id": p["id"], "p_verified": verified, "p_contact_name": name or "",
+                                                   "p_contact_email": contact["email"] if contact and not existing else "", "p_contact_source_url": (src if website_verified else "")})
+        return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "pages": len(pages), "text_chars": len(text)}
     rpc("intel_agent_upsert_prospect", {"p_type": p["type"], "p_name": p["name"], "p_website": p["website"], "p_contact_name": name or "", "p_contact_email": contact["email"] if contact and not existing else "",
                                         "p_contact_source_url": (src if website_verified else ""), "p_country": ent.get("country_hint") or "", "p_language": language, "p_verified": verified})
-    return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "pages": len(pages)}
+    return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "pages": len(pages), "text_chars": len(text)}
 
 
 def prior_studio_model(p: dict) -> str | None:
@@ -179,10 +200,44 @@ def prior_studio_model(p: dict) -> str | None:
     return ((p.get("facts") or {}).get("estimates") or {}).get("scoring_model") or scoring.STUDIO_LEGACY_MODEL
 
 
-def _qualify_studio(rpc, ctx: dict, criteria: dict) -> scoring.Result:
+@dataclass(frozen=True)
+class ReevalScope:
+    """Passing this to qualify() is the ONLY way to request a deliberate studio-v2 rescore over an older score. It names the run, and the
+    run's start time, so that only evidence collected in that run after it began can decide the new score."""
+    run_id: str
+    started_at: str
+
+
+def _ts(value) -> datetime | None:
+    try:
+        t = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def fresh_evidence(rows: list[dict], run_id: str, started_at: str) -> list[dict]:
+    """Verified evidence this run collected after it began. Fails closed: a row without a readable timestamp or run id is stale."""
+    t0 = _ts(started_at)
+    if t0 is None:
+        return []
+    out = []
+    for e in rows or []:
+        t = _ts(e.get("fetched_at"))
+        if e.get("verified") and e.get("reeval_run") == run_id and t is not None and t >= t0:
+            out.append(e)
+    return out
+
+
+def _qualify_studio(rpc, ctx: dict, criteria: dict, reeval: ReevalScope | None = None) -> scoring.Result:
     p = ctx["prospect"]
+    evidence = ctx["evidence"]
+    if reeval is not None:
+        if p.get("type") != "animation_studio_support" or p.get("origin") != "discovered":
+            raise PermanentError("a studio-v2 reevaluation rescore is only allowed for discovered animation_studio_support prospects")
+        evidence = fresh_evidence(evidence, reeval.run_id, reeval.started_at)
     sigs: dict[str, list[str]] = {}
-    for e in ctx["evidence"]:                          # every verified sentence, not just the last one per signal
+    for e in evidence:                                 # every verified sentence, not just the last one per signal
         if e["verified"] and e.get("snippet"):
             sigs.setdefault(e["fact_type"], []).append(e["snippet"])
     verified = (p.get("facts") or {}).get("verified", {})
@@ -194,9 +249,17 @@ def _qualify_studio(rpc, ctx: dict, criteria: dict) -> scoring.Result:
         email_status in ("website_extracted", "human_confirmed")
         and bool(prospect_email)
         and verified_email == prospect_email
+        and (reeval is None or verified.get("reeval_run") == reeval.run_id)      # a reevaluation trusts only what it verified itself
     )
     contact = {"email": prospect_email, "name": p.get("contact_name") or "", "role": verified.get("contact_role", "")} if email_is_verified else None
     res = scoring.score_studio(sigs, meta, contact, qualify_min=int(criteria.get("qualify_min", 70)), review_min=int(criteria.get("review_min", 50)))
+    if reeval is not None:
+        # Deliberate studio-v2 rescore over whatever score was there (legacy or not). Written through the run-scoped function, which re-checks
+        # scope, run and "research recorded in this run" in the database. Ordinary qualification never reaches this branch.
+        res.write = rpc("intel_agent_reeval_set_score", {"p_run_id": reeval.run_id, "p_prospect_id": p["id"], "p_score": res.score, "p_breakdown": res.breakdown, "p_decision": res.decision,
+                                                         "p_reason": res.reason, "p_estimates": {"decision_basis": "deterministic rubric over verified evidence collected in this reevaluation run",
+                                                                                                 "scoring_model": res.model, "evidence_rows_used": len(evidence)}}) or {}
+        return res
     prior = prior_studio_model(p)
     if prior is not None and prior != scoring.STUDIO_MODEL:
         # A score from an older model is never overwritten here. The new result is appended as UNVERIFIED evidence (append-only,
@@ -212,10 +275,12 @@ def _qualify_studio(rpc, ctx: dict, criteria: dict) -> scoring.Result:
     return res
 
 
-def qualify(rpc, ctx: dict, criteria: dict) -> scoring.Result:
+def qualify(rpc, ctx: dict, criteria: dict, *, reeval: ReevalScope | None = None) -> scoring.Result:
     p = ctx["prospect"]
     if p["type"] != "indie_game_developer":
-        return _qualify_studio(rpc, ctx, criteria)
+        return _qualify_studio(rpc, ctx, criteria, reeval)
+    if reeval is not None:
+        raise PermanentError("a reevaluation never applies to indie_game_developer prospects")
     sigs = {e["fact_type"]: e["snippet"] for e in ctx["evidence"] if e["verified"]}
     verified = (p.get("facts") or {}).get("verified", {})
     meta = {"recent_activity": bool(verified.get("recent_activity", False)), "coming_soon": verified.get("coming_soon", False),

@@ -69,6 +69,9 @@ def main(argv=None) -> int:
         return 2
     if cmd == "selftest":
         return selftest(cfg, argv[1] if len(argv) > 1 else "all")
+    if cmd == "reeval-studio":           # queue / inspect the studio-v2 reevaluation; does not run the worker and cannot send anything
+        from . import studio_reeval
+        return studio_reeval.cli(SupabaseAgent(cfg).rpc, argv[1:])
     _, deps = build(cfg)
     worker = Worker(deps)
     if cmd == "once":      # drain the queue once (useful for testing)

@@ -40,6 +40,7 @@ class Result:
     suitability: str = ""              # decision on score + uncertainty alone, before the contact gate (studio only)
     uncertain: list = field(default_factory=list)
     held: bool = False                 # set by research.qualify when a legacy score was deliberately not overwritten
+    write: dict = field(default_factory=dict)      # what the database answered to a reevaluation rescore (empty for ordinary qualification)
 
 
 def _row(name, pts, mx, why):
