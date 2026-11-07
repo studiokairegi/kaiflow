@@ -38,6 +38,13 @@ export const intelApi = {
   approveProfile: (s, type, approved) => call(s, "intel_admin_approve_profile", { p_type: type, p_approved: approved }),
   addManualPost: (s, type, url, text) => call(s, "intel_admin_add_manual_post", { p_type: type, p_url: url || "", p_text: text || "" }),
   discoveryStats: (s) => call(s, "intel_admin_discovery_stats"),
+  reevalStart: (s, a) => call(s, "intel_admin_reeval_start", {
+    p_name: a.name, p_limit: a.limit ?? null, p_dry_run: a.dryRun ?? true,
+    p_include_previous: false, p_all: a.all ?? false, p_expect_count: a.expectCount ?? null,
+  }),
+  reevalStatus: (s) => call(s, "intel_admin_reeval_status", { p_run_id: null }),
+  reevalCancel: (s, runId) => call(s, "intel_admin_reeval_cancel", { p_run_id: runId }),
+
 
   crmReview: (s, limit = 400) => call(s, "intel_admin_crm_review", { p_limit: limit }),
   crmAdopt: (s, ids, type) => call(s, "intel_admin_crm_adopt", { p_lead_ids: ids, p_type: type }),
