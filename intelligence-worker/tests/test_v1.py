@@ -1,8 +1,9 @@
+from pathlib import Path
 import json
 import unittest
 
 from kairflow_intel import chat, drafting, jobs, mailops
-from kairflow_intel.errors import PermanentError, RpcError, TransientError
+from kairflow_intel.errors import ThreadingRejected, PermanentError, RpcError, TransientError
 from kairflow_intel.zoho import ZohoClient, ZohoRejected
 from .helpers import CFG
 from .test_ops import FakeRpc, FakeZoho
@@ -132,7 +133,7 @@ class Threading(unittest.TestCase):
         finally: r.__class__.__call__ = orig.__func__ if hasattr(orig, "__func__") else orig
         self.assertEqual(z.parents, ["123456789"])
 
-    def test_zoho_reply_refused_falls_back_to_one_plain_send(self):
+    def test_zoho_reply_refused_never_falls_back_to_unthreaded_send(self):
         calls = []
         c = ZohoClient(tokens=None)
         def fake(method, path, json=None, params=None):
@@ -140,8 +141,9 @@ class Threading(unittest.TestCase):
             if path.startswith("/messages/"): raise ZohoRejected("zoho 400")
             return {"data": {"messageId": "9", "threadId": "t"}}
         c._call = fake
-        out = c.send("a@s.t", "b@p.t", "Re: x", "body", reply_to_zoho_id="123456789")
-        self.assertEqual(calls, ["/messages/123456789", "/messages"]); self.assertFalse(out["threaded"])
+        with self.assertRaises(ThreadingRejected):
+            c.send("a@s.t", "b@p.t", "Re: x", "body", reply_to_zoho_id="123456789")
+        self.assertEqual(calls, ["/messages/123456789"])
 
     def test_zoho_reply_uncertain_outcome_is_never_retried_as_plain_send(self):
         c = ZohoClient(tokens=None); calls = []
@@ -163,11 +165,65 @@ class FollowupDrafts(unittest.TestCase):
         def rpc(name, p=None):
             calls.append((name, p or {}))
             return {"intel_agent_context": ctx, "intel_agent_settings": st, "intel_agent_kb": kb, "intel_agent_upsert_draft": {"ok": True, "message_id": "m", "state": "pending_approval"}}.get(name)
-        jobs.h_draft(jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=None, llm=None), {"payload": {"prospect_id": "p", "kind": "followup"}})
-        up = next(p for n, p in calls if n == "intel_agent_upsert_draft")
-        self.assertEqual((up["p_step"], up["p_in_reply_to"], up["p_idempotency_key"]), (2, None, "draft:p:fu2"))
-        self.assertTrue(up["p_subject"].startswith("Following up:")); self.assertIn("2026-10-20", up["p_body"])
+        result = jobs.h_draft(jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=None, llm=None), {"payload": {"prospect_id": "p", "kind": "followup"}})
+        # The CRM import includes only metadata for the previous sent message, not
+        # its content or prospect research. Phase 2 must not fabricate a generic
+        # follow-up: the correct outcome is a visible manual-review flag.
+        self.assertEqual(result, {"skipped": "manual_review_required"})
+        self.assertIn("draft_review_required", [p.get("p_action") for n, p in calls if n == "intel_agent_log"])
+        self.assertIn("intel_agent_flag_prospect", [n for n, _ in calls])
+        self.assertNotIn("intel_agent_upsert_draft", [n for n, _ in calls])
         self.assertNotIn("send", [n for n, _ in calls])
+
+
+class ReengagementMigration(unittest.TestCase):
+    def test_candidate_migration_marks_final_followup_slot_for_reengagement(self):
+        migration = Path(__file__).parents[2] / "supabase" / "migrations" / "20261117110000_intelligence_phase2_reengagement_scan.sql"
+        sql = migration.read_text(encoding="utf-8").lower()
+        self.assertIn("as draft_kind", sql)
+        self.assertIn("'reengagement'", sql)
+        self.assertIn("s.max_followups - 1", sql)
+        self.assertIn("grant execute on function public.intel_agent_followup_candidates(int) to authenticated", sql)
+        self.assertIn("not exists", sql)
+
+
+class ReengagementDraft(unittest.TestCase):
+    def test_reengagement_uses_existing_followup_database_kind_and_final_slot(self):
+        from unittest.mock import patch
+        calls = []
+        kb = [
+            {"key": "studio.about", "body": "Studio Kairegi is a 2D animation studio."},
+            {"key": "services.indie_game_developer", "body": "We create 2D animation for indie games."},
+            {"key": "portfolio.main", "body": "Portfolio: https://studio.test/portfolio"},
+        ]
+        st = {"sender_name": "John", "sender_email": "john@studio.test", "physical_address": "1 Road", "opt_out_text": "Reply unsubscribe", "autonomy": "shadow"}
+        prospect = {"id": "p", "type": "indie_game_developer", "name": "Pixel Moon", "contact_email": "a@pixel.test", "contact_name": "", "status": "contacted", "domain": "pixel.test"}
+        messages = [
+            {"kind": "initial", "state": "sent", "direction": "outbound", "sent_at": "2026-10-01T00:00:00Z", "subject": "Initial"},
+            {"kind": "followup", "state": "sent", "direction": "outbound", "sent_at": "2026-10-10T00:00:00Z", "subject": "Follow-up 1"},
+            {"kind": "followup", "state": "sent", "direction": "outbound", "sent_at": "2026-10-20T00:00:00Z", "subject": "Follow-up 2"},
+        ]
+        ctx = {"prospect": prospect, "evidence": [{"id": "ev", "verified": True, "snippet": "A hand-drawn 2D adventure with a cinematic trailer."}], "lead": {}, "messages": messages}
+        def rpc(name, p=None):
+            calls.append((name, p or {}))
+            if name == "intel_agent_context": return ctx
+            if name == "intel_agent_settings": return st
+            if name == "intel_agent_kb": return kb
+            if name == "intel_agent_recent_outbound": return []
+            if name == "intel_agent_upsert_draft": return {"ok": True, "message_id": "m-reengage", "state": "pending_approval"}
+            return None
+        mail = {"subject": "A fresh note about your adventure", "body": "A fresh note.", "model_written": False}
+        with patch("kairflow_intel.drafting.compose_english", return_value=mail) as compose, \
+             patch("kairflow_intel.policy.validate_outbound", return_value=[]) as validate:
+            result = jobs.h_draft(jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=None, llm=None),
+                                  {"payload": {"prospect_id": "p", "kind": "reengagement"}})
+        self.assertEqual(result["state"], "pending_approval")
+        self.assertEqual(compose.call_args.kwargs["kind"], "reengagement")
+        self.assertEqual(validate.call_args.args[4], "followup")
+        [draft_call] = [p for n, p in calls if n == "intel_agent_upsert_draft"]
+        self.assertEqual((draft_call["p_kind"], draft_call["p_step"]), ("followup", 3))
+        self.assertEqual(draft_call["p_idempotency_key"], "draft:p:fu3")
+        self.assertFalse(draft_call["p_auto_ok"])
 
 
 class Discovery(unittest.TestCase):

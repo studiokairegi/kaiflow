@@ -1,0 +1,74 @@
+[
+  {
+    "label": "duplicate",
+    "language": "en",
+    "a": "Your hand-drawn adventure has a cinematic trailer and a distinctive visual direction.",
+    "b": "Your hand-drawn adventure has a cinematic trailer and a distinctive visual direction."
+  },
+  {
+    "label": "name_swap",
+    "language": "en",
+    "a": "Hello Rina, your hand drawn adventure shows a cinematic visual direction for the upcoming project.",
+    "b": "Hello Ken, your hand drawn adventure shows a cinematic visual direction for the upcoming project."
+  },
+  {
+    "label": "duplicate",
+    "language": "en",
+    "a": "I noticed your upcoming 2D adventure and its hand-painted environments.",
+    "b": "I noticed your upcoming 2D adventure and its hand-painted environments."
+  },
+  {
+    "label": "near_duplicate",
+    "language": "en",
+    "a": "Your studio's character animation work has expressive movement and careful timing.",
+    "b": "Your studio's character animation work has expressive movement and careful timing. I wanted to introduce our support."
+  },
+  {
+    "label": "distinct",
+    "language": "en",
+    "a": "Your game uses a hand-painted fantasy world and orchestral soundtrack.",
+    "b": "Your accessibility tools support community-created mods and custom controls."
+  },
+  {
+    "label": "distinct",
+    "language": "en",
+    "a": "The puzzle mechanics use gravity-based movement across compact levels.",
+    "b": "Your team publishes developer diaries about narrative design and worldbuilding."
+  },
+  {
+    "label": "distinct",
+    "language": "en",
+    "a": "Your soundtrack features orchestral themes and ambient sound design.",
+    "b": "Your studio publishes short films with stop-motion characters."
+  },
+  {
+    "label": "distinct",
+    "language": "en",
+    "a": "The trailer introduces a cooperative survival game set underwater.",
+    "b": "The portfolio highlights hand-drawn character acting for television animation."
+  },
+  {
+    "label": "duplicate",
+    "language": "ja",
+    "a": "ご連絡ありがとうございます。弊社のポートフォリオをご覧いただけます。制作実績をご確認ください。",
+    "b": "ご連絡ありがとうございます。弊社のポートフォリオをご覧いただけます。制作実績をご確認ください。"
+  },
+  {
+    "label": "name_swap",
+    "language": "ja",
+    "a": "佐藤様、ご連絡ありがとうございます。貴社の2Dアニメーション制作実績を拝見しました。弊社は原画と動画の制作協力に対応しています。",
+    "b": "田中様、ご連絡ありがとうございます。貴社の2Dアニメーション制作実績を拝見しました。弊社は原画と動画の制作協力に対応しています。"
+  },
+  {
+    "label": "distinct",
+    "language": "ja",
+    "a": "ご連絡ありがとうございます。弊社のポートフォリオをご覧いただけます。",
+    "b": "制作実績のリンクをお送りします。ご確認ください。"
+  },
+  {
+    "label": "distinct",
+    "language": "ja",
+    "a": "レイアウトと原画の制作協力に対応しています。",
+    "b": "キャラクター設定と背景美術の制作を行っています。"
+  }
+]

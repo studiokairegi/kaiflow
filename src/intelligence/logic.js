@@ -211,7 +211,12 @@ export const countAiGeneratedLeads = (leads) => (leads || []).filter(isAiGenerat
 export const MAIL_PROVIDERS = Object.freeze({ gmail: "Gmail", zoho: "Zoho Mail" });
 export const mailProviderName = (mail) => MAIL_PROVIDERS[mail?.provider] || MAIL_PROVIDERS.zoho;
 /** "Gmail connected (studio@gmail.com)" / "Mail not connected". */
-export const mailStatusLabel = (mail) => (mail?.status === "connected" ? `${mailProviderName(mail)} connected (${mail.mailbox || "mailbox"})` : "Mail not connected");
+export const mailStatusLabel = (mail) => {
+  if (!mail || mail.status === "disconnected" || !mail.status) return "Mail not connected";
+  if (mail.status === "connected") return `${mailProviderName(mail)} connected (${mail.mailbox || "mailbox"})`;
+  if (mail.status === "error" || mail.status === "check_failed") return `${mailProviderName(mail)} status check failed`;
+  return `${mailProviderName(mail)}: ${String(mail.status).replace(/[_-]+/g, " ")}`;
+};
 /** What the person sees after Google/Zoho send them back to KairFlow (?intelligence=<flag>). Unknown flags show nothing. */
 export const OAUTH_RESULTS = Object.freeze({
   gmail_connected: { tone: "ok", text: "Gmail is connected. Set KAIRFLOW_MAIL_PROVIDER=gmail on the worker, then run its selftest." },

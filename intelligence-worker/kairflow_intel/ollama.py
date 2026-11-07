@@ -47,6 +47,9 @@ def validate(schema: dict, value, path: str = "$") -> None:
             validate(schema["items"], v, f"{path}[{i}]")
 
 
+MAX_UNTRUSTED_CHARS = 24000   # was 12000, which cut the approved facts and inbound message off a 30-item catalog
+
+
 class OllamaClient:
     def __init__(self, cfg, session: requests.Session | None = None):
         self.cfg, self.s = cfg, session or requests.Session()
@@ -60,12 +63,16 @@ class OllamaClient:
     def generate_json(self, instruction: str, untrusted: str, schema: dict, *, fast: bool = False,
                       num_ctx: int = 4096, timeout: int = 240) -> dict:
         model = self.cfg.ollama_fast_model if fast else self.cfg.ollama_model
+        untrusted = untrusted[:MAX_UNTRUSTED_CHARS]
+        # Scale the context window with the input so a long (but within-limit) payload is not silently
+        # truncated by Ollama itself; roughly 2 characters per token (conservative; CJK text is close to 1) plus room for instruction and schema.
+        num_ctx = max(num_ctx, min(16384, len(untrusted) // 2 + 2048))
         payload = {
             "model": model, "stream": False, "format": schema,
             "options": {"temperature": 0, "num_ctx": num_ctx},
             "messages": [
                 {"role": "system", "content": UNTRUSTED_NOTICE},
-                {"role": "user", "content": f"{instruction}\n\n<untrusted>\n{untrusted[:12000]}\n</untrusted>"},
+                {"role": "user", "content": f"{instruction}\n\n<untrusted>\n{untrusted}\n</untrusted>"},
             ],
         }
         try:

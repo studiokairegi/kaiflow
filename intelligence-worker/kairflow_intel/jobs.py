@@ -12,7 +12,7 @@ from typing import Callable
 from . import classify as cls, discovery, drafting, mailops, policy, research, sources, studio_reeval
 from .errors import PermanentError, RpcError, TransientError
 
-DEFER = {"daily_cap", "followup_cap", "campaign_cap", "followup_not_due", "campaign_paused", "kill_switch", "needs_reconcile"}
+DEFER = {"daily_cap", "followup_cap", "campaign_cap", "followup_not_due", "campaign_paused", "kill_switch", "needs_reconcile", "send_spacing"}
 
 
 @dataclass
@@ -93,41 +93,177 @@ def h_resolve(d: Deps, job):
     return r
 
 
+def _recipient_names(p: dict) -> list[str]:
+    return [str(p.get("name") or ""), str(p.get("contact_name") or "")]
+
+
+def _prior_row(m: dict) -> dict:
+    return {"subject": m.get("subject", ""), "body": m.get("body_text") or m.get("body") or "",
+            "names": [m.get("prospect_name") or "", m.get("contact_name") or ""]}
+
+
+def _vet_draft(d: Deps, st: dict, kb: dict, mail: dict, compose, prior, *, kind: str, stored_kind: str, domain: str, pid, names,
+               opt_out_text: str | None = None) -> tuple[dict, dict | None]:
+    """Similarity and outbound-policy checks with ONE regeneration.
+
+    A model-written draft that is too similar to earlier mail or breaks policy is rewritten once, with the reason
+    given to the model; if the second draft also fails the caller flags the prospect for a person. Template drafts
+    (compose is None) are never regenerated. Returns (mail, None) when acceptable, else (mail, problem) where problem
+    is {"type": "similar", "unique": ...} | {"type": "policy", "violations": [...]} | {"type": "review", "reason": ...}."""
+    footer = policy.compliance_footer(st)
+    regenerated = False
+    while True:
+        problem = None
+        if prior is not None and mail.get("model_written"):
+            unique = drafting.uniqueness_check(mail, prior, threshold=drafting.SIMILARITY_THRESHOLD, footer=footer, names=names)
+            if not unique["ok"]:
+                problem = {"type": "similar", "unique": unique}
+        if problem is None:
+            bad = policy.validate_outbound(mail["subject"], mail["body"], st, drafting.approved_urls(kb), stored_kind, domain, opt_out_text=opt_out_text)
+            if bad:
+                problem = {"type": "policy", "violations": bad}
+        if problem is None:
+            return mail, None
+        if regenerated or compose is None or not mail.get("model_written"):
+            return mail, problem
+        regenerated = True
+        if problem["type"] == "similar":
+            feedback = (f"it was too similar ({problem['unique']['similarity']:.2f}, {problem['unique']['reason']}) to mail already written for other "
+                        "recipients. Build the opening and collaboration angle from this recipient's own evidence.")
+        else:
+            feedback = "it broke outbound policy: " + "; ".join(problem["violations"])[:300]
+        d.rpc("intel_agent_log", {"p_action": "draft_regenerating", "p_entity_type": "prospect", "p_entity_id": pid,
+                                  "p_detail": {"kind": kind, "reason": feedback[:300]}})
+        try:
+            mail = compose(feedback)
+        except PermanentError as exc:
+            return mail, {"type": "review", "reason": str(exc)}
+
+
+def _store_evidence_trace(d: Deps, message_id, mail: dict) -> None:
+    """Record which evidence informed a model-written draft on the message row itself. Best effort: the draft is already
+    stored, so a failure here (for example the migration not yet applied) is logged, never allowed to lose or duplicate it."""
+    trace = mail.get("evidence_trace")
+    if not (message_id and trace):
+        return
+    try:
+        d.rpc("intel_agent_set_message_evidence", {"p_message_id": message_id, "p_evidence": trace})
+    except RpcError as exc:
+        try:
+            d.rpc("intel_agent_log", {"p_action": "evidence_trace_not_stored", "p_entity_type": "message", "p_entity_id": str(message_id),
+                                      "p_detail": {"reason": str(exc)[:200]}})
+        except RpcError:
+            pass
+
+
 def h_draft(d: Deps, job):
     pid, kind = job["payload"]["prospect_id"], job["payload"].get("kind", "initial")
+    stored_kind = kind
+    compose = None   # set for English model-written drafts; lets the vetting step regenerate once
     ctx = d.rpc("intel_agent_context", {"p_prospect_id": pid})
     p = ctx["prospect"]
     st, kb = d.rpc("intel_agent_settings", {}), _kb(d)
     if not p.get("contact_email"):
         return {"skipped": "no verified contact email"}
+    # Fail early on unsafe approved KB copy. This is independent of prospect
+    # research availability and must remain a hard, logged policy failure.
+    relevant_kb_keys = {"studio.about", "portfolio.main", drafting.TYPE_KEY.get(p.get("type"), "")}
+    unsafe_kb = []
+    for key in relevant_kb_keys:
+        entry = kb.get(key) or {}
+        text = str(entry.get("body") or "")
+        if policy.PRICE_IN_DRAFT.search(text):
+            unsafe_kb.append(f"{key}: prohibited price/guarantee language")
+        match = policy.FALSE_CLAIMS.search(text)
+        if match:
+            unsafe_kb.append(f"{key}: unsupported claim {match.group(0)!r}")
+    if unsafe_kb:
+        reason = "approved knowledge-base content violates outbound policy: " + "; ".join(unsafe_kb)
+        d.rpc("intel_agent_log", {"p_action": "draft_blocked", "p_entity_type": "prospect", "p_entity_id": pid,
+            "p_detail": {"reason": reason[:300], "kind": kind}})
+        raise PermanentError(reason)
     if kind == "initial":
         if p["status"] != "lead_linked":
             return {"skipped": f"status {p['status']}"}
-        mail = drafting.build_initial(p, ctx["evidence"], kb, st, llm=lambda name, snips: d.llm.generate_json(
-            f"Write ONE friendly sentence (30 to 200 characters) from an animation studio introducing itself to {name}. Refer to something in the snippets. No numbers, no links, no claim that anyone played, watched or reviewed anything.",
-            snips, drafting.HOOK_SCHEMA))
+        if drafting.is_japanese_animation_prospect(p):
+            mail = drafting.build_initial(p, ctx["evidence"], kb, st, llm=None)
+        else:
+            compose = lambda feedback=None: drafting.compose_english(p, ctx["evidence"], kb, st,
+                llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
+                kind="initial", history=ctx.get("messages") or [], feedback=feedback)
+            try:
+                mail = compose()
+            except PermanentError as exc:
+                d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"reason": str(exc)[:300], "kind": kind}})
+                d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Individualized English draft requires manual review: " + str(exc)[:220]})
+                return {"skipped": "manual_review_required"}
         step, key = 0, f"draft:{pid}:initial"
         thread = None
-    else:
+    elif kind in ("followup", "reengagement"):
         if p["status"] != "contacted":
             return {"skipped": f"status {p['status']}"}
         msgs = ctx["messages"]
-        prev = [m for m in msgs if m["kind"] == "followup" and m["state"] not in ("discarded", "failed")]
+        prev = [m for m in msgs if m.get("kind") == "followup" and m.get("state") not in ("discarded", "failed")]
         initial = next((m for m in msgs if m["kind"] == "initial" and m["state"] == "sent"), None)
         step = drafting.next_step(p, ctx.get("lead"), len(prev))
+        # The persisted message schema intentionally remains initial/followup/reply.
+        # Re-engagement is a distinct composition mode occupying the final allowed
+        # follow-up slot, so it uses the existing followup RPC and send safeguards.
+        stored_kind = "followup" if kind == "reengagement" else kind
         key = f"draft:{pid}:fu{step}"
         parent = drafting.thread_parent(msgs)
         anchor = ((initial or {}).get("sent_at") or (initial or {}).get("created_at") or "")[:10] or "recently"
-        mail = drafting.build_followup(p, kb, st, anchor, parent["subject"] if parent else None)
+        if drafting.is_japanese_animation_prospect(p):
+            mail = drafting.build_followup(p, kb, st, anchor, parent["subject"] if parent else None)
+        else:
+            compose = lambda feedback=None: drafting.compose_english(p, ctx.get("evidence") or [], kb, st,
+                llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
+                kind=kind, history=msgs, sent_on=anchor, parent_subject=(parent or {}).get("subject"), feedback=feedback)
+            try:
+                mail = compose()
+            except PermanentError as exc:
+                d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"reason": str(exc)[:300], "kind": kind}})
+                d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Individualized English draft requires manual review: " + str(exc)[:220]})
+                return {"skipped": "manual_review_required"}
         thread = parent
+    else:
+        return {"skipped": f"unsupported draft kind {kind}"}
+    prior = None
+    if mail.get("model_written") and not drafting.is_japanese_animation_prospect(p):
+        # Compare against persisted organization-wide outbound history, not only this
+        # prospect's thread. This catches template reuse across different recipients.
+        history = d.rpc("intel_agent_recent_outbound", {"p_limit": 500}) or []
+        prior = [_prior_row(m) for m in history
+                 if m.get("state") not in ("discarded", "failed") and m.get("idempotency_key") != key]   # not our own earlier copy (retry)
     localized_opt_out = kb.get("policy.opt_out.ja", {}).get("body", "").strip() if drafting.is_japanese_animation_prospect(p) else None
-    bad = policy.validate_outbound(mail["subject"], mail["body"], st, drafting.approved_urls(kb), kind, p.get("domain", ""), opt_out_text=localized_opt_out)
-    if bad:
+    mail, problem = _vet_draft(d, st, kb, mail, compose, prior, kind=kind, stored_kind=stored_kind, domain=p.get("domain", ""), pid=pid,
+                               names=_recipient_names(p), opt_out_text=localized_opt_out)
+    if problem and problem["type"] == "review":
+        d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"reason": problem["reason"][:300], "kind": kind}})
+        d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Individualized English draft requires manual review: " + problem["reason"][:220]})
+        return {"skipped": "manual_review_required"}
+    if problem and problem["type"] == "similar":
+        unique = problem["unique"]
+        d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid,
+            "p_detail": {"reason": unique["reason"], "similarity": unique["similarity"], "kind": kind}})
+        d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Draft is too similar to previous outreach; manual review required."})
+        return {"skipped": "manual_review_required"}
+    if mail.get("personalization"):
+        d.rpc("intel_agent_log", {"p_action": "draft_personalization_evidence", "p_entity_type": "prospect", "p_entity_id": pid,
+            "p_detail": {"kind": kind, "evidence_ids": mail["personalization"].get("evidence_ids", []), "evidence": mail.get("evidence_trace", []),
+                         "grounding_overlap": mail["personalization"].get("grounding_overlap")}})
+    if problem:   # policy
+        bad = problem["violations"]
         d.rpc("intel_agent_log", {"p_action": "draft_blocked", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"violations": bad}})
+        if mail.get("model_written"):
+            # A model-written draft that fails policy must surface for a human, not sit silently at lead_linked / contacted.
+            d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Draft blocked by outbound policy; manual review required: " + "; ".join(bad)[:200]})
         raise PermanentError("draft failed policy: " + "; ".join(bad))
-    r = d.rpc("intel_agent_upsert_draft", {"p_prospect_id": pid, "p_kind": kind, "p_step": step, "p_subject": mail["subject"], "p_body": mail["body"],
+    r = d.rpc("intel_agent_upsert_draft", {"p_prospect_id": pid, "p_kind": stored_kind if kind in ("followup", "reengagement") else kind, "p_step": step, "p_subject": mail["subject"], "p_body": mail["body"],
                                            "p_idempotency_key": key, "p_to_email": p["contact_email"], "p_auto_ok": False,
                                            "p_in_reply_to": (thread or {}).get("in_reply_to"), "p_references": (thread or {}).get("references")})
+    if r.get("ok"):
+        _store_evidence_trace(d, r.get("message_id"), mail)
     if r.get("ok") and r.get("state") == "approved":
         _enq(d, "send", {"message_id": r["message_id"]}, f"send:{r['message_id']}:{int(d.clock() // 900)}")
     return r
@@ -146,14 +282,13 @@ def h_send(d: Deps, job):
     if st.get("kill_switch", True):
         return {"sent": False, "reason": "kill_switch"}
 
-    # Gentle pacing between sends so 30 a day never goes out as a burst.
-    last = getattr(d, "_last_send", 0)
-    gap = d.rand(45, 120)
-    if d.clock() - last < gap:
-        d.sleep(max(0, gap - (d.clock() - last)))
-
+    # Spacing is reserved atomically in Supabase so multiple worker processes
+    # cannot bypass the studio-wide throttle.
     r = mailops.send_message(d.rpc, d.zoho, job["payload"]["message_id"])
-    d._last_send = d.clock()
+    if r.get("reason") == "send_spacing":
+        delay = max(5, min(int(r.get("retry_after", 60)), 300))
+        message_id = job["payload"]["message_id"]
+        _enq(d, "send", {"message_id": message_id}, f"send-slot:{message_id}:{int(d.clock() // 60)}", delay=delay)
     return r
 
 def h_sync_mail(d: Deps, job):
@@ -174,20 +309,86 @@ def h_classify(d: Deps, job):
     llm = lambda subject, body: d.llm.generate_json("Classify this email reply to a cold introduction from an animation studio. Labels: " + ", ".join(cls.LABELS) + ".",
                                                     f"Subject: {subject}\n{body}", cls.SCHEMA, fast=True)
     done = 0
-    for m in d.rpc("intel_agent_unprocessed_inbound", {"p_limit": 20}) or []:
+    requested_id = (job.get("payload") or {}).get("message_id")
+    # Classify jobs are keyed per inbound message. Pull a larger bounded backlog
+    # and select the matching row rather than repeatedly classifying the first 20.
+    pending = d.rpc("intel_agent_unprocessed_inbound", {"p_limit": 100}) or []
+    if requested_id:
+        pending = [m for m in pending if str(m.get("id")) == str(requested_id)]
+        if not pending:
+            return {"done": 0, "skipped": "inbound_message_not_pending"}
+    for m in pending:
         r = cls.classify(m, own, llm)
-        d.rpc("intel_agent_classify_inbound", {"p_message_id": m["id"], "p_class": r["class"], "p_confidence": r["confidence"], "p_escalate": r["escalate"], "p_summary": r["summary"], "p_related_email": r["related_email"]})
+        def save_class(m=m, r=r):
+            d.rpc("intel_agent_classify_inbound", {"p_message_id": m["id"], "p_class": r["class"], "p_confidence": r["confidence"], "p_escalate": r["escalate"], "p_summary": r["summary"], "p_related_email": r["related_email"]})
+        # The classification is saved only after the reply draft is stored (or composition definitively fails), so a
+        # model outage or a failed database call leaves the message pending and the whole job retries.
+        if not (r["auto_ok"] and m.get("prospect_id")):
+            save_class()
         done += 1
         if r["auto_ok"] and m.get("prospect_id"):
             ctx = d.rpc("intel_agent_context", {"p_prospect_id": m["prospect_id"]})
-            reply = drafting.build_auto_reply(r["class"], ctx["prospect"], kb, st, m.get("subject", ""))
-            if reply and not policy.validate_outbound(reply["subject"], reply["body"], st, drafting.approved_urls(kb), "reply", ctx["prospect"].get("domain", "")):
+            compose = None   # English model-written replies only; lets the vetting step regenerate once
+            if drafting.is_japanese_animation_prospect(ctx["prospect"]):
+                reply = drafting.build_auto_reply(r["class"], ctx["prospect"], kb, st, m.get("subject", ""))
+            else:
+                compose = lambda feedback=None, m=m, r=r, ctx=ctx: drafting.compose_english(ctx["prospect"], ctx.get("evidence") or [], kb, st,
+                    llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
+                    kind="reply", inbound={"id": m.get("id"), "subject": m.get("subject", ""), "body": m.get("body_text", ""),
+                        "class": r["class"], "summary": r.get("summary", "")},
+                    history=ctx.get("messages") or [], feedback=feedback)
+                try:
+                    reply = compose()
+                except PermanentError as exc:
+                    # Classification is retained, but composition failure must be visible
+                    # and actionable rather than silently dropping the reply draft.
+                    d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect",
+                        "p_entity_id": m["prospect_id"], "p_detail": {"reason": str(exc)[:300], "kind": "reply", "inbound_message_id": m.get("id")}})
+                    d.rpc("intel_agent_flag_prospect", {"p_prospect_id": m["prospect_id"],
+                        "p_reason": "Incoming reply requires manual review because individualized reply drafting failed: " + str(exc)[:220]})
+                    reply = None
+            if reply:
+                # Replies receive the same substantive near-duplicate/structural check
+                # as outbound outreach, against actual sent messages in this thread.
+                history = d.rpc("intel_agent_recent_outbound", {"p_limit": 500}) or []
+                prior_replies = [_prior_row(x) for x in history
+                    if x.get("state") in ("sent", "approved", "pending_approval", "reserved", "sending", "unknown")
+                    and x.get("idempotency_key") != f"reply:{m['id']}"]   # not our own earlier copy (retry)
+                pid_m = m["prospect_id"]
+                reply, problem = _vet_draft(d, st, kb, reply, compose, prior_replies, kind="reply", stored_kind="reply",
+                                            domain=ctx["prospect"].get("domain", ""), pid=pid_m, names=_recipient_names(ctx["prospect"]))
+                bad_reply = []
+                if problem and problem["type"] == "review":
+                    d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid_m,
+                        "p_detail": {"reason": problem["reason"][:300], "kind": "reply", "inbound_message_id": m.get("id")}})
+                    d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid_m,
+                        "p_reason": "Incoming reply requires manual review because individualized reply drafting failed: " + problem["reason"][:220]})
+                    reply = None
+                elif problem and problem["type"] == "similar":
+                    unique = problem["unique"]
+                    d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid_m,
+                        "p_detail": {"reason": unique["reason"], "similarity": unique["similarity"], "kind": "reply", "inbound_message_id": m.get("id")}})
+                    d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid_m, "p_reason": "Reply draft is too similar to previous sent communication; manual review required."})
+                    reply = None
+                elif problem:
+                    bad_reply = problem["violations"]
+            else:
+                bad_reply = []
+            if reply and bad_reply:
+                d.rpc("intel_agent_log", {"p_action": "draft_blocked", "p_entity_type": "prospect", "p_entity_id": m["prospect_id"], "p_detail": {"violations": bad_reply, "kind": "reply", "inbound_message_id": m.get("id")}})
+                d.rpc("intel_agent_flag_prospect", {"p_prospect_id": m["prospect_id"], "p_reason": "Reply draft blocked by outbound policy; manual review required: " + "; ".join(bad_reply)[:200]})
+            if reply and not bad_reply:
                 out = d.rpc("intel_agent_upsert_draft", {"p_prospect_id": m["prospect_id"], "p_kind": "reply", "p_step": 0, "p_subject": reply["subject"], "p_body": reply["body"],
-                                                         "p_idempotency_key": f"reply:{m['id']}", "p_to_email": m["from_email"], "p_auto_ok": True,
+                                                         "p_idempotency_key": f"reply:{m['id']}", "p_to_email": m["from_email"], "p_auto_ok": not reply.get("model_written"),   # model-written replies are always human-approved
                                                          "p_in_reply_to": m.get("rfc_message_id") or None,
                                                          "p_references": " ".join(x for x in [(m.get("references_ids") or "").strip(), m.get("rfc_message_id") or ""] if x)[-3900:] or None})
+                if out.get("ok"):
+                    _store_evidence_trace(d, out.get("message_id"), reply)
                 if out.get("ok") and out.get("state") == "approved":
                     _enq(d, "send", {"message_id": out["message_id"]}, f"send:{out['message_id']}:{int(d.clock() // 900)}", priority=3)
+            # Saved last: if the history lookup or the draft upsert fails, the message stays pending and the retry
+            # produces the reply. Saving earlier marked it processed and the reply was lost for good.
+            save_class()
     return {"classified": done}
 
 
@@ -212,7 +413,10 @@ def h_followup_scan(d: Deps, job):
         if c.get("takeover"):      # a pasted conversation exists: the follow-up must continue THAT conversation, not use the generic template
             _enq(d, "takeover", {"prospect_id": c["prospect_id"], "scheduled": True}, f"takeover-scan:{c['prospect_id']}:{day}")
         else:
-            _enq(d, "draft", {"prospect_id": c["prospect_id"], "kind": "followup"}, f"fuscan:{c['prospect_id']}:{day}")
+            draft_kind = c.get("draft_kind") or "followup"
+            if draft_kind not in ("followup", "reengagement"):
+                draft_kind = "followup"
+            _enq(d, "draft", {"prospect_id": c["prospect_id"], "kind": draft_kind}, f"fuscan:{c['prospect_id']}:{draft_kind}:{day}")
         n += 1
     return {"candidates": n}
 

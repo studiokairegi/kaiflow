@@ -60,6 +60,7 @@ function Shell({ supabase, target, onOpenLead }) {
   useEffect(() => { if (target) { setFocus(target); setTab("outreach"); } }, [target?.nonce]);
   const ov = useLoad(() => intelApi.overview(supabase), [supabase, tick]);
   const mail = useLoad(() => intelApi.mailStatus(supabase), [supabase, tick]);
+  const mailStatus = mail.error ? { ...(mail.data || {}), status: "check_failed", last_error: mail.error } : mail.data;
   const refresh = async () => { await ov.reload(); await mail.reload(); setTick((t) => t + 1); };
 
   if (ov.loading) return <Muted>Loading…</Muted>;
@@ -87,7 +88,7 @@ function Shell({ supabase, target, onOpenLead }) {
       </div>
       {flash && <Banner tone={flash.tone} action={<Btn small onClick={() => setFlash(null)}>Dismiss</Btn>}>{flash.text}</Banner>}
       <div className="kf-intel-tabs"><Tabs tabs={tabs} value={tab} onChange={setTab} /></div>
-      {tab === "overview" && <OverviewView o={o} mail={mail.data} supabase={supabase} onChanged={refresh} setTab={setTab} onNeedsDecision={() => { setProspectStatusFocus("needs_review"); setTab("prospects"); }} />}
+      {tab === "overview" && <OverviewView o={o} mail={mailStatus} supabase={supabase} onChanged={refresh} setTab={setTab} onNeedsDecision={() => { setProspectStatusFocus("needs_review"); setTab("prospects"); }} />}
       {tab === "chat" && <ChatView supabase={supabase} tick={tick} workerSeconds={o.worker_last_seen_seconds} onChanged={refresh} />}
       {tab === "crm" && <CrmFollowupView {...common} />}
       {tab === "indie" && <CampaignView type="indie_game_developer" {...common} />}
@@ -96,7 +97,7 @@ function Shell({ supabase, target, onOpenLead }) {
       {tab === "qualified" && <ProspectsView mode="qualified" {...common} />}
       {tab === "outreach" && <OutreachView {...common} focus={focus} />}
       {tab === "logs" && <LogsView supabase={supabase} tick={tick} />}
-      {tab === "settings" && <SettingsView supabase={supabase} tick={tick} mail={mail.data} onChanged={refresh} />}
+      {tab === "settings" && <SettingsView supabase={supabase} tick={tick} mail={mailStatus} onChanged={refresh} />}
     </div>
   );
 }

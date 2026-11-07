@@ -14,3 +14,7 @@ class RpcError(Exception):
 
 class MailRejected(Exception):
     """The mail provider definitively refused the request (4xx). The message was NOT sent."""
+
+
+class ThreadingRejected(MailRejected):
+    """A provider refused native reply threading; never downgrade to an unthreaded send."""

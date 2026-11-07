@@ -9,6 +9,19 @@ class Ssrf(unittest.TestCase):
     def check(self, url, mapping=None):
         safety.assert_public_url(url, resolver_for(mapping or {"example.com": ["93.184.216.34"], "evil.test": ["10.0.0.5"], "meta.test": ["169.254.169.254"], "lo.test": ["127.0.0.1"], "v6.test": ["::1"], "mixed.test": ["93.184.216.34", "192.168.1.9"]}))
 
+    def test_public_resolution_is_returned_for_connection_pinning(self):
+        resolver = resolver_for({"example.com": ["93.184.216.34"]})
+        self.assertEqual(safety.assert_public_url("https://example.com/x", resolver), ["93.184.216.34"])
+
+    def test_pinned_https_connection_uses_validated_ip_not_hostname_dns(self):
+        from unittest.mock import patch
+        import urllib3.util.connection
+        conn = safety._PinnedHTTPSConnection("example.com", 443, dns_pin="93.184.216.34", timeout=3)
+        sentinel = object()
+        with patch.object(urllib3.util.connection, "create_connection", return_value=sentinel) as connect:
+            self.assertIs(conn._new_conn(), sentinel)
+        self.assertEqual(connect.call_args.args[0], ("93.184.216.34", 443))
+
     def test_public_allowed(self): self.check("https://example.com/x")
     def test_blocks_private_loopback_metadata_ipv6_and_mixed(self):
         for h in ("evil.test", "meta.test", "lo.test", "v6.test", "mixed.test"):

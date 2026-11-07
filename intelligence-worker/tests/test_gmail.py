@@ -82,6 +82,23 @@ class Client(unittest.TestCase):
         c = gmail.GmailClient(Tok(), Sess({("GET", "/messages/18c0ffee12345678"): Resp(404), ("POST", "/messages/send"): Resp(200, {"id": "G2", "threadId": "T"})}))
         self.assertEqual(c.send("studio@gmail.com", "d@p.com", "Re: x", "b", reply_to_zoho_id="18c0ffee12345678", in_reply_to="<a@x>")["zoho_message_id"], "G2")
 
+
+    def test_find_sent_searches_multiple_pages(self):
+        token = "kf" + "a" * 32
+        def list_page(_json, params):
+            if params.get("pageToken") == "next":
+                return Resp(200, {"messages": [{"id": "match"}]})
+            return Resp(200, {"messages": [{"id": "other"}], "nextPageToken": "next"})
+        routes = {
+            ("GET", "/messages"): list_page,
+            ("GET", "/messages/other"): Resp(200, {"payload": {"headers": [{"name": "Subject", "value": "not a match"}]}, "internalDate": "1760000000000", "threadId": "t1"}),
+            ("GET", "/messages/match"): Resp(200, {"payload": {"headers": [{"name": "Subject", "value": "Ref " + token}, {"name": "Message-ID", "value": "<m@x>"}]}, "internalDate": "1760000000000", "threadId": "t2"}),
+        }
+        c = gmail.GmailClient(Tok(), Sess(routes))
+        found = c.find_sent(token, "to@x.test", 0)
+        self.assertEqual(found["zoho_message_id"], "match")
+        self.assertEqual(found["thread_id"], "t2")
+
     def test_listing_reading_and_headers(self):
         html = base64.urlsafe_b64encode(b"<p>Hello <b>there</b></p>").decode()
         plain = base64.urlsafe_b64encode(b"Sure, send pricing. Ref: kf" + b"a" * 32).decode()

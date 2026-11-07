@@ -24,18 +24,37 @@ BOUNCE_SUBJ = re.compile(r"undeliver|delivery status notification|delivery (has 
 PERMANENT = re.compile(r"\b550\b|\b5\.\d\.\d\b|user unknown|no such user|does not exist|mailbox (not found|unavailable)|address rejected|unknown recipient|recipient address rejected", I)
 EMAIL = re.compile(r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9\-]{1,63}(?:\.[A-Za-z0-9\-]{1,63})+")
 URL = re.compile(r"https?://[^\s<>\")\]]+", I)
-PRICE_IN_DRAFT = re.compile(r"[$€£¥]\s?\d|\d\s?(usd|eur|gbp|jpy)\b|\bper (second|minute|frame|hour)\b|\bdiscount\b|\bfree\b|\bguarantee", I)
+MAX_BODY_CHARS = 3200   # single limit shared with drafting.compose_english (footer included)
+PRICE_IN_DRAFT = re.compile(r"[$€£¥]\s?\d|\d\s?(usd|eur|gbp|jpy)\b|\bper (second|minute|frame|hour)\b|\bdiscount\b|\bfree (?:of charge|trial|quote|estimate|sample|samples|test|consultation|pilot|revision|revisions|work)\b|\bfor free\b|\bat no (?:cost|charge)\b|\bcomplimentary\b|\bgratis\b|\bguarantee", I)
 FALSE_CLAIMS = re.compile(r"\b(we (have )?(played|watched|reviewed|tested|read|studied)|as we discussed|following up on our (call|conversation|meeting)|you('| a)?re (already )?(a )?(client|customer)|referred by|(mutual|common) (friend|connection)|i saw you at|we met)\b", I)
 
 ESCALATE_CLASSES = {"pricing", "negotiation", "contract", "deadline", "availability", "complaint", "ambiguous", "meeting_request", "project_opportunity", "negotiation"}
 
 
+def normalize_quotes(text: str) -> str:
+    """Curly quotes are what phone and Outlook clients type; the patterns below use straight ones."""
+    return (text or "").translate({0x2018: "'", 0x2019: "'", 0x02BC: "'", 0x201C: '"', 0x201D: '"'})
+
+
+_OUTLOOK_SEP = re.compile(r"^\s*(?:-{2,}\s*original message|_{5,}|from:\s|sent:\s)", I)
+_ATTRIBUTION = re.compile(r"^\s*on .{5,200} wrote:\s*$", I)
+
+
 def first_unquoted(body: str) -> str:
-    """The new text of an email: drops quoted history and signatures so old words don't trigger rules."""
-    out = []
+    """The sender's own new words, whether they reply above OR below the quoted history.
+
+    Drops quoted lines (">"), "On ... wrote:" headers and quoted-header blocks. An Outlook-style separator ends
+    the text only when new text already sits above it; otherwise the reply was written below the quote and is
+    kept. (Stopping at the first quote marker made a bottom-posted reply read as empty, so pricing, unsubscribe
+    and complaint words in it were missed.)"""
+    out: list[str] = []
     for line in (body or "").splitlines():
-        if re.match(r"^\s*>", line) or re.match(r"^\s*(on .{5,80} wrote:|-{2,}\s*original message|from:\s)", line, I):
-            break
+        if _OUTLOOK_SEP.match(line):
+            if "\n".join(out).strip():
+                break
+            continue
+        if re.match(r"^\s*>", line) or _ATTRIBUTION.match(line):
+            continue
         out.append(line)
     return "\n".join(out).strip()
 
@@ -63,7 +82,7 @@ def is_auto_reply(subject: str, body: str, headers: dict | None = None) -> bool:
 
 def scan_inbound(subject: str, body: str) -> dict:
     """Deterministic read of a reply. `hard` classes (unsubscribe, complaint, pricing...) can never be overridden by the model."""
-    text = f"{subject}\n{first_unquoted(body)}"
+    text = normalize_quotes(f"{subject}\n{first_unquoted(body)}")
     hits = {k for k, p in CLASS_PATTERNS.items() if p.search(text)}
     if "decline" in hits:   # "not interested" must not also count as interest
         if not CLASS_PATTERNS["interest"].search(CLASS_PATTERNS["decline"].sub(" ", text)):
@@ -94,7 +113,7 @@ def validate_outbound(subject: str, body: str, settings: dict, allowed_urls: set
     v: list[str] = []
     if not subject.strip() or "\n" in subject or len(subject) > 160:
         v.append("bad subject")
-    if len(body) > 3200:
+    if len(body) > MAX_BODY_CHARS:
         v.append("too long")
     if kind in ("initial", "followup"):
         required_opt_out = (opt_out_text if opt_out_text is not None else settings.get("opt_out_text", "")).strip()
@@ -103,7 +122,7 @@ def validate_outbound(subject: str, body: str, settings: dict, allowed_urls: set
         if not settings.get("physical_address", "").strip() or settings["physical_address"].strip().lower() not in body.lower():
             v.append("missing postal address")
     if PRICE_IN_DRAFT.search(body):
-        v.append("mentions price, discount, guarantee or free")
+        v.append("mentions price, discount, guarantee or free offer")
     m = FALSE_CLAIMS.search(body)
     if m:
         v.append(f"claims something we cannot verify: {m.group(0)!r}")

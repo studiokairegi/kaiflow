@@ -1,7 +1,7 @@
 import unittest
 
 from kairflow_intel import config, jobs, mailops
-from kairflow_intel.errors import PermanentError, RpcError, TransientError
+from kairflow_intel.errors import PermanentError, RpcError, ThreadingRejected, TransientError
 from kairflow_intel.supa import SupabaseAgent
 from kairflow_intel.zoho import ZohoRejected
 from .helpers import CFG
@@ -20,6 +20,7 @@ class FakeRpc:
             if m["state"] == "sent": return {"ok": False, "reason": "already_sent"}
             if m["state"] != "approved": return {"ok": False, "reason": "not_approved"}
             m["state"] = "reserved"; return {"ok": True, "message": dict(m)}
+        if name == "intel_agent_acquire_send_slot": return {"ok": True, "resumed": False}
         if name == "intel_agent_mark_sending": m["state"] = "sending"; return True
         if name == "intel_agent_confirm_send":
             if self.fail_confirm: raise TransientError("network")
@@ -53,11 +54,126 @@ class FakeZoho:
 class Sending(unittest.TestCase):
     def setUp(self): self.r, self.z = FakeRpc(), FakeZoho(); self.r.add("m1")
 
+
+    def test_parent_lookup_failure_is_definite_non_send_not_unknown(self):
+        rpc_calls = []
+        def rpc(name, params=None):
+            params = params or {}; rpc_calls.append(name)
+            if name == "intel_agent_reserve_send": return {"ok": True, "message": {"id": "m1", "in_reply_to": "<parent@x>", "prospect_id": "p1", "state": "approved"}}
+            if name == "intel_agent_acquire_send_slot": return {"ok": True, "resumed": False}
+            if name == "intel_agent_mark_sending": return True
+            if name == "intel_agent_context": raise TransientError("db unavailable")
+            return None
+        z = FakeZoho()
+        out = mailops.send_message(rpc, z, "m1")
+        self.assertEqual(out["reason"], "parent_lookup_retry")
+        self.assertNotIn("intel_agent_mark_unknown", rpc_calls)
+        self.assertIn("intel_agent_fail_send", rpc_calls)
+        self.assertNotIn("intel_agent_acquire_send_slot", rpc_calls)
+        self.assertNotIn("intel_agent_mark_sending", rpc_calls)
+        self.assertEqual(z.sent, [])
+
+    def test_zoho_reply_missing_parent_is_not_sent_as_unthreaded(self):
+        self.r.add("m2")
+        m = self.r.msgs["m2"]; m["in_reply_to"] = "<incoming@x>"; m["prospect_id"] = "p1"
+        def rpc(name, params=None):
+            params = params or {}
+            if name == "intel_agent_context": return {"messages": []}
+            return self.r(name, params)
+        z = FakeZoho()
+        out = mailops.send_message(rpc, z, "m2")
+        self.assertEqual(out["reason"], "reply_parent_missing")
+        self.assertEqual(z.sent, [])
+
+
+    def test_reply_parent_preflight_happens_before_slot_and_final_transition(self):
+        self.r.add("reply")
+        m = self.r.msgs["reply"]
+        m.update({"in_reply_to": "<incoming@x>", "prospect_id": "p1"})
+        calls = []
+        def rpc(name, params=None):
+            calls.append(name)
+            if name == "intel_agent_context":
+                return {"messages": [{"rfc_message_id": "<incoming@x>", "zoho_message_id": "parent-zoho"}]}
+            return self.r(name, params)
+        out = mailops.send_message(rpc, self.z, "reply")
+        self.assertEqual(out["reason"], "ok")
+        self.assertLess(calls.index("intel_agent_context"), calls.index("intel_agent_acquire_send_slot"))
+        self.assertLess(calls.index("intel_agent_acquire_send_slot"), calls.index("intel_agent_mark_sending"))
+        self.assertEqual(self.z.parents, ["parent-zoho"])
+
+    def test_kill_switch_rejection_at_final_transition_prevents_provider_call(self):
+        self.r.add("stopped")
+        calls = []
+        def rpc(name, params=None):
+            calls.append(name)
+            if name == "intel_agent_mark_sending":
+                return False  # models kill switch enabled after slot acquisition
+            return self.r(name, params)
+        out = mailops.send_message(rpc, self.z, "stopped")
+        self.assertEqual(out["reason"], "not_reserved_or_send_stopped")
+        self.assertEqual(self.z.sent, [])
+        self.assertLess(calls.index("intel_agent_acquire_send_slot"), calls.index("intel_agent_mark_sending"))
+        self.assertEqual(calls[-1], "intel_agent_mark_sending")
+
+    def test_provider_response_without_id_is_unknown_not_confirmed_sent(self):
+        self.r.add("m3")
+        class MissingId(FakeZoho):
+            def send(self, *a, **kw): return {"zoho_message_id": "", "thread_id": "t"}
+        z = MissingId()
+        out = mailops.send_message(self.r, z, "m3")
+        self.assertEqual(out["reason"], "unknown")
+        self.assertEqual(self.r.msgs["m3"]["state"], "unknown")
+        self.assertNotIn("intel_agent_confirm_send", [name for name, _ in self.r.calls])
+
+    def test_worker_requeues_message_after_global_send_spacing_denial(self):
+        calls = []
+        message = {"id": "paced", "state": "reserved", "token": "kf" + "b" * 32,
+                   "to_email": "rina@pixelmoon.com", "from_email": "alex@studio.test",
+                   "subject": "Hello", "body_text": "Body"}
+        def rpc(name, params=None):
+            params = params or {}; calls.append((name, params))
+            if name == "intel_agent_settings": return {"kill_switch": False}
+            if name == "intel_agent_reserve_send": return {"ok": True, "message": dict(message)}
+            if name == "intel_agent_acquire_send_slot": return {"ok": False, "reason": "send_spacing", "retry_after": 73}
+            if name == "intel_agent_enqueue_job": return "queued"
+            return None
+        d = jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=self.z, llm=None,
+                      sleep=lambda _seconds: None, clock=lambda: 1_800_000_000.0)
+        out = jobs.h_send(d, {"payload": {"message_id": "paced"}})
+        self.assertEqual(out["reason"], "send_spacing")
+        queued = next(params for name, params in calls if name == "intel_agent_enqueue_job")
+        self.assertEqual(queued["p_kind"], "send")
+        self.assertEqual(queued["p_payload"], {"message_id": "paced"})
+        self.assertEqual(queued["p_run_after"], "2027-01-15T08:01:13Z")
+        self.assertEqual(self.z.sent, [])
+
+    def test_global_send_slot_denial_defers_before_provider_call(self):
+        self.r.add("paced")
+        original = self.r.__call__
+        def throttled(name, params=None):
+            if name == "intel_agent_acquire_send_slot":
+                return {"ok": False, "reason": "send_spacing", "retry_after": 73}
+            return original(name, params)
+        out = mailops.send_message(throttled, self.z, "paced")
+        self.assertEqual(out["reason"], "send_spacing")
+        self.assertEqual(out["retry_after"], 73)
+        self.assertEqual(self.z.sent, [])
+        self.assertEqual(self.r.msgs["paced"]["state"], "reserved")
+
     def test_success_sends_once_with_ref_and_confirms(self):
         out = mailops.send_message(self.r, self.z, "m1")
         self.assertEqual(out, {"sent": True, "reason": "ok"}); self.assertEqual(len(self.z.sent), 1)
         self.assertIn("Ref: kf" + "a" * 32, self.z.sent[0][3]); self.assertEqual(self.r.msgs["m1"]["state"], "sent")
         self.assertEqual(mailops.send_message(self.r, self.z, "m1")["reason"], "already_sent"); self.assertEqual(len(self.z.sent), 1)
+
+    def test_threading_rejection_is_permanent_and_not_sent_unthreaded(self):
+        self.z.raise_on_send = ThreadingRejected("Zoho rejected native reply threading")
+        self.r.add("threaded")
+        out = mailops.send_message(self.r, self.z, "threaded")
+        self.assertEqual(out["reason"], "threading_rejected")
+        self.assertEqual((self.r.msgs["threaded"]["state"], self.r.msgs["threaded"]["perm"]), ("failed", True))
+        self.assertEqual(self.z.sent, [])
 
     def test_zoho_rejection_marks_failed_and_is_not_retried(self):
         self.z.raise_on_send = ZohoRejected("zoho 400: invalid recipient address")
@@ -89,6 +205,30 @@ class Sending(unittest.TestCase):
 
 
 class Inbox(unittest.TestCase):
+    def test_sync_paginates_backlog_before_advancing_cursor(self):
+        r, z = FakeRpc(), FakeZoho()
+        base = 1_700_000_100_000
+        z.inbox = [{"id": f"old{i}", "folder_id": "f", "subject": "reply", "from": f"u{i}@example.com",
+                    "to": "", "time_ms": base - i * 1000, "thread_id": ""} for i in range(125)]
+        z.iter_messages = lambda folder, page_size: (item for item in z.inbox)
+        got = mailops.sync_inbox(r, z, set(), overlap_ms=0, limit=50)
+        self.assertEqual(got["new"], 125)
+        self.assertEqual(len(r.inbound), 125)
+        self.assertEqual(r.cursor["last_time_ms"], base)
+
+    def test_cursor_does_not_advance_when_persisting_page_fails(self):
+        class BrokenRpc(FakeRpc):
+            def __call__(self, name, p=None):
+                if name == "intel_agent_record_inbound":
+                    raise RuntimeError("db unavailable")
+                return super().__call__(name, p)
+        r, z = BrokenRpc(), FakeZoho()
+        z.inbox = [{"id": "one", "folder_id": "f", "subject": "reply", "from": "u@example.com",
+                    "to": "", "time_ms": 1_700_000_100_000, "thread_id": ""}]
+        with self.assertRaises(RuntimeError):
+            mailops.sync_inbox(r, z, set(), overlap_ms=0)
+        self.assertEqual(r.cursor.get("last_time_ms", 0), 0)
+
     def test_sync_is_idempotent_and_skips_own_mail(self):
         r, z = FakeRpc(), FakeZoho()
         z.inbox = [{"id": "i1", "folder_id": "f", "subject": "Re: hi", "from": "Rina <rina@pixelmoon.com>", "to": "", "time_ms": 1_700_000_100_000, "thread_id": ""},

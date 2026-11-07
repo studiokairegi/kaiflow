@@ -9,9 +9,67 @@ import urllib.robotparser
 from urllib.parse import urljoin, urlparse
 
 import requests
+import urllib3
+from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup, Comment
 
 from .errors import PermanentError, TransientError
+
+
+
+class _PinnedHTTPConnection(urllib3.connection.HTTPConnection):
+    """Connect to a prevalidated IP instead of resolving the hostname again."""
+    def __init__(self, *args, dns_pin: str, **kwargs):
+        self.dns_pin = dns_pin
+        super().__init__(*args, **kwargs)
+
+    def _new_conn(self):
+        return urllib3.util.connection.create_connection(
+            (self.dns_pin, self.port), self.timeout, source_address=self.source_address,
+            socket_options=self.socket_options,
+        )
+
+
+class _PinnedHTTPSConnection(urllib3.connection.HTTPSConnection):
+    """IP-pinned TCP connection; inherited TLS setup retains original host for SNI/cert validation."""
+    def __init__(self, *args, dns_pin: str, **kwargs):
+        self.dns_pin = dns_pin
+        super().__init__(*args, **kwargs)
+
+    def _new_conn(self):
+        return urllib3.util.connection.create_connection(
+            (self.dns_pin, self.port), self.timeout, source_address=self.source_address,
+            socket_options=self.socket_options,
+        )
+
+
+class _PinnedHTTPPool(urllib3.connectionpool.HTTPConnectionPool):
+    ConnectionCls = _PinnedHTTPConnection
+
+
+class _PinnedHTTPSPool(urllib3.connectionpool.HTTPSConnectionPool):
+    ConnectionCls = _PinnedHTTPSConnection
+
+
+class _PinnedPoolManager(urllib3.PoolManager):
+    def __init__(self, dns_pin: str, **kwargs):
+        self.pool_classes_by_scheme = dict(self.pool_classes_by_scheme)
+        self.pool_classes_by_scheme["http"] = _PinnedHTTPPool
+        self.pool_classes_by_scheme["https"] = _PinnedHTTPSPool
+        super().__init__(dns_pin=dns_pin, **kwargs)
+
+
+class _PinnedAdapter(HTTPAdapter):
+    def __init__(self, dns_pin: str):
+        self.dns_pin = dns_pin
+        super().__init__()
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        self.poolmanager = _PinnedPoolManager(
+            dns_pin=self.dns_pin, num_pools=connections, maxsize=maxsize, block=block,
+            **pool_kwargs,
+        )
+
 
 ALLOWED_TYPES = ("text/html", "application/xhtml", "text/plain", "application/json", "application/xml", "text/xml", "application/rss", "application/atom")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9\-]{1,63}(?:\.[A-Za-z0-9\-]{1,63})+")
@@ -23,7 +81,7 @@ def is_public_ip(ip: str) -> bool:
     return not (a.is_private or a.is_loopback or a.is_link_local or a.is_multicast or a.is_reserved or a.is_unspecified)
 
 
-def assert_public_url(url: str, resolver=socket.getaddrinfo) -> None:
+def assert_public_url(url: str, resolver=socket.getaddrinfo) -> list[str]:
     """SSRF guard: http(s) only, no credentials, every resolved address must be public."""
     p = urlparse(url)
     if p.scheme not in ("http", "https") or not p.hostname:
@@ -39,6 +97,7 @@ def assert_public_url(url: str, resolver=socket.getaddrinfo) -> None:
     addrs = {i[4][0] for i in infos}
     if not addrs or not all(is_public_ip(a) for a in addrs):
         raise PermanentError(f"blocked non-public address for {p.hostname}")
+    return sorted(addrs)
 
 
 class Fetcher:
@@ -58,16 +117,34 @@ class Fetcher:
 
     def _get_raw(self, url: str, accept_any_type: bool = False):
         for _ in range(5):
-            assert_public_url(url, self.resolver)
+            validated = assert_public_url(url, self.resolver)
             self._pace(urlparse(url).hostname or "")
             try:
-                r = self.s.get(url, headers={"User-Agent": self.cfg.user_agent, "Accept": "text/html,*/*;q=0.5"},
-                               timeout=self.cfg.fetch_timeout, allow_redirects=False, stream=True)
+                if isinstance(self.s, requests.Session):
+                    # Fresh direct session ensures the validated IP is the one used for TCP;
+                    # TLS still validates against the original URL hostname.
+                    pinned = requests.Session()
+                    pinned.trust_env = False
+                    pinned.mount("http://", _PinnedAdapter(validated[0]))
+                    pinned.mount("https://", _PinnedAdapter(validated[0]))
+                    try:
+                        r = pinned.get(url, headers={"User-Agent": self.cfg.user_agent, "Accept": "text/html,*/*;q=0.5"},
+                                       timeout=self.cfg.fetch_timeout, allow_redirects=False, stream=True)
+                    finally:
+                        # Attach ownership to response; close after body consumption.
+                        pass
+                    r._kairflow_pinned_session = pinned
+                else:
+                    r = self.s.get(url, headers={"User-Agent": self.cfg.user_agent, "Accept": "text/html,*/*;q=0.5"},
+                                   timeout=self.cfg.fetch_timeout, allow_redirects=False, stream=True)
             except requests.RequestException as exc:
                 raise TransientError(f"fetch failed: {exc}") from exc
             if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
                 url = urljoin(url, r.headers["Location"])
                 r.close()
+                owner = getattr(r, "_kairflow_pinned_session", None)
+                if owner is not None:
+                    owner.close()
                 continue
             return url, r
         raise PermanentError("too many redirects")
@@ -78,7 +155,17 @@ class Fetcher:
         if origin not in self._robots:
             rp = urllib.robotparser.RobotFileParser()
             try:
-                _, r = self._get_raw(origin + "/robots.txt")
+                final_robots_url, r = self._get_raw(origin + "/robots.txt")
+                if urlparse(final_robots_url).netloc.lower() != p.netloc.lower():
+                    # A redirected robots document belongs to a different origin;
+                    # don't apply it to this host. Fail closed for this origin.
+                    self._robots[origin] = rp
+                    rp.disallow_all = True
+                    r.close()
+                    owner = getattr(r, "_kairflow_pinned_session", None)
+                    if owner is not None:
+                        owner.close()
+                    return False
                 if r.status_code == 200:
                     rp.parse(r.raw.read(200_000, decode_content=True).decode("utf-8", "replace").splitlines())
                     self._robots[origin] = rp
@@ -88,6 +175,9 @@ class Fetcher:
                     self._robots[origin] = rp
                     rp.disallow_all = True                 # server error: be conservative
                 r.close()
+                owner = getattr(r, "_kairflow_pinned_session", None)
+                if owner is not None:
+                    owner.close()
             except (TransientError, PermanentError):
                 rp.disallow_all = True
                 self._robots[origin] = rp
@@ -124,6 +214,9 @@ class Fetcher:
             return final, data.decode(r.encoding or "utf-8", "replace")
         finally:
             r.close()
+            owner = getattr(r, "_kairflow_pinned_session", None)
+            if owner is not None:
+                owner.close()
 
 
 _HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0", re.I)

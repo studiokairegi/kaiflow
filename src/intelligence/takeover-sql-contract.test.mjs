@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const sql = readFileSync(new URL("../../supabase/migrations/20261116090000_intelligence_crm_takeover.sql", import.meta.url), "utf8");
+const reserveOverrideSql = readFileSync(new URL("../../supabase/migrations/20261116100000_intelligence_crm_reserve_send_email_gate.sql", import.meta.url), "utf8");
 const code = sql.replace(/--.*$/gm, "");
-const fn = (name) => {
-  const m = code.match(new RegExp(`create or replace function public\\.${name}\\(([\\s\\S]*?)\\n(?:end|end;) ?\\$\\$;`));
+const fn = (name, source = code) => {
+  const m = source.replace(/--.*$/gm, "").match(new RegExp(`create or replace function public\\.${name}\\(([\\s\\S]*?)\\n(?:end|end;) ?\\$\\$;`));
   assert.ok(m, `${name} is defined`);
   return m[0];
 };
@@ -48,7 +49,9 @@ test("the email rule runs when a draft is created and again when a send is reser
   assert.match(draft, /_intel_lead_email_gate\(p\.lead_id, case when p_kind in \('initial','followup'\) then v_to else null end\)/);
   assert.match(draft, /p\.lead_id is null and p_kind in \('initial','followup'\) then return public\._intel_deny\('no_crm_lead'\)/);
   assert.match(draft, /when p\.origin = 'crm_existing' then 'pending_approval'/);
-  const send = fn("intel_agent_reserve_send");
+  // reserve_send is replaced by the next migration; assert against the effective
+  // definition, not the earlier function body that the migration supersedes.
+  const send = fn("intel_agent_reserve_send", reserveOverrideSql);
   const gate = send.indexOf("_intel_lead_email_gate(m.lead_id");
   const resume = send.indexOf("if m.state = 'reserved' then");
   const approved = send.indexOf("if m.state <> 'approved' then");

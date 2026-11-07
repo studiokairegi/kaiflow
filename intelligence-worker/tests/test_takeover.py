@@ -191,6 +191,21 @@ class Handle(unittest.TestCase):
         out, rpc = run(ctx([OUT1], status="closed"))
         self.assertEqual(out, {"skipped": "prospect is closed"}); self.assertEqual(rpc.named("intel_agent_upsert_draft"), [])
 
+    def test_scan_enqueues_reengagement_composition_when_candidate_requests_it(self):
+        enq = []
+        def rpc(name, p=None):
+            if name == "intel_agent_followup_candidates":
+                return [{"prospect_id": "p-final", "takeover": False, "draft_kind": "reengagement"}]
+            if name == "intel_agent_enqueue_job":
+                enq.append(p)
+                return "job-id"
+        d = jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=None, llm=None, clock=lambda: 1_800_000_000)
+        result = jobs.h_followup_scan(d, {})
+        self.assertEqual(result["candidates"], 1)
+        self.assertEqual(enq[0]["p_kind"], "draft")
+        self.assertEqual(enq[0]["p_payload"], {"prospect_id": "p-final", "kind": "reengagement"})
+        self.assertIn(":reengagement:", enq[0]["p_idempotency_key"])
+
     def test_scan_routes_pasted_conversations_to_takeover_not_the_template(self):
         enq = []
         def rpc(name, p=None):

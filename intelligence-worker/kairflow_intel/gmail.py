@@ -109,16 +109,35 @@ class GmailClient:
             self._meta[message_id] = {"headers": h, "time_ms": int(d.get("internalDate") or 0), "thread_id": str(d.get("threadId", "") or ""), "labels": d.get("labelIds") or []}
         return self._meta[message_id]
 
-    def list_messages(self, folder: str, limit: int = 50, start: int = 1) -> list[dict]:
+    def _message_rows(self, folder: str, limit: int = 50, page_token: str | None = None) -> tuple[list[dict], str | None]:
         label = self.folder_id(folder)
-        rows = self._call("GET", "/messages", params={"labelIds": label, "maxResults": max(1, min(limit, 100))}).get("messages") or []
+        params = {"labelIds": label, "maxResults": max(1, min(limit, 100))}
+        if page_token:
+            params["pageToken"] = page_token
+        d = self._call("GET", "/messages", params=params)
+        rows = d.get("messages") or []
         out = []
         for r in rows:
             meta = self._headers_of(r["id"])
             h = meta["headers"]
             out.append({"id": r["id"], "folder_id": label, "subject": h.get("Subject", ""), "from": h.get("From", ""), "to": h.get("To", ""),
                         "time_ms": meta["time_ms"], "thread_id": meta["thread_id"]})
-        return out
+        return out, d.get("nextPageToken")
+
+    def list_messages(self, folder: str, limit: int = 50, start: int = 1) -> list[dict]:
+        # Legacy single-page API; `start` cannot represent Gmail's opaque page token.
+        return self._message_rows(folder, limit)[0]
+
+    def iter_messages(self, folder: str, page_size: int = 50):
+        """Yield Gmail's opaque-token pages without translating them into offsets."""
+        token = None
+        while True:
+            rows, token = self._message_rows(folder, page_size, token)
+            if not rows:
+                return
+            yield from rows
+            if not token:
+                return
 
     def content_text(self, folder_id: str, message_id: str) -> str:
         d = self._call("GET", f"/messages/{message_id}", params={"format": "full"})
@@ -142,14 +161,25 @@ class GmailClient:
             return {}                                  # best effort: the Ref token still matches replies
 
     def find_sent(self, token: str, to_email: str, since_ms: int) -> dict | None:
-        """Look in Sent for the message carrying our token: proves whether a send happened (used to settle `unknown` sends)."""
-        rows = self._call("GET", "/messages", params={"labelIds": "SENT", "q": f"to:{to_email}", "maxResults": 25}).get("messages") or []
-        for r in rows:
-            meta = self._headers_of(r["id"])
-            if meta["time_ms"] and meta["time_ms"] < since_ms:
-                continue
-            if token in meta["headers"].get("Subject", "") or token in self.content_text("SENT", r["id"]):
-                return {"zoho_message_id": r["id"], "rfc_message_id": meta["headers"].get("Message-ID", "").strip(), "thread_id": meta["thread_id"], "time_ms": meta["time_ms"]}
+        """Paginate Sent search results so a recent matching message is not missed on page one."""
+        page_token = None
+        # Bounded paging prevents an unbounded reconciliation call during a very large mailbox.
+        for _ in range(20):
+            params = {"labelIds": "SENT", "q": f"to:{to_email}", "maxResults": 100}
+            if page_token:
+                params["pageToken"] = page_token
+            d = self._call("GET", "/messages", params=params)
+            rows = d.get("messages") or []
+            for row in rows:
+                meta = self._headers_of(row["id"])
+                if meta["time_ms"] and meta["time_ms"] < since_ms:
+                    continue
+                if token in meta["headers"].get("Subject", "") or token in self.content_text("SENT", row["id"]):
+                    return {"zoho_message_id": row["id"], "rfc_message_id": meta["headers"].get("Message-ID", "").strip(),
+                            "thread_id": meta["thread_id"], "time_ms": meta["time_ms"]}
+            page_token = d.get("nextPageToken")
+            if not page_token or not rows:
+                return None
         return None
 
     def check(self) -> tuple[bool, str]:

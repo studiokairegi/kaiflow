@@ -8,7 +8,7 @@ import time
 
 import requests
 
-from .errors import MailRejected, PermanentError, TransientError
+from .errors import MailRejected, PermanentError, ThreadingRejected, TransientError
 from .safety import html_to_text
 
 
@@ -76,17 +76,21 @@ class ZohoClient:
 
     def send(self, from_addr: str, to_addr: str, subject: str, body: str, *, reply_to_zoho_id: str | None = None, in_reply_to: str | None = None, references: str | None = None) -> dict:
         """Send plain text. (`in_reply_to`/`references` are accepted for interface parity with Gmail and ignored: Zoho sets them itself.) When `reply_to_zoho_id` is given, use Zoho's reply action so Zoho itself sets In-Reply-To and
-        References and the message lands in the same thread. If Zoho definitively refuses the reply action (4xx: nothing
-        was sent), fall back ONCE to a normal send with the same subject: still duplicate-safe, just threaded by subject.
-        Network errors and 429/5xx are never retried here (outcome unknown: the caller marks the message `unknown`).
+        References and the message lands in the same thread. If Zoho definitively refuses the reply action (4xx),
+        fail closed for manual review; never downgrade a reply to a new unthreaded message. Network errors and 429/5xx
+        are never retried here (outcome unknown: the caller marks the message `unknown`).
         NOT verified against a live Zoho account: see docs/ZOHO_COMPATIBILITY.md."""
         payload = {"fromAddress": from_addr, "toAddress": to_addr, "subject": subject, "content": body, "mailFormat": "plaintext", "askReceipt": "no"}
-        if reply_to_zoho_id and re.fullmatch(r"\d{6,30}", str(reply_to_zoho_id)):
+        if reply_to_zoho_id:
+            if not re.fullmatch(r"\d{6,30}", str(reply_to_zoho_id)):
+                raise ThreadingRejected("Zoho reply parent id is malformed; refusing an unthreaded fallback")
             try:
                 d = self._call("POST", f"/messages/{reply_to_zoho_id}", json={**payload, "action": "reply"}).get("data") or {}
-                return {"zoho_message_id": str(d.get("messageId", "")), "thread_id": str(d.get("threadId", "") or ""), "threaded": True}
-            except ZohoRejected:
-                pass
+            except ZohoRejected as exc:
+                # A 4xx is a definite refusal, but silently converting a reply into a new
+                # conversation is unsafe. Keep it failed for manual review instead.
+                raise ThreadingRejected(f"Zoho rejected native reply threading: {exc}") from exc
+            return {"zoho_message_id": str(d.get("messageId", "")), "thread_id": str(d.get("threadId", "") or ""), "threaded": True}
         d = self._call("POST", "/messages", json=payload).get("data") or {}
         return {"zoho_message_id": str(d.get("messageId", "")), "thread_id": str(d.get("threadId", "") or ""), "threaded": False}
 
@@ -95,6 +99,30 @@ class ZohoClient:
         return [{"id": str(r.get("messageId")), "folder_id": str(r.get("folderId") or self.folder_id(folder)), "subject": r.get("subject", ""),
                  "from": (r.get("fromAddress") or r.get("sender") or "").strip(), "to": (r.get("toAddress") or "").strip(),
                  "time_ms": int(r.get("receivedTime") or r.get("sentDateInGMT") or 0), "thread_id": str(r.get("threadId", "") or "")} for r in rows if r.get("messageId")]
+
+    def iter_messages(self, folder: str, page_size: int = 50, max_pages: int | None = None):
+        """Yield pages using Zoho offsets with overlap and duplicate suppression.
+
+        `max_pages` bounds reconciliation scans; inbox sync may leave it unset to
+        traverse the complete backlog before committing its cursor.
+        """
+        start = 1
+        overlap = min(10, max(1, page_size // 5))
+        seen_ids: set[str] = set()
+        pages = 0
+        while max_pages is None or pages < max_pages:
+            page = self.list_messages(folder, limit=page_size, start=start)
+            pages += 1
+            if not page:
+                return
+            fresh = [row for row in page if row.get("id") not in seen_ids]
+            seen_ids.update(row.get("id") for row in page if row.get("id"))
+            yield from fresh
+            if len(page) < page_size:
+                return
+            # Zoho offsets are not opaque cursors. Overlap adjacent pages to
+            # reduce skips when new messages arrive while the scan is in progress.
+            start += max(1, len(page) - overlap)
 
     def content_text(self, folder_id: str, message_id: str) -> str:
         d = self._call("GET", f"/folders/{folder_id}/messages/{message_id}/content").get("data") or {}
@@ -116,10 +144,13 @@ class ZohoClient:
 
     def find_sent(self, token: str, to_email: str, since_ms: int) -> dict | None:
         """Look in the Sent folder for the message carrying our token: proves whether a send happened."""
-        for m in self.list_messages("sent", limit=50):
+        # Sent-folder reconciliation must look beyond the first page: after a busy
+        # day the target can be older than the newest 50 messages. Keep the scan bounded.
+        for m in self.iter_messages("sent", page_size=100, max_pages=20):
             if m["time_ms"] and m["time_ms"] < since_ms:
                 continue
-            if to_email.lower() not in (m["to"] or "").lower():
+            recipients = {x.strip().lower() for x in re.split(r"[,;]", m.get("to") or "") if x.strip()}
+            if to_email.lower() not in recipients and to_email.lower() not in (m["to"] or "").lower():
                 continue
             if token in (m["subject"] or "") or token in self.content_text(m["folder_id"], m["id"]):
                 h = self.rfc_headers(m["folder_id"], m["id"])

@@ -15,7 +15,8 @@ if (-not (Test-Path $envFile)) {
 # Only SYSTEM and Administrators may read the file that holds the agent password.
 icacls $dir /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" | Out-Null
 
-$python = "C:\ProgramData\KairFlowIntelligence\.venv\Scripts\python.exe"
+$python = Join-Path $PSScriptRoot "..\.venv\Scripts\python.exe"
+$python = [System.IO.Path]::GetFullPath($python)
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "External Python not found: $python" }
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\run-worker.ps1`" -EnvFile `"$envFile`" -Python `"$python`""
 $trigger = New-ScheduledTaskTrigger -AtStartup

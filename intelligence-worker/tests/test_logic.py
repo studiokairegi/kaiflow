@@ -1,4 +1,5 @@
 import unittest
+import json
 
 from kairflow_intel import classify, drafting, policy, scoring, signals, sources
 from kairflow_intel.errors import PermanentError
@@ -12,7 +13,7 @@ KB = drafting.kb_map([
     {"key": "portfolio.main", "kind": "portfolio", "title": "", "body": "Our work: https://studio.test/portfolio"},
 ])
 P = {"id": "p1", "type": "indie_game_developer", "name": "Pixel Moon", "contact_name": "Rina Tanaka", "contact_email": "rina@pixelmoon.com", "domain": "pixelmoon.com"}
-EV = [{"verified": True, "snippet": "Hand-drawn 2D adventure coming soon with a cinematic trailer", "fact_type": "style_2d"}]
+EV = [{"id": "e0", "verified": True, "snippet": "Hand-drawn 2D adventure coming soon with a cinematic trailer", "fact_type": "style_2d"}]
 
 
 class Scoring(unittest.TestCase):
@@ -148,6 +149,49 @@ class Drafting(unittest.TestCase):
         self.assertIsNone(drafting.build_auto_reply("pricing", P, KB, SETTINGS, "x"))
         self.assertIsNone(drafting.build_auto_reply("positive", P, {}, SETTINGS, "x"))
 
+
+    def test_phase2_composer_requires_evidence_and_traceability(self):
+        def writer(instruction, payload, schema):
+            data = json.loads(payload)
+            self.assertEqual(data["prospect"]["name"], "Pixel Moon")
+            self.assertIn("verified_evidence", data)
+            return {"subject": "A thought on Pixel Moon's hand-drawn adventure",
+                    "body": "The hand-drawn 2D adventure and cinematic trailer seem like a distinctive direction.",
+                    "evidence_ids": ["e0"]}
+        mail = drafting.compose_english(P, EV, KB, SETTINGS, writer, kind="initial")
+        self.assertTrue(mail["model_written"])
+        self.assertEqual(mail["evidence_ids"], ["e0"])
+        self.assertIn(SETTINGS["opt_out_text"], mail["body"])
+        with self.assertRaises(PermanentError):
+            drafting.compose_english(P, [], KB, SETTINGS, writer, kind="initial")
+
+    def test_phase2_claim_level_grounding_rejects_unsupported_personalized_sentence(self):
+        def writer(instruction, payload, schema):
+            return {"subject": "A thought on Pixel Moon", "body": "Your team has won awards for a secret sci-fi RPG.", "evidence_ids": ["e0"]}
+        with self.assertRaisesRegex(PermanentError, "sentence-by-sentence|high-specificity"):
+            drafting.compose_english(P, EV, KB, SETTINGS, writer, kind="initial")
+
+    def test_phase2_similarity_ignores_repeated_boilerplate_blocks(self):
+        common = "Studio Kairegi provides professional animation support and portfolio samples."
+        prior = [
+            {"subject": "Pixel Moon", "body": "Your hand-drawn adventure has a cinematic trailer.\n\n" + common},
+            {"subject": "Solar Fox", "body": "The puzzle platformer uses an unusual gravity mechanic.\n\n" + common},
+        ]
+        candidate = {"subject": "Northwind", "body": "Your community tools support accessible mod collaboration.\n\n" + common}
+        self.assertTrue(drafting.uniqueness_check(candidate, prior, threshold=0.55)["ok"])
+
+    def test_phase2_duplicate_and_name_swapped_drafts_fail(self):
+        a = {"subject": "Animation support for Pixel Moon", "body": "Hello Rina, your hand drawn adventure and cinematic trailer have a distinctive visual style. We provide 2D animation support."}
+        b = {"subject": "Animation support for Solar Fox", "body": "Hello Ken, your hand drawn adventure and cinematic trailer have a distinctive visual style. We provide 2D animation support."}
+        result = drafting.uniqueness_check(b, [a], threshold=0.55)
+        self.assertFalse(result["ok"])
+        self.assertIn(result["reason"], ("duplicate_or_near_duplicate", "structural_repetition"))
+
+    def test_phase2_distinct_message_is_not_duplicate(self):
+        a = {"subject": "Animation support for Pixel Moon", "body": "Your hand drawn adventure trailer shows a cinematic 2D visual direction."}
+        b = {"subject": "Animation for Northwind", "body": "Your platform's accessibility and community mod tools could benefit from animated explainer assets."}
+        self.assertTrue(drafting.uniqueness_check(b, [a], threshold=0.55)["ok"])
+
     def test_japanese_animation_outreach_uses_only_approved_japanese_entries(self):
         ja_kb = {**KB,
             "studio.about.ja": {"key": "studio.about.ja", "body": "Studio Kairegiは、2Dアニメーション制作スタジオです。"},
@@ -185,6 +229,98 @@ class Drafting(unittest.TestCase):
         r = drafting.build_auto_reply("portfolio_request", japan, ja_kb, SETTINGS, "Re: ご提案")
         self.assertIn("ご返信いただき", r["body"])
         self.assertNotIn("Thank you", r["body"])
+
+    def test_phase2_subject_unsupported_award_claim_rejected(self):
+        def writer(instruction, payload, schema):
+            return {"subject": "Your award-winning hand-drawn adventure", "body": "The hand-drawn 2D adventure and cinematic trailer seem like a distinctive direction.", "evidence_ids": ["e0"]}
+        with self.assertRaisesRegex(PermanentError, "unsupported award"):
+            drafting.compose_english(P, EV, KB, SETTINGS, writer, kind="initial")
+
+    def test_phase2_inbound_message_is_first_catalog_item_and_traceable(self):
+        evidence = [{"verified": True, "id": f"research{i}", "snippet": f"Research evidence item number {i} describes verified game details"} for i in range(35)]
+        catalog = drafting._evidence_catalog(evidence, inbound={"id": "inbound-123", "body": "Can you send your portfolio?"}, kind="reply")
+        self.assertEqual(catalog[0]["id"], "inbound-123")
+        self.assertEqual(len(catalog), 30)
+        self.assertIn("inbound-123", {x["id"] for x in catalog})
+
+    def test_phase2_reply_consequential_language_requires_review(self):
+        def writer(instruction, payload, schema):
+            return {"subject": "Re: portfolio", "body": "Thank you for your interest. We can deliver by next Friday.", "evidence_ids": ["incoming_message"]}
+        with self.assertRaisesRegex(PermanentError, "consequential"):
+            drafting.compose_english(P, EV, KB, SETTINGS, writer, kind="reply", inbound={"id": "incoming_message", "body": "Please share your portfolio."})
+
+    def test_phase2_outbound_history_cannot_ground_prospect_facts(self):
+        catalog = drafting._evidence_catalog([], history=[{"id": "sent-1", "direction": "outbound", "state": "sent", "body": "Your award-winning game needs animation support."}], kind="followup")
+        self.assertEqual(catalog[0]["fact_type"], "sent_outreach_history")
+        def writer(instruction, payload, schema):
+            return {"subject": "Your award-winning game", "body": "Your award-winning game needs animation support.", "evidence_ids": ["sent-1"]}
+        with self.assertRaisesRegex(PermanentError, "only conversation continuity"):
+            drafting.compose_english(P, [], KB, SETTINGS, writer, kind="followup", history=[{"id": "sent-1", "direction": "outbound", "state": "sent", "body": "Your award-winning game needs animation support."}])
+
+    def test_phase2_consequential_inbound_is_reviewed_before_model_call(self):
+        def writer(*args):
+            raise AssertionError("writer must not run for consequential inbound")
+        with self.assertRaisesRegex(PermanentError, "incoming reply raises consequential"):
+            drafting.compose_english(P, EV, KB, SETTINGS, writer, kind="reply", inbound={"id": "inbound-9", "subject": "Scope", "body": "Can you confirm the scope and commit to delivery by our launch?"})
+
+    def test_phase2_subject_unsupported_named_entity_rejected(self):
+        def writer(instruction, payload, schema):
+            return {"subject": "A note about Pixel Moon and Ghibli", "body": "The hand-drawn 2D adventure and cinematic trailer seem like a distinctive direction.", "evidence_ids": ["e0"]}
+        with self.assertRaisesRegex(PermanentError, "unsupported named entity"):
+            drafting.compose_english(P, EV, KB, SETTINGS, writer, kind="initial")
+
+
+    def test_phase2_reply_must_cite_and_answer_the_inbound_request(self):
+        inbound = {"id": "inbound-portfolio", "subject": "Portfolio request", "body": "Could you send me a link to your portfolio?"}
+        def unrelated(instruction, payload, schema):
+            return {"subject": "Re: Portfolio request", "body": "Thank you for your message. Your upcoming 2D adventure has a distinctive visual direction.", "evidence_ids": ["e0"]}
+        with self.assertRaisesRegex(PermanentError, "actual incoming message"):
+            drafting.compose_english(P, EV, KB, SETTINGS, unrelated, kind="reply", inbound=inbound)
+        def nonanswer(instruction, payload, schema):
+            return {"subject": "Re: Portfolio request", "body": "Thank you for getting in touch. We appreciate your time.", "evidence_ids": ["inbound-portfolio"]}
+        with self.assertRaisesRegex(PermanentError, "does not address"):
+            drafting.compose_english(P, EV, KB, SETTINGS, nonanswer, kind="reply", inbound=inbound)
+        def answer(instruction, payload, schema):
+            return {"subject": "Re: Portfolio request", "body": "Portfolio link: https://studio.test/portfolio", "evidence_ids": ["inbound-portfolio", "e0"]}
+        mail = drafting.compose_english(P, EV, KB, SETTINGS, answer, kind="reply", inbound=inbound)
+        self.assertIn("portfolio", mail["body"].lower())
+
+    def test_japanese_similarity_uses_character_ngrams(self):
+        a = "ご連絡ありがとうございます。弊社のポートフォリオをご覧いただけます。"
+        b = "制作実績のリンクをお送りします。ご確認ください。"
+        self.assertGreater(drafting.similarity(a, a), 0.99)
+        self.assertLess(drafting.similarity(a, b), 0.55)
+        self.assertEqual(drafting.similarity("", ""), 1.0)
+        self.assertEqual(drafting.similarity(a, ""), 0.0)
+
+    def test_japanese_name_swapped_near_duplicate_is_detected(self):
+        a = {"subject": "制作協力のご提案", "body": "佐藤様、ご連絡ありがとうございます。貴社の2Dアニメーション制作実績を拝見しました。弊社は原画と動画の制作協力に対応しています。"}
+        b = {"subject": "制作協力のご提案", "body": "田中様、ご連絡ありがとうございます。貴社の2Dアニメーション制作実績を拝見しました。弊社は原画と動画の制作協力に対応しています。"}
+        result = drafting.uniqueness_check(b, [a], threshold=0.55)
+        self.assertFalse(result["ok"])
+
+    def test_similarity_benchmark_threshold_on_english_and_japanese_pairs(self):
+        from pathlib import Path
+        pairs = json.loads((Path(__file__).parent / "fixtures" / "phase2_similarity_pairs.json").read_text(encoding="utf-8"))
+        false_negative = false_positive = tp = tn = 0
+        for pair in pairs:
+            score = drafting.similarity(pair["a"], pair["b"])
+            flagged = score >= drafting.SIMILARITY_THRESHOLD
+            actual_duplicate = pair["label"] in ("duplicate", "name_swap", "near_duplicate")
+            if actual_duplicate and flagged: tp += 1
+            elif actual_duplicate: false_negative += 1
+            elif flagged: false_positive += 1
+            else: tn += 1
+        self.assertEqual(false_negative, 0, "benchmark contains a duplicate/name-swap false negative")
+        self.assertEqual(false_positive, 0, "benchmark contains a distinct-message false positive")
+        self.assertEqual((tp, tn), (6, 6))
+
+    def test_phase2_structural_normalization_detects_name_swaps(self):
+        a = {"subject": "Animation support for Pixel Moon", "body": "Hello Rina, your hand drawn adventure shows a cinematic visual direction for the upcoming project."}
+        b = {"subject": "Animation support for Solar Fox", "body": "Hello Ken, your hand drawn adventure shows a cinematic visual direction for the upcoming project."}
+        result = drafting.uniqueness_check(b, [a], threshold=0.99)
+        self.assertFalse(result["ok"])
+        self.assertIn(result["reason"], ("duplicate_or_near_duplicate", "structural_repetition"))
 
 
 class Schema(unittest.TestCase):

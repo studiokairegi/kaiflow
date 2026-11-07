@@ -24,7 +24,7 @@ test("provider labels", () => {
   assert.deepEqual(Object.keys(MAIL_PROVIDERS), ["gmail", "zoho"]);
   assert.equal(mailProviderName({ provider: "gmail" }), "Gmail"); assert.equal(mailProviderName({}), "Zoho Mail");
   assert.equal(mailStatusLabel({ status: "connected", provider: "gmail", mailbox: "a@gmail.com" }), "Gmail connected (a@gmail.com)");
-  assert.equal(mailStatusLabel({ status: "error", provider: "gmail" }), "Mail not connected"); assert.equal(mailStatusLabel(null), "Mail not connected");
+  assert.equal(mailStatusLabel({ status: "error", provider: "gmail" }), "Gmail status check failed"); assert.equal(mailStatusLabel(null), "Mail not connected");
 });
 
 test("migration allows exactly gmail and zoho, keeps OAuth states provider-tagged, and does not weaken anything", () => {
@@ -63,4 +63,9 @@ test("each function wrapper points at the matching logic module", () => {
     const src = read(`../../supabase/functions/intel-gmail-${fn}/index.ts`);
     assert.match(src, /intel_gmail_logic\.ts/); assert.ok(!/zoho/i.test(src.replace(/Zoho's/g, "")), `${fn} wrapper mentions Zoho`);
   }
+});
+
+test("mail status distinguishes a provider check failure from a disconnected mailbox", () => {
+  assert.equal(mailStatusLabel({ status: "check_failed", provider: "zoho" }), "Zoho Mail status check failed");
+  assert.equal(mailStatusLabel({ status: "disconnected", provider: "zoho" }), "Mail not connected");
 });

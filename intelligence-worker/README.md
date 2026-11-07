@@ -19,6 +19,10 @@ the Supabase service-role key or any Zoho secret. It can only call `intel_agent_
 5. Check everything without sending anything: `python -m kairflow_intel selftest`
    (`selftest zoho` is read-only: it lists Zoho folders, nothing else. `selftest resend` checks local provider selection only; it does not send email.)
 
+## Phase 2 production hardening migration
+
+Before deploying the Phase 2 worker update, apply `supabase/migrations/20261119090000_intelligence_phase2_global_send_pacing.sql` after the existing Intelligence migrations. This migration adds the organization-wide send-spacing reservation, an emergency-stop recheck immediately before the provider-call state, and the bounded outbound-history RPC used for cross-recipient duplicate checks. If the migration is not applied, the worker intentionally fails closed rather than sending without the new coordination contract.
+
 ## Resend provider (server-side only)
 
 - Keep `KAIRFLOW_MAIL_PROVIDER=none` until the local migration has been reviewed/applied and both Intelligence Edge Functions have been deployed.
