@@ -23,6 +23,20 @@ the Supabase service-role key or any Zoho secret. It can only call `intel_agent_
 
 Before deploying the Phase 2 worker update, apply `supabase/migrations/20261119090000_intelligence_phase2_global_send_pacing.sql` after the existing Intelligence migrations. This migration adds the organization-wide send-spacing reservation, an emergency-stop recheck immediately before the provider-call state, and the bounded outbound-history RPC used for cross-recipient duplicate checks. If the migration is not applied, the worker intentionally fails closed rather than sending without the new coordination contract.
 
+
+## Phase 3 — Japanese-language drafting
+
+Japanese-language prospects and Japanese inbound conversations use the Japanese model composer for initial outreach, follow-ups, re-engagement and replies. The composer uses the same local Ollama client, verified-evidence trace, organization-wide similarity history, one-regeneration rule, outbound policy validation and human-approval boundary as Phase 2. It does not use fixed Japanese email templates.
+
+Before Japanese drafting is available, approve these Knowledge base entries in Intelligence > Settings:
+- `studio.about.ja`
+- `services.animation_studio_support.ja`
+- `services.indie_game_developer.ja`
+- `portfolio.main.ja` (must use an already-approved Studio Kairegi URL)
+- `policy.opt_out.ja`
+
+The service entry matching the prospect type is required. If any required entry or verified prospect research is missing, the draft is flagged for human review; English fallback is not used. Japanese pricing, contract, deadline, capacity, complaint and opt-out replies remain human-review cases. All model-written drafts stay pending approval (`auto_ok=false`).
+
 ## Resend provider (server-side only)
 
 - Keep `KAIRFLOW_MAIL_PROVIDER=none` until the local migration has been reviewed/applied and both Intelligence Edge Functions have been deployed.

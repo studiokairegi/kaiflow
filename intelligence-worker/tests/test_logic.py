@@ -199,7 +199,7 @@ class Drafting(unittest.TestCase):
             "portfolio.main.ja": {"key": "portfolio.main.ja", "body": "制作実績：https://studio.test/portfolio"},
             "policy.opt_out.ja": {"key": "policy.opt_out.ja", "body": "今後のご案内が不要な場合は、このメールに「配信停止」とご返信ください。"},
         }
-        japan = {**P, "type": "animation_studio_support", "country": "Japan", "language": "en", "name": "Tokyo Studio"}
+        japan = {**P, "type": "animation_studio_support", "country": "Japan", "language": "", "name": "Tokyo Studio"}   # no language on record: country is the fallback
         m = drafting.build_initial(japan, EV, ja_kb, SETTINGS, llm=lambda *_: self.fail("Japanese outreach must not use the English hook model"))
         self.assertTrue(m["subject"].startswith("アニメーション制作協力"))
         self.assertIn("ご担当者様", m["body"])

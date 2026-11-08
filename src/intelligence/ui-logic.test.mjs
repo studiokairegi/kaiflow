@@ -57,8 +57,9 @@ test("missingKb lists exactly the approved entries the agent still needs", () =>
 });
 
 test("Japanese outreach entries are tracked separately from the global required knowledge base", () => {
-  assert.equal(missingJapaneseKb([]).length, 3);
-  const ja = ["studio.about.ja", "services.animation_studio_support.ja", "portfolio.main.ja"].map((key) => ({ key, approved: true, body: "Japanese text" }));
+  assert.equal(missingJapaneseKb([]).length, 5);
+  const ja = ["studio.about.ja", "services.animation_studio_support.ja", "services.indie_game_developer.ja",
+    "portfolio.main.ja", "policy.opt_out.ja"].map((key) => ({ key, approved: true, body: "Japanese text" }));
   assert.equal(missingJapaneseKb(ja).length, 0);
   assert.deepEqual(missingJapaneseKb([{ ...ja[0], approved: false }, ...ja.slice(1)]).map((x) => x.key), ["studio.about.ja"]);
 });

@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 from datetime import date
 
 from kairflow_intel import jobs, takeover
@@ -9,7 +10,8 @@ PID, HID = "p-1", "h-1"
 ST = {"sender_name": "Kai", "physical_address": "1 Studio Way, Nairobi", "opt_out_text": "Reply STOP to opt out.", "followup_business_days": 7,
       "max_followups": 1, "today": "2026-10-20", "timezone": "UTC"}
 KB = [{"key": "studio.about", "body": "We are a 2D animation studio."}, {"key": "portfolio.main", "body": "Our reel: https://kairegi.com/reel"},
-      {"key": "services.indie_game_developer", "body": "We animate characters for indie games."}]
+      {"key": "services.indie_game_developer", "body": "We animate characters for indie games."},
+      {"key": "policy.opt_out.ja", "body": "今後のご案内が不要でしたら、その旨をご返信ください。"}]
 
 
 def entry(d, body, at=None, subject=""): return {"direction": d, "at": at, "subject": subject, "body": body}
@@ -77,8 +79,20 @@ class Decide(unittest.TestCase):
         self.assertEqual(r["next_action"], "stop"); self.assertNotIn("suppress", r)
 
     def test_price_contract_meeting_need_a_person(self):
-        for text in ("What are your rates per minute?", "Can you send a contract?", "Can we set up a call on Friday?"):
-            self.assertEqual(self.d([OUT1, entry("inbound", text, "2026-10-06")])["next_action"], "needs_human", text)
+        for text in ("What are your rates per minute?", "Can you send a contract?", "Can we set up a call on Friday?",
+                     "お電話で一度お話しできますでしょうか。", "オンラインで面談をお願いできますか。",
+                     "来週、日程調整をお願いできますか。", "Would you mind scheduling a meeting?",
+                     "Would you mind setting up a call?", "Could we find a time to talk next week?",
+                     "来週お打合せのお時間をいただけますでしょうか。", "打ち合わせの日時を決めたいです。"):
+            self.assertEqual(self.d([OUT1, entry("inbound", text, "2026-10-06")], intent="interested")["next_action"], "needs_human", text)
+
+    def test_meeting_material_requests_do_not_force_human_takeover(self):
+        for message in ("Could we send the meeting notes?", "Would you share meeting materials?",
+                        "打合せ資料をお送りいただけますか。", "議事録を共有いただけますか。",
+                        "会議資料を送ってください。", "会議の議題を教えていただけますか。"):
+            with self.subTest(message=message):
+                result = self.d([OUT1, entry("inbound", message, "2026-10-06")], intent="interested")
+                self.assertEqual(result["next_action"], "reply")
 
     def test_model_can_only_add_caution(self):
         self.assertEqual(self.d([OUT1, entry("inbound", "Sounds good, tell me more.", "2026-10-06")], intent="negotiating")["next_action"], "needs_human")
@@ -170,6 +184,22 @@ class Handle(unittest.TestCase):
         self.assertEqual(out["next_action"], "needs_human"); self.assertEqual(rpc.named("intel_agent_upsert_draft"), [])
         self.assertTrue(rpc.named("intel_agent_takeover_result")[-1]["p_notify"])
 
+    def test_japanese_meeting_request_never_creates_a_draft_even_if_model_says_interested(self):
+        for message in ("お電話で一度お話しできますでしょうか。",
+                        "オンラインで面談をお願いできますか。",
+                        "来週、日程調整をお願いできますか。",
+                        "打合せをお願いできますか。",
+                        "お打合せできますでしょうか。",
+                        "会議を設定できますか。",
+                        "来週の候補日を教えてください。"):
+            with self.subTest(message=message):
+                c = ctx([OUT1, entry("inbound", message, "2026-10-06", "Re: 制作協力について")], last_contact="2026-10-06")
+                c["prospect"]["language"] = "ja"
+                analysis = {"summary": "They are interested.", "intent": "interested", "open_questions": [], "language": "ja"}
+                out, rpc = run(c, Llm(analysis=analysis))
+                self.assertEqual(out["next_action"], "needs_human")
+                self.assertEqual(rpc.named("intel_agent_upsert_draft"), [])
+
     def test_scheduled_run_does_not_redraft_but_a_manual_one_does(self):
         key = f"takeover:{HID}:followup:1"
         c = ctx([OUT1], messages=[{"idempotency_key": key, "kind": "followup", "state": "discarded", "direction": "outbound"}])
@@ -215,6 +245,85 @@ class Handle(unittest.TestCase):
         jobs.h_followup_scan(d, {})
         self.assertEqual(enq, [("takeover", "a"), ("draft", "b")])
         self.assertIn("takeover", jobs.HANDLERS)
+
+
+    def test_japanese_thread_language_routes_takeover_reply_through_phase3_composer(self):
+        c = ctx([OUT1, entry("inbound", "制作実績に興味があります。資料をお願いします。", "2026-10-06", "Re: 制作協力")])
+        c["prospect"]["language"] = "en"
+        analysis = {"summary": "They are interested and asked for materials.", "intent": "interested", "open_questions": [], "language": "ja"}
+        fake_mail = {"subject": "Re: 制作協力", "body": "Hana様\n\nご返信ありがとうございます。資料をお送りします。", "model_written": True}
+        with patch.object(takeover, "_draft_japanese_takeover", return_value=fake_mail) as composer:
+            out, rpc = run(c, Llm(analysis=analysis))
+        composer.assert_called_once()
+        self.assertEqual(composer.call_args.args[-1], "reply")
+        self.assertEqual(out["next_action"], "reply")
+        self.assertEqual(rpc.named("intel_agent_upsert_draft")[0]["p_auto_ok"], False)
+
+    def test_ambiguous_short_reply_preserves_japanese_outreach_language_in_takeover(self):
+        japanese_outreach = entry("outbound", "佐藤様、ご案内をお送りします。", "2026-10-05", "アニメーション制作協力のご提案")
+        c = ctx([japanese_outreach, entry("inbound", "Thanks.", "2026-10-06", "Re: Thanks")])
+        c["prospect"]["language"] = "en"
+        analysis = {"summary": "They are interested.", "intent": "interested", "open_questions": [], "language": "en"}
+        fake_mail = {"subject": "Re: アニメーション制作協力のご提案", "body": "ご担当者様\n\nご返信ありがとうございます。", "model_written": True}
+        with patch.object(takeover, "_draft_japanese_takeover", return_value=fake_mail) as composer:
+            out, rpc = run(c, Llm(analysis=analysis))
+        composer.assert_called_once()
+        self.assertEqual(out["next_action"], "reply")
+        self.assertEqual(rpc.named("intel_agent_upsert_draft")[0]["p_auto_ok"], False)
+
+    def test_japanese_takeover_followup_uses_analysis_language_when_metadata_is_english(self):
+        c = ctx([OUT1])
+        c["prospect"]["language"] = "en"
+        analysis = {"summary": "No reply yet.", "intent": "no_response", "open_questions": [], "language": "ja"}
+        fake_mail = {"subject": "Re: 2D animation for Pixel Moon", "body": "ご担当者様\n\n前回のご案内について、改めてご連絡いたしました。\n\n今後のご案内が不要でしたら、その旨をご返信ください。\n1 Studio Way, Nairobi", "model_written": True}
+        with patch.object(takeover, "_draft_japanese_takeover", return_value=fake_mail) as composer:
+            out, rpc = run(c, Llm(analysis=analysis))
+        composer.assert_called_once()
+        self.assertEqual(composer.call_args.args[-1], "followup")
+        self.assertEqual(out["next_action"], "follow_up")
+        self.assertEqual(rpc.named("intel_agent_upsert_draft")[0]["p_auto_ok"], False)
+
+
+
+
+    def test_japanese_takeover_uses_real_phase3_composer_with_grounded_evidence(self):
+        c = ctx([OUT1, entry("inbound", "制作実績に興味があります。ポートフォリオをお願いします。", "2026-10-06", "Re: 制作協力")])
+        c["prospect"]["language"] = "en"
+        c["evidence"] = [{"id": "ev-pixel-1", "verified": True, "fact_type": "portfolio",
+                          "snippet": "Pixel Moonは2Dゲームのキャラクターアニメーション制作実績を公開しています。",
+                          "url": "https://pixelmoon.jp/works"}]
+        class JapaneseRpc(Rpc):
+            def __call__(self, name, p=None):
+                if name == "intel_agent_kb":
+                    return [
+                        {"key": "studio.about", "body": "We are a 2D animation studio."},
+                        {"key": "portfolio.main", "body": "Our reel: https://kairegi.com/reel"},
+                        {"key": "services.indie_game_developer", "body": "We animate characters for indie games."},
+                        {"key": "studio.about.ja", "body": "Studio Kairegiは2Dアニメーション制作を行うスタジオです。"},
+                        {"key": "services.indie_game_developer.ja", "body": "ゲーム向けの2Dアニメーション映像制作に対応しています。"},
+                        {"key": "portfolio.main.ja", "body": "制作実績：https://kairegi.com/reel"},
+                        {"key": "policy.opt_out.ja", "body": "今後のご案内が不要でしたら、その旨をご返信ください。"},
+                    ]
+                return super().__call__(name, p)
+        class JapaneseLlm(Llm):
+            def generate_json(self, instruction, untrusted, schema, **kw):
+                if "evidence_ids" in schema.get("properties", {}):
+                    import json
+                    payload = json.loads(untrusted)
+                    ids = [e["id"] for e in payload["verified_evidence"]]
+                    return {"subject": "Re: 制作協力について",
+                            "body": "Hana Sato様\n\nご返信ありがとうございます。貴社が公開された2Dゲームのキャラクターアニメーション制作実績を拝見しました。ポートフォリオをお送りします。",
+                            "evidence_ids": ids}
+                return self.analysis
+        rpc = JapaneseRpc(c)
+        d = jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=None,
+                      llm=JapaneseLlm(analysis={"summary": "They are interested.", "intent": "interested", "open_questions": [], "language": "ja"}))
+        out = takeover.handle(d, {"id": "jp-takeover", "attempts": 1, "max_attempts": 5, "payload": {"prospect_id": PID}})
+        self.assertEqual(out["next_action"], "reply")
+        draft = rpc.named("intel_agent_upsert_draft")[0]
+        self.assertIn("ポートフォリオをお送りします", draft["p_body"])
+        self.assertIn("今後のご案内が不要でしたら", draft["p_body"])
+        self.assertFalse(draft["p_auto_ok"])
 
 
 if __name__ == "__main__":

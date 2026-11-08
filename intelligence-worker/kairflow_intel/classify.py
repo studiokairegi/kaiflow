@@ -28,7 +28,7 @@ def classify(msg: dict, own_addresses: set[str], llm=None) -> dict:
     if hard == "complaint":
         return _r("complaint", 1.0, True, "Complaint or privacy request: needs you")
     if hard:
-        return _r({"contract": "negotiation"}.get(hard, hard), 0.95, True, f"Mentions {hard}: needs you")
+        return _r({"contract": "negotiation", "meeting": "meeting_request"}.get(hard, hard), 0.95, True, f"Mentions {hard}: needs you")
     if "decline" in hits and not hits & {"interest", "portfolio", "meeting"}:
         return _r("rejection", 0.9, False, "Declined")
     label, conf, summary = None, 0.0, ""

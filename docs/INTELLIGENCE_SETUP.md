@@ -43,15 +43,16 @@ For Gmail follow `docs/GMAIL_SETUP.md` and skip the rest of this section; set `K
 ## E. First run (nothing is sent)
 1. Intelligence > Setup: sender name, Zoho address, postal address, time zone.
 2. Settings > Knowledge base: write and approve `studio.about`, `services.indie_game_developer`, `services.animation_studio_support`, `portfolio.main`.
-3. For Japanese animation-studio outreach, also add and approve these four separate entries in Settings > Knowledge base. Emma uses them only when an animation-support prospect's researched site language is Japanese or its country is Japan; if any is missing or unapproved, drafting stops rather than falling back to English. Keep the portfolio URL identical to an already-approved Studio Kairegi portfolio URL. Suggested concise copy (review and approve before use):
-   - `studio.about.ja` (kind `studio`): `Studio Kairegiは、2Dアニメーション制作スタジオです。`
-   - `services.animation_studio_support.ja` (kind `service`): `レイアウト（LO）、原画（Genga）、動画（Douga）、クリーンアップなどの作画工程に対応しています。`
-   - `portfolio.main.ja` (kind `portfolio`): `制作実績はこちらからご覧いただけます：[approved Studio Kairegi portfolio URL]` (use the exact URL already approved in `portfolio.main`)
-   - `policy.opt_out.ja` (kind `policy`): `今後のご案内が不要な場合は、このメールに「配信停止」とご返信ください。`
-   The sender name and postal address remain in the compliance footer. The Japanese opt-out sentence is included from its separately approved entry; review the wording for your legal requirements before approving it.
-3. Register the agent account; start the worker (see `intelligence-worker/README.md`).
-4. Activate a campaign and press Run discovery. Review what it finds. Sending stays OFF and every email needs your approval.
-5. Only when you are happy with the drafts: Overview > Enable sending. It starts at 5 introductions a day and rises weekly (warm-up) up to your limit (max 30).
+3. For Japanese-language outreach, add and approve these five separate entries in Settings > Knowledge base. Language is selected from the prospect's researched site language/country and the recipient's current or established inbound conversation language. If a required entry is missing or unapproved, drafting stops for human review rather than falling back to English. Keep portfolio URLs identical to already-approved Studio Kairegi portfolio URLs. Translate the approved English service descriptions faithfully; do not invent services. Suggested entries:
+   - `studio.about.ja` (kind `studio`): Japanese version of the approved `studio.about`.
+   - `services.animation_studio_support.ja` (kind `service`): Japanese version of the approved animation-studio service description; distinguish レイアウト, 原画, 動画 and 仕上げ accurately.
+   - `services.indie_game_developer.ja` (kind `service`): Japanese version of the approved indie-game developer service description.
+   - `portfolio.main.ja` (kind `portfolio`): Japanese introduction using the exact URL already approved in `portfolio.main`.
+   - `policy.opt_out.ja` (kind `policy`): Japanese opt-out sentence reviewed for your legal requirements.
+   The sender name and postal address remain in the compliance footer. The Japanese opt-out sentence is included from its separately approved entry.
+4. Register the agent account; start the worker (see `intelligence-worker/README.md`).
+5. Activate a campaign and press Run discovery. Review what it finds. Sending stays OFF and every email needs your approval.
+6. Only when you are happy with the drafts: Overview > Enable sending. It starts at 5 introductions a day and rises weekly (warm-up) up to your limit (max 30).
 
 ## F. Legal and platform
 Public email addresses are not blanket permission to send marketing. Before enabling sending, get short advice for the regions you will write to

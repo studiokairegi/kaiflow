@@ -30,12 +30,136 @@ def require_kb(kb: dict, ptype: str) -> None:
 
 
 def is_japanese_animation_prospect(prospect: dict) -> bool:
-    """Japanese copy is used for animation-support prospects whose site language is Japanese or country is Japan."""
-    if prospect.get("type") != "animation_studio_support":
+    """Animation-support prospect for whom Japanese is the language on record.
+
+    This delegates to should_use_japanese (metadata only) so the legacy template builders and the routers can never
+    disagree: an explicit language ("en", "ja-JP") wins over the country, and the country is only a fallback."""
+    return prospect.get("type") == "animation_studio_support" and should_use_japanese(prospect)
+
+
+_JAPANESE_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
+_JAPANESE_KANA = re.compile(r"[\u3040-\u30ff]")
+
+
+def _has_japanese_text(value: str) -> bool:
+    """Recognize Japanese even in short replies; kana distinguishes Japanese from Chinese-only text."""
+    value = str(value or "")
+    compact = re.sub(r"[\s。、，．.!?！？]", "", value)
+    # These short kanji-only acknowledgements are common in Japanese email threads.
+    # Keep the list narrow so ordinary Chinese text is not misidentified as Japanese.
+    if compact in {"了解", "承知", "了承", "確認", "承りました", "かしこまりました"}:
+        return True
+    kana_count = len(_JAPANESE_KANA.findall(value))
+    jp_count = len(_JAPANESE_SCRIPT.findall(value))
+    compact_len = len(re.sub(r"\s", "", value))
+    return (kana_count >= 2 and jp_count >= 2 and
+            jp_count / max(1, compact_len) >= 0.10)
+
+
+# Courtesy words that say nothing about the language the person wants to continue in ("Thank you.", "Sounds good").
+_ENGLISH_ACK_WORDS = {
+    "thank", "thanks", "thx", "you", "very", "much", "so", "many", "a", "lot", "again", "ok", "okay", "got", "it", "sounds", "good",
+    "understood", "noted", "great", "perfect", "sure", "yes", "no", "problem", "will", "do", "cool", "received", "appreciate",
+    "appreciated", "for", "your", "email", "reply", "message", "response", "time", "info", "information", "regards", "best", "kind",
+    "cheers", "hi", "hello", "dear", "all", "the", "is", "fine", "alright", "right", "yep", "yup"}
+
+
+def _clearly_english_text(value: str, *, ignore_courtesy: bool = True) -> bool:
+    """Require an actual English phrase, not a name, URL, a lone acknowledgement or (for the recipient's words) a stock
+    courtesy such as "Thank you." Our own sent mail is judged without the courtesy exemption."""
+    words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", str(value or ""))]
+    if len(words) < 2 or _has_japanese_text(value):
         return False
+    return not (ignore_courtesy and all(w in _ENGLISH_ACK_WORDS for w in words))
+
+
+_SIGNATURE_CUT = re.compile(r"^\s*(?:--+\s*|(?:best(?: regards| wishes)?|kind regards|warm regards|regards|thanks|thank you|cheers|sincerely|many thanks)[,!.]?\s*)$", re.I)
+_TERMINAL_PUNCT = re.compile(r"[.!?。！？]\s*$")
+
+
+def _without_signature(text: str) -> str:
+    """The message itself, minus a trailing signature block.
+
+    A Japanese corporate signature (株式会社… / 代表取締役 …) under an English message is not the language of the message.
+    The block is cut at an English sign-off line, then trailing short lines without sentence punctuation are dropped.
+    The stripped text is used only to decide the language; callers fall back to the full text when nothing is left."""
+    lines = str(text or "").strip().splitlines()
+    for i, line in enumerate(lines):
+        if i > 0 and _SIGNATURE_CUT.match(line):
+            lines = lines[:i]
+            break
+    while lines and (not lines[-1].strip() or (len(lines[-1].strip()) <= 40 and not _TERMINAL_PUNCT.search(lines[-1]))):
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
+def _decisive_language(text: str, *, ignore_courtesy: bool = True):
+    """True = Japanese, False = English, None = no decisive language (empty, a name, a lone acknowledgement)."""
+    body = _without_signature(text)
+    for sample in ([body] if body else []) + [str(text or "")]:
+        if _has_japanese_text(sample):
+            # Japanese only counts from the full text when the message body itself had no decisive English.
+            if sample is body or not _clearly_english_text(body, ignore_courtesy=ignore_courtesy):
+                return True
+        elif _clearly_english_text(sample, ignore_courtesy=ignore_courtesy):
+            return False
+    return None
+
+
+def should_use_japanese(prospect: dict, history: list[dict] | None = None, inbound: dict | None = None) -> bool:
+    """Choose from the sender's unquoted current words, then the latest inbound language, then researched metadata."""
+    if inbound:
+        current = _new_text(str(inbound.get("body") or inbound.get("body_text") or ""))
+        if not current.strip():
+            current = str(inbound.get("subject") or "")
+        if current.strip():
+            decision = _decisive_language(current)
+            if decision is not None:
+                return decision
+            # A Japanese subject is useful positive evidence. An English-looking subject must not override an
+            # ambiguous non-empty body (e.g. "Thanks.") or erase the established language of the conversation.
+            if _has_japanese_text(str(inbound.get("subject") or "")):
+                return True
+    # Ambiguous short acknowledgements do not establish a language switch. First use the nearest decisive recipient
+    # language, then the language of the studio's latest sent outreach, and only then the prospect metadata.
+    for message in reversed(history or []):
+        if message.get("direction") == "inbound":
+            current = _new_text(str(message.get("body_text") or message.get("body") or ""))
+            if not current.strip():
+                current = str(message.get("subject") or "")
+            decision = _decisive_language(current)
+            if decision is not None:
+                return decision
+    has_inbound_context = bool(inbound) or any(m.get("direction") == "inbound" for m in (history or []))
+    if has_inbound_context:
+        for message in reversed(history or []):
+            if message.get("direction") == "outbound":
+                current = _new_text(str(message.get("body_text") or message.get("body") or ""))
+                if not current.strip():
+                    current = str(message.get("subject") or "")
+                decision = _decisive_language(current, ignore_courtesy=False)
+                if decision is not None:
+                    return decision
     language = str(prospect.get("language") or "").strip().lower()
     country = str(prospect.get("country") or "").strip().lower()
-    return language in {"ja", "japanese", "日本語"} or country in {"japan", "jp", "jpn", "日本", "日本国"}
+    if language.startswith("ja") or language in {"japanese", "日本語"}:
+        return True
+    if language.startswith("en") or language in {"english"}:
+        return False
+    return country in {"japan", "jp", "jpn", "日本", "日本国"}
+
+
+def japanese_kb_keys(prospect: dict) -> tuple[str, ...]:
+    service_key = TYPE_KEY.get(prospect.get("type"))
+    if not service_key:
+        raise PermanentError("Japanese drafting is unavailable for this prospect type")
+    return ("studio.about.ja", service_key + ".ja", "portfolio.main.ja", "policy.opt_out.ja")
+
+
+def require_japanese_kb_for(prospect: dict, kb: dict) -> None:
+    missing = [k for k in japanese_kb_keys(prospect) if not (kb.get(k) and str(kb[k].get("body") or "").strip())]
+    if missing:
+        raise PermanentError("approved Japanese knowledge base is incomplete: " + ", ".join(missing))
 
 
 def require_japanese_kb(kb: dict) -> None:
@@ -193,7 +317,9 @@ PAYLOAD_BUDGET = 18000   # chars of JSON sent to the model; ollama.generate_json
 
 
 def _english(prospect: dict) -> bool:
-    return not is_japanese_animation_prospect(prospect)
+    """English is chosen by the caller (should_use_japanese, which sees the conversation), never re-decided here from
+    country metadata: a Japanese studio that writes to us in English must get an English reply."""
+    return True
 
 def _stable_evidence_id(e: dict) -> str:
     """Position-independent id for evidence rows the RPC returns without one."""
@@ -263,6 +389,12 @@ def _new_text(body: str) -> str:
 
 _GREETING_LINE = re.compile(r"^\s*(?:hello|hi|hey|dear|good (?:morning|afternoon|evening))\b[^\n]{0,60}$", re.I)
 _SIGNOFF_LINE = re.compile(r"^\s*(?:best(?: regards| wishes)?|kind regards|warm regards|regards|thanks|thank you|cheers|sincerely|many thanks)[,!.]?\s*$", re.I)
+_JAPANESE_GREETING_LINE = re.compile(
+    r"^\s*(?:ご担当者様|御中|[\w\u3400-\u4dbf\u3040-\u30ff・ー]+(?:\s+[\w\u3400-\u4dbf\u3040-\u30ff・ー]+)?(?:様|先生|御中)|様|先生)[、,]?\s*$"
+)
+_JAPANESE_SIGNOFF_LINE = re.compile(
+    r"^\s*(?:(?:何卒|どうぞ|引き続き)[、,]?)?(?:(?:ご検討|ご確認|ご査収)のほど[、,]?)?"
+    r"(?:今後とも)?(?:よろしくお願い(?:いたします|致します|申し上げます)|お願い(?:いたします|申し上げます))[。！!]?\s*$")
 
 
 def _claim_body(body: str) -> str:
@@ -274,10 +406,10 @@ def _claim_body(body: str) -> str:
     lines = str(body or "").strip().splitlines()
     while lines and not lines[0].strip():
         lines.pop(0)
-    if lines and _GREETING_LINE.match(lines[0]) and not re.search(r"[.!?]\s*$", lines[0]):
+    if lines and ((_GREETING_LINE.match(lines[0]) and not re.search(r"[.!?]\s*$", lines[0])) or _JAPANESE_GREETING_LINE.match(lines[0])):
         lines.pop(0)
     for i in range(max(0, len(lines) - 4), len(lines)):
-        if _SIGNOFF_LINE.match(lines[i]):
+        if _SIGNOFF_LINE.match(lines[i]) or _JAPANESE_SIGNOFF_LINE.match(lines[i]):
             lines = lines[:i]
             break
     return "\n".join(lines).strip()
@@ -307,10 +439,16 @@ def similarity(a: str, b: str) -> float:
 
 def _similarity_text(value: str) -> str:
     """Remove recipient greeting and policy footer before comparing message substance."""
-    text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+    raw_lines = str(value or "").strip().splitlines()
+    for _ in range(2):   # Japanese salutation lines ("株式会社X 佐藤様", "ご担当者様") name the recipient; they are not substance
+        if raw_lines and re.search(r"(?:様|御中|先生|各位)[、,]?\s*$", raw_lines[0].strip()) and len(raw_lines[0].strip()) <= 60:
+            raw_lines.pop(0)
+        elif raw_lines and not raw_lines[0].strip():
+            raw_lines.pop(0)
+    text = re.sub(r"\s+", " ", "\n".join(raw_lines)).strip().lower()
     # Remove common opt-out/legal footer content and standard address/email lines.
     text = re.sub(r"(?:if you (?:would rather|prefer) not to hear from us|to unsubscribe|please reply.*?unsubscribe).*?$", "", text, flags=re.I)
-    text = re.sub(r"\b(?:unsubscribe|配信停止)\b", "", text, flags=re.I)
+    text = re.sub(r"\bunsubscribe\b|配信停止", "", text, flags=re.I)
     text = re.sub(r"\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b", "<email>", text)
     text = re.sub(r"https?://\S+", "<url>", text)
     text = re.sub(r"^(?:hello(?:\s+[^,]+)?|dear(?:\s+[^,]+)?),?\s*", "", text)
@@ -410,6 +548,294 @@ def _reply_addresses_inbound(body: str, inbound: dict | None) -> bool:
     if len(source_tokens) < 2:
         return bool(source_tokens & reply_tokens)
     return len(source_tokens & reply_tokens) / len(source_tokens) >= 0.20
+
+
+
+def _japanese_reply_addresses_inbound(body: str, inbound: dict | None) -> bool:
+    """Check that a Japanese reply addresses the actual request using natural phrase families.
+
+    This remains deliberately fail-closed for requests outside the recognized intents. The groups
+    represent response meaning (e.g. sharing material), not one exact keyword.
+    """
+    if not inbound:
+        return False
+    source = _new_text(" ".join(str(inbound.get(k) or "") for k in ("body", "body_text", "summary")))
+    reply = _claim_body(body)
+    groups = [
+        (r"ポートフォリオ|制作実績|作品例|サンプル|リール|作品集|過去作品|作例|作品資料|資料",
+         ("ポートフォリオ", "制作実績", "作品", "サンプル", "リール", "作品集", "作例", "資料")),
+        (r"リンク|url|ウェブサイト|サイト|送付|送って|共有|見せて|見られ|添付",
+         ("リンク", "url", "ウェブサイト", "サイト", "お送りします", "お送りいたします", "お送り", "送付", "共有", "添付", "こちら", "以下", "下記", "ご覧")),
+        (r"打ち合わせ|ミーティング|面談|電話|話せ|相談したい",
+         ("打ち合わせ", "ミーティング", "面談", "お電話", "日程", "候補日", "ご相談", "調整")),
+        (r"質問|教えて|確認|詳細|説明|知りたい|伺いたい",
+         ("ご質問", "お答え", "詳細", "ご説明", "確認", "ご案内", "回答", "お知らせ")),
+        (r"興味|関心|ぜひ|前向き|話を聞きたい|詳しく知りたい",
+         ("ありがとうございます", "嬉しく存じます", "ご案内", "ご紹介", "ご説明", "ご相談", "お話")),
+    ]
+    required = [terms for pattern, terms in groups if re.search(pattern, source, re.I)]
+    if required:
+        # Every independently detected request family must be answered; a reply to
+        # only one part of a multi-part request is not considered complete.
+        return all(any(term in reply for term in terms) for terms in required)
+    # Unknown requests are not validated by generic character overlap. That can
+    # accept polite but irrelevant text; route them to a person instead.
+    return False
+
+
+def _is_consequential_japanese_inbound(inbound: dict | None) -> bool:
+    """Use the shared deterministic inbound policy; Japanese high-impact messages always go to review."""
+    if not inbound:
+        return False
+    subject = str(inbound.get("subject") or "")
+    body = str(inbound.get("body") or inbound.get("body_text") or "")
+    hits = policy.scan_inbound(subject, body)["hits"]
+    inbound_class = str(inbound.get("class") or "").strip().lower()
+    if policy.hard_class(hits) or inbound_class in (policy.ESCALATE_CLASSES | {"unsubscribe", "complaint"}):
+        return True
+    # The sender's own new words count too (the English check reads them): subject-only matching missed
+    # "価格を教えてください" in a body under a neutral "Re: …" subject.
+    text = policy.normalize_quotes(" ".join(
+        [str(inbound.get(k) or "") for k in ("subject", "summary", "class")]
+        + [_new_text(str(inbound.get(k) or "")) for k in ("body", "body_text")]))
+    patterns = (
+        r"料金|価格|費用|見積|予算|割引|支払|請求|単価|報酬",
+        r"契約|合意|条件|交渉|秘密保持|法務|署名|契約書",
+        r"苦情|クレーム|不満|問題|返金|トラブル|誤り|迷惑",
+        r"納期|締切|締め切り|期限|納品日|納品時期|納品予定|納品可能|納品できますか|までに納品|納入日|納入時期|納入できますか|いつまで|いつ頃|何日|何週間|完了予定|保証|確約|対応可能|空き|スケジュール|開始日|いつから|稼働|着手",
+        r"配信停止|送らないで|連絡しないで|今後.*(?:連絡|メール|案内)|削除してください|メール不要|案内不要|営業メール.*結構",
+
+    )
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
+def _validate_japanese_recipient_name(body: str, prospect: dict) -> None:
+    """Reject wrong or missing named-recipient greetings; generic salutations are allowed only without a contact name.
+
+    A named contact may be addressed by full name or by family name alone (佐藤様), and the company may sit on its own
+    line above the name, as in ordinary Japanese business mail. Any other name is rejected."""
+    lines = [l.strip() for l in str(body or "").splitlines() if l.strip()][:2]
+    contact = re.sub(r"\s+", "", str(prospect.get("contact_name") or ""))
+    company = re.sub(r"\s+", "", str(prospect.get("name") or ""))
+    norm_lines = [re.sub(r"[\s、,]", "", l) for l in lines]
+    if contact:
+        tokens = [t for t in re.split(r"\s+", str(prospect.get("contact_name") or "").strip()) if t]
+        accepted = {contact}
+        japanese_name = bool(_JAPANESE_SCRIPT.search(contact))
+        if len(tokens) > 1:
+            # "佐藤 花子": the family name (first token) may address the person; the given name alone may not.
+            # Latin names are given-name first ("Hanako Sato"), so either token may carry the honorific there.
+            accepted.update(tokens[:1] if japanese_name else tokens)
+        elif japanese_name and len(contact) >= 3:
+            # Unspaced "佐藤花子": a two-character family name is the usual case; a three-character family name
+            # (長谷川) is only plausible when at least two characters of given name remain. Never a truncated name.
+            accepted.update(contact[:k] for k in (2, 3) if k < len(contact) and (k == 2 or len(contact) >= 5))
+        for line in norm_lines:
+            m = re.search(r"(.+?)(?:様|先生)$", line)
+            if not m:
+                continue
+            name_part = m.group(1)
+            if company and name_part.startswith(company):
+                name_part = name_part[len(company):]
+            name_part = re.sub(r"^(?:ご担当|担当|株式会社|有限会社)", "", name_part)
+            if name_part in accepted:
+                return
+        raise PermanentError("Japanese salutation does not match the prospect's verified contact name; manual review required")
+    first = norm_lines[0] if norm_lines else ""
+    generic = "ご担当者様" in first or "ご担当者各位" in first
+    company_address = bool(company and company in first and first.endswith("御中"))
+    if not (generic or company_address):
+        raise PermanentError("Japanese salutation must use a generic business greeting or the verified company name; manual review required")
+
+
+# Stock courtesy phrases that carry no claim about the prospect. A sentence made only of these (plus particles and
+# kana) is not a factual statement and needs no evidence; anything with other content words is still checked.
+_COURTESY_STOCK = ("突然", "ご連絡", "連絡", "失礼", "初めて", "はじめまして", "多忙", "忙しい", "恐縮", "恐れ入", "関心", "興味",
+                   "放念", "一読", "検討", "確認", "お願い", "申し上げ", "幸い", "返信", "都合", "時間", "手すき", "際に", "ご案内",
+                   "案内", "申し", "存じ", "拝見", "お知らせ", "不要", "差し支え", "ご質問", "質問", "お気軽", "ご不明", "不明",
+                   "先日", "前回", "先般", "過日")   # references to our own earlier mail; initial mail rejects them in policy
+_CJK_CONTENT = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]{2,}|[\u30a1-\u30fa\u30fc]{2,}|[A-Za-z]{3,}")
+_CJK_ANY = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]|[\u30a1-\u30fa]")
+# Content words that are acceptable in any message (verbs of reading, generic business nouns).
+_JA_NEUTRAL_TERMS = {"貴社", "御社", "拝見", "拝読", "拝聴", "貴スタジオ", "弊社", "弊スタジオ", "今回", "突然", "連絡", "失礼", "案内",
+                     "返信", "検討", "確認", "資料", "説明", "紹介", "相談", "提案", "協力", "対応", "場合", "際", "必要", "是非",
+                     "先日", "前回", "先般", "過日"}   # back-references to our own earlier mail; initial mail rejects them via policy.PRIOR_CONTACT_JA_INITIAL
+
+
+def _is_courtesy_sentence(sentence: str) -> bool:
+    rest = str(sentence or "")
+    for stock in sorted(_COURTESY_STOCK, key=len, reverse=True):
+        rest = rest.replace(stock, "")
+    return len(_CJK_ANY.findall(rest)) <= 2 and not re.search(r"https?://", rest)
+
+
+def _ja_terms_grounded(sentence: str, source_text: str, ignore_names: list[str]) -> tuple[int, int]:
+    """(grounded, total) content terms: runs of kanji/katakana. A term is grounded when it, or at least half of its
+    two-character pieces, appears in the evidence/approved text; unlike raw bigram overlap, particles cannot pad this."""
+    text = str(sentence or "")
+    for n in ignore_names:
+        if n:
+            text = text.replace(n, " ")
+    for stock in sorted(_COURTESY_STOCK, key=len, reverse=True):
+        text = text.replace(stock, " ")          # stock courtesy words are not claims about the prospect
+    grounded = total = 0
+    for term in _CJK_CONTENT.findall(text):
+        if term in _JA_NEUTRAL_TERMS or term.lower() in source_text.lower():
+            if term not in _JA_NEUTRAL_TERMS:
+                total += 1
+                grounded += 1
+            continue
+        total += 1
+        pieces = [term[i:i + 2] for i in range(len(term) - 1)]
+        if len(term) >= 3 and pieces and sum(1 for pc in pieces if pc in source_text) / len(pieces) >= 0.67:
+            grounded += 1
+    return grounded, total
+
+
+def compose_japanese(prospect: dict, evidence: list[dict], kb: dict, settings: dict, llm,
+                     *, kind: str, inbound: dict | None = None, history: list[dict] | None = None,
+                     sent_on: str | None = None, parent_subject: str | None = None, feedback: str | None = None) -> dict:
+    """Compose individualized Japanese business email. No generic or literal-translation fallback."""
+    keys = japanese_kb_keys(prospect)
+    require_japanese_kb_for(prospect, kb)
+    if kind not in ("initial", "followup", "reply", "reengagement"):
+        raise PermanentError(f"unsupported Japanese composition kind: {kind}")
+    if kind == "reply" and _is_consequential_japanese_inbound(inbound):
+        raise PermanentError("Japanese reply raises pricing, terms, complaint, scheduling, commitment or opt-out issues; manual review required")
+    catalog = _evidence_catalog(evidence, inbound=inbound, history=history, kind=kind)
+    factual = [e for e in catalog if e.get("fact_type") not in ("sent_outreach_history", "actual_incoming_message", "conversation_inbound")]
+    if not factual:
+        raise PermanentError("insufficient verified prospect research for individualized Japanese draft; manual review required")
+    approved = {k: str(kb[k]["body"]).strip() for k in keys[:3]}
+    if not all(approved.values()):
+        raise PermanentError("approved Japanese studio/service/portfolio facts are incomplete")
+    instructions = {
+        "initial": "初回の営業メールを作成してください。相手の実際の制作実績・活動に基づく個別の切り口にしてください。",
+        "followup": "実際に送信済みの前回メールと会話履歴を踏まえ、同じ売り込みを繰り返さず、自然で簡潔なフォローアップを作成してください。",
+        "reengagement": "過去の送信内容を踏まえつつ、以前に関心を示したと偽らず、新しい切り口の控えめな再連絡を作成してください。",
+        "reply": "受信したメールの質問・依頼に直接答えてください。受信文の内容を理解し、返答になっていることを確認してください。",
+    }
+    payload_obj = {
+        "message_kind": kind, "approved_studio_facts": approved,
+        "prospect": {"name": prospect.get("name"), "contact_name": prospect.get("contact_name"),
+                     "type": prospect.get("type"), "website": prospect.get("website"), "services": prospect.get("services")},
+        "incoming_message": ({**inbound, "body": _new_text(str(inbound.get("body") or inbound.get("body_text") or ""))[:3000]} if inbound else {}),
+        "sent_date": sent_on, "thread_subject": parent_subject, "verified_evidence": catalog,
+        "conversation_history": [{k: (str(v)[:600] if isinstance(v, str) else v) for k, v in m.items()
+                                  if k in ("direction", "kind", "state", "subject", "body_text", "body", "sent_at")}
+                                 for m in (history or [])[-6:]],
+    }
+    while len(catalog) > 1 and len(json.dumps(payload_obj, ensure_ascii=False)) > PAYLOAD_BUDGET:
+        catalog = catalog[:-1]
+        payload_obj["verified_evidence"] = catalog
+    instruction = (
+        "あなたはStudio Kairegiの日本語ビジネスメール担当者です。自然で現代的な日本語を使い、相手との関係に合う適切な敬語で、簡潔かつ具体的に書いてください。"
+        + instructions[kind]
+        + " 英語の直訳調、過剰に硬い表現、定型文の使い回しを避けてください。"
+        " アニメ制作用語は意味を厳密に区別してください：レイアウト（画面構成・動きの設計）、原画（キーアニメーション）、動画（中割りを含む動画工程）、仕上げ（彩色工程）。"
+        " 承認済みサービス情報の意味を変えたり、提供範囲を拡大したりしないでください。"
+        " 個別の事実主張はverified_evidenceに明記された内容だけに基づけてください。採用、外注需要、人員不足、関心、視聴・プレイ経験を推測しないでください。"
+        " replyでは受信メールの質問に答え、価格・契約・納期・稼働状況・苦情・配信停止は回答せず、人による確認が必要です。"
+        " 面識・過去のやり取り・ゲームのプレイや作品の視聴経験があるかのような表現（先日、お会いした、プレイいたしました等）、金額・料金に関する表現は使わないでください。"
+        " 会社名・担当者名は入力の表記を正確に保ってください。件名と本文を日本語で作成し、配信停止文・住所・署名・フッターは本文に含めないでください。"
+        " 参照したevidence idをevidence_idsに必ず含めてください。JSONのみを返してください。"
+    )
+    if feedback:
+        instruction += " 前回の草案は審査で却下されました。指摘事項を解消し、構成と表現を変えてください：" + re.sub(r"\s+", " ", str(feedback))[:300]
+    try:
+        mail = llm(instruction, json.dumps(payload_obj, ensure_ascii=False), COMPOSE_SCHEMA)
+    except TransientError:
+        raise
+    except Exception as exc:
+        raise PermanentError(f"Japanese composition unavailable; manual review required ({type(exc).__name__})") from exc
+    if not isinstance(mail, dict):
+        raise PermanentError("Japanese composer returned invalid structure; manual review required")
+    subject, body, ids = str(mail.get("subject") or "").strip(), str(mail.get("body") or "").strip(), mail.get("evidence_ids")
+    allowed_ids = {e["id"] for e in catalog}
+    footer = policy.compliance_footer(settings, opt_out_text=kb["policy.opt_out.ja"]["body"].strip())
+    if not subject or "\n" in subject or len(subject) > 120 or not body or len(body) + len(footer) > policy.MAX_BODY_CHARS or not isinstance(ids, list):
+        raise PermanentError("Japanese composer returned incomplete or oversized draft; manual review required")
+    # A message that continues a real conversation keeps that conversation's subject (one "Re:"): the model does not
+    # choose it, so the thread cannot be broken and an English-subject thread can still receive a Japanese reply.
+    thread_subject = str(parent_subject or "").strip() or (str((inbound or {}).get("subject") or "").strip() if kind == "reply" else "")
+    threaded = kind in ("followup", "reengagement", "reply") and bool(thread_subject)
+    if threaded:
+        subject = (thread_subject if re.match(r"(?i)^\s*re:", thread_subject) else "Re: " + thread_subject)[:120]
+    elif len(_JAPANESE_SCRIPT.findall(subject)) < 2:
+        raise PermanentError("Japanese subject and body must both use Japanese; manual review required")
+    if not _has_japanese_text(body):
+        raise PermanentError("Japanese subject and body must both use Japanese; manual review required")
+    _validate_japanese_recipient_name(body, prospect)
+    company_name = str(prospect.get("name") or "").strip()
+    if kind in ("initial", "followup", "reengagement") and not threaded and company_name and company_name not in subject:
+        raise PermanentError("Japanese outreach subject must preserve the verified company name exactly; manual review required")
+    if not ids or any(str(x) not in allowed_ids for x in ids):
+        raise PermanentError("Japanese draft evidence trace is missing or invalid; manual review required")
+    if kind == "reply" and str((inbound or {}).get("id") or "incoming_message") not in {str(x) for x in ids}:
+        raise PermanentError("Japanese reply does not cite the actual incoming message; manual review required")
+    cited = [e for e in catalog if e["id"] in {str(x) for x in ids}]
+    cited_facts = [e for e in cited if e.get("fact_type") not in ("sent_outreach_history", "actual_incoming_message", "conversation_inbound")]
+    if not cited_facts:
+        raise PermanentError("Japanese draft cites no verified prospect facts; manual review required")
+    cited_text = " ".join(e["snippet"] for e in cited_facts)
+    source_tokens = _tokens(cited_text)
+    approved_tokens = _tokens(" ".join(approved.values()))
+    if kind == "initial":
+        subject_tokens = _tokens(subject) - _tokens(str(prospect.get("name") or "") + " " + str(prospect.get("contact_name") or ""))
+        subject_support = _tokens(cited_text + " " + " ".join(approved.values()))
+        if subject_tokens and len(subject_tokens & subject_support) / len(subject_tokens) < 0.20:
+            raise PermanentError("Japanese subject contains an unsupported personalized claim; manual review required")
+    inbound_tokens = _tokens(_new_text(" ".join(str((inbound or {}).get(k) or "") for k in ("body", "body_text", "summary"))))
+    sentences = [x.strip() for x in re.split(r"(?<=[。！？!?])", _claim_body(body)) if x.strip()]
+    personalized = []
+    ground_source = cited_text + " " + " ".join(approved.values()) + (" " + _new_text(" ".join(str((inbound or {}).get(k) or "") for k in ("body", "body_text"))) if kind == "reply" else "")
+    name_parts = [str(prospect.get("name") or ""), str(prospect.get("contact_name") or "")]
+    name_parts += [p for n in name_parts for p in re.split(r"\s+", n) if len(p) >= 2]
+    for sentence in sentences:
+        tokens = _tokens(sentence)
+        if not tokens:
+            continue
+        if _is_courtesy_sentence(sentence):
+            continue
+        g, t = _ja_terms_grounded(sentence, ground_source, name_parts)
+        if t and g / t < 0.6:
+            raise PermanentError("Japanese sentence contains content not supported by cited evidence or approved facts; manual review required")
+        ev_overlap = len(tokens & source_tokens) / max(1, len(tokens))
+        kb_overlap = len(tokens & approved_tokens) / max(1, len(tokens))
+        inbound_overlap = len(tokens & inbound_tokens) / max(1, len(tokens))
+        if kind == "reply" and inbound_overlap >= 0.08:
+            personalized.append(inbound_overlap)
+            continue
+        if re.search(r"貴社|御社|作品|制作|プロジェクト|拝見|公開|発表|取り組み|スタジオ", sentence):
+            if ev_overlap < 0.12 and kb_overlap < 0.45:
+                raise PermanentError("Japanese personalized sentence is not grounded in cited evidence; manual review required")
+            if ev_overlap >= 0.12:
+                personalized.append(ev_overlap)
+        elif max(ev_overlap, kb_overlap) < 0.12 and len(tokens) >= 8:
+            raise PermanentError("Japanese sentence is unsupported by prospect evidence or approved facts; manual review required")
+    if not personalized:
+        raise PermanentError("Japanese draft contains no evidence-grounded individualization; manual review required")
+    if policy.PRICE_IN_DRAFT_JA.search(body) or policy.PRICE_IN_DRAFT.search(body):
+        raise PermanentError("Japanese draft contains pricing, amounts, discount, free-offer or guarantee language; manual review required")
+    if re.search(r"以前(?:ご相談|お話し)|お話しした通り|外注先をお探し|人手不足", body) or policy.FALSE_CLAIMS_JA.search(body) \
+            or (kind == "initial" and policy.PRIOR_CONTACT_JA_INITIAL.search(body)):
+        raise PermanentError("Japanese draft implies unsupported prior contact, experience, interest or staffing needs; manual review required")
+    risky = ("受賞", "受賞歴", "売上", "資金調達", "採用", "募集中", "外注先を探", "人手不足", "需要が高",
+             "評価", "好評", "人気", "話題", "注目", "好調", "順調", "急成長", "増員", "若手育成", "海外展開", "力を入れ", "強化")
+    allowed_text = " ".join(e["snippet"] for e in cited_facts) + " " + " ".join(approved.values())
+    if any(term in body and term not in allowed_text for term in risky):
+        raise PermanentError("Japanese draft contains an unsupported high-specificity claim; manual review required")
+    if kind == "reply" and not _japanese_reply_addresses_inbound(body, inbound):
+        raise PermanentError("Japanese reply does not address the actual incoming request; manual review required")
+    urls = {u.rstrip("/.,)") for u in policy.URL.findall(body)}
+    if not urls.issubset(approved_urls(kb)):
+        raise PermanentError("Japanese draft contains an unapproved URL; manual review required")
+    body += "\n\n" + footer
+    trace = [{"id": e["id"], "fact_type": e["fact_type"], "url": e["url"], "snippet": e["snippet"][:240]} for e in cited]
+    return {"subject": subject, "body": body, "model_written": True, "evidence_ids": [str(x) for x in ids],
+            "evidence_trace": trace,
+            "personalization": {"kind": kind, "language": "ja", "evidence_ids": [str(x) for x in ids],
+                                "grounding_overlap": round(sum(personalized) / len(personalized), 3)}}
 
 
 def compose_english(prospect: dict, evidence: list[dict], kb: dict, settings: dict, llm,

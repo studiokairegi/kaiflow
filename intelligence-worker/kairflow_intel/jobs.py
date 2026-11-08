@@ -3,6 +3,7 @@ nothing: expired leases return to the queue, sends are settled by the message st
 from __future__ import annotations
 
 import random
+import re
 import threading
 import time
 import traceback
@@ -110,7 +111,7 @@ def _vet_draft(d: Deps, st: dict, kb: dict, mail: dict, compose, prior, *, kind:
     given to the model; if the second draft also fails the caller flags the prospect for a person. Template drafts
     (compose is None) are never regenerated. Returns (mail, None) when acceptable, else (mail, problem) where problem
     is {"type": "similar", "unique": ...} | {"type": "policy", "violations": [...]} | {"type": "review", "reason": ...}."""
-    footer = policy.compliance_footer(st)
+    footer = policy.compliance_footer(st, opt_out_text=opt_out_text)
     regenerated = False
     while True:
         problem = None
@@ -167,16 +168,21 @@ def h_draft(d: Deps, job):
         return {"skipped": "no verified contact email"}
     # Fail early on unsafe approved KB copy. This is independent of prospect
     # research availability and must remain a hard, logged policy failure.
+    use_japanese = drafting.should_use_japanese(p, ctx.get("messages") or [])
     relevant_kb_keys = {"studio.about", "portfolio.main", drafting.TYPE_KEY.get(p.get("type"), "")}
+    if use_japanese:
+        relevant_kb_keys.update(drafting.japanese_kb_keys(p))
     unsafe_kb = []
     for key in relevant_kb_keys:
         entry = kb.get(key) or {}
         text = str(entry.get("body") or "")
-        if policy.PRICE_IN_DRAFT.search(text):
+        if policy.PRICE_IN_DRAFT.search(text) or (use_japanese and policy.PRICE_IN_DRAFT_JA.search(text)):
             unsafe_kb.append(f"{key}: prohibited price/guarantee language")
         match = policy.FALSE_CLAIMS.search(text)
         if match:
             unsafe_kb.append(f"{key}: unsupported claim {match.group(0)!r}")
+        if use_japanese and (re.search(r"以前(?:ご相談|お話し)|お話しした通り|外注先をお探し|人手不足", text) or policy.FALSE_CLAIMS_JA.search(text)):
+            unsafe_kb.append(f"{key}: unsupported Japanese history, interest or staffing claim")
     if unsafe_kb:
         reason = "approved knowledge-base content violates outbound policy: " + "; ".join(unsafe_kb)
         d.rpc("intel_agent_log", {"p_action": "draft_blocked", "p_entity_type": "prospect", "p_entity_id": pid,
@@ -185,18 +191,16 @@ def h_draft(d: Deps, job):
     if kind == "initial":
         if p["status"] != "lead_linked":
             return {"skipped": f"status {p['status']}"}
-        if drafting.is_japanese_animation_prospect(p):
-            mail = drafting.build_initial(p, ctx["evidence"], kb, st, llm=None)
-        else:
-            compose = lambda feedback=None: drafting.compose_english(p, ctx["evidence"], kb, st,
-                llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
-                kind="initial", history=ctx.get("messages") or [], feedback=feedback)
-            try:
-                mail = compose()
-            except PermanentError as exc:
-                d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"reason": str(exc)[:300], "kind": kind}})
-                d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Individualized English draft requires manual review: " + str(exc)[:220]})
-                return {"skipped": "manual_review_required"}
+        composer = drafting.compose_japanese if drafting.should_use_japanese(p, ctx.get("messages") or []) else drafting.compose_english
+        compose = lambda feedback=None: composer(p, ctx["evidence"], kb, st,
+            llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
+            kind="initial", history=ctx.get("messages") or [], feedback=feedback)
+        try:
+            mail = compose()
+        except PermanentError as exc:
+            d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"reason": str(exc)[:300], "kind": kind}})
+            d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Individualized draft requires manual review: " + str(exc)[:220]})
+            return {"skipped": "manual_review_required"}
         step, key = 0, f"draft:{pid}:initial"
         thread = None
     elif kind in ("followup", "reengagement"):
@@ -213,34 +217,32 @@ def h_draft(d: Deps, job):
         key = f"draft:{pid}:fu{step}"
         parent = drafting.thread_parent(msgs)
         anchor = ((initial or {}).get("sent_at") or (initial or {}).get("created_at") or "")[:10] or "recently"
-        if drafting.is_japanese_animation_prospect(p):
-            mail = drafting.build_followup(p, kb, st, anchor, parent["subject"] if parent else None)
-        else:
-            compose = lambda feedback=None: drafting.compose_english(p, ctx.get("evidence") or [], kb, st,
-                llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
-                kind=kind, history=msgs, sent_on=anchor, parent_subject=(parent or {}).get("subject"), feedback=feedback)
-            try:
-                mail = compose()
-            except PermanentError as exc:
-                d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"reason": str(exc)[:300], "kind": kind}})
-                d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Individualized English draft requires manual review: " + str(exc)[:220]})
-                return {"skipped": "manual_review_required"}
+        composer = drafting.compose_japanese if drafting.should_use_japanese(p, msgs) else drafting.compose_english
+        compose = lambda feedback=None: composer(p, ctx.get("evidence") or [], kb, st,
+            llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
+            kind=kind, history=msgs, sent_on=anchor, parent_subject=(parent or {}).get("subject"), feedback=feedback)
+        try:
+            mail = compose()
+        except PermanentError as exc:
+            d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"reason": str(exc)[:300], "kind": kind}})
+            d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Individualized draft requires manual review: " + str(exc)[:220]})
+            return {"skipped": "manual_review_required"}
         thread = parent
     else:
         return {"skipped": f"unsupported draft kind {kind}"}
     prior = None
-    if mail.get("model_written") and not drafting.is_japanese_animation_prospect(p):
+    if mail.get("model_written"):
         # Compare against persisted organization-wide outbound history, not only this
         # prospect's thread. This catches template reuse across different recipients.
         history = d.rpc("intel_agent_recent_outbound", {"p_limit": 500}) or []
         prior = [_prior_row(m) for m in history
                  if m.get("state") not in ("discarded", "failed") and m.get("idempotency_key") != key]   # not our own earlier copy (retry)
-    localized_opt_out = kb.get("policy.opt_out.ja", {}).get("body", "").strip() if drafting.is_japanese_animation_prospect(p) else None
+    localized_opt_out = kb.get("policy.opt_out.ja", {}).get("body", "").strip() if drafting.should_use_japanese(p, ctx.get("messages") or []) else None
     mail, problem = _vet_draft(d, st, kb, mail, compose, prior, kind=kind, stored_kind=stored_kind, domain=p.get("domain", ""), pid=pid,
                                names=_recipient_names(p), opt_out_text=localized_opt_out)
     if problem and problem["type"] == "review":
         d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"reason": problem["reason"][:300], "kind": kind}})
-        d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Individualized English draft requires manual review: " + problem["reason"][:220]})
+        d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Individualized draft requires manual review: " + problem["reason"][:220]})
         return {"skipped": "manual_review_required"}
     if problem and problem["type"] == "similar":
         unique = problem["unique"]
@@ -306,8 +308,15 @@ def h_sync_mail(d: Deps, job):
 def h_classify(d: Deps, job):
     st, kb = d.rpc("intel_agent_settings", {}), _kb(d)
     own = {st["sender_email"].lower()} if st["sender_email"] else set()
-    llm = lambda subject, body: d.llm.generate_json("Classify this email reply to a cold introduction from an animation studio. Labels: " + ", ".join(cls.LABELS) + ".",
-                                                    f"Subject: {subject}\n{body}", cls.SCHEMA, fast=True)
+    def llm(subject, body):
+        if drafting._has_japanese_text(str(subject or "") + " " + str(body or "")):
+            instruction = ("次の日本語メールを分類してください。ラベルは " + ", ".join(cls.LABELS)
+                + " のいずれかです。ポートフォリオ送付依頼は portfolio_request、一般的な前向きな返答は positive、"
+                  "料金・契約・交渉・納期・稼働状況・苦情・配信停止は該当する要確認ラベルにしてください。"
+                  " 曖昧な場合は ambiguous を選んでください。JSONのみを返してください。")
+        else:
+            instruction = "Classify this email reply to a cold introduction from an animation studio. Labels: " + ", ".join(cls.LABELS) + "."
+        return d.llm.generate_json(instruction, f"Subject: {subject}\n{body}", cls.SCHEMA, fast=True)
     done = 0
     requested_id = (job.get("payload") or {}).get("message_id")
     # Classify jobs are keyed per inbound message. Pull a larger bounded backlog
@@ -328,25 +337,23 @@ def h_classify(d: Deps, job):
         done += 1
         if r["auto_ok"] and m.get("prospect_id"):
             ctx = d.rpc("intel_agent_context", {"p_prospect_id": m["prospect_id"]})
-            compose = None   # English model-written replies only; lets the vetting step regenerate once
-            if drafting.is_japanese_animation_prospect(ctx["prospect"]):
-                reply = drafting.build_auto_reply(r["class"], ctx["prospect"], kb, st, m.get("subject", ""))
-            else:
-                compose = lambda feedback=None, m=m, r=r, ctx=ctx: drafting.compose_english(ctx["prospect"], ctx.get("evidence") or [], kb, st,
-                    llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
-                    kind="reply", inbound={"id": m.get("id"), "subject": m.get("subject", ""), "body": m.get("body_text", ""),
-                        "class": r["class"], "summary": r.get("summary", "")},
-                    history=ctx.get("messages") or [], feedback=feedback)
-                try:
-                    reply = compose()
-                except PermanentError as exc:
-                    # Classification is retained, but composition failure must be visible
-                    # and actionable rather than silently dropping the reply draft.
-                    d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect",
-                        "p_entity_id": m["prospect_id"], "p_detail": {"reason": str(exc)[:300], "kind": "reply", "inbound_message_id": m.get("id")}})
-                    d.rpc("intel_agent_flag_prospect", {"p_prospect_id": m["prospect_id"],
-                        "p_reason": "Incoming reply requires manual review because individualized reply drafting failed: " + str(exc)[:220]})
-                    reply = None
+            inbound_context = {"id": m.get("id"), "subject": m.get("subject", ""), "body": m.get("body_text", ""),
+                               "class": r["class"], "summary": r.get("summary", "")}
+            composer = drafting.compose_japanese if drafting.should_use_japanese(ctx["prospect"], ctx.get("messages") or [], inbound_context) else drafting.compose_english
+            compose = lambda feedback=None, m=m, r=r, ctx=ctx, inbound_context=inbound_context, composer=composer: composer(
+                ctx["prospect"], ctx.get("evidence") or [], kb, st,
+                llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
+                kind="reply", inbound=inbound_context, history=ctx.get("messages") or [], feedback=feedback)
+            try:
+                reply = compose()
+            except PermanentError as exc:
+                # Classification is retained, but composition failure must be visible
+                # and actionable rather than silently dropping the reply draft.
+                d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect",
+                    "p_entity_id": m["prospect_id"], "p_detail": {"reason": str(exc)[:300], "kind": "reply", "inbound_message_id": m.get("id")}})
+                d.rpc("intel_agent_flag_prospect", {"p_prospect_id": m["prospect_id"],
+                    "p_reason": "Incoming reply requires manual review because individualized drafting failed: " + str(exc)[:220]})
+                reply = None
             if reply:
                 # Replies receive the same substantive near-duplicate/structural check
                 # as outbound outreach, against actual sent messages in this thread.
@@ -356,7 +363,9 @@ def h_classify(d: Deps, job):
                     and x.get("idempotency_key") != f"reply:{m['id']}"]   # not our own earlier copy (retry)
                 pid_m = m["prospect_id"]
                 reply, problem = _vet_draft(d, st, kb, reply, compose, prior_replies, kind="reply", stored_kind="reply",
-                                            domain=ctx["prospect"].get("domain", ""), pid=pid_m, names=_recipient_names(ctx["prospect"]))
+                                            domain=ctx["prospect"].get("domain", ""), pid=pid_m, names=_recipient_names(ctx["prospect"]),
+                                            opt_out_text=(kb.get("policy.opt_out.ja", {}).get("body", "").strip()
+                                                if drafting.should_use_japanese(ctx["prospect"], ctx.get("messages") or [], inbound_context) else None))
                 bad_reply = []
                 if problem and problem["type"] == "review":
                     d.rpc("intel_agent_log", {"p_action": "draft_review_required", "p_entity_type": "prospect", "p_entity_id": pid_m,

@@ -176,7 +176,7 @@ def decide(transcript: list[dict], ctx: dict, settings: dict, intent: str) -> di
         hits = policy.scan_inbound(last["subject"], last["body"])["hits"]
         if "decline" in hits or intent == "declined":
             return {"next_action": "stop", "reason": "They said they are not interested. No follow-up was written."}
-        sensitive = [h for h in ("pricing", "negotiation", "contract", "deadline", "availability", "meeting") if h in hits]
+        sensitive = [h for h in ("pricing", "negotiation", "contract", "deadline", "availability", "meeting", "ambiguous") if h in hits]
         if sensitive or intent == "negotiating":
             what = ", ".join(sensitive) if sensitive else "terms or scheduling"
             return {"next_action": "needs_human", "reason": f"Their last message is about {what}. A person should answer it."}
@@ -228,6 +228,56 @@ def _subject_for(thread: list[dict], p: dict, reply: bool) -> str | None:
     if reply and base and not re.match(r"(?i)^re:", base):
         base = f"Re: {base}"
     return base
+
+
+def _thread_for_composer(thread: list[dict]) -> list[dict]:
+    """Translate takeover transcript records into the shared composer history contract."""
+    out = []
+    for i, item in enumerate(thread or []):
+        direction = "inbound" if item.get("who") == "them" else "outbound"
+        out.append({"id": item.get("id") or f"takeover-{direction}-{i}", "direction": direction,
+                    "subject": item.get("subject") or "", "body_text": item.get("body") or "",
+                    "state": "sent" if direction == "outbound" else "received",
+                    "sent_at": item.get("at")})
+    return out
+
+
+def _latest_inbound(thread: list[dict]) -> dict | None:
+    for i, item in enumerate(reversed(thread or [])):
+        if item.get("who") == "them":
+            return {"id": item.get("id") or f"takeover-inbound-{len(thread)-i-1}",
+                    "subject": item.get("subject") or "", "body": item.get("body") or ""}
+    return None
+
+
+def _draft_japanese_takeover(d, p: dict, evidence: list[dict], kb: dict, st: dict, thread: list[dict], kind: str, feedback: str | None = None) -> dict:
+    history = _thread_for_composer(thread)
+    inbound = _latest_inbound(thread) if kind == "reply" else None
+    last_out = next((t for t in reversed(thread) if t.get("who") == "us"), None)
+    return drafting.compose_japanese(
+        p, evidence or [], kb, st,
+        llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
+        kind=kind, inbound=inbound, history=history,
+        sent_on=(last_out or {}).get("at"), parent_subject=_subject_for(thread, p, reply=(kind == "reply")), feedback=feedback)
+
+
+def _vet_japanese_takeover(d, p: dict, kb: dict, st: dict, mail: dict, regenerate) -> dict:
+    """Same similarity gate as normal outreach: compare a model-written draft with mail already written for anyone
+    (names masked), regenerate once with the reason, then hand the lead to a person. Raises PermanentError on failure."""
+    if not mail.get("model_written"):
+        return mail
+    from . import jobs     # late import: jobs does not import takeover, but keep the module graph acyclic
+    footer = policy.compliance_footer(st, opt_out_text=kb.get("policy.opt_out.ja", {}).get("body", "").strip())
+    history = d.rpc("intel_agent_recent_outbound", {"p_limit": 500})
+    prior = [jobs._prior_row(m) for m in (history if isinstance(history, list) else []) if isinstance(m, dict) and m.get("state") not in ("discarded", "failed")]
+    for attempt in (0, 1):
+        unique = drafting.uniqueness_check(mail, prior, threshold=drafting.SIMILARITY_THRESHOLD, footer=footer, names=jobs._recipient_names(p))
+        if unique["ok"]:
+            return mail
+        if attempt == 0:
+            mail = regenerate(f"it was too similar ({unique['similarity']:.2f}, {unique['reason']}) to mail already written for other recipients. "
+                              "Build the opening and collaboration angle from this recipient's own evidence.")
+    raise PermanentError("the draft is too similar to earlier outreach")
 
 
 def draft_followup(d, p: dict, kb: dict, st: dict, thread: list[dict], convo: str) -> dict:
@@ -331,9 +381,18 @@ def _run(d, job, ctx, p, lead, history, hid, base, manual) -> dict:
         raise
     summary, intent = str(a.get("summary") or "")[:700], a.get("intent", "unclear")
     questions = [str(q)[:200] for q in (a.get("open_questions") or [])][:5]
+    composer_history = _thread_for_composer(thread)
+    latest_inbound = _latest_inbound(thread)
+    language_prospect = dict(p)
+    latest_text = (latest_inbound or {}).get("body", "")
+    if not drafting._clearly_english_text(latest_text) and not drafting._has_japanese_text(latest_text):
+        if a.get("language") in ("ja", "en"):
+            language_prospect["language"] = a["language"]
+    use_japanese = drafting.should_use_japanese(language_prospect, composer_history, latest_inbound)
+    detected_language = "ja" if use_japanese else "en"
     # the model's read of intent can only add caution: re-decide with it
     out = decide(thread, ctx, st, intent=intent)
-    res = {**base, "state": "ready", "summary": summary, "intent": intent, "open_questions": questions, "language": a.get("language", "en"),
+    res = {**base, "state": "ready", "summary": summary, "intent": intent, "open_questions": questions, "language": detected_language,
            "next_action": out["next_action"], "reason": out["reason"]}
     if out.get("due_on"):
         res["due_on"] = out["due_on"]
@@ -353,25 +412,38 @@ def _run(d, job, ctx, p, lead, history, hid, base, manual) -> dict:
         return {"skipped": "already drafted"}
 
     try:
-        drafting.require_kb(kb, p["type"])
+        if not use_japanese:   # the Japanese path needs only the approved Japanese entries; compose_japanese enforces them
+            drafting.require_kb(kb, p["type"])
     except PermanentError as exc:
         res.update({"next_action": "needs_human", "reason": f"A draft could not be written: {exc}"})
         _save(d, pid, res, notify=res["reason"])
         return {"next_action": "needs_human"}
 
-    if kind == "followup":
-        mail = draft_followup(d, p, kb, st, thread, convo)
+    if use_japanese:
+        try:
+            mail = _draft_japanese_takeover(d, p, ctx.get("evidence") or [], kb, st, thread, kind)
+            mail = _vet_japanese_takeover(d, p, kb, st, mail, lambda fb: _draft_japanese_takeover(
+                d, p, ctx.get("evidence") or [], kb, st, thread, kind, feedback=fb))
+        except (PermanentError, TransientError) as exc:
+            if isinstance(exc, TransientError):
+                raise
+            res.update({"next_action": "needs_human", "reason": f"Japanese individualized drafting requires review: {exc}"})
+            _save(d, pid, res, notify=res["reason"])
+            return {"next_action": "needs_human"}
+        email_kind = "followup" if kind == "followup" else "reply"
+    elif kind == "followup":
+        mail = draft_followup(d, {**p, "language": "en"}, kb, st, thread, convo)   # English chosen above: never fall back to the Japanese templates
         email_kind = "followup"
     else:
         hits = policy.scan_inbound(turns[-1]["subject"], turns[-1]["body"])["hits"]
-        mail = draft_reply(d, p, kb, st, thread, convo, hits)
+        mail = draft_reply(d, {**p, "language": "en"}, kb, st, thread, convo, hits)
         email_kind = "reply"
         if mail is None:
             res.update({"next_action": "needs_human", "reason": "A safe reply could not be written automatically. A person should answer."})
             _save(d, pid, res, notify=res["reason"])
             return {"next_action": "needs_human"}
 
-    localized = kb.get("policy.opt_out.ja", {}).get("body", "").strip() if drafting.is_japanese_animation_prospect(p) else None
+    localized = kb.get("policy.opt_out.ja", {}).get("body", "").strip() if use_japanese else None
     bad = policy.validate_outbound(mail["subject"], mail["body"], st, drafting.approved_urls(kb), email_kind, p.get("domain", ""), opt_out_text=localized)
     if bad:
         d.rpc("intel_agent_log", {"p_action": "draft_blocked", "p_entity_type": "prospect", "p_entity_id": pid, "p_detail": {"violations": bad, "source": "takeover"}})
@@ -385,6 +457,9 @@ def _run(d, job, ctx, p, lead, history, hid, base, manual) -> dict:
         res.update({"next_action": "needs_human", "reason": f"The draft was refused: {r.get('reason', 'unknown')}."})
         _save(d, pid, res, notify=res["reason"])
         return {"next_action": "needs_human", "refused": r.get("reason")}
+    if mail.get("evidence_trace"):
+        from . import jobs
+        jobs._store_evidence_trace(d, r.get("message_id"), mail)
     res.update({"draft_message_id": r.get("message_id"), "drafted_by_model": bool(mail.get("model_written")), "step": step})
     _save(d, pid, res)
     return {"next_action": out["next_action"], "message_id": r.get("message_id"), "created": r.get("created")}
