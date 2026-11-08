@@ -27,6 +27,8 @@ for m in 20261029090000_chat_collaboration 20261030090000_studio_multiuser_core 
 done
 run "$root/supabase/migrations/20261109090000_intelligence_authorization.sql"
 run "$root/supabase/migrations/20261109090000_intelligence_authorization.sql"   # idempotent re-run
+run "$root/supabase/migrations/20261201090000_intelligence_phase11_privileged_user_guard.sql"
+run "$root/supabase/migrations/20261201090000_intelligence_phase11_privileged_user_guard.sql" # idempotent re-run
 for m in 20261109100000_intelligence_core_tables 20261109110000_intelligence_crm_notifications 20261109120000_intelligence_rpcs 20261109130000_intelligence_zoho_oauth 20261109140000_intelligence_v1_completion 20261109150000_intelligence_gmail_provider 20261109160000_intelligence_chat_actions 20261109170000_intelligence_discovery; do
   run "$root/supabase/migrations/$m.sql"; run "$root/supabase/migrations/$m.sql"   # applied twice: idempotent
 done

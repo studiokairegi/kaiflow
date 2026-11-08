@@ -42,6 +42,26 @@ def send_message(rpc, zoho, message_id: str) -> dict:
     if not res.get("ok"):
         return {"sent": False, "reason": res.get("reason", "denied")}
     m = res["message"]
+    # Assign a concrete mailbox and reserve its quota atomically. The SQL gate also
+    # requires explicit prospecting consent or a genuine inbound correspondence thread.
+    try:
+        assigned = rpc("intel_agent_assign_provider_account", {"p_message_id": message_id}) or {}
+    except Exception as exc:
+        rpc("intel_agent_fail_send", {"p_message_id": message_id, "p_error": f"provider assignment failed: {type(exc).__name__}"[:300], "p_permanent": False})
+        return {"sent": False, "reason": "provider_assignment_retry"}
+    if not assigned:
+        # Compatibility with pre-2.5 installations and lightweight test doubles; the
+        # deployed migration always returns a structured result.
+        assigned = {"ok": True, "legacy": True, "message": m}
+    if not assigned.get("ok"):
+        reason = assigned.get("reason", "provider_assignment_denied")
+        if reason == "provider_account_quota":
+            return {"sent": False, "reason": reason, "retry_after": int(assigned.get("retry_after", 60))}
+        if reason in ("prospecting_consent_required", "business_correspondence_context_required", "no_eligible_provider_account", "assigned_account_disabled"):
+            rpc("intel_agent_fail_send", {"p_message_id": message_id, "p_error": reason, "p_permanent": reason in ("prospecting_consent_required", "business_correspondence_context_required")})
+        return {"sent": False, "reason": reason}
+    m = assigned.get("message") or m
+    provider = zoho.for_message(m) if hasattr(zoho, "for_message") else zoho
     # Complete all network/database preflight before taking the studio-wide slot.
     # In particular, resolve native reply threading before the final state transition
     # so the kill-switch/slot guard is the last RPC before provider submission.
@@ -53,10 +73,10 @@ def send_message(rpc, zoho, message_id: str) -> dict:
     if m.get("in_reply_to") and not parent:
         try:
             rpc("intel_agent_log", {"p_action": "reply_parent_missing", "p_entity_type": "message", "p_entity_id": m["id"],
-                                    "p_detail": {"provider": getattr(zoho, "provider", "zoho"), "in_reply_to": m.get("in_reply_to")}})
+                                    "p_detail": {"provider": getattr(provider, "provider", "zoho"), "in_reply_to": m.get("in_reply_to")}})
         except Exception:
             pass
-        if getattr(zoho, "provider", "zoho") == "zoho":
+        if getattr(provider, "provider", "zoho") == "zoho":
             rpc("intel_agent_fail_send", {"p_message_id": m["id"], "p_error": "Zoho reply parent missing; manual review required", "p_permanent": True})
             return {"sent": False, "reason": "reply_parent_missing"}
 
@@ -69,10 +89,10 @@ def send_message(rpc, zoho, message_id: str) -> dict:
     if not rpc("intel_agent_mark_sending", {"p_message_id": m["id"]}):
         return {"sent": False, "reason": "not_reserved_or_send_stopped"}
     send_args = {"reply_to_zoho_id": parent, "in_reply_to": m.get("in_reply_to") or None, "references": m.get("references_ids") or None}
-    if getattr(zoho, "provider", "") == "resend":
+    if getattr(provider, "provider", "") == "resend":
         send_args["message_id"] = m["id"]
     try:
-        out = zoho.send(m["from_email"], m["to_email"], m["subject"], with_ref(m["body_text"], m["token"]), **send_args)
+        out = provider.send(m["from_email"], m["to_email"], m["subject"], with_ref(m["body_text"], m["token"]), **send_args)
         provider_id = str(out.get("zoho_message_id") or "").strip()
         if not provider_id:
             # Provider call returned without a durable id. Do not confirm a sent
@@ -89,7 +109,7 @@ def send_message(rpc, zoho, message_id: str) -> dict:
         rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": f"{type(exc).__name__}: {exc}"[:300]})
         return {"sent": False, "reason": "unknown"}
     rfc = out.get("rfc_message_id") or ""
-    if getattr(zoho, "provider", "") == "resend":
+    if getattr(provider, "provider", "") == "resend":
         try:
             saved = rpc("intel_agent_record_resend_acceptance", {"p_message_id": m["id"], "p_provider_message_id": provider_id})
             if not saved:
@@ -98,7 +118,7 @@ def send_message(rpc, zoho, message_id: str) -> dict:
             rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": f"Resend accepted but provider id could not be saved: {type(exc).__name__}"[:300]})
             return {"sent": False, "reason": "unknown"}
     try:
-        found = None if rfc or getattr(zoho, "provider", "") == "resend" else zoho.find_sent(m["token"], m["to_email"], int(time.time() * 1000) - 600_000)
+        found = None if rfc or getattr(provider, "provider", "") == "resend" else provider.find_sent(m["token"], m["to_email"], int(time.time() * 1000) - 600_000)
         rfc = rfc or (found or {}).get("rfc_message_id", "")
     except Exception:
         pass                                           # headers are an optional extra: the token still matches replies
@@ -114,19 +134,27 @@ def reconcile(rpc, zoho) -> dict:
     """Settle unresolved sends using provider-specific evidence. Never resends."""
     counts = {"confirmed": 0, "absent": 0, "left": 0}
     for m in rpc("intel_agent_stale_sends", {"p_older_than_seconds": 600}) or []:
+        provider = zoho.for_message(m) if hasattr(zoho, "for_message") else zoho
         try:
-            if getattr(zoho, "provider", "") == "resend":
+            if getattr(provider, "provider", "") == "resend":
                 provider_id = m.get("provider_message_id") or m.get("zoho_message_id")
                 if not provider_id:
                     rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": "Resend may have accepted the message, but no provider id was saved; manual resolution required"})
                     counts["left"] += 1
                     continue
-                found = zoho.verify_sent(provider_id, m["id"])
+                found = provider.verify_sent(provider_id, m["id"])
+            elif getattr(provider, "provider", "") == "smtp":
+                # SMTP has no standard Sent-folder API. A provider acceptance response
+                # is recorded at send time; a crash/timeout remains ambiguous and is
+                # never converted into an automatic retry without external evidence.
+                rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": "SMTP outcome cannot be independently verified from a Sent folder; manual resolution required"})
+                counts["left"] += 1
+                continue
             else:
                 since = int((datetime.fromisoformat(m["reserved_at"].replace("Z", "+00:00")).timestamp() - 300) * 1000) if m.get("reserved_at") else 0
-                found = zoho.find_sent(m["token"], m["to_email"], since)
+                found = provider.find_sent(m["token"], m["to_email"], since)
         except Exception as exc:
-            if getattr(zoho, "provider", "") == "resend":
+            if getattr(provider, "provider", "") == "resend":
                 try:
                     rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": f"Resend verification unavailable: {type(exc).__name__}; manual resolution required"})
                 except Exception:
@@ -137,13 +165,23 @@ def reconcile(rpc, zoho) -> dict:
             rpc("intel_agent_confirm_send", {"p_message_id": m["id"], "p_zoho_message_id": found["zoho_message_id"], "p_rfc_message_id": found["rfc_message_id"],
                                              "p_thread_id": found["thread_id"], "p_sent_at": _iso(found["time_ms"])})
             counts["confirmed"] += 1
-        elif getattr(zoho, "provider", "") == "resend":
+        elif getattr(provider, "provider", "") == "resend":
             rpc("intel_agent_mark_unknown", {"p_message_id": m["id"], "p_error": "Resend provider id could not be verified; manual resolution required"})
             counts["left"] += 1
         else:
             rpc("intel_agent_fail_send", {"p_message_id": m["id"], "p_error": "verified absent from Sent folder", "p_permanent": False})
             counts["absent"] += 1
     return counts
+
+
+
+def _rfc_header(headers: dict, name: str) -> str:
+    """RFC field names are case-insensitive; provider APIs may preserve any casing."""
+    target = name.casefold()
+    for key, value in (headers or {}).items():
+        if str(key).casefold() == target:
+            return str(value or "").strip()
+    return ""
 
 
 def sync_inbox(rpc, zoho, own_addresses: set[str], overlap_ms: int = 3_600_000, limit: int = 50) -> dict:
@@ -163,8 +201,8 @@ def sync_inbox(rpc, zoho, own_addresses: set[str], overlap_ms: int = 3_600_000, 
         hdr = zoho.rfc_headers(item["folder_id"], item["id"])
         tok = TOKEN_RE.search(f"{item['subject']}\n{body}")
         r = rpc("intel_agent_record_inbound", {
-            "p_zoho_message_id": item["id"], "p_rfc_message_id": hdr.get("Message-ID", "").strip(), "p_in_reply_to": hdr.get("In-Reply-To", "").strip(),
-            "p_references": hdr.get("References", "").strip(), "p_from_email": sender, "p_subject": item["subject"], "p_body_text": body,
+            "p_zoho_message_id": item["id"], "p_rfc_message_id": _rfc_header(hdr, "Message-ID"), "p_in_reply_to": _rfc_header(hdr, "In-Reply-To"),
+            "p_references": _rfc_header(hdr, "References"), "p_from_email": sender, "p_subject": item["subject"], "p_body_text": body,
             "p_received_at": _iso(item["time_ms"]), "p_thread_id": item["thread_id"], "p_token": tok.group(0) if tok else None})
         if not r.get("duplicate"):
             fresh += 1

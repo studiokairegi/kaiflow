@@ -2,10 +2,11 @@
 // Deploy with --no-verify-jwt: portal visitors have no login, and every action authenticates itself.
 //
 // Secrets: VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT (mailto: or https: URL),
-//          optional PORTAL_HASH_PEPPER. SUPABASE_* are provided by the platform.
+//          required PORTAL_HASH_PEPPER (32+ characters) for public actions. SUPABASE_* are provided by the platform.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import webpush from "npm:web-push@3.6.7";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
+import { rateLimitIpHash } from "../_shared/rate_limit_identity.ts";
 import {
   buildPayload, cleanPrefs, isGone, namespacedKey, safeOpenUrl, shouldDeliver, validSubscription, validateJobs,
 } from "../_shared/push_logic.js";
@@ -56,8 +57,8 @@ Deno.serve(async (req) => {
       return json({ ok: true, ...(await dispatchDue(admin, publicKey, privateKey, subject)) });
     }
 
-    const forwarded = req.headers.get("cf-connecting-ip") || (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "unknown";
-    const ipHash = await sha256Hex(`${Deno.env.get("PORTAL_HASH_PEPPER") || ""}|${forwarded}`);
+    const ipHash = await rateLimitIpHash(req, Deno.env.get("PORTAL_HASH_PEPPER"));
+    if (!ipHash) throw new HttpError(503, "rate_limit_not_configured");
     const limited = async (scope: string, subjectHash: string, limit: number, seconds: number) => {
       const { data } = await admin.rpc("portal_rate_limit", { p_scope: scope, p_subject_hash: subjectHash, p_limit: limit, p_window_seconds: seconds });
       return data !== true;

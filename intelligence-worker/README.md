@@ -64,14 +64,15 @@ Apply `supabase/migrations/20261116090000_intelligence_crm_takeover.sql`, then r
 
 ## 2. Run from the KairFlow app (Windows, recommended)
 
-The browser cannot launch a Python process on your computer by itself. Install the small local controller once; it runs on `127.0.0.1` only and accepts control requests only from `https://app.studiokairegi.com` (plus the local Vite development origin). It never returns or logs the worker credentials.
+The browser cannot launch a Python process on your computer by itself. Install the small local controller once; it runs on `127.0.0.1` only and accepts control requests only from `https://app.studiokairegi.com` (plus the local Vite development origin). It requires a per-install bearer token in addition to exact Origin/Host checks, and never returns or logs worker credentials or the controller token.
 
 1. Complete the Python environment setup above.
-2. In a normal PowerShell window, run `.\windows\install-controller.ps1` from this folder. It creates `%LOCALAPPDATA%\KairFlowIntelligence\worker.env`; fill in the Supabase URL, anon key and agent email. Prefer storing the agent password in Windows Credential Manager using the `keyring` instructions above, leaving `KAIRFLOW_AGENT_PASSWORD` blank. If you put the password in the file instead, keep the file private.
-3. The controller starts automatically at Windows sign-in. Open KairFlow → Intelligence → Settings and use **Start Emma** / **Stop Emma**. Chrome may ask permission for KairFlow to access your local network; allow it.
+2. In a normal PowerShell window, run `.\windows\install-controller.ps1` from this folder. It creates `%LOCALAPPDATA%\KairFlowIntelligence\worker.env` and a random per-install `controller.token`; fill in the Supabase URL, anon key and agent email. Prefer storing the agent password in Windows Credential Manager using the `keyring` instructions above, leaving `KAIRFLOW_AGENT_PASSWORD` blank. If you put the password in the file instead, keep the file private.
+3. The controller starts automatically at Windows sign-in. Open KairFlow → Intelligence → Settings, paste the contents of `%LOCALAPPDATA%\KairFlowIntelligence\controller.token` into the Local controller access token field, then use **Start Emma** / **Stop Emma**. The token stays in memory while this Settings view is open and is never persisted by the app; never share it. Chrome may ask permission for KairFlow to access your local network; allow it.
+   To update an already-installed controller after updating the worker files, first use **Stop Emma** in Settings, then rerun the installer. It safely stops and replaces the old scheduled controller task.
 4. Starting Emma resumes queued worker activity. If sending is enabled and the emergency stop is OFF, approved messages may be sent under the existing rules.
 
-Do not run the older `KairFlow Intelligence Worker` scheduled task at the same time as the controller-managed worker; that would create two workers. If you previously installed that task, disable it before using the in-app controls. The older `run-worker.ps1` console method remains available for troubleshooting, but do not use it while the in-app worker is running.
+Choose exactly one worker installation mode: controller-managed (`install-controller.ps1`, recommended) OR the legacy SYSTEM scheduled worker (`install-task.ps1`). The installers refuse to coexist, and the worker also acquires a machine-wide singleton lock so manual starts cannot create a second instance. The scheduled-task wrapper runs the worker once; Task Scheduler is its only restart supervisor. NSSM/manual service mode is also mutually exclusive with these modes. The worker process rotates `worker.log` continuously at 5 MB with three retained backups.
 
 To remove only the controller auto-start, run `.\windows\uninstall-controller.ps1`. This leaves the worker settings and logs in place.
 
@@ -79,13 +80,14 @@ To remove only the controller auto-start, run `.\windows\uninstall-controller.ps
 - Try it in a console: `python -m kairflow_intel run` (Ctrl+C stops it cleanly). `python -m kairflow_intel once` drains the queue once.
 - Keep it running across reboots (recommended, no extra software): in an Administrator PowerShell run
   `.\windows\install-task.ps1 -ManageOllama`, fill in `C:\ProgramData\KairFlowIntelligence\worker.env`, then
-  `Start-ScheduledTask -TaskName 'KairFlow Intelligence Worker'`. The task starts at boot with no login, restarts on failure, keeps the password
+  `Start-ScheduledTask -TaskName 'KairFlow Intelligence Worker'`. This mutually exclusive legacy mode starts at boot with no login, restarts on failure, keeps the password
   in a file only SYSTEM and Administrators can read, and `-ManageOllama` starts Ollama on 127.0.0.1 only and blocks inbound port 11434.
   (Windows Credential Manager is per-user, so it is not used by the boot task. These scripts were not run on a Windows machine while writing them: read them first.)
-- Alternative with NSSM (free):
+- Alternative with NSSM (free; do not use alongside either scheduled-task mode or the controller):
   `nssm install KairFlowIntelligence "C:\path\.venv\Scripts\python.exe" "-m kairflow_intel run"`
   `nssm set KairFlowIntelligence AppDirectory C:\path\intelligence-worker`
   `nssm set KairFlowIntelligence AppExit Default Restart`
+  `nssm set KairFlowIntelligence AppEnvironmentExtra KAIRFLOW_WORKER_LOG_FILE=C:\ProgramData\KairFlowIntelligence\worker.log`
   Also turn off sleep and hibernate while plugged in. A crash, reboot or lost connection is safe: the job queue lives in Supabase,
   unfinished jobs return to the queue when their lease expires, and a message that might have been sent is **never** sent again. Mailbox providers use their Sent folder; Resend uses a saved provider id through the server-side verification proxy. If delivery cannot be verified, it stays "Delivery unverified" until you decide.
 
@@ -98,3 +100,11 @@ To remove only the controller auto-start, run `.\windows\uninstall-controller.ps
 ## What is NOT verified here
 The Zoho Mail endpoints in `kairflow_intel/zoho.py` follow Zoho's public documentation but have not been run against a real account. The Resend Intelligence transport uses `intel-resend-send` and `intel-resend-webhook`; its live API behavior must be verified against the actual Resend account before enabling it.
 Run `selftest zoho` after connecting and adjust response parsing in that one file if anything differs.
+
+## Phase 12 operations
+
+- The Overview > Worker operations panel combines the last database heartbeat, active job, Ollama signal, queue counts, expired leases and dead/failed jobs.
+- Jobs in `dead` or `failed` state can be manually requeued from Agent Activity Logs. Requeueing does not bypass message approval, recipient consent, kill-switch, provider assignment, quota or final send-boundary checks.
+- Initial and follow-up messages outside the configured send window are deferred to the next local opening time; the database final-send gate remains authoritative. Replies are not subject to the initial/follow-up send window.
+- Expired job leases are recovered by the next claim transaction, with a bounded lease-expiry diagnostic. A worker that loses/uncertainly renews a lease will not mark the job complete or failed as the former owner.
+- RFC threading association checks exact Message-ID tokens, preferring `In-Reply-To` over `References`, and requires the inbound sender to match the outbound recipient before associating the reply.

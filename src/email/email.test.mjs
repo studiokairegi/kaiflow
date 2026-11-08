@@ -299,7 +299,7 @@ function claimModel(nowFn, { leaseMs = 300_000, max = 12 } = {}) {
 function hookHarness(over = {}) {
   const clock = over.clock || (() => NOW);
   const model = claimModel(clock, over.claimOpts);
-  const log = { webhooks: model.rows, ingested: [], uploads: [], events: [], fetches: [], finishCalls: [] };
+  const log = { webhooks: model.rows, ingested: [], uploads: [], events: [], intelEvents: [], fetches: [], finishCalls: [] };
   const accountsByAddress = over.accounts || { "john@studiokairegi.com": [{ id: ACC, organization_id: ORG, address: "john@studiokairegi.com" }] };
   const store = {
     providerEnabled: async () => { if (over.flagError) throw new Error("flag read failed"); return over.enabled ?? true; },
@@ -310,6 +310,7 @@ function hookHarness(over = {}) {
     uploadAttachment: async (path, bytes, type) => { log.uploads.push({ path, size: bytes.length, type }); },
     ingestInbound: async (p) => { if (over.ingestError) throw new Error("ingest failed"); log.ingested.push(p); return { duplicate: false, message_id: "IN1", conversation_id: p.conversation_id || "NEWCONV" }; },
     applyDeliveryEvent: async (a) => { log.events.push(a); return over.applyResult || { found: over.eventFound ?? true }; },
+    applyIntelDeliveryEvent: async (a) => { log.intelEvents.push(a); if (over.intelError) throw new Error("intel rpc failure"); return over.intelResult || { found: over.intelFound ?? false }; },
   };
   const received = { id: "rx_1", to: ["John <john+kaaaaaaaa1111@studiokairegi.com>"], cc: [], bcc: [], from: "Ada <ada@client.com>", subject: "Re: Quote", message_id: "<abc@client.com>",
     created_at: new Date(NOW).toISOString(), html: "<p>Thanks!</p>", text: null,
@@ -406,6 +407,7 @@ test("webhook: delivery, bounce and complaint events update the message; unrelat
   assert.equal((await hook(ev("email.bounced", { bounce: { message: "Mailbox full", type: "Transient" } }), h.deps, { id: "e2" })).status, 200);
   assert.equal((await hook(ev("email.complained"), h.deps, { id: "e3" })).status, 200);
   assert.deepEqual(h.log.events.map((e) => [e.status, e.provider_event_id]), [["delivered", "e1"], ["bounced", "e2"], ["complained", "e3"]]);
+  assert.deepEqual(h.log.intelEvents.map((e) => [e.event_type, e.provider_event_id]), [["email.delivered", "e1"], ["email.bounced", "e2"], ["email.complained", "e3"]]);
   assert.equal(h.log.events[1].detail.reason, "Mailbox full");
   assert.equal((await hook(ev("email.opened"), h.deps, { id: "e4" })).status, 200);
   assert.equal(h.log.events.length, 3);                                    // opens are not stored as status changes
@@ -471,19 +473,19 @@ test("the Resend migrations follow every Intelligence migration and use unique n
   for (const e of email) assert.equal(names.filter((n) => n.startsWith(e + "_")).length, 1, `timestamp ${e} is used by exactly one file`);
 });
 
-test("browser code never contains provider secrets and Settings offers only providers the database flag enabled", () => {
+test("browser code never contains provider secrets and Intelligence Settings uses the dynamic provider registry", () => {
   const browserFiles = ["InboxModule.jsx", ...["lib", "components"].flatMap((d) => fs.readdirSync(new URL(`./${d}/`, import.meta.url)).filter((n) => /\.(js|jsx)$/.test(n)).map((n) => `${d}/${n}`))];
   assert.ok(browserFiles.length >= 8, "the Inbox browser code is scanned, including its subfolders");
   for (const f of browserFiles) {
     const src = fs.readFileSync(new URL(`./${f}`, import.meta.url), "utf8");
     assert.equal(/RESEND_API_KEY|RESEND_WEBHOOK_SECRET|api\.resend\.com|SERVICE_ROLE/.test(src), false, `${f} must not reference provider secrets`);
   }
-  assert.deepEqual(activeMailProviders({ gmail: false, zoho: false, resend: true }, { gmail: "Gmail", zoho: "Zoho Mail" }), []);
-  assert.deepEqual(activeMailProviders({ zoho: true }, { gmail: "Gmail", zoho: "Zoho Mail" }), [["zoho", "Zoho Mail"]]);
-  assert.deepEqual(activeMailProviders(null, { gmail: "Gmail" }), []);                  // still loading = paused
   const settings = fs.readFileSync(new URL("../intelligence/SettingsView.jsx", import.meta.url), "utf8");
-  assert.match(settings, /activeMailProviders\(flags\.data, MAIL_PROVIDERS\)/);
-  assert.match(settings, /options=\{active\}/);
+  assert.match(settings, /intelApi\.providerCatalog\(supabase\)/);
+  assert.match(settings, /intelApi\.providerAccounts\(supabase\)/);
+  assert.match(settings, /supports_multiple_accounts === true/);
+  assert.doesNotMatch(settings, /<AccessCard/);
+  assert.doesNotMatch(settings, /activeMailProviders\(flags\.data, MAIL_PROVIDERS\)/);
 });
 
 // ---------------------------------------------------------------- Inbox UI logic
@@ -972,4 +974,23 @@ test("new-email detection: silent on the first poll, counts only increases", () 
   assert.equal(newArrivals(5, 2), 0);          // reading mail lowers the count: no sound
   assert.equal(newArrivals(0, "1"), 1);
   assert.equal(newArrivals(undefined, 3), 0);
+});
+
+test("webhook: Intelligence delivery-event persistence failure is retried instead of acknowledged", async () => {
+  const h = hookHarness({ intelError: true });
+  const ev = { type: "email.bounced", created_at: new Date(NOW).toISOString(), data: { email_id: "resend_intel_1", to: ["producer@studio.test"], bounce: { message: "Mailbox unavailable" } } };
+  const res = await hook(ev, h.deps, { id: "intel_retry_1" });
+  assert.equal(res.status, 500);
+  assert.equal(h.log.webhooks.get("intel_retry_1").status, "failed");
+  assert.equal(h.log.intelEvents.length, 1);
+});
+
+test("webhook: Intelligence-only delivery event is accepted when CRM has no matching message", async () => {
+  const h = hookHarness({ eventFound: false, intelFound: true });
+  const ev = { type: "email.delivered", created_at: new Date(NOW - 5 * 60_000).toISOString(), data: { email_id: "resend_intel_only", to: ["artist@studio.test"] } };
+  const res = await hook(ev, h.deps, { id: "intel_only_event" });
+  assert.equal(res.status, 200);
+  assert.equal(h.log.events.length, 1);
+  assert.equal(h.log.intelEvents.length, 1);
+  assert.equal(h.log.webhooks.get("intel_only_event").status, "processed");
 });

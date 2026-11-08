@@ -3,8 +3,8 @@ from __future__ import annotations
 
 DEFAULT_TERMS = {
     "animation_studio_support": {
-        "terms_en": ["animation studio", "anime studio", "key animation", "layout animation", "in-between animation", "animation outsourcing", "freelance animators wanted", "animation production support"],
-        "terms_ja": ["アニメーター募集", "原画募集", "第二原画募集", "動画募集", "作画協力", "レイアウト募集", "LO募集", "仕上げ募集", "アニメ制作会社 外注"],
+        "terms_en": ["animation studio", "anime studio", "animation production company", "animation studio portfolio", "animation production credits", "key animation", "layout animation", "in-between animation", "animation outsourcing", "animation production support"],
+        "terms_ja": ["アニメーション制作会社", "アニメ制作会社", "作画スタジオ", "制作実績", "参加作品", "アニメーター募集", "原画募集", "第二原画募集", "作画協力", "アニメ制作会社 外注"],
         "exclude": ["school", "course", "tutorial", "スクール", "専門学校", "講座"],
     },
     "indie_game_developer": {

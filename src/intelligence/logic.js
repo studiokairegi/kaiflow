@@ -106,9 +106,12 @@ export const splitLines = (text) => String(text || "").split(/\r?\n/).map((l) =>
 export const joinLines = (arr) => (Array.isArray(arr) ? arr.join("\n") : "");
 
 /** Campaign form -> criteria patch (the database merges it into the stored criteria). */
-export function criteriaPatch({ keywords, seedUrls, qualifyMin, reviewMin }) {
-  const q = Math.max(0, Math.min(100, Math.round(Number(qualifyMin))));
-  const r = Math.max(0, Math.min(q, Math.round(Number(reviewMin))));
+export function criteriaPatch({ keywords, seedUrls, qualifyMin, reviewMin, prospectType }) {
+  // Studio-v2 has immutable Phase 1 decision bands. Keep the campaign payload aligned
+  // with the worker's server-side enforcement even if stale/custom values are loaded.
+  const isStudio = prospectType === "animation_studio_support";
+  const q = isStudio ? 70 : Math.max(0, Math.min(100, Math.round(Number(qualifyMin))));
+  const r = isStudio ? 50 : Math.max(0, Math.min(q, Math.round(Number(reviewMin))));
   if (!Number.isFinite(q) || !Number.isFinite(r)) throw new Error("Scores must be numbers between 0 and 100.");
   return { keywords: splitLines(keywords).map((k) => k.toLowerCase()), seed_urls: splitLines(seedUrls), qualify_min: q, review_min: r };
 }
@@ -219,18 +222,25 @@ export const mailProviderName = (mail) => MAIL_PROVIDERS[mail?.provider] || MAIL
 /** "Gmail connected (studio@gmail.com)" / "Mail not connected". */
 export const mailStatusLabel = (mail) => {
   if (!mail || mail.status === "disconnected" || !mail.status) return "Mail not connected";
-  if (mail.status === "connected") return `${mailProviderName(mail)} connected (${mail.mailbox || "mailbox"})`;
+  if (mail.status === "connected") {
+    const accounts = Array.isArray(mail.accounts) ? mail.accounts : [];
+    if (mail.provider === "multiple" || accounts.length > 1) {
+      const connected = accounts.filter((a) => a.status === "connected").length;
+      return `${connected} of ${accounts.length} provider accounts connected`;
+    }
+    return `${mailProviderName(mail)} connected (${mail.mailbox || "mailbox"})`;
+  }
   if (mail.status === "error" || mail.status === "check_failed") return `${mailProviderName(mail)} status check failed`;
   return `${mailProviderName(mail)}: ${String(mail.status).replace(/[_-]+/g, " ")}`;
 };
 /** What the person sees after Google/Zoho send them back to KairFlow (?intelligence=<flag>). Unknown flags show nothing. */
 export const OAUTH_RESULTS = Object.freeze({
-  gmail_connected: { tone: "ok", text: "Gmail is connected. Set KAIRFLOW_MAIL_PROVIDER=gmail on the worker, then run its selftest." },
+  gmail_connected: { tone: "ok", text: "Gmail is connected. Refresh provider accounts in Settings; outbound messages use their durable account assignment." },
   gmail_cancelled: { tone: "warn", text: "Gmail connection cancelled. Nothing was saved." },
   gmail_scope: { tone: "bad", text: "Gmail needs both permissions (send and read replies). Connect again and leave both ticked. Nothing was saved." },
   gmail_denied: { tone: "bad", text: "Only an administrator who is also an active Master User can connect Gmail. Nothing was saved." },
   gmail_error: { tone: "bad", text: "Gmail could not be connected. Nothing was saved. Check the Google app settings and try again." },
-  zoho_connected: { tone: "ok", text: "Zoho Mail is connected. Set KAIRFLOW_MAIL_PROVIDER=zoho on the worker, then run its selftest." },
+  zoho_connected: { tone: "ok", text: "Zoho Mail is connected. Refresh provider accounts in Settings; outbound messages use their durable account assignment." },
   zoho_denied: { tone: "bad", text: "Only an administrator who is also an active Master User can connect Zoho Mail. Nothing was saved." },
   zoho_error: { tone: "bad", text: "Zoho Mail could not be connected. Nothing was saved." },
 });

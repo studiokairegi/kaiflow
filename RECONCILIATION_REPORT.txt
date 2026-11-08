@@ -1,0 +1,70 @@
+KAIRFLOW REMOTE MIGRATION RECOVERY AND RECONCILIATION REPORT
+Generated: 2026-11-08
+Project ref inspected: hlplzosdgciavucaebfd
+Method: read-only SELECT against supabase_migrations.schema_migrations and pg_catalog.
+
+RECOVERED REMOTE-ONLY MIGRATION RECORDS (6)
+1. 20261107204107 intelligence_phase2_reengagement_scan
+2. 20261107204111 intelligence_resend_kill_switch
+3. 20261107204140 intelligence_phase2_global_send_pacing
+4. 20261107204144 intelligence_phase2_send_slot_enforcement
+5. 20261107204213 intelligence_phase2_fixes
+6. 20261107204217 intelligence_phase2_evidence_trace
+
+The first four SQL files were previously reconstructed from schema_migrations.statements.
+The last two are additionally reconstructed from the same table. SQL statements are preserved
+as retrieved and formatted into standalone files. Original comments, byte-level whitespace,
+encoding and line endings cannot be guaranteed because the database stores SQL statements,
+not original source-file bytes.
+
+REMOTE LEDGER OBSERVATION
+The queried remote schema_migrations table includes records through 20261117100000, along
+with the six extra 20261107* records above. The query did not show later local versions
+20261117110000, 20261118090000, 20261119090000, 20261120090000, 20261121090000,
+20261122090000 or 20261123100000.
+
+DEPLOYED-SCHEMA OBSERVATION (read-only)
+- intel_agent_followup_candidates(integer): exists. Its deployed body contains
+  p.review_reason !~ '^(Individualized English draft|Draft is too similar|Draft blocked by outbound policy)'.
+  PostgreSQL NULL semantics mean rows with review_reason IS NULL are filtered out by this
+  predicate. This is a confirmed deployed logic defect requiring a separately reviewed,
+  forward-only correction.
+- intel_admin_set_kill_switch(boolean): exists and currently checks sender_email,
+  physical_address, opt_out_text and agent_user_id before turning sending on.
+- intel_agent_acquire_send_slot(uuid): exists; deployed body uses clock_timestamp and
+  enforces active slot ownership/expiry.
+- intel_agent_mark_sending(uuid): exists; deployed body refuses or releases a reserved
+  message when its slot is expired or not owned by that message.
+- intel_agent_recent_outbound(integer): exists and returns idempotency_key, prospect_name
+  and contact_name.
+- intel_agent_context(uuid): exists and returns evidence IDs, message metadata, history and lead context.
+- intel_agent_set_message_evidence(uuid,jsonb): exists.
+- intel_settings.send_slot_until and send_slot_message_id exist.
+- intel_messages.evidence_trace exists.
+- The 10-argument intel_agent_upsert_draft overload exists.
+- The 11-argument overload with p_force_review does NOT exist.
+
+IMPORTANT ORDERING / REPLAY WARNING
+The six recovered versions are timestamped 20261107, before the local core-table and RPC
+migrations 20261108140000_intelligence_core_tables and 20261108160000_intelligence_rpcs.
+Their SQL references intel_settings, intel_messages and Intel functions created by those
+later-timestamped migrations. Therefore, placing these six files unmodified into the active
+supabase/migrations directory would cause a clean chronological replay to attempt to execute
+statements before their dependencies exist. Do NOT blindly copy them into supabase/migrations
+or run migration up/db push/db reset/repair as part of this recovery.
+
+RECOMMENDED SAFE RECONCILIATION
+- Keep these six SQL files as archival recovered evidence outside supabase/migrations,
+  e.g. supabase/recovery/remote-applied/.
+- Preserve the remote ledger as-is; do not rewrite or repair history automatically.
+- Compare each local pending migration (17110000 through 23100000) against the deployed
+  definitions before deciding whether it is a genuinely new change, a duplicate/reissue,
+  or a correction.
+- The current remote DB is missing the 11-argument p_force_review overload; 20261123100000
+  is therefore not confirmed deployed.
+- Fix the review_reason NULL predicate through a new forward-only migration after reviewing
+  the pending migration stack and dependency order.
+
+NO CHANGES MADE
+No SQL was executed except read-only SELECTs. No migration was applied or repaired. No local
+repository, Git state, worker, provider settings or email data was modified.

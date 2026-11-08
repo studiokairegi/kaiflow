@@ -3,6 +3,7 @@ success or failure back so a broken source stops itself instead of hammering a s
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 from . import anilist, commoncrawl, entity, feeds, gdelt, manual_post, profile, signals, siteanalysis, wikidata
 from .errors import PermanentError, TransientError
@@ -102,9 +103,15 @@ def h_seed_sources(d, job):
         out["wikidata"] = {"rows": raw, "new": new}
         if raw >= wikidata.PAGE and offset < 3000:
             _enq(d, "seed_sources", {"type": ptype, "offset": offset + wikidata.PAGE}, f"seed:wikidata:{offset + wikidata.PAGE}:{_week(d)}", delay=90)
-    if "anilist" in avail and _use(d, "anilist", 2):
+    # Three status groups request 2 + 1 + 2 pages respectively. Reserve
+    # the maximum number of outbound page requests before making any of them.
+    if "anilist" in avail and _use(d, "anilist", 5):
         try:
-            studios = anilist.fetch_studios(d.api, "RELEASING", 2) + anilist.fetch_studios(d.api, "NOT_YET_RELEASED", 1)
+            studios = (
+                anilist.fetch_studios(d.api, "RELEASING", 2)
+                + anilist.fetch_studios(d.api, "NOT_YET_RELEASED", 1)
+                + anilist.fetch_studios(d.api, "FINISHED", 2)
+            )
             _report(d, "anilist", True)
         except (TransientError, PermanentError) as exc:
             _report(d, "anilist", False, exc)
@@ -126,9 +133,14 @@ def h_analyze_site(d, job):
         return {"skipped": "not analyzable"}
     avail = d.rpc("intel_agent_sources", {}) or {}
     out = {}
-    if "site_crawler" in avail and _use(d, "site_crawler", 3):
+    if "site_crawler" in avail:
+        class MeteredSiteFetcher:
+            def fetch(self, url):
+                if not _use(d, "site_crawler"):
+                    raise PermanentError("site_crawler source is disabled, unconfirmed, over budget or circuit-open")
+                return d.fetcher.fetch(url)
         try:
-            out = siteanalysis.analyze(d, ctx)
+            out = siteanalysis.analyze(replace(d, fetcher=MeteredSiteFetcher()), ctx)
         except PermanentError as exc:
             d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": f"site could not be read: {exc}"[:280]})
             return {"unreadable": str(exc)[:120]}
@@ -215,11 +227,11 @@ def h_crawl_index(d, job):
         if not crawl or not _use(d, "commoncrawl"):
             break
         try:
-            rows = commoncrawl.recruit_pages(d.api, crawl, k["domain"])
+            rows = commoncrawl.evidence_pages(d.api, crawl, k["domain"])
         except (TransientError, PermanentError):
             continue
         for r in rows[:10]:
-            d.rpc("intel_agent_record_item", {"p_source": "commoncrawl", "p_type": "recruit_page", "p_url": r["url"], "p_title": "archived page", "p_snippet": "", "p_language": "", "p_prospect_id": k["prospect_id"], "p_meta": {"crawl": crawl, "timestamp": r.get("timestamp", "")}})
+            d.rpc("intel_agent_record_item", {"p_source": "commoncrawl", "p_type": "public_work_page", "p_url": r["url"], "p_title": "archived public evidence page", "p_snippet": "", "p_language": "", "p_prospect_id": k["prospect_id"], "p_meta": {"crawl": crawl, "timestamp": r.get("timestamp", ""), "evidence_path": "portfolio_or_production_or_recruitment"}})
             found += 1
         if rows:
             _enq(d, "analyze_site", {"prospect_id": k["prospect_id"]}, f"analyze:{k['prospect_id']}:{crawl}")

@@ -6,6 +6,14 @@
 param([switch]$ManageOllama, [string]$OllamaExe = "C:\Users\$env:USERNAME\AppData\Local\Programs\Ollama\ollama.exe")
 $ErrorActionPreference = "Stop"
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw "Run this in an Administrator PowerShell." }
+$controllerTask = Get-ScheduledTask -TaskName "KairFlow Local Worker Controller" -ErrorAction SilentlyContinue
+if ($controllerTask) { throw "The KairFlow Local Worker Controller task exists. Remove that controller installation before installing the legacy scheduled-worker mode." }
+$nssmService = Get-Service -Name "KairFlowIntelligence" -ErrorAction SilentlyContinue
+if ($nssmService) { throw "The KairFlowIntelligence NSSM service exists. Remove that service before installing scheduled-worker mode." }
+$pythonProcesses = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^python(w)?\.exe$' }
+$runningWorker = $pythonProcesses | Where-Object { $_.CommandLine -match 'kairflow_intel\s+run' }
+$runningController = $pythonProcesses | Where-Object { $_.CommandLine -match 'controller\.py' }
+if ($runningWorker -or $runningController) { throw "A KairFlow worker or controller is already running. Stop it before installing scheduled-worker mode." }
 $dir = "C:\ProgramData\KairFlowIntelligence"; $envFile = Join-Path $dir "worker.env"
 New-Item -ItemType Directory -Force $dir | Out-Null
 if (-not (Test-Path $envFile)) {

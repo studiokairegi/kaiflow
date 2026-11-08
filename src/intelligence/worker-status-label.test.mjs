@@ -14,3 +14,8 @@ test("Emma controls still use the local controller and expose start/stop", () =>
   assert.match(source, /"Start Emma"/);
   assert.match(source, /"Stop Emma"/);
 });
+
+test("Emma controller access requires an in-memory per-install token", () => {
+  assert.match(source, /Authorization: `Bearer \${token}`/);
+  assert.match(source, /controller\.token/);
+});

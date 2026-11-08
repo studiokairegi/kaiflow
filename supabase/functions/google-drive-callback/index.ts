@@ -1,3 +1,4 @@
+// Deploy with --no-verify-jwt: Google redirects without a Supabase session; consume the single-use intent.
 // GET /google-drive-callback?code=...&state=<intent id>
 // Exchanges the authorization code for tokens, consumes the intent to
 // recover which studio user is connecting (see migration_oauth_intents.sql

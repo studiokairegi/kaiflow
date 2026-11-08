@@ -104,12 +104,14 @@ class NaturalPhrasing(unittest.TestCase):          # false positives found on re
             with self.subTest(tail):
                 self.assertTrue(compose(self.CORE + tail)["model_written"])
 
-    def test_contraction_wont_is_not_the_risky_word_won(self):
-        # must not be rejected for the word "won"; any rejection must come from a different rule
-        try:
-            compose(self.CORE + "We won't take much of your time.")
-        except PermanentError as exc:
-            self.assertNotIn("high-specificity", str(exc))
+    def test_ascii_and_curly_wont_contractions_are_not_risky_claims(self):
+        # Neither typographic form may be rejected by the high-specificity “won” guard.
+        for contraction in ("won't", "won’t", "won‘t"):
+            with self.subTest(contraction=contraction):
+                try:
+                    compose(self.CORE + f"We {contraction} take much of your time.")
+                except PermanentError as exc:
+                    self.assertNotIn("high-specificity", str(exc))
 
     def test_real_won_claim_still_blocked(self):
         with self.assertRaises(PermanentError):

@@ -27,13 +27,14 @@ test("the send-slot RPC and final sending transition both recheck the emergency 
 });
 
 test("worker completes reply preflight before slot acquisition and keeps the final guard adjacent to send", () => {
+  const assignment = worker.indexOf("intel_agent_assign_provider_account");
   const parent = worker.indexOf("parent = parent_zoho_id(rpc, m)");
   const slot = worker.indexOf("intel_agent_acquire_send_slot");
   const sending = worker.indexOf("intel_agent_mark_sending");
-  const provider = worker.indexOf("out = zoho.send(");
-  assert.ok(parent >= 0 && slot > parent && sending > slot && provider > sending);
+  const provider = worker.indexOf("out = provider.send(");
+  assert.ok(assignment >= 0 && parent > assignment && slot > parent && sending > slot && provider > sending);
   assert.ok(provider - sending < 500, "no extra network preflight should be inserted between final DB guard and provider send");
-  assert.match(jobs, /r\.get\("reason"\) == "send_spacing"[\s\S]*?_enq\(d, "send"/);
+  assert.match(jobs, /r\.get\("reason"\) in \("send_spacing", "provider_account_quota"\)[\s\S]*?_enq\(d, "send"/);
   assert.doesNotMatch(jobs, /_last_send/);
 });
 

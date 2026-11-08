@@ -416,6 +416,8 @@ export interface WebhookStore {
   uploadAttachment(path: string, bytes: Uint8Array, contentType: string): Promise<void>;
   ingestInbound(p: Record<string, unknown>): Promise<{ duplicate: boolean; message_id: string; conversation_id?: string }>;
   applyDeliveryEvent(a: { provider_message_id: string; status: string; event_type: string; provider_event_id: string; occurred_at: string | null; detail: Record<string, unknown> }): Promise<{ found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean }>;
+  /** Route authenticated Resend delivery events into Intelligence, matching exact provider message/account provenance. */
+  applyIntelDeliveryEvent(a: { provider_message_id: string; event_type: string; provider_event_id: string; occurred_at: string | null; recipient: string; reason: string }): Promise<{ found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean }>;
 }
 export interface WebhookDeps {
   env: (k: string) => string | undefined;
@@ -597,8 +599,19 @@ export async function processDeliveryEvent(d: WebhookDeps, svixId: string, event
   if (!emailId) return { result: "ignored", reason: "missing email id" };
   const detail = { reason: String(event?.data?.bounce?.message || event?.data?.failed?.reason || event?.data?.reason || "").slice(0, 400), type: event?.data?.bounce?.type || null };
   const out = await d.store.applyDeliveryEvent({ provider_message_id: emailId, status, event_type: String(event.type), provider_event_id: svixId, occurred_at: event?.created_at || null, detail });
-  if (out.ambiguous) { console.error("resend-webhook: provider message id matches several messages; not updated"); return { result: "ignored", reason: "ambiguous provider message id" }; }
-  if (out.found) return { result: "processed" };
+  if (out.ambiguous) console.error("resend-webhook: provider message id matches several CRM messages; CRM row not updated");
+  // CRM Inbox and Intelligence own separate message rows, and either side can
+  // exist independently. Route the authenticated event to both idempotent stores.
+  const rawTo = event?.data?.to;
+  const recipients = Array.isArray(rawTo) ? rawTo.map((x: unknown) => String(x || "").trim().toLowerCase()).filter(Boolean) : [];
+  const intel = await d.store.applyIntelDeliveryEvent({
+    provider_message_id: emailId, event_type: String(event.type), provider_event_id: svixId,
+    occurred_at: event?.created_at || null, recipient: recipients.length === 1 ? recipients[0] : "",
+    reason: detail.reason,
+  });
+  if (intel.ambiguous) throw new Error("Intelligence provider message id is ambiguous");
+  if (out.found || intel.found) return { result: "processed" };
+  if (out.ambiguous) return { result: "ignored", reason: "ambiguous provider message id" };
   const age = d.now() - Date.parse(String(event?.created_at || ""));
   if (Number.isFinite(age) && age < 120_000) throw new Error("Message not recorded yet");
   return { result: "ignored", reason: "unknown provider message id" };

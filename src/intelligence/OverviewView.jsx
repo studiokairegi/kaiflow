@@ -41,6 +41,19 @@ export default function OverviewView({ o, mail, supabase, onChanged, setTab, onN
         <Kpi label="Need a decision" value={st.needs_review || 0} tone={st.needs_review ? "warn" : "ok"} onClick={onNeedsDecision} />
         <Kpi label="Replies" value={st.replied || 0} onClick={() => setTab("outreach")} />
       </div>
+      <Section title="Worker operations" hint="One machine-wide worker instance, database heartbeat, active work and recoverable queue state.">
+        <div style={S.grid(190)}>
+          <Kpi label="Worker heartbeat" value={o.worker_last_seen_seconds == null ? "Never" : `${Math.max(0, Math.round(o.worker_last_seen_seconds / 60))} min ago`} sub={o.worker_id || "No worker identity"} />
+          <Kpi label="Queued jobs" value={o.ready_jobs ?? o.queued_jobs ?? 0} sub={`${o.running_jobs ?? 0} running`} />
+          <Kpi label="Scheduled deferrals" value={o.scheduled_jobs ?? 0} sub="Waiting for run time" />
+          <Kpi label="Expired leases" value={o.expired_leases ?? 0} tone={o.expired_leases ? "warn" : "ok"} />
+          <Kpi label="Dead / failed jobs" value={`${o.dead_jobs ?? 0} / ${o.failed_jobs ?? 0}`} tone={(o.dead_jobs || o.failed_jobs) ? "warn" : "ok"} />
+        </div>
+        {o.oldest_queued_seconds != null && <Muted>Oldest queued job: {Math.max(0, Math.round(o.oldest_queued_seconds / 60))} minutes</Muted>}
+        {o.worker_info?.active_job?.kind && <Muted>Currently processing: {o.worker_info.active_job.kind}</Muted>}
+        {o.worker_info?.last_job_error && <Banner tone="warn">Last worker job issue: {o.worker_info.last_job_error}</Banner>}
+        {o.worker_info?.ollama === false && <Banner tone="warn">Ollama did not report healthy at the last worker heartbeat.</Banner>}
+      </Section>
       <div style={S.grid(300)}>
         <Section title="By campaign" hint="Prospects discovered so far.">
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

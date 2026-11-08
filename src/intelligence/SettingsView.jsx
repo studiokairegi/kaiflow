@@ -1,10 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, useBusy } from "../finance/ui.jsx";
 import { intelApi } from "./api.js";
-import { AUTONOMY, KB_KINDS, MAIL_PROVIDERS, fmtWhen, mailProviderName, missingJapaneseKb, missingKb, sourceState } from "./logic.js";
+import { AUTONOMY, KB_KINDS, fmtWhen, missingJapaneseKb, missingKb, sourceState } from "./logic.js";
 import { Input, Muted, Section, Select, TextArea, useLoad, confirmAction } from "./kit.jsx";
-import { emailApi } from "../email/lib/api.js";
-import { activeMailProviders } from "../email/lib/logic.js";
 
 const WORKER_CONTROL_URL = "http://127.0.0.1:17843";
 
@@ -13,11 +11,16 @@ function WorkerControlCard() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [checkedAt, setCheckedAt] = useState(null);
+  // Keep the local process-control credential in component memory only; never persist it.
+  const [controllerToken, setControllerToken] = useState("");
 
   const request = async (path, method = "GET") => {
+    const token = controllerToken.trim();
+    if (!token) throw new Error("Enter the local controller token from %LOCALAPPDATA%\\KairFlowIntelligence\\controller.token.");
     const response = await fetch(`${WORKER_CONTROL_URL}${path}`, {
       method, mode: "cors", credentials: "omit", cache: "no-store",
-      ...(method === "POST" ? { headers: { "Content-Type": "application/json" }, body: "{}" } : {}),
+      headers: { Authorization: `Bearer ${token}`, ...(method === "POST" ? { "Content-Type": "application/json" } : {}) },
+      ...(method === "POST" ? { body: "{}" } : {}),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.ok) throw new Error(data.error || `Local controller returned ${response.status}.`);
@@ -37,7 +40,7 @@ function WorkerControlCard() {
     refresh();
     const timer = window.setInterval(refresh, 5000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [controllerToken]);
 
   const act = async (action) => {
     if (action === "start" && !confirmAction("Start Emma on this computer? The worker will resume its configured queue. If email sending is enabled and the emergency stop is OFF, approved messages may be sent under your existing limits.")) return;
@@ -69,8 +72,10 @@ function WorkerControlCard() {
           <Btn kind="link" disabled={busy} onClick={refresh}>Refresh</Btn>
         </div>
       </div>
-      {!online && <Banner tone="warn">The local controller is not reachable. On this computer, run <code>intelligence-worker\windows\install-controller.ps1</code> once in PowerShell, then refresh. If Chrome asks to allow local network access, allow it for KairFlow.</Banner>}
-      {error && online && <Banner tone="bad">{error}</Banner>}
+      {!online && <Banner tone="warn">{controllerToken ? "The local controller is not reachable or rejected the token. Check the controller installation and token, then refresh." : "Paste the contents of %LOCALAPPDATA%\\KairFlowIntelligence\\controller.token below. If the controller is not installed yet, run intelligence-worker\\windows\\install-controller.ps1 once in PowerShell."} If Chrome asks to allow local network access, allow it for KairFlow.</Banner>}
+      <Field label="Local controller access token" hint="This per-computer token authorizes starting and stopping Emma. It stays in memory while this Settings view is open and is never persisted by the app."><Input type="password" value={controllerToken} onChange={(e) => setControllerToken(e.target.value)} placeholder="Paste controller.token contents" /></Field>
+      {controllerToken && <div><Btn kind="link" onClick={() => setControllerToken("")}>Clear controller token</Btn></div>}
+      {error && <Banner tone="bad">{error}</Banner>}
       {status?.last_error && <Banner tone="bad">Worker restart problem: {status.last_error}</Banner>}
       {online && !running && status?.last_exit_code !== null && status?.last_exit_code !== undefined && <Banner tone="warn">The worker exited with code {status.last_exit_code}. Check `%LOCALAPPDATA%\KairFlowIntelligence\worker.log` for details.</Banner>}
       {online && !running && <p style={S.sub}>Emma is stopped. Starting her resumes queued discovery, research and drafting work. Email sending remains governed by the existing approval, autonomy, daily-limit and emergency-stop settings.</p>}
@@ -133,50 +138,83 @@ function SenderCard({ s, supabase, onSaved }) {
   );
 }
 
-function AccessCard({ s, mail, supabase, onSaved }) {
-  const [agent, setAgent] = useState("");
-  const [provider, setProvider] = useState(mail?.provider || "gmail");
-  const [dc, setDc] = useState(mail?.data_center && mail.data_center !== "google" ? mail.data_center : "com");
-  const { busy, error, run } = useBusy();
-  // Gmail and Zoho are PAUSED by a database flag (public.email_provider_flags); email runs through Resend. Unknown or still loading = paused.
-  const flags = useLoad(() => emailApi.providerFlags(supabase).catch(() => ({})), [supabase]);
-  const active = activeMailProviders(flags.data, MAIL_PROVIDERS);
-  useEffect(() => { if (active.length && !active.some(([k]) => k === provider)) setProvider(active[0][0]); }, [flags.data]);   // eslint-disable-line react-hooks/exhaustive-deps
-  const connect = () => run(async () => {
-    const fn = provider === "gmail" ? "intel-gmail-connect" : "intel-zoho-connect";
-    const { data, error: e } = await supabase.functions.invoke(fn, { body: provider === "gmail" ? {} : { data_center: dc } });
-    if (e || !data?.url) throw new Error(e?.message || `Could not start the ${MAIL_PROVIDERS[provider]} connection.`);
-    window.location.href = data.url;
-  });
-  const connected = mail?.status === "connected";
-  return (
-    <Section title="Connections" hint="The worker signs in as its own limited account and can only run the agent functions. It is never an administrator.">
-      {error && <Banner tone="bad">{error}</Banner>}
-      <div style={S.row}><b>Agent account</b>{s.agent_user_id ? <Pill tone="ok">registered</Pill> : <Pill tone="warn">not registered</Pill>}</div>
-      <div style={S.row}>
-        <Input style={{ maxWidth: 380 }} placeholder="Agent user id (UUID from Supabase Auth)" value={agent} onChange={(e) => setAgent(e.target.value.trim())} />
-        <Btn disabled={busy || !agent} onClick={() => run(async () => { await intelApi.registerAgent(supabase, agent); setAgent(""); await onSaved(); })}>{s.agent_user_id ? "Replace agent account" : "Register agent account"}</Btn>
-      </div>
-      <div style={S.row}><b>Mailbox</b><Pill tone={connected ? "ok" : "warn"}>{mail?.status || "disconnected"}</Pill>{connected && <span style={{ color: T.muted }}>{mailProviderName(mail)}: {mail.mailbox}</span>}{mail?.last_sync_at && <span style={{ color: T.faint, fontSize: 12 }}>last sync {fmtWhen(mail.last_sync_at)}</span>}</div>
-      {mail?.last_error && <Banner tone="bad">{mail.last_error}</Banner>}
-      {active.length === 0 ? (
-        <Muted>Gmail and Zoho Mail connections are paused. Email now runs through Resend: use CRM &gt; Inbox. Existing connections and history are kept.</Muted>
-      ) : (
-      <>
-      <div style={S.row}>
-        <Select value={provider} onChange={(e) => setProvider(e.target.value)} style={{ maxWidth: 200 }} options={active} />
-        {provider === "zoho" && <Select value={dc} onChange={(e) => setDc(e.target.value)} style={{ maxWidth: 240 }} options={ZOHO_DCS} />}
-        <Btn disabled={busy} onClick={connect}>{connected && mail.provider === provider ? `Reconnect ${MAIL_PROVIDERS[provider]}` : `Connect ${MAIL_PROVIDERS[provider]}`}</Btn>
-        {connected && <Btn kind="danger" disabled={busy} onClick={() => confirmAction(`Disconnect ${mailProviderName(mail)}? Sending is switched off and the stored connection is deleted. Also remove KairFlow under connected apps / third-party access in your mail account.`) && run(async () => { await intelApi.disconnectMail(supabase); await onSaved(); })}>Disconnect</Btn>}
-      </div>
-      {connected && mail.provider !== provider && <Muted>Connecting {MAIL_PROVIDERS[provider]} replaces the current {mailProviderName(mail)} connection. There is one mailbox per studio.</Muted>}
-      {provider === "gmail"
-        ? <Muted>Use a dedicated Gmail account, not your personal one. Send and read-replies permissions are requested, nothing else. The sender email above must equal this Gmail address. Set KAIRFLOW_MAIL_PROVIDER=gmail on the worker.</Muted>
-        : <Muted>Pick the data center your Zoho account lives on (the address you see when signed in to Zoho Mail). Only mail read and send permissions are requested. API access depends on your Zoho plan. Set KAIRFLOW_MAIL_PROVIDER=zoho on the worker.</Muted>}
-      </>
-      )}
-    </Section>
-  );
+function ProviderAccountsCard({ supabase, tick, onSaved }) {
+  const catalog = useLoad(() => intelApi.providerCatalog(supabase), [supabase, tick]);
+  const accounts = useLoad(() => intelApi.providerAccounts(supabase), [supabase, tick]);
+  const [provider, setProvider] = useState("gmail");
+  const [zohoDc, setZohoDc] = useState("com");
+  const [busyId, setBusyId] = useState("");
+  const [error, setError] = useState("");
+  const [working, setWorking] = useState(false);
+  const [consentEmail, setConsentEmail] = useState("");
+  const [consentEvidence, setConsentEvidence] = useState("");
+  const [consentPurpose, setConsentPurpose] = useState("consented_prospecting");
+  const [smtp, setSmtp] = useState({ mailbox: "", host: "", port: "587", username: "", password: "", tls_mode: "starttls" });
+  const run = async (id, fn) => { setBusyId(id); setError(""); try { await fn(); await accounts.reload(); await onSaved?.(); } catch (e) { setError(e?.message || "Provider account operation failed."); } finally { setBusyId(""); } };
+  const connect = async () => {
+    setWorking(true); setError("");
+    try {
+      if (provider === "smtp") {
+        const { data, error: invokeError } = await supabase.functions.invoke("intel-provider-smtp-connect", { body: { ...smtp, port: Number(smtp.port) } });
+        if (invokeError || !data?.ok) throw new Error(invokeError?.message || data?.error || "Could not save SMTP account.");
+        await accounts.reload(); await onSaved?.();
+        setSmtp({ mailbox: "", host: "", port: "587", username: "", password: "", tls_mode: "starttls" });
+      } else {
+        const { data, error: invokeError } = await supabase.functions.invoke("intel-provider-connect", { body: { provider_key: provider, ...(provider === "zoho" ? { data_center: zohoDc } : {}) } });
+        if (invokeError || !data?.url) throw new Error(invokeError?.message || data?.error || "Could not start provider authorization.");
+        window.location.href = data.url;
+      }
+    } catch (e) { setError(e?.message || "Could not connect account."); setWorking(false); }
+  };
+  const rows = accounts.data || [];
+  return <Section title="Email provider accounts" hint="Connect multiple mailboxes independently. New connections are disabled for sending until policy, approval and quota controls are configured. Resend is intentionally not available for prospect communication.">
+    {error && <Banner tone="bad">{error}</Banner>}
+    <div style={S.row}>
+      <Select value={provider} onChange={(e) => setProvider(e.target.value)} style={{ maxWidth: 220 }} options={(catalog.data || []).filter((p) => p.enabled && p.manifest?.supports_multiple_accounts === true && ["gmail", "zoho", "smtp"].includes(p.provider_key)).map((p) => [p.provider_key, p.display_name])} />
+      {provider === "zoho" && <Select value={zohoDc} onChange={(e) => setZohoDc(e.target.value)} options={[["com","US (.com)"],["eu","Europe (.eu)"],["in","India (.in)"],["com.au","Australia (.com.au)"],["jp","Japan (.jp)"],["ca","Canada (.ca)"],["sa","Saudi Arabia (.sa)"],["com.cn","China (.com.cn)"]]} />}
+      {provider !== "smtp" && <Btn kind="primary" disabled={working || !catalog.data?.some((p) => p.provider_key === provider && p.enabled && p.manifest?.supports_multiple_accounts === true)} onClick={connect}>{working ? "Opening…" : "Connect another account"}</Btn>}
+      <Btn kind="link" disabled={catalog.loading || accounts.loading} onClick={() => { catalog.reload(); accounts.reload(); }}>Refresh</Btn>
+    </div>
+    {provider === "smtp" && <div style={{ ...S.card, marginTop: 10 }}>
+      <b>Connect SMTP mailbox</b>
+      <Muted>Send-only adapter. Use an app-specific password where available. TLS is mandatory; credentials are encrypted before storage. New accounts remain disabled for sending.</Muted>
+      <div style={S.row}><Input value={smtp.mailbox} onChange={(e) => setSmtp((v) => ({ ...v, mailbox: e.target.value }))} placeholder="mailbox@example.com" />
+        <Input value={smtp.host} onChange={(e) => setSmtp((v) => ({ ...v, host: e.target.value }))} placeholder="smtp.example.com" />
+        <Input value={smtp.port} onChange={(e) => setSmtp((v) => ({ ...v, port: e.target.value }))} placeholder="587" /></div>
+      <div style={S.row}><Input value={smtp.username} onChange={(e) => setSmtp((v) => ({ ...v, username: e.target.value }))} placeholder="SMTP username" />
+        <Input type="password" value={smtp.password} onChange={(e) => setSmtp((v) => ({ ...v, password: e.target.value }))} placeholder="SMTP app password" />
+        <Select value={smtp.tls_mode} onChange={(e) => setSmtp((v) => ({ ...v, tls_mode: e.target.value }))} options={[["starttls", "STARTTLS (587)"], ["ssl", "Implicit TLS (465)"]]} />
+        <Btn kind="primary" disabled={working || !smtp.mailbox.includes("@") || !smtp.host || !smtp.username || !smtp.password || !["465", "587"].includes(smtp.port)} onClick={connect}>{working ? "Saving…" : "Save SMTP account"}</Btn></div>
+    </div>}
+    <Banner tone="info">Account connection does not authorize sending. The global emergency stop and existing human-approval rules remain authoritative. Each new account starts with sending OFF. Prospecting also requires explicit recorded consent for the exact recipient.</Banner>
+    {(catalog.data || []).filter((p) => ["gmail", "zoho", "smtp"].includes(p.provider_key)).map((p) => <div key={p.provider_key} style={{ ...S.row, marginTop: 8 }}>
+      <Pill tone={p.sending_enabled ? "warn" : "muted"}>{p.display_name} global provider gate: {p.sending_enabled ? "ON" : "OFF"}</Pill>
+      <Muted>Deployment-owner controlled. Organization admins can manage only their own mailbox accounts.</Muted>
+    </div>)}
+    <div style={{ ...S.card, marginTop: 12 }}>
+      <b>Record recipient permission</b>
+      <Muted>Use only when you have documented permission or an existing business-correspondence basis. Revocation blocks future dispatch.</Muted>
+      <div style={S.row}><Input value={consentEmail} onChange={(e) => setConsentEmail(e.target.value)} placeholder="recipient@example.com" />
+        <Select value={consentPurpose} onChange={(e) => setConsentPurpose(e.target.value)} options={[["consented_prospecting","Consented prospecting"],["business_correspondence","Business correspondence"]]} /></div>
+      <div style={S.row}><Input value={consentEvidence} onChange={(e) => setConsentEvidence(e.target.value)} placeholder="Evidence type / reference" />
+        <Btn small kind="primary" disabled={!!busyId || !consentEmail.includes("@") || !consentEvidence.trim()} onClick={() => run("consent", async () => { await intelApi.setContactPermission(supabase, { email: consentEmail, purpose: consentPurpose, evidenceType: "admin_recorded:" + consentEvidence.trim(), evidenceReference: consentEvidence.trim(), granted: true }); setConsentEmail(""); setConsentEvidence(""); })}>Record permission</Btn>
+        <Btn small kind="danger" disabled={!!busyId || !consentEmail.includes("@")} onClick={() => confirmAction(`Revoke ${consentPurpose.replaceAll("_", " ")} for ${consentEmail}?`) && run("consent-revoke", () => intelApi.setContactPermission(supabase, { email: consentEmail, purpose: consentPurpose, evidenceType: "admin_revocation", evidenceReference: "Revoked from provider settings", granted: false }))}>Revoke</Btn></div>
+    </div>
+    <Table rowKey={(r) => r.id} rows={rows} empty={accounts.loading ? "Loading provider accounts…" : "No provider accounts connected yet."} columns={[
+      { key: "mailbox", label: "Mailbox", render: (r) => <><b>{r.mailbox}</b><div style={{ color: T.muted, fontSize: 11 }}>{r.provider_key} · {r.auth_method}</div></> },
+      { key: "status", label: "Connection", render: (r) => <Pill tone={r.status === "connected" ? "ok" : "warn"}>{r.status}</Pill> },
+      { key: "health", label: "Health", render: (r) => <Pill tone={r.health_status === "healthy" ? "ok" : "muted"}>{r.health_status}</Pill> },
+      { key: "sync", label: "Sync", render: (r) => r.is_enabled ? "Enabled" : "Paused" },
+      { key: "send", label: "Sending", render: (r) => <span style={S.row}><Pill tone={r.send_enabled ? "warn" : "muted"}>{r.send_enabled ? "Configured on" : "OFF"}</Pill><Btn small disabled={!!busyId || r.status !== "connected" || !r.is_enabled || !(["gmail", "zoho", "smtp"].includes(r.provider_key))} onClick={() => confirmAction(`${r.send_enabled ? "Disable" : "Enable"} sending from ${r.mailbox}? Global provider gate, recipient policy, quotas and emergency stop still apply.`) && run(r.id, () => intelApi.updateProviderAccount(supabase, r.id, { send_enabled: !r.send_enabled }))}>{r.send_enabled ? "Turn off" : "Turn on"}</Btn></span> },
+      { key: "purpose", label: "Prospecting", render: (r) => { const purposes = r.allowed_message_purposes || ["business_correspondence"]; const allowed = purposes.includes("consented_prospecting"); return <span><Btn small disabled={!!busyId || !( ["gmail", "zoho", "smtp"].includes(r.provider_key))} onClick={() => confirmAction(`${allowed ? "Remove" : "Allow"} consented prospecting for ${r.mailbox}? Recipient-specific consent is still mandatory.`) && run(r.id, () => intelApi.updateProviderAccount(supabase, r.id, { allowed_message_purposes: allowed ? purposes.filter((x) => x !== "consented_prospecting") : [...purposes, "consented_prospecting"] }))}>{allowed ? "Allowed" : "Not allowed"}</Btn>{r.provider_key === "zoho" && <Muted>Manual approval required per message</Muted>}</span>; } },
+      { key: "limits", label: "Caps / day · hour · min", render: (r) => `${r.daily_send_limit ?? "∞"} · ${r.hourly_send_limit ?? "∞"} · ${r.minute_send_limit ?? "∞"}` },
+      { key: "actions", label: "Actions", render: (r) => <span style={S.row}>
+        <Btn small disabled={!!busyId || r.status !== "connected"} onClick={() => run(r.id, () => intelApi.updateProviderAccount(supabase, r.id, { is_enabled: !r.is_enabled }))}>{r.is_enabled ? "Pause sync" : "Enable sync"}</Btn>
+        <Btn small kind="danger" disabled={!!busyId} onClick={() => confirmAction(`Disconnect ${r.mailbox}? This disables this account only; other connected accounts are untouched.`) && run(r.id, () => intelApi.disconnectProviderAccount(supabase, r.id))}>Disconnect</Btn>
+      </span> },
+    ]} />
+    {rows.some((r) => r.last_error) && <div>{rows.filter((r) => r.last_error).map((r) => <Banner key={r.id} tone="warn">{r.mailbox}: {r.last_error}</Banner>)}</div>}
+  </Section>;
 }
 
 function ResendAuditCard({ supabase }) {
@@ -311,7 +349,7 @@ export default function SettingsView({ supabase, tick, mail, onChanged }) {
       <WorkerControlCard />
       <SafetyCard s={st.data} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />
       <SenderCard s={st.data} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />
-      <AccessCard s={st.data} mail={mail} supabase={supabase} onSaved={async () => { await st.reload(); await onChanged(); }} />
+      <ProviderAccountsCard supabase={supabase} tick={tick} onSaved={onChanged} />
       <ResendAuditCard supabase={supabase} />
       <SourcesCard supabase={supabase} />
       <KbCard supabase={supabase} />

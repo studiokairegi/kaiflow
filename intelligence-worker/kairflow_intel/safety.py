@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import codecs
 import re
 import socket
 import time
@@ -53,10 +54,23 @@ class _PinnedHTTPSPool(urllib3.connectionpool.HTTPSConnectionPool):
 
 class _PinnedPoolManager(urllib3.PoolManager):
     def __init__(self, dns_pin: str, **kwargs):
+        # urllib3 2.x assigns pool_classes_by_scheme during PoolManager.__init__;
+        # touching it before super().__init__ raises AttributeError. Override only
+        # after the base manager has installed its version-specific defaults.
+        super().__init__(dns_pin=dns_pin, **kwargs)
         self.pool_classes_by_scheme = dict(self.pool_classes_by_scheme)
         self.pool_classes_by_scheme["http"] = _PinnedHTTPPool
         self.pool_classes_by_scheme["https"] = _PinnedHTTPSPool
-        super().__init__(dns_pin=dns_pin, **kwargs)
+        # dns_pin is a connection-pool constructor kwarg, not part of urllib3's
+        # PoolKey schema. Keep it out of the cache key normalizer while leaving it
+        # in request_context so _new_pool passes it to the pinned pool class.
+        for scheme in ("http", "https"):
+            original_key_fn = self.key_fn_by_scheme[scheme]
+            def without_dns_pin(context, key_fn=original_key_fn):
+                clean = dict(context)
+                clean.pop("dns_pin", None)
+                return key_fn(clean)
+            self.key_fn_by_scheme[scheme] = without_dns_pin
 
 
 class _PinnedAdapter(HTTPAdapter):
@@ -77,8 +91,16 @@ JUNK_EMAIL_TLD = {"png", "jpg", "jpeg", "gif", "webp", "svg", "css", "js"}
 
 
 def is_public_ip(ip: str) -> bool:
-    a = ipaddress.ip_address(ip)
-    return not (a.is_private or a.is_loopback or a.is_link_local or a.is_multicast or a.is_reserved or a.is_unspecified)
+    """Accept only globally routable unicast addresses (not merely non-private ones).
+
+    In particular, shared address space (100.64.0.0/10), benchmarking and
+    documentation ranges are not public destinations even though older
+    ipaddress predicates did not classify all of them as private/reserved.
+    """
+    try:
+        return ipaddress.ip_address(ip).is_global
+    except ValueError:
+        return False
 
 
 def assert_public_url(url: str, resolver=socket.getaddrinfo) -> list[str]:
@@ -149,6 +171,19 @@ class Fetcher:
             return url, r
         raise PermanentError("too many redirects")
 
+    @staticmethod
+    def _read_response(response, limit: int) -> bytes:
+        """Read a bounded response body and normalize transport/read failures.
+
+        With ``stream=True``, requests can raise timeouts after ``get()`` has
+        returned, while the body is consumed. Those failures must enter the
+        worker's transient retry path just like connection-time timeouts.
+        """
+        try:
+            return response.raw.read(limit, decode_content=True)
+        except (requests.RequestException, urllib3.exceptions.HTTPError, OSError) as exc:
+            raise TransientError(f"response body read failed: {type(exc).__name__}") from exc
+
     def allowed_by_robots(self, url: str) -> bool:
         p = urlparse(url)
         origin = f"{p.scheme}://{p.netloc}"
@@ -167,7 +202,7 @@ class Fetcher:
                         owner.close()
                     return False
                 if r.status_code == 200:
-                    rp.parse(r.raw.read(200_000, decode_content=True).decode("utf-8", "replace").splitlines())
+                    rp.parse(self._read_response(r, 200_000).decode("utf-8", "replace").splitlines())
                     self._robots[origin] = rp
                 elif 400 <= r.status_code < 500:
                     self._robots[origin] = None            # no robots.txt: allowed
@@ -208,10 +243,15 @@ class Fetcher:
             ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             if ctype and not ctype.startswith(ALLOWED_TYPES):
                 raise PermanentError(f"unsupported content type {ctype}")
-            data = r.raw.read(self.cfg.max_fetch_bytes + 1, decode_content=True)
+            data = self._read_response(r, self.cfg.max_fetch_bytes + 1)
             if len(data) > self.cfg.max_fetch_bytes:
                 data = data[: self.cfg.max_fetch_bytes]
-            return final, data.decode(r.encoding or "utf-8", "replace")
+            encoding = r.encoding or "utf-8"
+            try:
+                codecs.lookup(encoding)
+            except (LookupError, TypeError):
+                encoding = "utf-8"
+            return final, data.decode(encoding, "replace")
         finally:
             r.close()
             owner = getattr(r, "_kairflow_pinned_session", None)
@@ -274,3 +314,23 @@ def sentence_around(text: str, start: int, end: int, max_len: int = 240) -> str:
         lo = max(0, mid - max_len // 2)
         s = s[lo: lo + max_len].strip()
     return s
+
+
+class MeteredFetcher:
+    """Wrap a safe Fetcher so every site-crawler operation reserves budget first.
+
+    sitemaps() can trigger an internal robots.txt request, so it is metered too.
+    """
+    def __init__(self, fetcher, reserve):
+        self._fetcher = fetcher
+        self._reserve = reserve
+
+    def fetch(self, url):
+        if not self._reserve():
+            raise PermanentError("site_crawler source is disabled, unconfirmed, over budget or circuit-open")
+        return self._fetcher.fetch(url)
+
+    def sitemaps(self, url):
+        if not self._reserve():
+            raise PermanentError("site_crawler source is disabled, unconfirmed, over budget or circuit-open")
+        return self._fetcher.sitemaps(url)

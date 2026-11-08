@@ -11,7 +11,7 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from . import scoring, signals
+from . import contactability, scoring, signals
 from .errors import PermanentError, TransientError
 from .ollama import validate
 from .safety import extract_emails, html_to_text, quote_in_text
@@ -178,14 +178,28 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
         verified.update({"contact_verification": "unknown_legacy", "contact_email": existing})
     elif run_id is not None:       # a reevaluation must not inherit an older run's "website_extracted": nothing was re-verified now
         verified.update({"contact_verification": "not_verified_this_run", "contact_email": ""})
+    contact_assessment = contactability.assess(
+        email=verified.get("contact_email") or existing,
+        official_domain=p.get("domain") or "",
+        source_url=verified.get("contact_source_url") or p.get("contact_source_url") or "",
+        verification=verified.get("contact_verification") or "",
+        verified_email=verified.get("contact_email") or "",
+        employee_affiliation=bool(verified.get("employee_affiliation_evidence")),
+        delivery_evidence=verified.get("delivery_evidence") or "",
+        bounced=bool(verified.get("bounced")), complained=bool(verified.get("complained")),
+        contact_form_only=not bool(verified.get("contact_email")) and any(
+            bool(BeautifulSoup(h, "lxml").find("form")) and re.search(r"contact|inquiry|お問い合わせ", url, re.I)
+            for url, h in pages),
+    )
+    verified["contactability"] = contact_assessment
     if run_id is not None:
         # By id, never through the canonical-key upsert: after a website recovery that upsert would derive a different key and create a duplicate prospect.
         rpc("intel_agent_reeval_record_research", {"p_run_id": run_id, "p_prospect_id": p["id"], "p_verified": verified, "p_contact_name": name or "",
                                                    "p_contact_email": contact["email"] if contact and not existing else "", "p_contact_source_url": (src if website_verified else "")})
-        return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "pages": len(pages), "text_chars": len(text)}
+        return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "contactability": contact_assessment, "pages": len(pages), "text_chars": len(text)}
     rpc("intel_agent_upsert_prospect", {"p_type": p["type"], "p_name": p["name"], "p_website": p["website"], "p_contact_name": name or "", "p_contact_email": contact["email"] if contact and not existing else "",
                                         "p_contact_source_url": (src if website_verified else ""), "p_country": ent.get("country_hint") or "", "p_language": language, "p_verified": verified})
-    return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "pages": len(pages), "text_chars": len(text)}
+    return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "contactability": contact_assessment, "pages": len(pages), "text_chars": len(text)}
 
 
 def prior_studio_model(p: dict) -> str | None:
@@ -242,23 +256,33 @@ def _qualify_studio(rpc, ctx: dict, criteria: dict, reeval: ReevalScope | None =
             sigs.setdefault(e["fact_type"], []).append(e["snippet"])
     verified = (p.get("facts") or {}).get("verified", {})
     meta = {"language": verified.get("language") or "other"}
-    email_status = verified.get("contact_verification")
     prospect_email = (p.get("contact_email") or "").strip().lower()
     verified_email = (verified.get("contact_email") or "").strip().lower()
-    email_is_verified = (
-        email_status in ("website_extracted", "human_confirmed")
-        and bool(prospect_email)
-        and verified_email == prospect_email
-        and (reeval is None or verified.get("reeval_run") == reeval.run_id)      # a reevaluation trusts only what it verified itself
-    )
-    contact = {"email": prospect_email, "name": p.get("contact_name") or "", "role": verified.get("contact_role", "")} if email_is_verified else None
-    res = scoring.score_studio(sigs, meta, contact, qualify_min=int(criteria.get("qualify_min", 70)), review_min=int(criteria.get("review_min", 50)))
+    current_run_ok = reeval is None or verified.get("reeval_run") == reeval.run_id
+    suppression = {}
+    try:
+        suppression = rpc("intel_agent_contactability_facts", {"p_email": prospect_email, "p_domain": p.get("domain") or ""}) or {}
+    except Exception:
+        # Missing/unavailable suppression lookup must never turn an address into Pass.
+        suppression = {"lookup_unavailable": True}
+    assessment = contactability.assess(
+        email=prospect_email, official_domain=p.get("domain") or "",
+        source_url=verified.get("contact_source_url") or p.get("contact_source_url") or "",
+        verification=verified.get("contact_verification") or "",
+        verified_email=verified_email,
+        employee_affiliation=bool(verified.get("employee_affiliation_evidence")),
+        delivery_evidence=verified.get("delivery_evidence") or "",
+        bounced=bool(verified.get("bounced") or suppression.get("bounced")),
+        complained=bool(verified.get("complained") or suppression.get("complained")),
+    ) if current_run_ok and not suppression.get("lookup_unavailable") else {"status": "needs_review", "reason": "suppression status could not be verified", "evidence": {}}
+    res = scoring.score_studio(sigs, meta, None, qualify_min=int(criteria.get("qualify_min", 70)), review_min=int(criteria.get("review_min", 50)))
+    res.contactability = assessment
     if reeval is not None:
         # Deliberate studio-v2 rescore over whatever score was there (legacy or not). Written through the run-scoped function, which re-checks
         # scope, run and "research recorded in this run" in the database. Ordinary qualification never reaches this branch.
         res.write = rpc("intel_agent_reeval_set_score", {"p_run_id": reeval.run_id, "p_prospect_id": p["id"], "p_score": res.score, "p_breakdown": res.breakdown, "p_decision": res.decision,
                                                          "p_reason": res.reason, "p_estimates": {"decision_basis": "deterministic rubric over verified evidence collected in this reevaluation run",
-                                                                                                 "scoring_model": res.model, "evidence_rows_used": len(evidence)}}) or {}
+                                                                                                 "scoring_model": res.model, "evidence_rows_used": len(evidence), "contactability": assessment}}) or {}
         return res
     prior = prior_studio_model(p)
     if prior is not None and prior != scoring.STUDIO_MODEL:
@@ -271,7 +295,7 @@ def _qualify_studio(rpc, ctx: dict, criteria: dict, reeval: ReevalScope | None =
         res.held = True
         return res
     rpc("intel_agent_set_score", {"p_prospect_id": p["id"], "p_score": res.score, "p_breakdown": res.breakdown, "p_decision": res.decision, "p_reason": res.reason,
-                                  "p_estimates": {"decision_basis": "deterministic rubric over verified evidence", "scoring_model": res.model}})
+                                  "p_estimates": {"decision_basis": "deterministic rubric over verified evidence", "scoring_model": res.model, "contactability": assessment}})
     return res
 
 
@@ -288,6 +312,18 @@ def qualify(rpc, ctx: dict, criteria: dict, *, reeval: ReevalScope | None = None
     contact = {"email": p.get("contact_email") or "", "name": p.get("contact_name") or "", "role": verified.get("contact_role", "")} if p.get("contact_email") else None
     fn = scoring.score_indie
     res = fn(sigs, meta, contact, qualify_min=int(criteria.get("qualify_min", 70)), review_min=int(criteria.get("review_min", 50)))
+    indie_email = p.get("contact_email") or ""
+    try:
+        suppression = rpc("intel_agent_contactability_facts", {"p_email": indie_email, "p_domain": p.get("domain") or ""}) or {}
+    except Exception:
+        suppression = {"lookup_unavailable": True}
+    res.contactability = contactability.assess(email=indie_email, official_domain=p.get("domain") or "",
+        source_url=verified.get("contact_source_url") or p.get("contact_source_url") or "",
+        verification=verified.get("contact_verification") or "", verified_email=verified.get("contact_email") or "",
+        employee_affiliation=bool(verified.get("employee_affiliation_evidence")), delivery_evidence=verified.get("delivery_evidence") or "",
+        bounced=bool(verified.get("bounced") or suppression.get("bounced")), complained=bool(verified.get("complained") or suppression.get("complained")))
+    if suppression.get("lookup_unavailable"):
+        res.contactability = {"status": "needs_review", "reason": "suppression status could not be verified", "evidence": {}}
     rpc("intel_agent_set_score", {"p_prospect_id": p["id"], "p_score": res.score, "p_breakdown": res.breakdown, "p_decision": res.decision, "p_reason": res.reason,
-                                  "p_estimates": {"decision_basis": "deterministic rubric over verified evidence"}})
+                                  "p_estimates": {"decision_basis": "deterministic rubric over verified evidence", "contactability": res.contactability}})
     return res

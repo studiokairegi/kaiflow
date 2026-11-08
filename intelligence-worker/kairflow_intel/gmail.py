@@ -51,6 +51,8 @@ def build_mime(from_addr: str, to_addr: str, subject: str, body: str, in_reply_t
 
 
 class GmailClient:
+    provider = "gmail"
+
     def __init__(self, tokens, session: requests.Session | None = None):
         self.tokens, self.s = tokens, session or requests.Session()
         self._meta: dict[str, dict] = {}      # id -> metadata headers (messages never change, so caching is safe)

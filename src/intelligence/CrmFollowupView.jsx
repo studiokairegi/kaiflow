@@ -22,8 +22,9 @@ export default function CrmFollowupView({ supabase, tick, onChanged, onOpenLead 
   const [dialog, setDialog] = useState(null);
   const { busy, error, run } = useBusy();
   const data = review.data || { counts: {}, leads: [] };
-  const rows = useMemo(() => (data.leads || []).filter((r) => filter === "all" || r.bucket === filter), [data, filter]);
   const takeoverByLead = useMemo(() => new Map((states.data || []).map((p) => [p.lead_id, p.takeover])), [states.data]);
+  const rows = useMemo(() => (data.leads || []).filter((r) => filter === "all" || (filter === "taken_over" ? takeoverByLead.has(r.lead_id) : r.bucket === filter)), [data, filter, takeoverByLead]);
+  const takenOverCount = (data.leads || []).filter((r) => takeoverByLead.has(r.lead_id)).length;
   const refreshAll = async () => { await review.reload(); await states.reload(); await onChanged(); };
 
   const toggleIntro = (row) => {
@@ -66,6 +67,7 @@ export default function CrmFollowupView({ supabase, tick, onChanged, onOpenLead 
           {CRM_ORDER.map((b) => (
             <Btn key={b} small kind={filter === b ? "primary" : "default"} onClick={() => setFilter(b)} title={bucketInfo(b).help}>{bucketInfo(b).label}: {data.counts?.[b] || 0}</Btn>
           ))}
+          <Btn small kind={filter === "taken_over" ? "primary" : "default"} onClick={() => setFilter("taken_over")}>Taken over: {takenOverCount}</Btn>
           <Btn small kind={filter === "all" ? "primary" : "default"} onClick={() => setFilter("all")}>All</Btn>
         </div>
         <Table rowKey={(r) => r.lead_id} empty={review.loading ? "Loading…" : "No leads in this group."} rows={rows}

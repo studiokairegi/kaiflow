@@ -1,3 +1,4 @@
+// Deploy with --no-verify-jwt: the single-use OAuth intent is the authorization credential.
 // GET /google-drive-connect?token=<supabase access token>
 // Verifies the studio user's identity, then redirects them to Google's
 // consent screen. The user's id is embedded in a signed `state` value so

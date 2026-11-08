@@ -108,3 +108,20 @@ small studios nobody links to.
 5. What runs by itself once the worker is up: weekly studio seeding (Wikidata, AniList), daily news scan (GDELT), 6-hourly feed polling, monthly archive check
    (Common Crawl), and per-studio site analysis (sitemaps, recruitment pages, feeds, credits links to other studios, 2 levels deep).
 Bluesky is intentionally not included, per your decision.
+
+## Dynamic provider foundation (Phase 2)
+
+The initial provider-registry and multi-account foundation is documented in [PHASE_2_PROVIDER_FOUNDATION.md](./PHASE_2_PROVIDER_FOUNDATION.md). The safe worker default remains `KAIRFLOW_MAIL_PROVIDER=none`. Gmail's new account-scoped adapter requires both `KAIRFLOW_MAIL_PROVIDER=gmail` and `KAIRFLOW_MAIL_ACCOUNT_ID`, and the provider/account sending gates remain disabled until the later dispatcher and management-interface increments are deployed. Do not enable sending by editing account rows manually.
+
+
+### Multi-account provider management (Phase 2.4)
+
+After applying the provider foundation and account-management migrations and deploying the three `intel-provider-*` Edge Functions, open Intelligence → Settings → Email provider accounts. Additional Gmail accounts can be connected independently. New accounts are intentionally sync-disabled and send-disabled until later dispatch/policy work is complete. Zoho multi-account OAuth is not yet available.
+
+### Phase 2.5 multi-account dispatch
+
+See `PHASE_2_5_MULTI_ACCOUNT_DISPATCH.md`. Apply migration `20261125090000_intelligence_multi_account_dispatch.sql` only after staging validation. New provider/account send gates are OFF by default. Prospecting requires an explicit exact-recipient permission record; business correspondence requires an inbound thread. Per-mailbox limits default to 25/day, 5/hour, and 1/minute. Do not enable sending until the staging checks and dedicated-mailbox end-to-end tests are complete.
+
+### Phase 2.6 SMTP adapter
+
+See [`PHASE_2_6_SMTP_ADAPTER.md`](./PHASE_2_6_SMTP_ADAPTER.md) for SMTP account setup, security behavior, deployment files, and the send-only limitations.

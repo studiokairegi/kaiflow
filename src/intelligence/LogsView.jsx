@@ -1,17 +1,22 @@
 import React, { useState } from "react";
-import { S, T, Pill, Banner, Table } from "../finance/ui.jsx";
+import { S, T, Pill, Banner, Table, Btn, useBusy } from "../finance/ui.jsx";
 import { intelApi } from "./api.js";
 import { fmtWhen } from "./logic.js";
-import { Muted, Section, Select, useLoad } from "./kit.jsx";
+import { Muted, Section, Select, useLoad, confirmAction } from "./kit.jsx";
 
 export default function LogsView({ supabase, tick }) {
   const acts = useLoad(() => intelApi.actions(supabase), [supabase, tick]);
   const jobs = useLoad(() => intelApi.jobs(supabase), [supabase, tick]);
   const [who, setWho] = useState("");
+  const { busy, error: actionError, run } = useBusy();
+  const recover = (job) => {
+    if (!confirmAction(`Requeue ${job.kind}? It will be rechecked by the worker and all existing approval, consent, kill-switch and send-boundary controls will still apply.`)) return;
+    run(async () => { const result = await intelApi.requeueJob(supabase, job.id); if (!result?.ok) throw new Error(result?.reason || "Job could not be requeued."); await jobs.reload(); });
+  };
   const rows = (acts.data || []).filter((a) => !who || a.actor === who);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {(acts.error || jobs.error) && <Banner tone="bad">{acts.error || jobs.error}</Banner>}
+      {(acts.error || jobs.error || actionError) && <Banner tone="bad">{actionError || acts.error || jobs.error}</Banner>}
       <Section title="Jobs" hint="Queued and running work, and anything that failed. Failed jobs retry automatically; dead ones need a look.">
         <Table rowKey={(r) => r.id} empty={jobs.loading ? "Loading…" : "No active or failed jobs."} rows={jobs.data || []}
           columns={[
@@ -20,6 +25,8 @@ export default function LogsView({ supabase, tick }) {
             { key: "attempts", label: "Tries", num: true, render: (r) => `${r.attempts}/${r.max_attempts}` },
             { key: "last_error", label: "Last error", render: (r) => <span style={{ color: T.muted }}>{r.last_error || "-"}</span> },
             { key: "updated_at", label: "Updated", render: (r) => fmtWhen(r.updated_at) },
+            { key: "recover", label: "Recovery", render: (r) => ["dead", "failed"].includes(r.state)
+              ? <Btn small disabled={busy} onClick={() => recover(r)}>Requeue</Btn> : <span style={{ color: T.faint }}>—</span> },
           ]} />
       </Section>
       <Section title="Agent activity" hint="Every action by the agent or by you, newest first. This log cannot be edited or deleted."

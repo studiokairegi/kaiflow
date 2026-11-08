@@ -1,5 +1,5 @@
-# Starts the KairFlow Intelligence worker with settings from a protected env file and restarts it if it ever exits.
-# Run by the scheduled task created by install-task.ps1. You can also run it by hand to test.
+# Single execution wrapper for the legacy scheduled-task mode.
+# Task Scheduler is the sole restart supervisor; do not create a second restart loop here.
 param(
   [string]$EnvFile = "C:\ProgramData\KairFlowIntelligence\worker.env",
   [string]$Python  = (Join-Path $PSScriptRoot "..\.venv\Scripts\python.exe"),
@@ -14,16 +14,17 @@ Get-Content $EnvFile | ForEach-Object {
     [Environment]::SetEnvironmentVariable($k.Trim(), $v.Trim(), "Process")
   }
 }
-# Safety: refuse to run if Ollama is pointed anywhere but this computer.
 $ollama = [Environment]::GetEnvironmentVariable("KAIRFLOW_OLLAMA_URL", "Process")
-if ($ollama -and $ollama -notmatch '^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?/?$') { throw "KAIRFLOW_OLLAMA_URL must be loopback, got $ollama" }
+if ($ollama -and $ollama -notmatch '^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?/?$') { throw "KAIRFLOW_OLLAMA_URL must point to this computer." }
 Set-Location $Dir
 $log = Join-Path (Split-Path $EnvFile) "worker.log"
-while ($true) {
-  "$(Get-Date -Format s) starting worker" | Add-Content $log
-  & $Python -m kairflow_intel run 2>&1 | Add-Content $log
-  "$(Get-Date -Format s) worker exited with code $LASTEXITCODE; restarting in 20 s" | Add-Content $log
-  # keep the log from growing without bound (about 5 MB)
-  if ((Get-Item $log).Length -gt 5MB) { Move-Item $log "$log.old" -Force }
-  Start-Sleep -Seconds 20
+[Environment]::SetEnvironmentVariable("KAIRFLOW_WORKER_LOG_FILE", $log, "Process")
+"$(Get-Date -Format s) starting worker" | Add-Content $log
+& $Python -m kairflow_intel run 2>&1 | Add-Content $log
+$workerExit = $LASTEXITCODE
+"$(Get-Date -Format s) worker exited with code $workerExit" | Add-Content $log
+if ($workerExit -eq 73) {
+  "$(Get-Date -Format s) duplicate worker detected; not restarting this instance" | Add-Content $log
+  exit 0
 }
+exit $workerExit

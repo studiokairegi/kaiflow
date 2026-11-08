@@ -12,6 +12,8 @@ STUDIO_V1_MAX = {"active_production": 20, "recruit_outsource": 25, "pipeline_fit
 
 # --- studio-v2 (Phase 1). Suitability only; contactability is NOT scored (Phase 5 owns it). -------------------------------
 STUDIO_MODEL = "studio-v2"
+STUDIO_QUALIFY_MIN = 70
+STUDIO_REVIEW_MIN = 50
 STUDIO_LEGACY_MODEL = "studio-v1"            # what every studio score written before Phase 1 was produced with
 # Pipeline fit (65) = seven items, each tied to one detectable signal on the studio's own pages.
 PIPELINE_ITEMS = [  # (item, signal, max)
@@ -19,7 +21,7 @@ PIPELINE_ITEMS = [  # (item, signal, max)
     ("coloring_finishing", "role_coloring", 10), ("character_animation", "role_character", 10),
     ("production_active", "production_active", 8), ("published_work", "multiple_titles", 7)]
 CAPABILITY_ITEMS = ("layout", "key_animation", "in_between_douga", "coloring_finishing", "character_animation")
-TWO_D_ITEMS = [("style_2d", "style_2d", 8), ("anime_production", "anime_production", 7)]
+TWO_D_ITEMS = [("style_2d", "style_2d", 8), ("style_2d_anime", "style_2d_anime", 7)]
 COLLAB_ITEMS = [("external_work", "external_collab", 9), ("business_inquiry", "business_inquiry", 3), ("outsourcing_announcement", "outsourcing", 3)]
 STUDIO_MAX = {"pipeline_fit": 65, "animation_2d": 15, "external_collaboration": 15, "language_preference": 5}
 assert sum(STUDIO_MAX.values()) == 100
@@ -41,6 +43,7 @@ class Result:
     uncertain: list = field(default_factory=list)
     held: bool = False                 # set by research.qualify when a legacy score was deliberately not overwritten
     write: dict = field(default_factory=dict)      # what the database answered to a reevaluation rescore (empty for ordinary qualification)
+    contactability: dict = field(default_factory=dict)
 
 
 def _row(name, pts, mx, why):
@@ -68,9 +71,8 @@ def score_indie(signals: dict, meta: dict, contact: dict | None, *, qualify_min:
     b.append(_row("commercial", min(15, comm), 15, "commercial signals from page/store" if comm else "none seen (budget is NOT assumed)"))
     b.append(_row("animation_need", 15 if "seeking_animation" in signals else 5 if "trailer" in signals else 0, 15,
                   "page asks for animation help" if "seeking_animation" in signals else "has trailer/cutscene content" if "trailer" in signals else "no stated need"))
-    kind = _contact_kind(contact)
-    b.append(_row("contact", {"business_email": 10, "generic_email": 7}.get(kind, 0), 10, kind))
-    return _decide(b, kind, qualify_min, review_min)
+    # Contactability is a separate decision and contributes no suitability points.
+    return _decide(b, "", qualify_min, review_min)
 
 
 def score_studio_v1(signals: dict, meta: dict, contact: dict | None, *, qualify_min: int = 70, review_min: int = 50) -> Result:
@@ -92,10 +94,8 @@ def score_studio_v1(signals: dict, meta: dict, contact: dict | None, *, qualify_
 
 def _decide(rows: list[dict], contact_kind: str, qualify_min: int, review_min: int) -> Result:
     total = sum(r["points"] for r in rows)
-    if total >= qualify_min and contact_kind in ("business_email", "generic_email"):
-        return Result(total, "qualified", "meets threshold with a verified business contact", rows)
     if total >= qualify_min:
-        return Result(total, "needs_review", "meets threshold but no verified business email (contact form or none)", rows)
+        return Result(total, "qualified", "meets suitability threshold", rows)
     if total >= review_min:
         return Result(total, "needs_review", "between review and qualify thresholds", rows)
     return Result(total, "rejected", "below review threshold", rows)
@@ -134,10 +134,16 @@ def _group(name: str, items: list[dict], status: str, why: str) -> dict:
     return {"criterion": name, "points": sum(i["points"] for i in items), "max": STUDIO_MAX[name], "why": why, "status": status, "model": STUDIO_MODEL, "items": items}
 
 
-def score_studio(signals: dict, meta: dict, contact: dict | None, *, qualify_min: int = 70, review_min: int = 50) -> Result:
-    """studio-v2. 100 = pipeline fit 65 + 2D relevance 15 + external-collaboration suitability 15 + English/Japanese preference 5.
-    Hiring / outsourcing wording is supplementary and cannot qualify a studio; nothing requires the studio to be hiring.
-    `signals` maps signal name -> evidence sentence, or -> list of sentences (every verified sentence should be passed)."""
+def score_studio(signals: dict, meta: dict, contact: dict | None, *, qualify_min: int = STUDIO_QUALIFY_MIN, review_min: int = STUDIO_REVIEW_MIN) -> Result:
+    """studio-v2 with immutable Phase 1 decision bands (70 qualified, 50 review).
+
+    The threshold keyword arguments remain accepted for compatibility with older callers,
+    but are intentionally ignored: campaign criteria must not override studio-v2 policy.
+    Hiring / outsourcing wording is supplementary and cannot qualify a studio; nothing
+    requires the studio to be hiring. `signals` maps signal names to verified evidence.
+    """
+    qualify_min = STUDIO_QUALIFY_MIN
+    review_min = STUDIO_REVIEW_MIN
     uncertain: list[str] = []
 
     pi = _items(signals, PIPELINE_ITEMS)
@@ -149,7 +155,11 @@ def score_studio(signals: dict, meta: dict, contact: dict | None, *, qualify_min
                   f"{len(caps)} production capabilities evidenced outside recruitment text ({', '.join(caps) or 'none'})" + ("" if p_ok else f"; need {MIN_CAPABILITIES_FOR_CERTAIN_PIPELINE}"))
 
     di = _items(signals, TWO_D_ITEMS)
-    d_ok = any(i["evidence_context"] == "capability" for i in di if i["signal"] == "style_2d") or any(not RECRUIT_CONTEXT.search(x) for x in _snips(signals, "style_2d_anime"))
+    d_ok = any(
+        i["evidence_context"] == "capability"
+        for i in di
+        if i["signal"] in {"style_2d", "style_2d_anime"}
+    )
     if not d_ok:
         uncertain.append("animation_2d")
     why2d = "explicit 2D / hand-drawn or 2D anime production evidence" if d_ok else ("3D/CG wording only, no 2D evidence" if signals.get("style_3d") else "no explicit 2D evidence")
@@ -178,7 +188,6 @@ def score_studio(signals: dict, meta: dict, contact: dict | None, *, qualify_min
         suit, reason = "needs_review", f"score {total} is in the review band"
     else:
         suit, reason = "rejected", f"score {total} is below the review threshold"
-    decision = suit
-    if suit == "qualified" and kind not in ("business_email", "generic_email"):    # existing contact gate, unchanged until Phase 5 separates contactability
-        decision, reason = "needs_review", f"suitable (score {total}) but no business email on the studio's own pages (contact form or none)"
-    return Result(total, decision, reason, rows, model=STUDIO_MODEL, suitability=suit, uncertain=uncertain)
+    # Suitability is deliberately independent of contactability. Phase 5 records
+    # a separate contactability decision and the job handler gates progression.
+    return Result(total, suit, reason, rows, model=STUDIO_MODEL, suitability=suit, uncertain=uncertain)

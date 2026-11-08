@@ -15,6 +15,7 @@ class FakeRpc:
     def __call__(self, name, p=None):
         p = p or {}; self.calls.append((name, p))
         m = self.msgs.get(p.get("p_message_id"))
+        if name == "intel_agent_send_window_status": return {"allowed": True, "reason": "inside_send_window"}
         if name == "intel_agent_reserve_send":
             if m["state"] in ("sending", "unknown"): return {"ok": False, "reason": "needs_reconcile"}
             if m["state"] == "sent": return {"ok": False, "reason": "already_sent"}
@@ -54,6 +55,34 @@ class FakeZoho:
 class Sending(unittest.TestCase):
     def setUp(self): self.r, self.z = FakeRpc(), FakeZoho(); self.r.add("m1")
 
+
+    def test_prospecting_consent_denial_never_calls_provider(self):
+        self.r.add("no-consent")
+        def rpc(name, params=None):
+            if name == "intel_agent_assign_provider_account":
+                return {"ok": False, "reason": "prospecting_consent_required"}
+            return self.r(name, params)
+        out = mailops.send_message(rpc, self.z, "no-consent")
+        self.assertEqual(out["reason"], "prospecting_consent_required")
+        self.assertEqual(self.z.sent, [])
+        self.assertEqual(self.r.msgs["no-consent"]["state"], "failed")
+
+    def test_dynamic_assignment_selects_account_adapter_before_provider_send(self):
+        self.r.add("dynamic")
+        class Routed:
+            def __init__(self, client): self.client = client; self.message = None
+            def for_message(self, message): self.message = message; return self.client
+        routed = Routed(self.z)
+        def rpc(name, params=None):
+            if name == "intel_agent_assign_provider_account":
+                m = dict(self.r.msgs["dynamic"])
+                m.update({"provider_account_id": "acct-1", "provider_key": "gmail"})
+                return {"ok": True, "legacy": False, "message": m}
+            return self.r(name, params)
+        out = mailops.send_message(rpc, routed, "dynamic")
+        self.assertEqual(out["reason"], "ok")
+        self.assertEqual(routed.message["provider_account_id"], "acct-1")
+        self.assertEqual(len(self.z.sent), 1)
 
     def test_parent_lookup_failure_is_definite_non_send_not_unknown(self):
         rpc_calls = []
@@ -134,6 +163,7 @@ class Sending(unittest.TestCase):
         def rpc(name, params=None):
             params = params or {}; calls.append((name, params))
             if name == "intel_agent_settings": return {"kill_switch": False}
+            if name == "intel_agent_send_window_status": return {"allowed": True, "reason": "inside_send_window"}
             if name == "intel_agent_reserve_send": return {"ok": True, "message": dict(message)}
             if name == "intel_agent_acquire_send_slot": return {"ok": False, "reason": "send_spacing", "retry_after": 73}
             if name == "intel_agent_enqueue_job": return "queued"
@@ -146,6 +176,35 @@ class Sending(unittest.TestCase):
         self.assertEqual(queued["p_kind"], "send")
         self.assertEqual(queued["p_payload"], {"message_id": "paced"})
         self.assertEqual(queued["p_run_after"], "2027-01-15T08:01:13Z")
+        self.assertEqual(self.z.sent, [])
+
+    def test_worker_defers_initial_send_until_next_local_window(self):
+        calls = []
+        def rpc(name, params=None):
+            params = params or {}; calls.append((name, params))
+            if name == "intel_agent_settings": return {"kill_switch": False}
+            if name == "intel_agent_send_window_status": return {"allowed": False, "reason": "outside_send_window", "next_open_at": "2027-01-15T09:00:00+00:00"}
+            if name == "intel_agent_enqueue_job": return "queued"
+            return None
+        d = jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=self.z, llm=None,
+                      clock=lambda: 1_800_000_000.0)
+        out = jobs.h_send(d, {"payload": {"message_id": "windowed"}})
+        self.assertEqual(out["reason"], "send_window_deferred")
+        self.assertTrue(out["deferred"])
+        self.assertGreater(out["retry_after"], 0)
+        queued = next(params for name, params in calls if name == "intel_agent_enqueue_job")
+        self.assertTrue(queued["p_idempotency_key"].startswith("send-window:windowed:"))
+        self.assertEqual(self.z.sent, [])
+
+    def test_provider_account_quota_denial_is_requeued_without_marking_failed(self):
+        self.r.add("quota")
+        def rpc(name, params=None):
+            if name == "intel_agent_assign_provider_account":
+                return {"ok": False, "reason": "provider_account_quota", "retry_after": 60}
+            return self.r(name, params)
+        out = mailops.send_message(rpc, self.z, "quota")
+        self.assertEqual(out["reason"], "provider_account_quota")
+        self.assertEqual(self.r.msgs["quota"]["state"], "reserved")
         self.assertEqual(self.z.sent, [])
 
     def test_global_send_slot_denial_defers_before_provider_call(self):
@@ -216,6 +275,19 @@ class Inbox(unittest.TestCase):
         self.assertEqual(len(r.inbound), 125)
         self.assertEqual(r.cursor["last_time_ms"], base)
 
+    def test_inbound_rfc_headers_are_case_insensitive_across_providers(self):
+        r, z = FakeRpc(), FakeZoho()
+        z.inbox = [{"id": "lowercase", "folder_id": "f", "subject": "Re: hi", "from": "rina@pixelmoon.com",
+                    "to": "studio@test", "time_ms": 1_700_000_100_000, "thread_id": "t"}]
+        z.iter_messages = lambda folder, page_size: iter(z.inbox)
+        z.rfc_headers = lambda *_: {"message-id": "<reply@pixelmoon.com>", "in-reply-to": "<outbound@studio.test>",
+                                    "references": "<older@studio.test> <outbound@studio.test>"}
+        mailops.sync_inbox(r, z, set(), overlap_ms=0)
+        payload = next(p for name, p in r.calls if name == "intel_agent_record_inbound")
+        self.assertEqual(payload["p_rfc_message_id"], "<reply@pixelmoon.com>")
+        self.assertEqual(payload["p_in_reply_to"], "<outbound@studio.test>")
+        self.assertEqual(payload["p_references"], "<older@studio.test> <outbound@studio.test>")
+
     def test_cursor_does_not_advance_when_persisting_page_fails(self):
         class BrokenRpc(FakeRpc):
             def __call__(self, name, p=None):
@@ -264,6 +336,48 @@ class WorkerLoop(unittest.TestCase):
     def test_one_bad_job_does_not_stop_the_worker(self):
         w, calls = self.mk(); w.run_job({"id": "j", "kind": "nonsense", "attempts": 1, "payload": {}})
         self.assertIn("intel_agent_fail_job", [n for n, _ in calls])
+
+    def test_lost_lease_does_not_complete_or_fail_the_job(self):
+        calls = []
+        def rpc(name, p=None):
+            calls.append(name)
+            if name == "intel_agent_extend_lease": return False
+            return True
+        w, _ = self.mk()
+        w.d.rpc = rpc
+        original = jobs.HANDLERS.get("send")
+        jobs.HANDLERS["send"] = lambda d, j: d.sleep(0.03) or {"sent": False}
+        try:
+            lease = jobs._Lease(rpc, {"id": "lease-job"}, "w", every=0.005)
+            # Exercise lease keeper deterministically without relying on the worker's normal 60s cadence.
+            lease.__enter__(); import time; time.sleep(0.02); lease.__exit__()
+            self.assertTrue(lease.lost.is_set())
+            self.assertEqual(lease.error, "lease renewal rejected")
+        finally:
+            jobs.HANDLERS["send"] = original
+
+    def test_run_job_does_not_complete_or_fail_after_lease_loss(self):
+        from unittest.mock import patch
+        import threading
+        calls = []
+        def rpc(name, p=None):
+            calls.append(name)
+            return True
+        w, _ = self.mk(); w.d.rpc = rpc; w = jobs.Worker(w.d, lease_thread=True)
+        class LostLease:
+            def __init__(self, *_args, **_kwargs): self.lost = threading.Event(); self.lost.set(); self.error = "lease renewal rejected"
+            def __enter__(self): return self
+            def __exit__(self, *_args): pass
+        original = jobs.HANDLERS.get("send")
+        jobs.HANDLERS["send"] = lambda *_: {"sent": True}
+        try:
+            with patch.object(jobs, "_Lease", LostLease):
+                w.run_job({"id": "lost", "kind": "send", "attempts": 1, "payload": {}})
+        finally:
+            jobs.HANDLERS["send"] = original
+        self.assertNotIn("intel_agent_complete_job", calls)
+        self.assertNotIn("intel_agent_fail_job", calls)
+        self.assertIn("intel_agent_log", calls)
 
     def test_periodic_enqueues_idempotent_keys_and_sends_only_when_sending_is_on(self):
         for kill in (True, False):

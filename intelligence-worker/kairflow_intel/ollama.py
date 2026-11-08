@@ -54,10 +54,24 @@ class OllamaClient:
     def __init__(self, cfg, session: requests.Session | None = None):
         self.cfg, self.s = cfg, session or requests.Session()
 
+    def list_models(self) -> list[str]:
+        """Return locally installed Ollama model names, failing closed on malformed responses."""
+        try:
+            response = self.s.get(f"{self.cfg.ollama_url}/api/tags", timeout=5)
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise TransientError(f"could not read Ollama model list: {exc}") from exc
+        models = payload.get("models") if isinstance(payload, dict) else None
+        if not isinstance(models, list):
+            raise TransientError("Ollama /api/tags returned an invalid model list")
+        return [item["name"] for item in models if isinstance(item, dict) and isinstance(item.get("name"), str)]
+
     def is_up(self) -> bool:
         try:
-            return self.s.get(f"{self.cfg.ollama_url}/api/tags", timeout=5).status_code == 200
-        except requests.RequestException:
+            self.list_models()
+            return True
+        except TransientError:
             return False
 
     def generate_json(self, instruction: str, untrusted: str, schema: dict, *, fast: bool = False,

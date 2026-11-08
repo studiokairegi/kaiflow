@@ -14,7 +14,7 @@ from .errors import PermanentError, TransientError
 from .safety import html_to_text
 
 RECRUIT_URL = re.compile(r"recruit|saiyo|saiyou|careers?|jobs?|join|freelanc|outsourc|partner|staff|採用|求人|募集|協力|外注|パートナー", re.I | re.U)
-CREDIT_URL = re.compile(r"works?|credits?|staff|partner|cooperation|協力|制作実績|取引先|関連会社|パートナー", re.I | re.U)
+CREDIT_URL = re.compile(r"works?|portfolio|credits?|staff|partner|cooperation|filmography|productions?|projects?|協力|制作実績|取引先|関連会社|パートナー|作品|制作|クレジット|参加作品", re.I | re.U)
 XML = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False, recover=True)
 MAX_SITEMAP_URLS = 2000
 MAX_SNOWBALL_PER_SITE = 8
@@ -64,6 +64,17 @@ def pick_recruit_pages(urls: list[str], limit: int = 4) -> list[str]:
     for u in urls:
         path = urlparse(u).path or "/"
         hits = len(RECRUIT_URL.findall(path))
+        if hits:
+            scored.append((-hits, len(path), u))
+    return [u for _, _, u in sorted(scored)[:limit]]
+
+
+def pick_credit_pages(urls: list[str], limit: int = 3) -> list[str]:
+    """Select published-work, portfolio and production-credit pages independently of recruitment pages."""
+    scored = []
+    for u in urls:
+        path = urlparse(u).path or "/"
+        hits = len(CREDIT_URL.findall(path))
         if hits:
             scored.append((-hits, len(path), u))
     return [u for _, _, u in sorted(scored)[:limit]]
@@ -121,19 +132,15 @@ def analyze(d, ctx: dict) -> dict:
     spawned = 0
     depth = int(((p.get("facts") or {}).get("verified") or {}).get("depth", 0))
     if depth < MAX_DEPTH and p["type"] == "animation_studio_support":
-        credit_pages = [u for u in [final] + [x for x in sitemap_urls(d.fetcher, final) if CREDIT_URL.search(urlparse(x).path or "")][:2]]
-        for cu in credit_pages[:3]:
+        credit_pages = [final] + pick_credit_pages(sitemap_urls(d.fetcher, final), limit=2)
+        for cu in credit_pages:
             try:
                 url, html = (final, home) if cu == final else d.fetcher.fetch(cu)
             except (PermanentError, TransientError):
                 continue
-            if cu == final and not CREDIT_URL.search(home_text[:2000]):
-                pass
             for c in credit_candidates(html, url, own):
                 if spawned >= MAX_SNOWBALL_PER_SITE:
                     break
-                if int(d.rpc("intel_agent_source_use", {"p_key": "site_crawler", "p_n": 1}) or 0) <= 0:
-                    return {"signals": found, "pages": pages_read, "spawned": spawned, "budget": "exhausted"}
                 from .discovery import ingest
                 _, created = ingest(d, p["type"], {**c, "meta": {"source": "credit_link", "depth": depth + 1, "found_on": p["domain"]}}, via="credit_link")
                 spawned += 1 if created else 0

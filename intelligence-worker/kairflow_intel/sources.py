@@ -17,10 +17,8 @@ MAX_PER_RUN = 25
 
 
 def _safe(fn, *a):
-    try:
-        return fn(*a)
-    except PermanentError:
-        return None
+    """Do not hide registry/budget failures; the caller must report them."""
+    return fn(*a)
 
 
 def steam(fetcher, keywords: list[str], limit: int = MAX_PER_RUN) -> list[dict]:
@@ -133,14 +131,61 @@ def seeds(fetcher, urls: list[str], limit: int = MAX_PER_RUN) -> list[dict]:
     return out
 
 
-def discover(fetcher, ptype: str, criteria: dict) -> list[dict]:
-    kws = [k for k in criteria.get("keywords", []) if isinstance(k, str)]
+def discover(fetcher, ptype: str, criteria: dict, *, enabled_sources=None, reserve_source=None, report_source=None) -> list[dict]:
+    """Discover only through explicitly configured and registry-authorized sources.
+
+    Indie adapters receive a per-request metered fetcher: every Steam search/details
+    request and every itch tag page reserves one source-budget unit immediately
+    before network access. Missing registry/reservation callbacks fail closed.
+    """
+    criteria = criteria if isinstance(criteria, dict) else {}
+    raw_keywords = criteria.get("keywords")
+    kws = [k.strip() for k in raw_keywords if isinstance(k, str) and k.strip()] if isinstance(raw_keywords, list) else []
     if ptype == "indie_game_developer":
-        srcs = criteria.get("sources", ["steam", "itch"])
+        requested = criteria.get("sources")
+        if not isinstance(requested, list) or not kws or enabled_sources is None or reserve_source is None:
+            return []
         out = []
-        if "steam" in srcs:
-            out += steam(fetcher, kws)
-        if "itch" in srcs:
-            out += itch(fetcher, kws)
+        # Validate requested source values instead of silently treating malformed
+        # configuration as an empty/partially authorized request.
+        if any(not isinstance(key, str) or key not in ("steam", "itch") for key in requested):
+            return []
+        for key, adapter in (("steam", steam), ("itch", itch)):
+            if key not in requested:
+                continue
+            if key not in enabled_sources:
+                if report_source:
+                    report_source(key, False, "requested source is not registry-authorized")
+                continue
+            class MeteredFetcher:
+                def fetch(self, url):
+                    if not reserve_source(key):
+                        raise PermanentError(f"{key} source is disabled, unconfirmed, over budget or circuit-open")
+                    return fetcher.fetch(url)
+            try:
+                out.extend(adapter(MeteredFetcher(), kws))
+            except (PermanentError, TransientError) as exc:
+                if report_source:
+                    report_source(key, False, exc)
+                continue
+            if report_source:
+                report_source(key, True, "")
         return out
-    return seeds(fetcher, [u for u in criteria.get("seed_urls", []) if isinstance(u, str)])
+    raw_seed_urls = criteria.get("seed_urls")
+    seed_urls = [u for u in raw_seed_urls if isinstance(u, str) and u.strip()] if isinstance(raw_seed_urls, list) else []
+    if not seed_urls or enabled_sources is None or reserve_source is None or "site_crawler" not in enabled_sources:
+        return []
+    class MeteredSeedFetcher:
+        def fetch(self, url):
+            if not reserve_source("site_crawler"):
+                raise PermanentError("site_crawler source is disabled, unconfirmed, over budget or circuit-open")
+            return fetcher.fetch(url)
+    try:
+        out = seeds(MeteredSeedFetcher(), seed_urls)
+    except (PermanentError, TransientError) as exc:
+        if report_source:
+            report_source("site_crawler", False, exc)
+        return []
+    if report_source:
+        report_source("site_crawler", True, "")
+    return out

@@ -27,7 +27,7 @@ supabase functions deploy portal-chat --no-verify-jwt
 
 `--no-verify-jwt` is required: guests and clients have no Supabase login. The function authenticates
 every call itself (hashed guest session, project share token, or a staff Bearer token re-checked in SQL).
-Optional hardening secret (rotating it invalidates nothing stored, it only salts IP hashes):
+Required rate-limit secret (at least 32 random characters; rotating it only changes IP hashes). This is required by `portal-chat`, `portfolio-view` and public `push` actions; requests fail closed if it is missing or too short:
 
 ```cmd
 supabase secrets set PORTAL_HASH_PEPPER=<long-random-string>

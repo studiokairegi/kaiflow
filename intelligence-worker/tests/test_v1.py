@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import unittest
+from unittest.mock import patch
 
 from kairflow_intel import chat, drafting, jobs, mailops
 from kairflow_intel.errors import ThreadingRejected, PermanentError, RpcError, TransientError
@@ -37,6 +38,113 @@ def deps(rpc, llm): return jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=None, 
 
 
 class ChatAllowlist(unittest.TestCase):
+
+    def test_explicit_email_draft_resolves_prospect_and_persists_before_confirming(self):
+        class DraftRpc(ChatRpc):
+            def __call__(self, name, p=None):
+                p = p or {}
+                self.calls.append((name, p))
+                if name == "intel_agent_chat_context":
+                    return {"ok": True, "answered": False,
+                            "request": "Draft a natural professional Japanese-language initial outreach email to Andraft on behalf of Studio Kairegi. Save it for review. Do not send.",
+                            "history": []}
+                if name == "intel_agent_chat_tool":
+                    assert p["p_tool"] == "list_prospects"
+                    return {"ok": True, "prospects": [{"id": U, "name": "Andraft", "status": "lead_linked"}]}
+                if name == "intel_agent_chat_reply":
+                    self.replies.append(p); return {"ok": True}
+                raise AssertionError(name)
+        rpc = DraftRpc()
+        llm = FakeLLM([])
+        with patch("kairflow_intel.jobs.h_draft", return_value={"ok": True, "message_id": "draft-123", "created": True, "state": "pending_approval"}) as draft:
+            out = chat.handle(deps(rpc, llm), {"thread_id": "t", "message_id": 1})
+        draft.assert_called_once()
+        self.assertEqual(draft.call_args.args[1]["payload"]["prospect_id"], U)
+        self.assertTrue(draft.call_args.args[1]["payload"]["force_review"])
+        self.assertTrue(out["draft_saved"])
+        self.assertEqual(out["message_id"], "draft-123")
+        self.assertIn("not been sent", rpc.replies[0]["p_text"])
+        self.assertEqual(llm.calls, [])
+
+
+    def test_existing_initial_draft_is_returned_without_regeneration_or_new_upsert(self):
+        class ExistingRpc:
+            def __init__(self): self.calls = []
+            def __call__(self, name, p=None):
+                self.calls.append(name)
+                if name == "intel_agent_context":
+                    return {"prospect": {"id": U, "status": "contacted", "contact_email": "a@b.test"},
+                            "messages": [{"id": "existing-55", "direction": "outbound", "kind": "initial",
+                                          "idempotency_key": f"draft:{U}:initial", "state": "sent"}]}
+                raise AssertionError(name)
+        rpc = ExistingRpc()
+        out = jobs.h_draft(deps(rpc, FakeLLM([])), {"payload": {"prospect_id": U, "kind": "initial", "force_review": True}})
+        self.assertEqual(out, {"ok": True, "message_id": "existing-55", "created": False, "state": "sent"})
+        self.assertEqual(rpc.calls, ["intel_agent_context"])
+
+    def test_request_to_persisted_japanese_initial_draft_end_to_end(self):
+        from .test_phase3_japanese import KB_ROWS, SETTINGS
+        prospect = {"id": U, "name": "Andraft", "type": "animation_studio_support",
+                    "status": "lead_linked", "language": "en", "country": "Japan",
+                    "contact_email": "contact@andraft.example", "domain": "andraft.example",
+                    "website": "https://andraft.example", "contact_name": ""}
+        persisted = {}
+        class E2ERpc:
+            def __init__(self): self.replies = []; self.calls = []
+            def __call__(self, name, p=None):
+                p = p or {}; self.calls.append((name, p))
+                if name == "intel_agent_chat_context":
+                    return {"ok": True, "answered": False,
+                            "request": "Draft a natural, professional Japanese-language initial outreach email to Andraft on behalf of Studio Kairegi. Save it for my review. Do not send the email.",
+                            "history": []}
+                if name == "intel_agent_chat_tool":
+                    return {"ok": True, "prospects": [{"id": U, "name": "Andraft", "status": "lead_linked"}]}
+                if name == "intel_agent_context":
+                    return {"prospect": prospect, "evidence": [], "messages": [], "lead": {"id": "lead-1"}}
+                if name == "intel_agent_settings": return {**SETTINGS, "autonomy": "autonomous", "kill_switch": False}
+                if name == "intel_agent_kb": return KB_ROWS
+                if name == "intel_agent_log": return {"ok": True}
+                if name == "intel_agent_upsert_draft":
+                    persisted.update(p)
+                    return {"ok": True, "message_id": "persisted-message-42", "created": True, "state": "pending_approval"}
+                if name == "intel_agent_chat_reply":
+                    self.replies.append(p); return {"ok": True}
+                raise AssertionError(name)
+        class LocalLLM(FakeLLM):
+            def generate_json(self, *args, **kwargs):
+                raise AssertionError("No recipient evidence: deterministic approved-facts fallback should not call model")
+        rpc = E2ERpc()
+        out = chat.handle(deps(rpc, LocalLLM([])), {"thread_id": "thread-1", "message_id": 77})
+        self.assertTrue(out["draft_saved"])
+        self.assertEqual(out["message_id"], "persisted-message-42")
+        self.assertEqual(persisted["p_prospect_id"], U)
+        self.assertEqual(persisted["p_kind"], "initial")
+        self.assertEqual(persisted["p_idempotency_key"], f"draft:{U}:initial")
+        self.assertFalse(persisted["p_auto_ok"])
+        self.assertTrue(persisted["p_force_review"])
+        self.assertIn("Studio Kairegiは2Dアニメーション制作を行うスタジオです。", persisted["p_body"])
+        self.assertNotIn("多くのアニメーション作品", persisted["p_body"])
+        self.assertIn("not been sent", rpc.replies[0]["p_text"])
+        self.assertFalse(any(n == "intel_agent_enqueue_job" or n == "send" for n, _ in rpc.calls))
+
+    def test_explicit_email_draft_does_not_guess_missing_or_ambiguous_prospect(self):
+        for rows, reason in (([], "prospect_not_found"),
+                             ([{"id": U, "name": "Andraft"}, {"id": "22222222-2222-3333-4444-555555555555", "name": "Andraft"}], "ambiguous_prospect")):
+            class DraftRpc(ChatRpc):
+                def __call__(self, name, p=None):
+                    p = p or {}; self.calls.append((name, p))
+                    if name == "intel_agent_chat_context":
+                        return {"ok": True, "answered": False, "request": "Draft an email to Andraft", "history": []}
+                    if name == "intel_agent_chat_tool": return {"ok": True, "prospects": rows}
+                    if name == "intel_agent_chat_reply": self.replies.append(p); return {"ok": True}
+                    raise AssertionError(name)
+            rpc = DraftRpc()
+            with patch("kairflow_intel.jobs.h_draft") as draft:
+                out = chat.handle(deps(rpc, FakeLLM([])), {"thread_id": "t", "message_id": 1})
+            self.assertEqual(out["draft_error"], reason)
+            draft.assert_not_called()
+            self.assertEqual(rpc.replies[0]["p_status"], "error")
+
     def test_no_tool_can_send_approve_delete_or_change_settings(self):
         import re
         for name in chat.TOOLS: self.assertIsNone(re.search(r"send_|approve|delete|remove|kill|suppress|setting|sql|shell|exec", name), name)
@@ -49,6 +157,55 @@ class ChatAllowlist(unittest.TestCase):
         self.assertEqual(chat.clean_args("adopt_crm_leads", {"lead_ids": [U, "not-a-uuid", 5], "type": "indie_game_developer"}), {"lead_ids": [U], "type": "indie_game_developer"})
         self.assertEqual(chat.clean_args("research_prospect", {"website": "javascript:alert(1)", "name": "X"}), {"name": "X"})
         with self.assertRaises(ValueError): chat.clean_args("send_email", {})
+
+    def test_chat_draft_database_migration_forces_review_and_keeps_idempotency(self):
+        migration = Path(__file__).resolve().parents[2] / "supabase/migrations/20261123100000_intelligence_chat_draft_force_review.sql"
+        sql = migration.read_text(encoding="utf-8")
+        self.assertIn("p_force_review boolean default false", sql)
+        self.assertIn("when coalesce(p_force_review, false) then 'pending_approval'", sql)
+        self.assertIn("on conflict (organization_id, idempotency_key) do nothing", sql)
+        self.assertIn("select id, state into v_id, v_state", sql)
+        self.assertIn("drop function if exists public.intel_agent_upsert_draft", sql)
+        self.assertIn("notify pgrst, 'reload schema'", sql.lower())
+        self.assertIn("grant execute on function public.intel_agent_upsert_draft", sql.lower())
+
+    def test_draft_target_parser_supports_english_and_japanese_addressing(self):
+        self.assertEqual(chat._draft_target("Draft an email to Andraft on behalf of Studio Kairegi"), "Andraft")
+        self.assertEqual(chat._draft_target("Andraft向けに日本語の営業メールを作成してください"), "Andraft")
+        self.assertEqual(chat._draft_target("Andraft宛に初回連絡メールを作成"), "Andraft")
+        self.assertEqual(chat._draft_target("株式会社アンドラフト様向けに日本語の営業メールを作成してください"), "株式会社アンドラフト")
+        self.assertEqual(chat._draft_target("アニメーション会社アンドラフト御中に営業メールを作成"), "アニメーション会社アンドラフト")
+
+    def test_negated_drafting_requests_never_create_a_draft(self):
+        for request in ("Do not draft an email to Andraft", "Don't write an outreach email for Andraft",
+                        "Never prepare an introduction email to Andraft"):
+            with self.subTest(request=request):
+                self.assertFalse(chat._is_explicit_draft_request(request))
+
+    def test_normal_questions_are_not_classified_as_draft_requests(self):
+        for request in ("How many positive responses did we receive this week?",
+                        "Show me prospects who need follow-ups",
+                        "Find 10 indie game developers"):
+            with self.subTest(request=request):
+                self.assertIsNone(chat._DRAFT_REQUEST.search(request))
+
+    def test_draft_persistence_failure_is_reported_without_claiming_success(self):
+        class FailedDraftRpc(ChatRpc):
+            def __call__(self, name, p=None):
+                p = p or {}; self.calls.append((name, p))
+                if name == "intel_agent_chat_context":
+                    return {"ok": True, "answered": False, "request": "Draft an email to Andraft", "history": []}
+                if name == "intel_agent_chat_tool":
+                    return {"ok": True, "prospects": [{"id": U, "name": "Andraft", "status": "lead_linked"}]}
+                if name == "intel_agent_chat_reply":
+                    self.replies.append(p); return {"ok": True}
+                raise AssertionError(name)
+        rpc = FailedDraftRpc()
+        with patch("kairflow_intel.jobs.h_draft", return_value={"ok": False, "reason": "database unavailable"}):
+            out = chat.handle(deps(rpc, FakeLLM([])), {"thread_id": "t", "message_id": 1})
+        self.assertFalse(out.get("draft_saved", False))
+        self.assertEqual(out["draft_error"], "database unavailable")
+        self.assertIn("No email was sent", rpc.replies[0]["p_text"])
 
     def test_model_asking_for_a_forbidden_tool_is_never_executed(self):
         rpc = ChatRpc(); llm = FakeLLM([{"action": "tool", "tool": "send_email", "args": {"to": "x@y.z"}}])
@@ -231,11 +388,13 @@ class Discovery(unittest.TestCase):
         calls = []
         def rpc(name, p=None):
             calls.append((name, p or {}))
-            if name == "intel_agent_settings": return {"campaigns": [{"type": "indie_game_developer", "status": "paused", "criteria": {}}]}
+            if name == "intel_agent_settings": return {"campaigns": [{"type": "indie_game_developer", "status": "paused", "criteria": {"sources": ["steam"], "keywords": ["2d"]}}]}
+            if name == "intel_agent_sources": return {"steam": {"remaining": 10}}
+            if name == "intel_agent_source_use": return 1
             if name == "intel_agent_upsert_prospect": return {"prospect_id": f"p{len(calls)}", "created": True}
             return None
         from kairflow_intel import sources
-        orig = sources.discover; sources.discover = lambda f, t, c: [{"name": f"G{i}", "website": f"https://g{i}.test"} for i in range(10)]
+        orig = sources.discover; sources.discover = lambda f, t, c, **kwargs: [{"name": f"G{i}", "website": f"https://g{i}.test"} for i in range(10)]
         try:
             d = jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=None, llm=None)
             self.assertEqual(jobs.h_discover(d, {"payload": {"type": "indie_game_developer"}}), {"skipped": "campaign paused"})

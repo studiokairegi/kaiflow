@@ -1,0 +1,457 @@
+-- KairFlow Intelligence: targeted reevaluation of REJECTED, DISCOVERED animation-studio prospects with the studio-v2 model.
+-- ADDITIVE ONLY. Requires the Intelligence migrations up to 20261116100000. Safe to run more than once. DO NOT APPLY until reviewed.
+--
+-- What this adds
+--   * intel_reeval_runs / intel_reeval_items   one row per run and one row per (run, prospect): the audit trail, the idempotency record
+--                                              and the restart-safe work list. A prospect appears at most once per run.
+--   * intel_evidence.reeval_run                which run (re)collected an evidence row. Re-seeing the same sentence refreshes fetched_at,
+--                                              so "collected after the run began" is true even when the sentence is not new.
+--   * job kind 'reeval_studio'                 one job per prospect; the handler does everything in one pass and can enqueue nothing else.
+--   * intel_agent_reeval_* functions           the ONLY way the worker touches a prospect during a reevaluation. Each one re-checks, in the
+--                                              database, that the run is active and that the prospect is type = animation_studio_support
+--                                              and origin = discovered. indie_game_developer rows are unreachable through them.
+--
+-- What this deliberately does NOT do
+--   * no CRM lead is created or linked, no message/draft is created, nothing is sent, nothing is scheduled for sending;
+--   * intel_settings (kill_switch, autonomy, daily caps, send window) is never read for writing and never changed;
+--   * a studio-v2 result of 'qualified' is stored as status 'needs_review' (the true decision is kept in the item and in estimates),
+--     so no reevaluated prospect becomes 'qualified' without a person approving it in the existing review queue.
+begin;
+
+-- 1. Job kind ---------------------------------------------------------------------------------------------------------------------
+alter table public.intel_jobs drop constraint if exists intel_jobs_kind_check;
+alter table public.intel_jobs add constraint intel_jobs_kind_check check (kind in
+  ('discover','research','qualify','resolve','draft','send','sync_mail','classify','reconcile','followup_scan','retention','chat',
+   'seed_sources','analyze_site','news_scan','feed_poll','crawl_index','manual_post','profile_terms','takeover','reeval_studio'));
+-- (This list is the union of the earlier migrations plus 'reeval_studio'. Keep it that way if you edit it.)
+
+-- 2. Tables -----------------------------------------------------------------------------------------------------------------------
+create table if not exists public.intel_reeval_runs (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.studio_organizations(id) on delete cascade,
+  name text not null check (char_length(name) between 3 and 80),
+  prospect_type text not null default 'animation_studio_support' check (prospect_type = 'animation_studio_support'),
+  prospect_origin text not null default 'discovered' check (prospect_origin = 'discovered'),
+  scoring_model text not null default 'studio-v2' check (scoring_model = 'studio-v2'),
+  state text not null default 'running' check (state in ('running','completed','cancelled')),
+  started_at timestamptz not null default now(),          -- evidence older than this can never decide a score in this run
+  finished_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique (organization_id, name)
+);
+
+create table if not exists public.intel_reeval_items (
+  run_id uuid not null references public.intel_reeval_runs(id) on delete cascade,
+  prospect_id uuid not null references public.intel_prospects(id) on delete cascade,
+  organization_id uuid not null references public.studio_organizations(id) on delete cascade,
+  state text not null default 'queued' check (state in ('queued','scored','needs_manual','failed','skipped')),
+  outcome text not null default '',                       -- short machine-readable reason, e.g. rescored, website_not_recovered, site_unreadable
+  prev_status text not null,
+  prev_score int,
+  prev_model text not null default '',
+  new_status text,
+  new_score int,
+  new_decision text,
+  detail jsonb not null default '{}'::jsonb,              -- website recovery provenance, research counts, errors (never secrets)
+  created_at timestamptz not null default now(),
+  researched_at timestamptz,
+  finished_at timestamptz,
+  primary key (run_id, prospect_id)
+);
+create index if not exists intel_reeval_items_state_idx on public.intel_reeval_items(run_id, state);
+create index if not exists intel_reeval_items_prospect_idx on public.intel_reeval_items(prospect_id);
+
+alter table public.intel_evidence add column if not exists reeval_run uuid references public.intel_reeval_runs(id) on delete set null;
+
+alter table public.intel_reeval_runs enable row level security;
+alter table public.intel_reeval_items enable row level security;
+revoke all on public.intel_reeval_runs, public.intel_reeval_items from public, anon, authenticated;
+grant select on public.intel_reeval_runs, public.intel_reeval_items to authenticated;
+drop policy if exists intel_select on public.intel_reeval_runs;
+create policy intel_select on public.intel_reeval_runs for select to authenticated using (public.intel_is_authorized(organization_id));
+drop policy if exists intel_select on public.intel_reeval_items;
+create policy intel_select on public.intel_reeval_items for select to authenticated using (public.intel_is_authorized(organization_id));
+
+-- 3. Scope guard (internal) -------------------------------------------------------------------------------------------------------
+-- NULL when the run is active, the prospect is an item of that run, and the prospect is a DISCOVERED ANIMATION STUDIO. Otherwise the reason.
+create or replace function public._intel_reeval_check(p_org uuid, p_run uuid, p_prospect uuid) returns text
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+  r public.intel_reeval_runs;
+  i public.intel_reeval_items;
+  p public.intel_prospects;
+  v_email text;
+  v_website_domain text;
+begin
+  -- Shared run lock prevents cancellation racing a write; per-item and per-prospect
+  -- locks serialize competing work on the same prospect without serializing the run.
+  select * into r
+    from public.intel_reeval_runs
+   where id = p_run and organization_id = p_org
+   for share;
+  if not found then return 'run_not_found'; end if;
+  if r.state <> 'running' then return 'run_' || r.state; end if;
+
+  select * into i
+    from public.intel_reeval_items
+   where run_id = p_run and prospect_id = p_prospect
+   for update;
+  if not found then return 'not_in_run'; end if;
+  if i.organization_id is distinct from p_org then return 'item_org_mismatch'; end if;
+  if i.state <> 'queued' then return 'item_not_queued'; end if;
+
+  select * into p
+    from public.intel_prospects
+   where id = p_prospect and organization_id = p_org
+   for update;
+  if not found then return 'prospect_not_found'; end if;
+
+  if p.type <> 'animation_studio_support' then return 'out_of_scope_type'; end if;
+  if p.origin <> 'discovered' then return 'out_of_scope_origin'; end if;
+  if p.status <> 'rejected' then return 'status_changed'; end if;
+
+  -- A human rejection is never overturned by automated reevaluation.
+  if exists (
+    select 1 from public.intel_actions a
+     where a.organization_id = p_org
+       and a.action = 'review_prospect_reject'
+       and a.entity_type = 'prospect'
+       and a.entity_id = p.id::text
+  ) then return 'human_rejected'; end if;
+
+  if p.lead_id is not null or exists (
+    select 1 from public.leads l where l.intel_prospect_id = p.id
+  ) then return 'prospect_linked'; end if;
+
+  if exists (
+    select 1 from public.intel_messages m where m.prospect_id = p.id
+  ) then return 'prospect_contacted'; end if;
+
+  if exists (
+    select 1 from public.intel_lead_history h where h.prospect_id = p.id
+  ) then return 'prospect_has_history'; end if;
+
+  v_email := coalesce(public.intel_norm_email(p.contact_email), '');
+  v_website_domain := coalesce(public.intel_domain_of(coalesce(p.website, '')), '');
+
+  if exists (
+    select 1
+      from public.intel_suppressions s
+     where s.organization_id = p_org
+       and (
+         (s.kind = 'domain' and s.value in (coalesce(p.domain, ''), v_website_domain))
+         or
+         (s.kind = 'email' and (
+           s.value = v_email
+           or (v_email <> '' and v_email like '%@' || s.value)
+         ))
+       )
+  ) then return 'prospect_suppressed'; end if;
+
+  return null;
+end $$;
+
+create or replace function public._intel_reeval_maybe_complete(p_run uuid) returns void
+language plpgsql security definer set search_path = pg_catalog, public as $$
+begin
+  if not exists (select 1 from public.intel_reeval_items where run_id = p_run and state = 'queued') then
+    update public.intel_reeval_runs set state = 'completed', finished_at = now() where id = p_run and state = 'running';
+  end if;
+end $$;
+
+-- Mark an item skipped when its eligibility changes after the run was created.
+-- Cancelled/finished runs and already-terminal items remain untouched.
+create or replace function public.intel_agent_reeval_skip_item(p_run_id uuid, p_prospect_id uuid) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare
+  v_org uuid := public.intel_agent_org();
+  v_bad text := public._intel_reeval_check(v_org, p_run_id, p_prospect_id);
+begin
+  if v_bad is null then
+    return jsonb_build_object('ok', true, 'changed', false, 'reason', 'still_in_scope');
+  end if;
+
+  if v_bad in ('run_not_found', 'run_cancelled', 'run_completed',
+               'not_in_run', 'item_not_queued', 'prospect_not_found',
+               'item_org_mismatch') then
+    return jsonb_build_object('ok', true, 'changed', false, 'reason', v_bad);
+  end if;
+
+  update public.intel_reeval_items
+     set state = 'skipped',
+         outcome = left('out_of_scope:' || v_bad, 80),
+         finished_at = now()
+   where run_id = p_run_id
+     and prospect_id = p_prospect_id
+     and organization_id = v_org
+     and state = 'queued';
+
+  if found then
+    perform public._intel_log(
+      v_org, 'agent', 'reeval_skipped', 'prospect', p_prospect_id::text,
+      jsonb_build_object('run_id', p_run_id, 'reason', v_bad)
+    );
+    perform public._intel_reeval_maybe_complete(p_run_id);
+  end if;
+
+  return jsonb_build_object('ok', true, 'changed', found, 'reason', v_bad);
+end $$;
+
+-- 4. Selection / start ------------------------------------------------------------------------------------------------------------
+-- Eligible = discovered animation studios currently 'rejected' that have NO CRM lead, NO messages, NO pasted history, were not rejected by a
+-- person, are not suppressed, and have not already been rescored by an earlier run (unless p_include_previous).
+-- p_dry_run (default TRUE) only counts. Otherwise it creates (or tops up) the run named p_name and queues one job per NEW item, at most
+-- p_limit new items per call (NULL = all eligible). Calling it again with the same name is safe: no duplicate items, no duplicate jobs.
+create or replace function public.intel_agent_reeval_start(p_name text, p_limit int default null, p_dry_run boolean default true, p_include_previous boolean default false, p_all boolean default false, p_expect_count int default null) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_org uuid := public.intel_agent_org(); v_run public.intel_reeval_runs; v_eligible int; v_noweb int; v_human int; v_total int; v_added int := 0; v_queued int := 0; v_name text; r record;
+begin
+  drop table if exists pg_temp._reeval_pool;
+  create temporary table _reeval_pool (prospect_id uuid primary key, has_website boolean, created_at timestamptz) on commit drop;
+  truncate pg_temp._reeval_pool;
+  insert into pg_temp._reeval_pool
+  select p.id, coalesce(p.website, '') <> '', p.created_at
+    from public.intel_prospects p
+   where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status = 'rejected' and p.lead_id is null
+     and not exists (select 1 from public.leads l where l.intel_prospect_id = p.id)
+     and not exists (select 1 from public.intel_messages m where m.prospect_id = p.id)
+     and not exists (select 1 from public.intel_lead_history h where h.prospect_id = p.id)
+     and not exists (select 1 from public.intel_suppressions s where s.organization_id = v_org and ((s.kind = 'domain' and p.domain <> '' and s.value = p.domain) or (s.kind = 'email' and p.contact_email <> '' and s.value = p.contact_email)))
+     and (coalesce(p_include_previous, false) or not exists (select 1 from public.intel_reeval_items i where i.prospect_id = p.id and i.state = 'scored'));
+  select count(*) into v_total from public.intel_prospects p where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status = 'rejected';
+  select count(*) into v_human from public.intel_prospects p
+   where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status = 'rejected'
+     and exists (select 1 from public.intel_actions a where a.organization_id = v_org and a.action = 'review_prospect_reject' and a.entity_type = 'prospect' and a.entity_id = p.id::text);
+  -- A person's rejection is a decision, not a model result: those prospects are never selected.
+  delete from pg_temp._reeval_pool where prospect_id in (select p.id from public.intel_prospects p join public.intel_actions a on a.entity_id = p.id::text and a.entity_type = 'prospect' and a.action = 'review_prospect_reject' and a.organization_id = v_org);
+  select count(*), count(*) filter (where not has_website) into v_eligible, v_noweb from pg_temp._reeval_pool;
+  if p_dry_run is distinct from false then
+    return jsonb_build_object('dry_run', true, 'rejected_discovered_studios', v_total, 'eligible', v_eligible, 'eligible_with_website', v_eligible - v_noweb,
+                              'eligible_without_website', v_noweb, 'excluded_rejected_by_a_person', v_human);
+  end if;
+  if btrim(coalesce(p_name, '')) = '' then raise exception 'run name required'; end if;
+  if length(btrim(p_name)) > 80 then raise exception 'run name must be 80 characters or fewer'; end if;
+  v_name := btrim(p_name);
+
+  if p_limit is not null and p_limit < 1 then
+    raise exception 'p_limit must be a positive integer';
+  end if;
+  if p_limit is null then
+    if p_all is distinct from true then
+      raise exception 'full population requires explicit p_all confirmation';
+    end if;
+    if p_expect_count is null or p_expect_count <> v_eligible then
+      raise exception 'eligible count changed; expected %, currently %', p_expect_count, v_eligible;
+    end if;
+  else
+    if p_all is distinct from false or p_expect_count is not null then
+      raise exception 'p_all and p_expect_count are only valid for a full-population start';
+    end if;
+  end if;
+
+  select * into v_run from public.intel_reeval_runs where organization_id = v_org and name = v_name for update;
+  if not found then
+    insert into public.intel_reeval_runs(organization_id, name) values (v_org, v_name) returning * into v_run;
+    perform public._intel_log(v_org, 'agent', 'reeval_run_started', 'reeval_run', v_run.id::text, jsonb_build_object('name', v_run.name, 'eligible', v_eligible));
+  elsif v_run.state <> 'running' then
+    raise exception 'run % is %', v_run.name, v_run.state;
+  end if;
+  for r in select pool.prospect_id from pg_temp._reeval_pool pool
+            where not exists (select 1 from public.intel_reeval_items i where i.run_id = v_run.id and i.prospect_id = pool.prospect_id)
+            order by pool.created_at, pool.prospect_id limit coalesce(p_limit, 1000000)
+  loop
+    insert into public.intel_reeval_items(run_id, prospect_id, organization_id, prev_status, prev_score, prev_model)
+    select v_run.id, p.id, v_org, p.status, p.score,
+           coalesce((select x ->> 'model' from jsonb_array_elements(case when jsonb_typeof(p.score_breakdown) = 'array' then p.score_breakdown else '[]'::jsonb end) x where x ? 'model' limit 1),
+                    p.facts -> 'estimates' ->> 'scoring_model', case when p.score is null then '' else 'studio-v1' end)
+      from public.intel_prospects p where p.id = r.prospect_id
+    on conflict do nothing;
+    v_added := v_added + 1;
+  end loop;
+  -- (Re)queue a job for every still-queued item. The idempotency key makes this a no-op for jobs that already exist, so a repeated call
+  -- after a crash or a worker restart fills any gap and never duplicates work.
+  for r in select prospect_id from public.intel_reeval_items where run_id = v_run.id and state = 'queued' loop
+    insert into public.intel_jobs(organization_id, kind, payload, idempotency_key, priority)
+    values (v_org, 'reeval_studio', jsonb_build_object('run_id', v_run.id, 'prospect_id', r.prospect_id), left('reeval-studio:' || v_run.id || ':' || r.prospect_id, 200), -5)
+    on conflict (organization_id, idempotency_key) do update
+       set state = 'queued', attempts = 0, run_after = now(), lease_until = null, locked_by = null, finished_at = null, updated_at = now()
+     where public.intel_jobs.state in ('dead','failed');          -- a dead job must not strand its item; queued/running/succeeded jobs are left alone
+    if found then v_queued := v_queued + 1; end if;
+  end loop;
+  perform public._intel_reeval_maybe_complete(v_run.id);
+  return jsonb_build_object('dry_run', false, 'run_id', v_run.id, 'started_at', v_run.started_at, 'eligible', v_eligible, 'items_added', v_added, 'jobs_queued', v_queued);
+end $$;
+
+create or replace function public.intel_agent_reeval_status(p_run_id uuid default null) returns jsonb
+language plpgsql stable security definer set search_path = pg_catalog, public as $$
+declare v_org uuid := public.intel_agent_org(); v_run public.intel_reeval_runs;
+begin
+  select * into v_run from public.intel_reeval_runs where organization_id = v_org and (p_run_id is null or id = p_run_id) order by created_at desc limit 1;
+  if not found then return jsonb_build_object('run', null); end if;
+  return jsonb_build_object('run', jsonb_build_object('id', v_run.id, 'name', v_run.name, 'state', v_run.state, 'started_at', v_run.started_at, 'finished_at', v_run.finished_at),
+    'by_state', coalesce((select jsonb_object_agg(s, n) from (select state s, count(*) n from public.intel_reeval_items where run_id = v_run.id group by state) q), '{}'::jsonb),
+    'by_outcome', coalesce((select jsonb_object_agg(s, n) from (select state || ':' || outcome s, count(*) n from public.intel_reeval_items where run_id = v_run.id group by 1) q), '{}'::jsonb),
+    'queued_items_without_live_job', (select count(*) from public.intel_reeval_items i where i.run_id = v_run.id and i.state = 'queued'
+        and not exists (select 1 from public.intel_jobs j where j.organization_id = v_org and j.kind = 'reeval_studio' and j.state in ('queued','running') and j.payload ->> 'prospect_id' = i.prospect_id::text and j.payload ->> 'run_id' = v_run.id::text)),
+    'by_new_decision', coalesce((select jsonb_object_agg(s, n) from (select coalesce(new_decision, 'none') s, count(*) n from public.intel_reeval_items where run_id = v_run.id and state = 'scored' group by 1) q), '{}'::jsonb));
+end $$;
+
+create or replace function public.intel_agent_reeval_cancel(p_run_id uuid) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_org uuid := public.intel_agent_org(); n int;
+begin
+  update public.intel_reeval_runs set state = 'cancelled', finished_at = now() where id = p_run_id and organization_id = v_org and state = 'running';
+  if not found then return jsonb_build_object('cancelled', false); end if;
+  update public.intel_jobs set state = 'cancelled', finished_at = now(), updated_at = now(), lease_until = null, locked_by = null
+   where organization_id = v_org and kind = 'reeval_studio' and state = 'queued' and payload ->> 'run_id' = p_run_id::text;
+  get diagnostics n = row_count;
+  perform public._intel_log(v_org, 'agent', 'reeval_run_cancelled', 'reeval_run', p_run_id::text, jsonb_build_object('jobs_cancelled', n));
+  return jsonb_build_object('cancelled', true, 'jobs_cancelled', n);
+end $$;
+
+-- 5. Per-prospect functions (all re-check scope in the database) ------------------------------------------------------------------
+-- Context for one item: the prospect, ONLY evidence this run collected after it began, and the already-known candidate websites.
+create or replace function public.intel_agent_reeval_context(p_run_id uuid, p_prospect_id uuid) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_org uuid := public.intel_agent_org(); v_bad text := public._intel_reeval_check(v_org, p_run_id, p_prospect_id); r public.intel_reeval_runs;
+begin
+  if v_bad is not null then return jsonb_build_object('out_of_scope', v_bad); end if;
+  select * into r from public.intel_reeval_runs where id = p_run_id;
+  return jsonb_build_object(
+    'run', jsonb_build_object('id', r.id, 'started_at', r.started_at, 'state', r.state, 'scoring_model', r.scoring_model),
+    'item', (select to_jsonb(i) - 'detail' from public.intel_reeval_items i where i.run_id = p_run_id and i.prospect_id = p_prospect_id),
+    'prospect', (select to_jsonb(p) from public.intel_prospects p where p.id = p_prospect_id),
+    'evidence', coalesce((select jsonb_agg(jsonb_build_object('source', e.source, 'url', e.url, 'fact_type', e.fact_type, 'snippet', e.snippet, 'verified', e.verified,
+                                                                'fetched_at', e.fetched_at, 'reeval_run', e.reeval_run) order by e.fetched_at)
+                            from public.intel_evidence e where e.prospect_id = p_prospect_id and e.reeval_run = p_run_id and e.fetched_at >= r.started_at), '[]'::jsonb),
+    'domain_aliases', coalesce((select jsonb_agg(a.value order by a.created_at) from public.intel_entity_aliases a where a.prospect_id = p_prospect_id and a.kind = 'domain'), '[]'::jsonb),
+    'name_aliases', coalesce((select jsonb_agg(a.value order by a.created_at) from public.intel_entity_aliases a where a.prospect_id = p_prospect_id and a.kind = 'name'), '[]'::jsonb),
+    'item_urls', coalesce((select jsonb_agg(distinct s.url) from public.intel_source_items s where s.prospect_id = p_prospect_id and s.url <> ''), '[]'::jsonb));
+end $$;
+
+-- Evidence written by a reevaluation. Re-seeing a sentence REFRESHES fetched_at and claims the row for this run (plain add_evidence would
+-- leave the old timestamp, and old evidence must never decide a new score).
+create or replace function public.intel_agent_reeval_add_evidence(p_run_id uuid, p_prospect_id uuid, p_source text, p_url text, p_fact_type text, p_snippet text, p_content_hash text, p_verified boolean) returns boolean
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_org uuid := public.intel_agent_org(); v_bad text := public._intel_reeval_check(v_org, p_run_id, p_prospect_id);
+begin
+  if v_bad is not null then raise exception 'reevaluation refused: %', v_bad; end if;
+  insert into public.intel_evidence(organization_id, prospect_id, source, url, fact_type, snippet, content_hash, verified, reeval_run, fetched_at)
+  values (v_org, p_prospect_id, left(p_source, 60), left(coalesce(p_url, ''), 500), left(p_fact_type, 60), left(coalesce(p_snippet, ''), 2000), left(coalesce(p_content_hash, ''), 64), coalesce(p_verified, false), p_run_id, now())
+  on conflict (prospect_id, fact_type, content_hash) do update
+     set fetched_at = now(), reeval_run = p_run_id, url = excluded.url, source = excluded.source, verified = excluded.verified;
+  return true;
+end $$;
+
+-- Official-website recovery: fills ONLY an empty website, and only with a domain no other prospect owns and nobody suppressed.
+create or replace function public.intel_agent_reeval_set_website(p_run_id uuid, p_prospect_id uuid, p_website text, p_detail jsonb default '{}'::jsonb) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_org uuid := public.intel_agent_org(); v_bad text := public._intel_reeval_check(v_org, p_run_id, p_prospect_id); p public.intel_prospects; v_domain text; v_other uuid;
+begin
+  if v_bad is not null then raise exception 'reevaluation refused: %', v_bad; end if;
+  select * into p from public.intel_prospects where id = p_prospect_id and organization_id = v_org for update;
+  if coalesce(p.website, '') <> '' then return jsonb_build_object('ok', false, 'reason', 'already_has_website'); end if;
+  if p.status <> 'rejected' then return jsonb_build_object('ok', false, 'reason', 'status_changed'); end if;
+  v_domain := coalesce(public.intel_domain_of(p_website), '');
+  if v_domain = '' then return jsonb_build_object('ok', false, 'reason', 'bad_website'); end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(v_org::text || ':reeval-domain:' || v_domain, 0));
+  if exists (select 1 from public.intel_suppressions s where s.organization_id = v_org and s.kind = 'domain' and s.value = v_domain) then return jsonb_build_object('ok', false, 'reason', 'domain_suppressed'); end if;
+  select id into v_other from public.intel_prospects where organization_id = v_org and id <> p.id and (domain = v_domain or canonical_key = 'd:' || v_domain) limit 1;
+  if v_other is null then select prospect_id into v_other from public.intel_entity_aliases where organization_id = v_org and kind = 'domain' and value = v_domain and prospect_id <> p.id limit 1; end if;
+  if v_other is not null then return jsonb_build_object('ok', false, 'reason', 'domain_belongs_to_other_prospect', 'other_prospect_id', v_other); end if;
+  update public.intel_prospects set website = left(p_website, 300), domain = v_domain, canonical_key = 'd:' || v_domain, updated_at = now() where id = p.id;
+  insert into public.intel_entity_aliases(organization_id, prospect_id, kind, value) values (v_org, p.id, 'domain', left(v_domain, 200)) on conflict do nothing;
+  update public.intel_reeval_items set detail = detail || jsonb_build_object('website_recovery', coalesce(p_detail, '{}'::jsonb) || jsonb_build_object('website', left(p_website, 300), 'recovered_at', now()))
+   where run_id = p_run_id and prospect_id = p.id;
+  perform public._intel_log(v_org, 'agent', 'reeval_website_recovered', 'prospect', p.id::text, jsonb_build_object('run_id', p_run_id, 'website', left(p_website, 300), 'evidence', coalesce(p_detail, '{}'::jsonb)));
+  return jsonb_build_object('ok', true, 'domain', v_domain);
+end $$;
+
+-- What this run's research learned, merged into facts.verified BY ID (never through the canonical-key upsert, which could create a duplicate
+-- prospect after a website recovery). Empty contact fields may be filled from the studio's own pages, as in ordinary research, unless suppressed.
+create or replace function public.intel_agent_reeval_record_research(p_run_id uuid, p_prospect_id uuid, p_verified jsonb, p_contact_name text default '', p_contact_email text default '', p_contact_source_url text default '') returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_org uuid := public.intel_agent_org(); v_bad text := public._intel_reeval_check(v_org, p_run_id, p_prospect_id); p public.intel_prospects; v_email text := public.intel_norm_email(p_contact_email); v_ok_email boolean;
+begin
+  if v_bad is not null then raise exception 'reevaluation refused: %', v_bad; end if;
+  select * into p from public.intel_prospects where id = p_prospect_id and organization_id = v_org for update;
+  if p.status <> 'rejected' then return jsonb_build_object('ok', false, 'reason', 'status_changed'); end if;
+  if p_verified is not null and jsonb_typeof(p_verified) <> 'object' then raise exception 'p_verified must be a JSON object'; end if;
+  v_ok_email := v_email <> '' and not exists (select 1 from public.intel_suppressions s where s.organization_id = v_org and ((s.kind = 'email' and s.value = v_email) or (s.kind = 'domain' and v_email like '%@' || s.value)));
+  update public.intel_prospects
+     set facts = jsonb_set(facts, '{verified}', coalesce(facts -> 'verified', '{}'::jsonb) || coalesce(p_verified, '{}'::jsonb) || jsonb_build_object('reeval_run', p_run_id, 'researched_at', now())),
+         contact_email = case when contact_email = '' and v_ok_email then v_email else contact_email end,
+         contact_name = case when contact_name = '' then left(coalesce(p_contact_name, ''), 200) else contact_name end,
+         contact_source_url = case when contact_email = '' and v_ok_email then left(coalesce(p_contact_source_url, ''), 500) else contact_source_url end,
+         updated_at = now()
+   where id = p.id;
+  update public.intel_reeval_items set researched_at = now() where run_id = p_run_id and prospect_id = p.id;
+  return jsonb_build_object('ok', true);
+end $$;
+
+-- The deliberate studio-v2 rescore. Refuses anything but studio-v2, refuses unless THIS run recorded fresh research, and only moves a prospect
+-- that is still 'rejected'. 'qualified' is stored as 'needs_review' (see the header). Never touches leads, messages, jobs or settings.
+create or replace function public.intel_agent_reeval_set_score(p_run_id uuid, p_prospect_id uuid, p_score int, p_breakdown jsonb, p_decision text, p_reason text default '', p_estimates jsonb default '{}'::jsonb) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_org uuid := public.intel_agent_org(); v_bad text := public._intel_reeval_check(v_org, p_run_id, p_prospect_id); p public.intel_prospects; i public.intel_reeval_items; v_status text; v_reason text;
+begin
+  if v_bad is not null then raise exception 'reevaluation refused: %', v_bad; end if;
+  if p_decision is null or p_decision not in ('qualified','needs_review','rejected') then raise exception 'bad decision'; end if;
+  if p_score is null then raise exception 'score is required'; end if;
+  if coalesce(p_estimates ->> 'scoring_model', '') <> 'studio-v2' then raise exception 'reevaluation only writes studio-v2 scores'; end if;
+  select * into p from public.intel_prospects where id = p_prospect_id and organization_id = v_org for update;
+  select * into i from public.intel_reeval_items where run_id = p_run_id and prospect_id = p_prospect_id for update;
+  if i.state <> 'queued' then return jsonb_build_object('ok', true, 'already', i.state); end if;
+  if p.status <> 'rejected' then
+    update public.intel_reeval_items set state = 'skipped', outcome = 'status_changed:' || p.status, finished_at = now() where run_id = p_run_id and prospect_id = p.id;
+    perform public._intel_reeval_maybe_complete(p_run_id);
+    return jsonb_build_object('ok', false, 'reason', 'status_changed', 'status', p.status);
+  end if;
+  if coalesce(p.facts -> 'verified' ->> 'reeval_run', '') <> p_run_id::text then raise exception 'reevaluation refused: no research recorded in this run'; end if;
+  v_status := case when p_decision = 'rejected' then 'rejected' else 'needs_review' end;
+  v_reason := left('Reevaluation (studio-v2): ' || case when p_decision = 'qualified' then 'meets the qualification score; a person must confirm before any CRM lead. ' else '' end || coalesce(p_reason, ''), 300);
+  update public.intel_prospects
+     set score = least(100, greatest(0, p_score)), score_breakdown = coalesce(p_breakdown, '{}'::jsonb), status = v_status, review_reason = v_reason,
+         facts = jsonb_set(facts, '{estimates}', coalesce(facts -> 'estimates', '{}'::jsonb) || coalesce(p_estimates, '{}'::jsonb)
+                 || jsonb_build_object('reeval_run', p_run_id, 'reeval_decision', p_decision, 'reeval_scored_at', now(), 'previous_score', i.prev_score, 'previous_model', i.prev_model)),
+         updated_at = now()
+   where id = p.id;
+  update public.intel_reeval_items set state = 'scored', outcome = 'rescored', new_status = v_status, new_score = least(100, greatest(0, p_score)), new_decision = p_decision, finished_at = now()
+   where run_id = p_run_id and prospect_id = p.id;
+  perform public._intel_log(v_org, 'agent', 'reeval_scored', 'prospect', p.id::text, jsonb_build_object('run_id', p_run_id, 'previous_status', i.prev_status, 'previous_score', i.prev_score,
+         'previous_model', i.prev_model, 'new_status', v_status, 'new_score', p_score, 'new_decision', p_decision));
+  perform public._intel_reeval_maybe_complete(p_run_id);
+  return jsonb_build_object('ok', true, 'status', v_status, 'decision', p_decision);
+end $$;
+
+-- Terminal outcomes that must NOT change the prospect: website not recovered, site unreadable, research incomplete, retries exhausted.
+-- The prospect keeps its status and score; a person sees the outcome in intel_reeval_items / the audit log.
+create or replace function public.intel_agent_reeval_finish_item(p_run_id uuid, p_prospect_id uuid, p_state text, p_outcome text, p_detail jsonb default '{}'::jsonb) returns jsonb
+language plpgsql security definer set search_path = pg_catalog, public as $$
+declare v_org uuid := public.intel_agent_org(); v_bad text := public._intel_reeval_check(v_org, p_run_id, p_prospect_id);
+begin
+  if v_bad is not null then raise exception 'reevaluation refused: %', v_bad; end if;
+  if p_state is null or p_state not in ('needs_manual','failed','skipped') then raise exception 'bad state'; end if;
+  update public.intel_reeval_items set state = p_state, outcome = left(coalesce(p_outcome, ''), 80), detail = detail || coalesce(p_detail, '{}'::jsonb), finished_at = now()
+   where run_id = p_run_id and prospect_id = p_prospect_id and state = 'queued';
+  if found then
+    perform public._intel_log(v_org, 'agent', 'reeval_' || p_state, 'prospect', p_prospect_id::text, jsonb_build_object('run_id', p_run_id, 'outcome', left(coalesce(p_outcome, ''), 80), 'detail', coalesce(p_detail, '{}'::jsonb)));
+  end if;
+  perform public._intel_reeval_maybe_complete(p_run_id);
+  return jsonb_build_object('ok', true, 'changed', found);
+end $$;
+
+-- 6. Grants -----------------------------------------------------------------------------------------------------------------------
+revoke all on function public._intel_reeval_check(uuid, uuid, uuid) from public, anon, authenticated;
+revoke all on function public._intel_reeval_maybe_complete(uuid) from public, anon, authenticated;
+do $$
+declare r record;
+begin
+  for r in select p.oid::regprocedure as sig from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'intel\_agent\_reeval\_%'
+  loop
+    execute format('revoke all on function %s from public, anon', r.sig);
+    execute format('grant execute on function %s to authenticated', r.sig);   -- the agent user is an authenticated user; intel_agent_org() is what limits it
+  end loop;
+end $$;
+
+commit;

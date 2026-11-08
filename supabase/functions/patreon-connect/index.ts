@@ -1,3 +1,4 @@
+// Deploy with --no-verify-jwt: the single-use OAuth intent is the authorization credential.
 // GET /patreon-connect?intent=<id from oauth-start-intent>
 // Same intent-based flow as google-drive-connect - see
 // migration_oauth_intents.sql and _shared/oauth_intent.ts.

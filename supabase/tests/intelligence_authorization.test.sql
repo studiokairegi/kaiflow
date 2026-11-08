@@ -24,14 +24,20 @@ end $$;
 create or replace function ti.as_user(u uuid) returns void language plpgsql as $$
 begin
   perform set_config('request.jwt.claim.sub', coalesce(u::text, ''), false);
+  perform set_config('request.jwt.claim.role', 'authenticated', false);
   execute 'reset role'; execute 'set role authenticated';
 end $$;
 create or replace function ti.as_anon() returns void language plpgsql as $$
 begin
   perform set_config('request.jwt.claim.sub', '', false);
+  perform set_config('request.jwt.claim.role', 'anon', false);
   execute 'reset role'; execute 'set role anon';
 end $$;
-create or replace function ti.as_super() returns void language plpgsql as $$ begin execute 'reset role'; end $$;
+create or replace function ti.as_super() returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.role', 'service_role', false);
+  execute 'reset role';
+end $$;
 grant execute on all functions in schema ti to anon, authenticated, service_role;
 
 set session_replication_role = replica; -- skip the signup bootstrap trigger for fixture users
@@ -78,6 +84,7 @@ begin
   insert into user_settings(user_id,is_admin) values (u_no,false) on conflict (user_id) do nothing;
   delete from user_settings where user_id = u_no;
 end $$;
+set session_replication_role = origin;
 
 -- The account matrix --------------------------------------------------------------------------
 do $$
@@ -138,6 +145,12 @@ declare
   orgA uuid := '20000000-0000-0000-0000-00000000000a'; dep uuid := gen_random_uuid();
 begin
   perform ti.as_user(u_am); perform ti.ok(intel_is_authorized() is true, 'baseline: allowed');
+
+  -- A signed-in user cannot promote themselves to admin or Pro through direct table writes.
+  perform ti.as_user(u_mo);
+  update user_settings set is_admin = true, plan = 'pro' where user_id = u_mo;
+  perform ti.ok((select is_admin is false and plan = 'free' from user_settings where user_id = u_mo),
+    'privileged-user trigger blocks self-grant of admin and Pro');
 
   perform ti.as_super(); update user_settings set is_admin = false where user_id = u_am;
   perform ti.as_user(u_am); perform ti.ok(intel_is_authorized() is false, 'revoking is_admin removes access');

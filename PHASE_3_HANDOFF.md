@@ -1,7 +1,7 @@
 # KairFlow Intelligence — Phase 3 Implementation Handoff
 
-**Phase:** 3 — Japanese-language emails, follow-ups and replies
-**Reference:** Approved Phase 2 archive supplied for this task
+**Phase:** 3 — Japanese-language emails, follow-ups and replies  
+**Reference:** Approved Phase 2 archive supplied for this task  
 **Implementation status:** Code changes and automated regression tests completed. Japanese model-quality acceptance remains pending a run against the configured local Ollama model and native-speaker review.
 
 ## 1. Objective

@@ -42,6 +42,8 @@ class EdgeTokenProvider:
 
 
 class ZohoClient:
+    provider = "zoho"
+
     def __init__(self, tokens, session: requests.Session | None = None):
         self.tokens, self.s = tokens, session or requests.Session()
         self._folders: dict[str, str] | None = None

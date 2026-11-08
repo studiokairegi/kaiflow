@@ -9,10 +9,10 @@
 --   * job kind 'reeval_studio'                 one job per prospect; the handler does everything in one pass and can enqueue nothing else.
 --   * intel_agent_reeval_* functions           the ONLY way the worker touches a prospect during a reevaluation. Each one re-checks, in the
 --                                              database, that the run is active and that the prospect is type = animation_studio_support
---                                              and origin = discovered. indie_game_developer rows are unreachable through them.
+--                                              and origin = discovered. Only pre-outreach states are eligible; manual/taken-over and indie rows are unreachable.
 --
 -- What this deliberately does NOT do
---   * no CRM lead is created or linked, no message/draft is created, nothing is sent, nothing is scheduled for sending;
+--   * no CRM lead is created or changed, no message/draft is created, nothing is sent, nothing is scheduled for sending; existing pre-outreach links are preserved;
 --   * intel_settings (kill_switch, autonomy, daily caps, send window) is never read for writing and never changed;
 --   * a studio-v2 result of 'qualified' is stored as status 'needs_review' (the true decision is kept in the item and in estimates),
 --     so no reevaluated prospect becomes 'qualified' without a person approving it in the existing review queue.
@@ -108,7 +108,7 @@ begin
 
   if p.type <> 'animation_studio_support' then return 'out_of_scope_type'; end if;
   if p.origin <> 'discovered' then return 'out_of_scope_origin'; end if;
-  if p.status <> 'rejected' then return 'status_changed'; end if;
+  if p.status not in ('rejected', 'needs_review', 'qualified', 'lead_linked') then return 'status_changed'; end if;
 
   -- A human rejection is never overturned by automated reevaluation.
   if exists (
@@ -119,9 +119,12 @@ begin
        and a.entity_id = p.id::text
   ) then return 'human_rejected'; end if;
 
-  if p.lead_id is not null or exists (
-    select 1 from public.leads l where l.intel_prospect_id = p.id
-  ) then return 'prospect_linked'; end if;
+  -- A CRM link alone does not mean outreach occurred. Pre-outreach qualified leads may be re-scored,
+  -- but the linked CRM row is never modified by this workflow. Actual messages/history remain excluded.
+  if (p.lead_id is not null and not exists (select 1 from public.leads l where l.id = p.lead_id and l.intel_prospect_id = p.id))
+     or exists (select 1 from public.leads l where l.intel_prospect_id = p.id and l.id is distinct from p.lead_id) then
+    return 'prospect_link_mismatch';
+  end if;
 
   if exists (
     select 1 from public.intel_messages m where m.prospect_id = p.id
@@ -198,8 +201,9 @@ begin
 end $$;
 
 -- 4. Selection / start ------------------------------------------------------------------------------------------------------------
--- Eligible = discovered animation studios currently 'rejected' that have NO CRM lead, NO messages, NO pasted history, were not rejected by a
--- person, are not suppressed, and have not already been rescored by an earlier run (unless p_include_previous).
+-- Eligible = discovered animation studios in rejected/needs_review/qualified/lead_linked states, with NO messages or pasted history,
+-- were not rejected by a person, are not suppressed, and have not already been rescored (unless p_include_previous).
+-- Existing CRM links are permitted only as a pre-outreach link and are never modified by this workflow.
 -- p_dry_run (default TRUE) only counts. Otherwise it creates (or tops up) the run named p_name and queues one job per NEW item, at most
 -- p_limit new items per call (NULL = all eligible). Calling it again with the same name is safe: no duplicate items, no duplicate jobs.
 drop function if exists public.intel_agent_reeval_start(text, integer, boolean, boolean);
@@ -214,8 +218,9 @@ begin
   insert into pg_temp._reeval_pool
   select p.id, coalesce(p.website, '') <> '', p.created_at
     from public.intel_prospects p
-   where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status = 'rejected' and p.lead_id is null
-     and not exists (select 1 from public.leads l where l.intel_prospect_id = p.id)
+   where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status in ('rejected','needs_review','qualified','lead_linked')
+     and ((p.lead_id is null and not exists (select 1 from public.leads l where l.intel_prospect_id=p.id))
+       or (p.lead_id is not null and exists (select 1 from public.leads l where l.id=p.lead_id and l.intel_prospect_id=p.id)))
      and not exists (select 1 from public.intel_messages m where m.prospect_id = p.id)
      and not exists (select 1 from public.intel_lead_history h where h.prospect_id = p.id)
      and not exists (
@@ -237,16 +242,16 @@ begin
           )
      )
      and (coalesce(p_include_previous, false) or not exists (select 1 from public.intel_reeval_items i where i.prospect_id = p.id and i.state = 'scored'));
-  select count(*) into v_total from public.intel_prospects p where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status = 'rejected';
+  select count(*) into v_total from public.intel_prospects p where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status in ('rejected','needs_review','qualified','lead_linked');
   select count(*) into v_human from public.intel_prospects p
-   where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status = 'rejected'
+   where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status in ('rejected','needs_review','qualified','lead_linked')
      and exists (select 1 from public.intel_actions a where a.organization_id = v_org and a.action = 'review_prospect_reject' and a.entity_type = 'prospect' and a.entity_id = p.id::text);
   -- A person's rejection is a decision, not a model result: those prospects are never selected.
   delete from pg_temp._reeval_pool where prospect_id in (select p.id from public.intel_prospects p join public.intel_actions a on a.entity_id = p.id::text and a.entity_type = 'prospect' and a.action = 'review_prospect_reject' and a.organization_id = v_org);
   select count(*), count(*) filter (where not has_website) into v_eligible, v_noweb from pg_temp._reeval_pool;
   if p_dry_run is distinct from false then
-    return jsonb_build_object('dry_run', true, 'rejected_discovered_studios', v_total, 'eligible', v_eligible, 'eligible_with_website', v_eligible - v_noweb,
-                              'eligible_without_website', v_noweb, 'excluded_rejected_by_a_person', v_human);
+    return jsonb_build_object('dry_run', true, 'pre_outreach_discovered_studios', v_total, 'eligible', v_eligible, 'eligible_with_website', v_eligible - v_noweb,
+                              'eligible_without_website', v_noweb, 'excluded_human_rejections', v_human);
   end if;
   if btrim(coalesce(p_name, '')) = '' then raise exception 'run name required'; end if;
   if length(btrim(p_name)) > 80 then raise exception 'run name must be 80 characters or fewer'; end if;
@@ -374,7 +379,7 @@ begin
   end if;
   select * into p from public.intel_prospects where id = p_prospect_id and organization_id = v_org for update;
   if coalesce(p.website, '') <> '' then return jsonb_build_object('ok', false, 'reason', 'already_has_website'); end if;
-  if p.status <> 'rejected' then return jsonb_build_object('ok', false, 'reason', 'status_changed'); end if;
+  if p.status not in ('rejected', 'needs_review', 'qualified', 'lead_linked') then return jsonb_build_object('ok', false, 'reason', 'status_changed'); end if;
   v_domain := coalesce(public.intel_domain_of(p_website), '');
   if v_domain = '' then return jsonb_build_object('ok', false, 'reason', 'bad_website'); end if;
   perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(v_org::text || ':reeval-domain:' || v_domain, 0));
@@ -398,7 +403,7 @@ declare v_org uuid := public.intel_agent_org(); v_bad text := public._intel_reev
 begin
   if v_bad is not null then raise exception 'reevaluation refused: %', v_bad; end if;
   select * into p from public.intel_prospects where id = p_prospect_id and organization_id = v_org for update;
-  if p.status <> 'rejected' then return jsonb_build_object('ok', false, 'reason', 'status_changed'); end if;
+  if p.status not in ('rejected', 'needs_review', 'qualified', 'lead_linked') then return jsonb_build_object('ok', false, 'reason', 'status_changed'); end if;
   if p_verified is not null and jsonb_typeof(p_verified) <> 'object' then raise exception 'p_verified must be a JSON object'; end if;
   v_ok_email := v_email <> '' and not exists (select 1 from public.intel_suppressions s where s.organization_id = v_org and ((s.kind = 'email' and s.value = v_email) or (s.kind = 'domain' and v_email like '%@' || s.value)));
   update public.intel_prospects
@@ -412,8 +417,8 @@ begin
   return jsonb_build_object('ok', true);
 end $$;
 
--- The deliberate studio-v2 rescore. Refuses anything but studio-v2, refuses unless THIS run recorded fresh research, and only moves a prospect
--- that is still 'rejected'. 'qualified' is stored as 'needs_review' (see the header). Never touches leads, messages, jobs or settings.
+-- Deliberate studio-v2 rescore. Requires fresh run-scoped evidence. A formerly qualified/lead-linked prospect is ALWAYS held at needs_review
+-- until a human reviews the result; CRM lead rows, messages, history, jobs and settings are never modified.
 create or replace function public.intel_agent_reeval_set_score(p_run_id uuid, p_prospect_id uuid, p_score int, p_breakdown jsonb, p_decision text, p_reason text default '', p_estimates jsonb default '{}'::jsonb) returns jsonb
 language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_org uuid := public.intel_agent_org(); v_bad text := public._intel_reeval_check(v_org, p_run_id, p_prospect_id); p public.intel_prospects; i public.intel_reeval_items; v_status text; v_reason text;
@@ -431,13 +436,13 @@ begin
   select * into p from public.intel_prospects where id = p_prospect_id and organization_id = v_org for update;
   select * into i from public.intel_reeval_items where run_id = p_run_id and prospect_id = p_prospect_id for update;
   if i.state <> 'queued' then return jsonb_build_object('ok', true, 'already', i.state); end if;
-  if p.status <> 'rejected' then
+  if p.status not in ('rejected', 'needs_review', 'qualified', 'lead_linked') then
     update public.intel_reeval_items set state = 'skipped', outcome = 'status_changed:' || p.status, finished_at = now() where run_id = p_run_id and prospect_id = p.id;
     perform public._intel_reeval_maybe_complete(p_run_id);
     return jsonb_build_object('ok', false, 'reason', 'status_changed', 'status', p.status);
   end if;
   if coalesce(p.facts -> 'verified' ->> 'reeval_run', '') <> p_run_id::text then raise exception 'reevaluation refused: no research recorded in this run'; end if;
-  v_status := case when p_decision = 'rejected' then 'rejected' else 'needs_review' end;
+  v_status := case when p.status in ('qualified', 'lead_linked') then 'needs_review' when p_decision = 'rejected' then 'rejected' else 'needs_review' end;
   v_reason := left('Reevaluation (studio-v2): ' || case when p_decision = 'qualified' then 'meets the qualification score; a person must confirm before any CRM lead. ' else '' end || coalesce(p_reason, ''), 300);
   update public.intel_prospects
      set score = least(100, greatest(0, p_score)), score_breakdown = coalesce(p_breakdown, '{}'::jsonb), status = v_status, review_reason = v_reason,

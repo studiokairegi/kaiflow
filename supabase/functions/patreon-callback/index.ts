@@ -1,3 +1,4 @@
+// Deploy with --no-verify-jwt: Patreon redirects without a Supabase session; consume the single-use intent.
 // GET /patreon-callback?code=...&state=<intent id>
 // Same intent-based state handling as google-drive-callback - see
 // migration_oauth_intents.sql and _shared/oauth_intent.ts. Exchanges the

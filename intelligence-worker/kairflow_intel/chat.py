@@ -176,6 +176,92 @@ def _reply(d, thread, mid, text, status="done"):
     d.rpc("intel_agent_chat_reply", {"p_thread_id": thread, "p_message_id": mid, "p_text": text[:7900], "p_status": status})
 
 
+
+_DRAFT_REQUEST = re.compile(
+    r"(?:\b(?:draft|write|compose|prepare)\b.{0,80}\b(?:email|outreach|introduction|intro)\b|"
+    r"\b(?:email|outreach|introduction)\b.{0,80}\b(?:draft|write|compose|prepare)\b|"
+    r"(?:メール|営業メール|初回連絡).{0,30}(?:作成|下書き|ドラフト))", re.I | re.S)
+_DRAFT_TARGET = re.compile(r"\b(?:to|for)\s+[\"“]?([A-Za-z0-9][A-Za-z0-9 .&'’_-]{0,58})", re.I)
+_NEGATED_DRAFT_REQUEST = re.compile(
+    r"\b(?:do\s+not|don't|dont|never|please\s+don't)\s+(?:draft|write|compose|prepare)\b", re.I)
+
+
+def _is_explicit_draft_request(request: str) -> bool:
+    return bool(_DRAFT_REQUEST.search(request) and not _NEGATED_DRAFT_REQUEST.search(request))
+
+
+def _company_key(value: str) -> str:
+    value = re.sub(r"^(?:株式会社|有限会社|合同会社)", "", str(value or "").strip(), flags=re.I)
+    value = re.sub(r"(?:株式会社|有限会社|合同会社)$", "", value, flags=re.I)
+    return re.sub(r"[\s　・,，.。'’\"“”_-]+", "", value).casefold()
+
+
+def _draft_target(request: str) -> str:
+    match = _DRAFT_TARGET.search(request)
+    if not match:
+        # Japanese prospect names may be written entirely in kana/kanji and
+        # followed by a business addressee suffix; do not make the resolver
+        # English-only merely because the request is in Japanese.
+        match = re.search(r"([^\s、。,.!?;:「」『』（）()]{2,80}?)(?:様|御中|宛(?:て)?|向け)", request)
+    if not match:
+        match = re.search(r"([A-Za-z0-9][A-Za-z0-9 .&'’_-]{1,58}?)(?:様|宛|向け)", request)
+    if not match:
+        return ""
+    value = match.group(1)
+    value = re.split(r"\s+(?:on behalf of|for|in|with|and)\b|[,.;:!?。\n]", value, maxsplit=1, flags=re.I)[0]
+    value = re.sub(r"\b(?:on behalf of|Studio Kairegi)\b.*$", "", value, flags=re.I).strip()
+    return value[:60].strip()
+
+
+def _handle_explicit_draft(d, thread: str, mid: int, request: str, used: list[str]):
+    """Deterministic draft path: resolve one exact prospect, compose and persist before confirming."""
+    target = _draft_target(request)
+    if not target:
+        _reply(d, thread, mid, "I can prepare and save the email, but I couldn't identify the recipient. Please specify the exact prospect name (for example, 'to Andraft').", "error")
+        return {"replied": True, "draft_error": "recipient_not_specified"}
+    args = clean_args("list_prospects", {"query": target, "limit": 25})
+    prospects = d.rpc("intel_agent_chat_tool", {"p_thread_id": thread, "p_message_id": mid, "p_tool": "list_prospects", "p_args": args})
+    used.append("list_prospects")
+    if not isinstance(prospects, dict) or prospects.get("ok") is False:
+        reason = (prospects or {}).get("reason", "prospect_lookup_failed")
+        _reply(d, thread, mid, f"I couldn't resolve {target!r} safely, so no email draft was created ({reason}).", "error")
+        return {"replied": True, "draft_error": reason}
+    matches = [p for p in prospects.get("prospects", []) if _company_key(p.get("name")) == _company_key(target)]
+    if len(matches) != 1:
+        reason = "prospect_not_found" if not matches else "ambiguous_prospect"
+        _reply(d, thread, mid, f"I couldn't identify exactly one prospect matching {target!r} ({reason}). No draft was created. Please use the exact prospect name shown in Prospects.", "error")
+        return {"replied": True, "draft_error": reason}
+    prospect = matches[0]
+    if prospect.get("status") != "lead_linked":
+        _reply(d, thread, mid, f"{prospect['name']} is currently {prospect.get('status')}, not lead_linked. The initial-outreach workflow requires a linked lead; no draft was created.", "error")
+        return {"replied": True, "draft_error": "prospect_not_ready"}
+    if not prospect.get("id"):
+        _reply(d, thread, mid, "The prospect lookup did not return a durable prospect identifier. No draft was created.", "error")
+        return {"replied": True, "draft_error": "missing_prospect_id"}
+    try:
+        from .jobs import h_draft
+        result = h_draft(d, {"payload": {"prospect_id": prospect["id"], "kind": "initial", "force_review": True,
+                                           "language": "ja" if re.search(r"japanese|日本語", request, re.I) else None}})
+    except Exception as exc:
+        _reply(d, thread, mid, f"I could not save the draft for {prospect['name']}: {str(exc)[:220]}. No successful save is being claimed.", "error")
+        return {"replied": True, "draft_error": type(exc).__name__}
+    if not isinstance(result, dict) or not result.get("ok") or not result.get("message_id"):
+        detail = (result or {}).get("skipped") or (result or {}).get("reason") or "draft_creation_failed"
+        _reply(d, thread, mid, f"I could not save the initial outreach draft for {prospect['name']} ({detail}). No email was sent.", "error")
+        return {"replied": True, "draft_error": detail}
+    message_id = result["message_id"]
+    created = result.get("created") is not False
+    status = result.get("state") or "pending_approval"
+    if status == "pending_approval":
+        message = (f"Saved the initial outreach draft for {prospect['name']} in Outreach → Waiting for your approval. "
+                   f"Draft ID: {message_id}. It has not been sent; review it in Outreach before approving.")
+    else:
+        message = (f"The initial outreach draft for {prospect['name']} already exists (Draft ID: {message_id}; "
+                   f"current status: {status}). No duplicate was created. Check Outreach for its current state.")
+    _reply(d, thread, mid, message, "done")
+    return {"replied": True, "draft_saved": True, "message_id": message_id, "created": created, "tools": used}
+
+
 def handle(d, payload: dict) -> dict:
     thread, mid = payload.get("thread_id"), payload.get("message_id")
     if not thread or not isinstance(mid, int):
@@ -194,6 +280,11 @@ def handle(d, payload: dict) -> dict:
     messages.append({"role": "user", "content": request})
     used, seen, last_tool = [], set(), None
     system = SYSTEM.format(tools=catalogue())
+
+    # Explicit email drafting is a state-changing operation. Do not leave it to
+    # free-form chat generation: resolve the prospect and persist through h_draft.
+    if _is_explicit_draft_request(request):
+        return _handle_explicit_draft(d, thread, mid, request, used)
 
     def run_tool(tool, args):
         nonlocal last_tool

@@ -704,11 +704,30 @@ def compose_japanese(prospect: dict, evidence: list[dict], kb: dict, settings: d
         raise PermanentError("Japanese reply raises pricing, terms, complaint, scheduling, commitment or opt-out issues; manual review required")
     catalog = _evidence_catalog(evidence, inbound=inbound, history=history, kind=kind)
     factual = [e for e in catalog if e.get("fact_type") not in ("sent_outreach_history", "actual_incoming_message", "conversation_inbound")]
-    if not factual:
-        raise PermanentError("insufficient verified prospect research for individualized Japanese draft; manual review required")
     approved = {k: str(kb[k]["body"]).strip() for k in keys[:3]}
     if not all(approved.values()):
         raise PermanentError("approved Japanese studio/service/portfolio facts are incomplete")
+    if not factual:
+        # No verified recipient-specific material: use a modest, deterministic
+        # introduction based only on approved Studio Kairegi facts. Never fake
+        # personalization just to satisfy a model-generation requirement.
+        if kind != "initial":
+            raise PermanentError("insufficient verified prospect research for individualized Japanese draft; manual review required")
+        subject = SUBJECT_JA.format(name=str(prospect.get("name") or "")).replace("アニメーション制作協力", "2Dアニメーション制作のご案内")[:120]
+        contact = str(prospect.get("contact_name") or "").strip()
+        salutation = (contact + ("" if contact.endswith(("様", "先生")) else "様")) if contact else (str(prospect.get("name") or "") + " ご担当者様")
+        body = (
+            salutation + "\n\n"
+            "突然のご連絡失礼いたします。Studio Kairegiと申します。\n\n"
+            + approved[keys[0]] + "\n\n" + approved[keys[1]] + "\n\n" + approved[keys[2]]
+            + "\n\n今後、アニメーション制作において外部スタジオとの協業をご検討の際には、"
+              "弊スタジオの対応内容をご紹介できればと存じます。"
+              "現時点でご予定がない場合は、どうぞご放念ください。"
+            + "\n\n" + policy.compliance_footer(settings, opt_out_text=kb["policy.opt_out.ja"]["body"].strip())
+        )
+        return {"subject": subject, "body": body, "model_written": False,
+                "evidence_ids": [], "evidence_trace": [],
+                "personalization": {"kind": kind, "language": "ja", "evidence_ids": [], "grounding_overlap": 0.0}}
     instructions = {
         "initial": "初回の営業メールを作成してください。相手の実際の制作実績・活動に基づく個別の切り口にしてください。",
         "followup": "実際に送信済みの前回メールと会話履歴を踏まえ、同じ売り込みを繰り返さず、自然で簡潔なフォローアップを作成してください。",
@@ -946,7 +965,7 @@ def compose_english(prospect: dict, evidence: list[dict], kb: dict, settings: di
     sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", _claim_body(body)) if x.strip()]
     overlap_values = []
     evidence_lower = cited_text.lower()
-    allowed_lower = evidence_lower + " " + " ".join(approved.values()).lower()
+    allowed_lower = (evidence_lower + " " + " ".join(approved.values()).lower()).replace("’", "'").replace("‘", "'")
     calendar_words = set("monday tuesday wednesday thursday friday saturday sunday january february march april june july august september october november december".split())
     sender_tokens = _tokens(str(settings.get("sender_name") or ""))
     allowed_entities = identity_tokens | sender_tokens | _tokens("Studio Kairegi") | cited_tokens | approved_tokens | calendar_words
@@ -964,7 +983,9 @@ def compose_english(prospect: dict, evidence: list[dict], kb: dict, settings: di
         claim_tokens = tokens - identity_tokens - sender_tokens - {"thanks", "regards", "best", "cheers", "sincerely", "welcome", "appreciate"}
         if not claim_tokens:
             continue
-        sentence_lower = sentence.lower()
+        # Normalize typographic apostrophes before lexical checks so contractions
+        # such as “won’t” are treated exactly like “won't”, not as the claim “won”.
+        sentence_lower = sentence.lower().replace("’", "'").replace("‘", "'")
         if any(n not in allowed_lower for n in re.findall(r"\d[\d,.]*\d|\d", sentence_lower)):
             raise PermanentError("sentence contains a number or year absent from cited evidence and approved facts; manual review required")
         # Every sentence gets the high-risk and entity checks, not only trigger-word ones.
@@ -982,7 +1003,7 @@ def compose_english(prospect: dict, evidence: list[dict], kb: dict, settings: di
         ap_ratio = len(claim_tokens & approved_tokens) / len(claim_tokens)
         # A sentence is a claim about the prospect if it uses a trigger word, names the
         # prospect, or states something about them or an event ("is ... recently ...").
-        personalized = bool(re.search(r"\b(?:your|you|project|game|trailer|portfolio|release|team|they|their|them|recently|currently|this year|last year|announced|secured|raised|launched|signed|partnered|won(?!')|is|are|was|were)\b", sentence, re.I)) or bool(tokens & identity_tokens)
+        personalized = bool(re.search(r"\b(?:your|you|project|game|trailer|portfolio|release|team|they|their|them|recently|currently|this year|last year|announced|secured|raised|launched|signed|partnered|won(?!')|is|are|was|were)\b", sentence_lower)) or bool(tokens & identity_tokens)
         service_only = ap_ratio >= 0.5 and not (tokens & identity_tokens)
         if personalized and not service_only and len(claim_tokens) >= (1 if tokens & identity_tokens else 3):
             if ev_ratio < 0.50:

@@ -16,7 +16,7 @@ RECRUIT_ONLY = ("We are hiring key animators, in-betweeners, layout artists and 
                 "Apply for our 2D animation openings. Careers page.")
 JA_STUDIO = ("当社は2Dアニメの制作会社です。\nレイアウト、原画、動画、仕上げまで一貫して手がけます。\nキャラクターの作画を得意としています。\n"
              "制作実績はこちら。TVアニメを多数制作しました。\n現在新作を制作中です。\n他社からの作画協力・受託も承ります。ご依頼はお問い合わせください。")
-CG_ONLY = ("We are an animation studio. We do layout, key animation, in-betweens and coloring in 3DCG. Our works include many films. "
+CG_ONLY = ("We are an animation studio. We do layout, key animation, in-betweens and coloring in 3DCG. Our works include Film A and Film B. "
            "Our series is in production. We take commissioned work from other studios. Business inquiries welcome.")
 
 
@@ -79,14 +79,14 @@ class Qualification(unittest.TestCase):
         self.assertEqual(r.suitability, "needs_review")
 
     def test_uncertain_collaboration_forces_review_even_above_70(self):
-        text = "Studio Q is a 2D animation studio making TV anime series. We do layout, key animation, in-betweens and coloring. Our works include many series. Our series is in production."
+        text = "Studio Q is a 2D animation studio making TV anime series. We produce hand-drawn 2D anime. We do layout, key animation, in-betweens and coloring. Our works include Series A and Series B. Our series is in production."
         r, _ = run(text)
         self.assertGreaterEqual(r.score, 70); self.assertEqual((r.decision, r.uncertain), ("needs_review", ["external_collaboration"]))
 
     def test_uncertain_pipeline_forces_review_even_above_70(self):
         sig = {"role_key": "Studio Z does key animation.", "role_layout": "Layout artists wanted.", "role_inbetween": "In-betweeners wanted.", "role_coloring": "Colorists wanted.",
                "role_character": "Character animation staff wanted.", "production_active": "Season 2 is in production.", "multiple_titles": "Our works include A and B.",
-               "style_2d": "We make 2D animation.", "anime_production": "We produce anime series.", "external_collab": "We take client work.", "outsourcing": "We use partner studios.",
+               "style_2d": "We make 2D animation.", "style_2d_anime": "We make hand-drawn 2D anime.", "external_collab": "We take client work.", "outsourcing": "We use partner studios.",
                "business_inquiry": "Business inquiries welcome."}
         r = scoring.score_studio(sig, {"language": "en"}, EMAIL)
         self.assertGreaterEqual(r.score, 70); self.assertEqual((r.decision, r.uncertain), ("needs_review", ["pipeline_fit"]))
@@ -102,10 +102,18 @@ class Qualification(unittest.TestCase):
 
     def test_bands_and_contact_gate(self):
         r, _ = run(SMALL_2D_NO_HIRING, contact=None)
-        self.assertEqual((r.suitability, r.decision), ("qualified", "needs_review"))           # contactability still gated exactly as before
-        self.assertEqual(run(SMALL_2D_NO_HIRING, contact={"form_url": "https://x"})[0].decision, "needs_review")
-        mid, _ = run(SMALL_2D_NO_HIRING, qualify_min=200, review_min=50); self.assertEqual(mid.decision, "needs_review")
-        low, _ = run(SMALL_2D_NO_HIRING, qualify_min=200, review_min=150); self.assertEqual(low.decision, "rejected")
+        self.assertEqual((r.suitability, r.decision), ("qualified", "qualified"))           # suitability is independent of contactability
+        self.assertEqual(run(SMALL_2D_NO_HIRING, contact={"form_url": "https://x"})[0].decision, "qualified")
+        # Campaign-level threshold overrides are ignored for studio-v2.
+        borderline = {
+            "role_layout": "We do layout.", "role_key": "We do key animation.",
+            "style_2d": "We make 2D animation.",
+            "external_collab": "We take client work.",
+        }
+        fixed = scoring.score_studio(borderline, {"language": "other"}, None, qualify_min=30, review_min=20)
+        self.assertEqual(fixed.score, 37)
+        self.assertEqual(fixed.decision, "rejected")
+        self.assertEqual((scoring.STUDIO_QUALIFY_MIN, scoring.STUDIO_REVIEW_MIN), (70, 50))
 
 
 class Detection(unittest.TestCase):
@@ -124,13 +132,21 @@ class Detection(unittest.TestCase):
     def test_indie_table_detection_unchanged(self):
         self.assertIn("style_2d", signals.detect_indie("A hand-drawn 2D adventure. Coming soon."))
 
+    def test_portfolio_heading_alone_is_not_published_work_evidence(self):
+        for text in ("Our works page is available here.", "Filmography", "制作実績はこちら。"):
+            self.assertNotIn("multiple_titles", signals.detect_studio(text), text)
+
+    def test_multiple_identifiable_entries_are_published_work_evidence(self):
+        for text in ("Our works include Title A and Title B.", "Filmography: Title A, Title B.", "制作実績：作品A、作品B"):
+            self.assertIn("multiple_titles", signals.detect_studio(text), text)
+
 
 def ctx(score=None, breakdown=None, estimates=None, ptype="animation_studio_support"):
     ev = [{"fact_type": k, "snippet": v, "verified": True} for k, v in {
         "role_layout": "We do layout.", "role_key": "We do key animation.", "role_inbetween": "We do in-betweens.", "role_coloring": "We do coloring.", "style_2d": "We are a 2D studio.", "anime_production": "We produce anime series.",
         "external_collab": "We take client work.", "production_active": "Our series is in production.", "multiple_titles": "Our works include A."}.items()]
     p = {"id": "p1", "type": ptype, "score": score, "score_breakdown": breakdown if breakdown is not None else {}, "facts": {"estimates": estimates or {}, "verified": {"language": "en"}},
-         "contact_email": "info@studio.example", "contact_name": "", "language": "en"}
+         "contact_email": "info@studio.example", "contact_name": "", "language": "en", "domain": "studio.example"}
     return {"prospect": p, "evidence": ev}
 
 
@@ -145,7 +161,43 @@ class LegacyPreservation(unittest.TestCase):
         r = Rec(); res = research.qualify(r, ctx(), {})
         s = r.named("intel_agent_set_score")[0]
         self.assertEqual(s["p_estimates"]["scoring_model"], "studio-v2"); self.assertTrue(all(b["model"] == "studio-v2" for b in s["p_breakdown"]))
-        self.assertFalse(res.held); self.assertEqual(res.decision, "needs_review")  # legacy contact has unknown provenance
+        self.assertFalse(res.held); self.assertEqual(res.decision, "qualified")  # suitability is independent; contactability is needs_review/rejected separately
+        self.assertEqual(res.contactability["status"], "needs_review")
+
+    def test_contactability_needs_review_blocks_resolve_even_when_suitable(self):
+        dctx = ctx()
+        dctx["prospect"]["facts"]["verified"].update({"contact_verification": "website_extracted", "contact_email": "info@studio.example", "contact_source_url": "https://studio.example/contact"})
+        enq = []
+        class D:
+            def rpc(self, name, args=None):
+                if name == "intel_agent_context": return dctx
+                if name == "intel_agent_settings": return {"campaigns": [{"type": "animation_studio_support", "criteria": {}}]}
+                return None
+        orig = jobs._enq; jobs._enq = lambda *a, **k: enq.append(a[1])
+        try:
+            out = jobs.h_qualify(D(), {"payload": {"prospect_id": "p1"}})
+        finally:
+            jobs._enq = orig
+        self.assertEqual(out["decision"], "qualified")
+        self.assertEqual(out["contactability"]["status"], "needs_review")
+        self.assertNotIn("resolve", enq)
+
+    def test_contactability_pass_allows_resolve(self):
+        dctx = ctx()
+        dctx["prospect"]["facts"]["verified"].update({"contact_verification": "human_confirmed", "contact_email": "info@studio.example", "contact_source_url": "https://studio.example/contact"})
+        enq = []
+        class D:
+            def rpc(self, name, args=None):
+                if name == "intel_agent_context": return dctx
+                if name == "intel_agent_settings": return {"campaigns": [{"type": "animation_studio_support", "criteria": {}}]}
+                return None
+        orig = jobs._enq; jobs._enq = lambda *a, **k: enq.append(a[1])
+        try:
+            out = jobs.h_qualify(D(), {"payload": {"prospect_id": "p1"}})
+        finally:
+            jobs._enq = orig
+        self.assertEqual(out["contactability"]["status"], "pass")
+        self.assertIn("resolve", enq)
 
     def test_legacy_score_is_not_overwritten_and_candidate_is_recorded(self):
         old = [{"criterion": "active_production", "points": 20, "max": 20, "why": "x"}]
@@ -210,10 +262,24 @@ class ResearchCorrections(unittest.TestCase):
         row = next(x for x in r.breakdown if x["criterion"] == "animation_2d")
         self.assertEqual(row["status"], "uncertain")
 
-    def test_documented_2d_anime_can_confirm_2d(self):
+    def test_documented_2d_anime_is_scored_and_confirms_2d(self):
         r = scoring.score_studio({"style_2d_anime": "当社は手描きのテレビアニメを制作しています。", "anime_production": "当社はテレビアニメを制作しています。"}, {"language": "ja"}, None)
         row = next(x for x in r.breakdown if x["criterion"] == "animation_2d")
         self.assertEqual(row["status"], "confirmed")
+        self.assertEqual(row["points"], 7)
+        self.assertEqual(row["items"][1]["signal"], "style_2d_anime")
+
+    def test_generic_anime_or_3d_cg_does_not_receive_2d_points(self):
+        found = {k: [v] for k, v in signals.detect_studio("We produce anime series entirely in 3DCG.").items()}
+        r = scoring.score_studio(found, {"language": "en"}, None)
+        row = next(x for x in r.breakdown if x["criterion"] == "animation_2d")
+        self.assertEqual(row["points"], 0)
+        self.assertEqual(row["status"], "uncertain")
+
+    def test_2d_anime_evidence_awards_points_without_generic_anime_double_count(self):
+        r = scoring.score_studio({"style_2d_anime": "We produce hand-drawn 2D anime.", "anime_production": "We produce anime series."}, {"language": "en"}, None)
+        row = next(x for x in r.breakdown if x["criterion"] == "animation_2d")
+        self.assertEqual(row["points"], 7)
 
     def test_existing_email_not_relabelled_verified_and_evidence_keeps_page_urls(self):
         home = '<html><body><a href="/works">Works</a><p>We are hiring key animators.</p><p>info@studio.example</p></body></html>'

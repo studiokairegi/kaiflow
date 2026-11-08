@@ -1,0 +1,60 @@
+# JWT verification is explicit for every function that intentionally accepts a
+# capability token, signed webhook, or one-time OAuth state instead of a Supabase JWT.
+# All functions not listed here retain Supabase's secure default: verify_jwt = true.
+
+[functions.google-drive-connect]
+verify_jwt = false
+
+[functions.google-drive-callback]
+verify_jwt = false
+
+[functions.patreon-connect]
+verify_jwt = false
+
+[functions.patreon-callback]
+verify_jwt = false
+
+[functions.patreon-webhook]
+verify_jwt = false
+
+[functions.paystack-checkout]
+verify_jwt = false
+
+[functions.paystack-webhook]
+verify_jwt = false
+
+[functions.resend-webhook]
+verify_jwt = false
+
+[functions.intel-resend-webhook]
+verify_jwt = false
+
+[functions.intel-gmail-callback]
+verify_jwt = false
+
+[functions.intel-zoho-callback]
+verify_jwt = false
+
+[functions.intel-provider-callback]
+verify_jwt = false
+
+[functions.studio-invite-accept]
+verify_jwt = false
+
+[functions.freelancer-drive-upload]
+verify_jwt = false
+
+[functions.client-final-download]
+verify_jwt = false
+
+[functions.portfolio-view]
+verify_jwt = false
+
+[functions.portfolio-media]
+verify_jwt = false
+
+[functions.portal-chat]
+verify_jwt = false
+
+[functions.push]
+verify_jwt = false

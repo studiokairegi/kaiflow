@@ -21,6 +21,7 @@ export const intelApi = {
   registerAgent: (s, userId) => call(s, "intel_admin_register_agent", { p_agent_user_id: userId }),
   updateCampaign: (s, type, patch) => call(s, "intel_admin_update_campaign", { p_type: type, p_patch: patch }),
   enqueue: (s, kind, payload) => call(s, "intel_admin_enqueue_job", { p_kind: kind, p_payload: payload || {} }),
+  requeueJob: (s, id) => call(s, "intel_admin_requeue_job", { p_job_id: id }),
   markProspectForReview: (s, id) => call(s, "intel_admin_mark_prospect_review", { p_prospect_id: id }),
   reviewProspect: (s, id, action, leadId) => call(s, "intel_admin_review_prospect", { p_prospect_id: id, p_action: action, p_lead_id: leadId || null }),
   reviewMessage: (s, id, action, subject, body) => call(s, "intel_admin_review_message", { p_message_id: id, p_action: action, p_subject: subject ?? null, p_body: body ?? null }),
@@ -33,6 +34,11 @@ export const intelApi = {
   approveKb: (s, key, approved) => call(s, "intel_admin_approve_kb", { p_key: key, p_approved: approved }),
 
   disconnectMail: (s) => call(s, "intel_admin_disconnect_mail"),
+  providerCatalog: (s) => call(s, "intel_admin_provider_catalog"),
+  providerAccounts: (s) => call(s, "intel_admin_provider_accounts"),
+  updateProviderAccount: (s, id, patch) => call(s, "intel_admin_update_provider_account", { p_account_id: id, p_patch: patch }),
+  disconnectProviderAccount: (s, id) => call(s, "intel_admin_disconnect_provider_account", { p_account_id: id }),
+  setContactPermission: (s, a) => call(s, "intel_admin_set_contact_permission", { p_email: a.email, p_purpose: a.purpose, p_evidence_type: a.evidenceType, p_evidence_reference: a.evidenceReference || "", p_granted: a.granted !== false }),
   updateSource: (s, key, patch) => call(s, "intel_admin_update_source", { p_key: key, p_enabled: patch.enabled ?? null, p_tos_status: patch.tosStatus ?? null, p_daily_budget: patch.dailyBudget ?? null }),
   setProfile: (s, type, p) => call(s, "intel_admin_set_profile", { p_type: type, p_description: p.description, p_terms_en: p.termsEn, p_terms_ja: p.termsJa, p_exclude: p.exclude }),
   approveProfile: (s, type, approved) => call(s, "intel_admin_approve_profile", { p_type: type, p_approved: approved }),
@@ -43,6 +49,7 @@ export const intelApi = {
     p_include_previous: false, p_all: a.all ?? false, p_expect_count: a.expectCount ?? null,
   }),
   reevalStatus: (s) => call(s, "intel_admin_reeval_status", { p_run_id: null }),
+  phase6ScoreAudit: (s) => call(s, "intel_admin_phase6_score_audit", {}),
   reevalCancel: (s, runId) => call(s, "intel_admin_reeval_cancel", { p_run_id: runId }),
 
 

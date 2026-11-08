@@ -12,8 +12,9 @@ from typing import Callable
 
 from . import classify as cls, discovery, drafting, mailops, policy, research, sources, studio_reeval
 from .errors import PermanentError, RpcError, TransientError
+from .safety import MeteredFetcher
 
-DEFER = {"daily_cap", "followup_cap", "campaign_cap", "followup_not_due", "campaign_paused", "kill_switch", "needs_reconcile", "send_spacing"}
+DEFER = {"daily_cap", "followup_cap", "campaign_cap", "followup_not_due", "campaign_paused", "kill_switch", "needs_reconcile", "send_spacing", "send_window_deferred", "provider_account_quota"}
 
 
 @dataclass
@@ -47,8 +48,32 @@ def h_discover(d: Deps, job):
     camp = next((c for c in st["campaigns"] if c["type"] == t), None)
     if not camp or (camp["status"] != "active" and not manual):
         return {"skipped": "campaign paused"}
+    # All h_discover paths, including admin-seeded studio URLs and indie
+    # Steam/itch adapters, must pass the organization-scoped source registry.
+    registry = d.rpc("intel_agent_sources", {}) or {}
+    enabled_sources = set(registry.keys())
+    reserve_source = lambda key: int(d.rpc("intel_agent_source_use", {"p_key": key, "p_n": 1}) or 0) == 1
+    report_source = lambda key, ok, err="": d.rpc("intel_agent_source_report", {"p_key": key, "p_ok": ok, "p_error": str(err)[:250]})
+    configured = camp.get("criteria")
+    if not isinstance(configured, dict):
+        return {"skipped": "discovery criteria must be an object"}
+    if t == "indie_game_developer":
+        requested = configured.get("sources")
+        keywords = configured.get("keywords")
+        if (not isinstance(requested, list) or not requested or
+                any(not isinstance(key, str) or key not in ("steam", "itch") for key in requested) or
+                not isinstance(keywords, list) or not any(isinstance(k, str) and k.strip() for k in keywords)):
+            return {"skipped": "indie discovery requires valid explicitly configured sources and non-empty keywords"}
+        if not any(key in enabled_sources for key in requested):
+            return {"skipped": "no requested indie source is registry-authorized"}
+    else:
+        seed_urls = configured.get("seed_urls")
+        if seed_urls is not None and (not isinstance(seed_urls, list) or any(not isinstance(u, str) or not u.strip() for u in seed_urls)):
+            return {"skipped": "seed_urls must be a list of non-empty strings"}
+        if seed_urls and "site_crawler" not in enabled_sources:
+            return {"skipped": "site_crawler source is not registry-authorized"}
     new = 0
-    for c in sources.discover(d.fetcher, t, camp["criteria"]):
+    for c in sources.discover(d.fetcher, t, configured, enabled_sources=enabled_sources, reserve_source=reserve_source, report_source=report_source):
         if limit is not None and new >= limit:
             break
         meta = c.get("meta") or {}
@@ -71,7 +96,11 @@ def h_research(d: Deps, job):
         d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "official website not found; add it or reject"})
         return {"skipped": "no website"}
     llm = lambda text: d.llm.generate_json(research.ENTITY_INSTRUCTION, text, research.ENTITY_SCHEMA, fast=True)
-    out = research.research(d.rpc, d.fetcher, llm, ctx)
+    registry = d.rpc("intel_agent_sources", {}) or {}
+    if "site_crawler" not in registry:
+        return {"skipped": "site_crawler source is disabled, terms-unconfirmed, over budget or circuit-open"}
+    fetcher = MeteredFetcher(d.fetcher, lambda: int(d.rpc("intel_agent_source_use", {"p_key": "site_crawler", "p_n": 1}) or 0) == 1)
+    out = research.research(d.rpc, fetcher, llm, ctx)
     _enq(d, "analyze_site", {"prospect_id": pid}, f"analyze:{pid}")      # deeper site look, then qualification
     return out
 
@@ -81,9 +110,9 @@ def h_qualify(d: Deps, job):
     ctx = d.rpc("intel_agent_context", {"p_prospect_id": pid})
     camp = next((c for c in d.rpc("intel_agent_settings", {})["campaigns"] if c["type"] == ctx["prospect"]["type"]), {"criteria": {}})
     res = research.qualify(d.rpc, ctx, camp["criteria"])
-    if res.decision == "qualified" and not res.held:       # held = older-model score kept as is; Phase 6 re-evaluates it
+    if res.decision == "qualified" and res.contactability.get("status") == "pass" and not res.held:       # suitability and contactability are independent gates
         _enq(d, "resolve", {"prospect_id": pid}, f"resolve:{pid}")
-    return {"score": res.score, "decision": res.decision, **({"held": "older scoring model kept; candidate recorded"} if res.held else {})}
+    return {"score": res.score, "decision": res.decision, "contactability": res.contactability, **({"held": "older scoring model kept; candidate recorded"} if res.held else {})}
 
 
 def h_resolve(d: Deps, job):
@@ -159,16 +188,23 @@ def _store_evidence_trace(d: Deps, message_id, mail: dict) -> None:
 
 def h_draft(d: Deps, job):
     pid, kind = job["payload"]["prospect_id"], job["payload"].get("kind", "initial")
+    force_review = bool((job.get("payload") or {}).get("force_review", False))
+    language_override = (job.get("payload") or {}).get("language")
     stored_kind = kind
     compose = None   # set for English model-written drafts; lets the vetting step regenerate once
     ctx = d.rpc("intel_agent_context", {"p_prospect_id": pid})
     p = ctx["prospect"]
+    if kind == "initial":
+        existing = next((m for m in reversed(ctx.get("messages") or [])
+                         if m.get("direction") == "outbound" and m.get("idempotency_key") == f"draft:{pid}:initial"), None)
+        if existing:
+            return {"ok": True, "message_id": existing["id"], "created": False, "state": existing.get("state")}
     st, kb = d.rpc("intel_agent_settings", {}), _kb(d)
     if not p.get("contact_email"):
         return {"skipped": "no verified contact email"}
     # Fail early on unsafe approved KB copy. This is independent of prospect
     # research availability and must remain a hard, logged policy failure.
-    use_japanese = drafting.should_use_japanese(p, ctx.get("messages") or [])
+    use_japanese = language_override == "ja" or drafting.should_use_japanese(p, ctx.get("messages") or [])
     relevant_kb_keys = {"studio.about", "portfolio.main", drafting.TYPE_KEY.get(p.get("type"), "")}
     if use_japanese:
         relevant_kb_keys.update(drafting.japanese_kb_keys(p))
@@ -181,8 +217,8 @@ def h_draft(d: Deps, job):
         match = policy.FALSE_CLAIMS.search(text)
         if match:
             unsafe_kb.append(f"{key}: unsupported claim {match.group(0)!r}")
-        if use_japanese and (re.search(r"以前(?:ご相談|お話し)|お話しした通り|外注先をお探し|人手不足", text) or policy.FALSE_CLAIMS_JA.search(text)):
-            unsafe_kb.append(f"{key}: unsupported Japanese history, interest or staffing claim")
+        if use_japanese and (re.search(r"以前(?:ご相談|お話し)|お話しした通り|外注先をお探し|人手不足|これまでに多く|数多く|豊富な経験|多数の作品|多くの作品|幅広い実績|数々の作品", text) or policy.FALSE_CLAIMS_JA.search(text)):
+            unsafe_kb.append(f"{key}: unsupported Japanese history, experience, volume, interest or staffing claim")
     if unsafe_kb:
         reason = "approved knowledge-base content violates outbound policy: " + "; ".join(unsafe_kb)
         d.rpc("intel_agent_log", {"p_action": "draft_blocked", "p_entity_type": "prospect", "p_entity_id": pid,
@@ -191,7 +227,7 @@ def h_draft(d: Deps, job):
     if kind == "initial":
         if p["status"] != "lead_linked":
             return {"skipped": f"status {p['status']}"}
-        composer = drafting.compose_japanese if drafting.should_use_japanese(p, ctx.get("messages") or []) else drafting.compose_english
+        composer = drafting.compose_japanese if use_japanese else drafting.compose_english
         compose = lambda feedback=None: composer(p, ctx["evidence"], kb, st,
             llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
             kind="initial", history=ctx.get("messages") or [], feedback=feedback)
@@ -237,7 +273,7 @@ def h_draft(d: Deps, job):
         history = d.rpc("intel_agent_recent_outbound", {"p_limit": 500}) or []
         prior = [_prior_row(m) for m in history
                  if m.get("state") not in ("discarded", "failed") and m.get("idempotency_key") != key]   # not our own earlier copy (retry)
-    localized_opt_out = kb.get("policy.opt_out.ja", {}).get("body", "").strip() if drafting.should_use_japanese(p, ctx.get("messages") or []) else None
+    localized_opt_out = kb.get("policy.opt_out.ja", {}).get("body", "").strip() if use_japanese else None
     mail, problem = _vet_draft(d, st, kb, mail, compose, prior, kind=kind, stored_kind=stored_kind, domain=p.get("domain", ""), pid=pid,
                                names=_recipient_names(p), opt_out_text=localized_opt_out)
     if problem and problem["type"] == "review":
@@ -263,7 +299,8 @@ def h_draft(d: Deps, job):
         raise PermanentError("draft failed policy: " + "; ".join(bad))
     r = d.rpc("intel_agent_upsert_draft", {"p_prospect_id": pid, "p_kind": stored_kind if kind in ("followup", "reengagement") else kind, "p_step": step, "p_subject": mail["subject"], "p_body": mail["body"],
                                            "p_idempotency_key": key, "p_to_email": p["contact_email"], "p_auto_ok": False,
-                                           "p_in_reply_to": (thread or {}).get("in_reply_to"), "p_references": (thread or {}).get("references")})
+                                           "p_in_reply_to": (thread or {}).get("in_reply_to"), "p_references": (thread or {}).get("references"),
+                                           "p_force_review": force_review})
     if r.get("ok"):
         _store_evidence_trace(d, r.get("message_id"), mail)
     if r.get("ok") and r.get("state") == "approved":
@@ -275,6 +312,23 @@ def _mail_paused(d: Deps) -> bool:
     return bool(getattr(d.zoho, "disabled", False))
 
 
+def _defer_outside_send_window(d: Deps, message_id: str):
+    status = d.rpc("intel_agent_send_window_status", {"p_message_id": message_id}) or {}
+    if status.get("allowed") is True:
+        return None
+    reason = status.get("reason", "send_window_status_unavailable")
+    if reason != "outside_send_window" or not status.get("next_open_at"):
+        return {"sent": False, "reason": reason}
+    raw = str(status["next_open_at"])
+    try:
+        next_open = __import__("datetime").datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        delay = max(30, min(int(next_open.timestamp() - d.clock()) + 1, 8 * 86_400))
+    except (TypeError, ValueError, OverflowError):
+        return {"sent": False, "reason": "send_window_schedule_invalid"}
+    _enq(d, "send", {"message_id": message_id}, f"send-window:{message_id}:{next_open.isoformat()}", delay=delay)
+    return {"sent": False, "reason": "send_window_deferred", "retry_after": delay, "next_open_at": raw, "deferred": True}
+
+
 def h_send(d: Deps, job):
     if _mail_paused(d):
         return {"sent": False, "reason": "mail_provider_paused"}
@@ -284,12 +338,23 @@ def h_send(d: Deps, job):
     if st.get("kill_switch", True):
         return {"sent": False, "reason": "kill_switch"}
 
+    message_id = job["payload"]["message_id"]
+    deferred = _defer_outside_send_window(d, message_id)
+    if deferred is not None:
+        return deferred
+
     # Spacing is reserved atomically in Supabase so multiple worker processes
-    # cannot bypass the studio-wide throttle.
-    r = mailops.send_message(d.rpc, d.zoho, job["payload"]["message_id"])
-    if r.get("reason") == "send_spacing":
-        delay = max(5, min(int(r.get("retry_after", 60)), 300))
-        message_id = job["payload"]["message_id"]
+    # cannot bypass the studio-wide throttle. The final DB gate rechecks the
+    # send window; if it closes between preflight and send, defer once more.
+    r = mailops.send_message(d.rpc, d.zoho, message_id)
+    if r.get("reason") == "not_reserved_or_send_stopped":
+        deferred = _defer_outside_send_window(d, message_id)
+        if deferred is not None and deferred.get("reason") == "outside_send_window":
+            return deferred
+        if deferred is not None and deferred.get("reason") == "send_window_deferred":
+            return deferred
+    if r.get("reason") in ("send_spacing", "provider_account_quota"):
+        delay = max(5, min(int(r.get("retry_after", 60)), 86_400))
         _enq(d, "send", {"message_id": message_id}, f"send-slot:{message_id}:{int(d.clock() // 60)}", delay=delay)
     return r
 
@@ -447,24 +512,59 @@ HANDLERS = {"seed_sources": discovery.h_seed_sources, "analyze_site": discovery.
 
 
 class _Lease:
-    """Keeps the job's lease alive while a long handler (model call, slow site) runs."""
-    def __init__(self, rpc, job, worker_id, every=60):
-        self.rpc, self.job, self.wid, self.every, self.stop = rpc, job, worker_id, every, threading.Event()
+    """Renews a claimed lease and records any loss/uncertain renewal."""
+    def __init__(self, rpc, job, worker_id, every=60, heartbeat=None):
+        self.rpc, self.job, self.wid, self.every, self.heartbeat = rpc, job, worker_id, every, heartbeat
+        self.stop, self.lost = threading.Event(), threading.Event()
+        self.error = None
     def __enter__(self):
+        if self.heartbeat:
+            try:
+                self.heartbeat()
+            except Exception:
+                pass
         def beat():
             while not self.stop.wait(self.every):
                 try:
-                    self.rpc("intel_agent_extend_lease", {"p_job_id": self.job["id"], "p_worker_id": self.wid, "p_seconds": 300})
-                except Exception:
-                    pass
+                    owned = self.rpc("intel_agent_extend_lease", {"p_job_id": self.job["id"], "p_worker_id": self.wid, "p_seconds": 300})
+                    if owned is not True:
+                        self.error = "lease renewal rejected"
+                        self.lost.set()
+                        return
+                    if self.heartbeat:
+                        try:
+                            self.heartbeat()
+                        except Exception:
+                            # Health telemetry must not invalidate a still-owned job lease.
+                            pass
+                except Exception as exc:
+                    self.error = f"lease renewal uncertain ({type(exc).__name__})"
+                    self.lost.set()
+                    return
         self.t = threading.Thread(target=beat, daemon=True); self.t.start(); return self
     def __exit__(self, *a):
         self.stop.set()
+        self.t.join(timeout=1)
 
 
 class Worker:
     def __init__(self, deps: Deps, lease_thread: bool = True):
         self.d, self.lease_thread, self._hb = deps, lease_thread, 0.0
+        self._active_job = None
+        self._last_job_completed_at = None
+        self._last_job_error = None
+
+    def _heartbeat(self) -> None:
+        d = self.d
+        info = {
+            "ollama": bool(getattr(d.llm, "is_up", lambda: False)()),
+            "worker_version": "1.1.0",
+            "pid": __import__("os").getpid(),
+            "active_job": self._active_job,
+            "last_job_completed_at": self._last_job_completed_at,
+            "last_job_error": self._last_job_error,
+        }
+        d.rpc("intel_agent_heartbeat", {"p_worker_id": d.cfg.worker_id, "p_info": info})
 
     def periodic(self) -> None:
         d, now = self.d, self.d.clock()
@@ -489,7 +589,7 @@ class Worker:
     def tick(self) -> bool:
         d = self.d
         if d.clock() - self._hb > 30:
-            d.rpc("intel_agent_heartbeat", {"p_worker_id": d.cfg.worker_id, "p_info": {"ollama": bool(getattr(d.llm, "is_up", lambda: False)())}})
+            self._heartbeat()
             self.periodic()
             self._hb = d.clock()
         job = d.rpc("intel_agent_claim_job", {"p_worker_id": d.cfg.worker_id, "p_kinds": None, "p_lease_seconds": 300})
@@ -500,27 +600,61 @@ class Worker:
 
     def run_job(self, job) -> None:
         d, h = self.d, HANDLERS.get(job["kind"])
+        self._active_job = {"id": job.get("id"), "kind": job.get("kind")}
+        lease = _Lease(d.rpc, job, d.cfg.worker_id, heartbeat=self._heartbeat) if self.lease_thread else None
         try:
             if h is None:
                 raise PermanentError(f"unknown job kind {job['kind']}")
-            ctx = _Lease(d.rpc, job, d.cfg.worker_id) if self.lease_thread else None
-            if ctx:
-                ctx.__enter__()
+            if lease:
+                lease.__enter__()
             try:
                 result = h(d, job)
             finally:
-                if ctx:
-                    ctx.__exit__()
+                if lease:
+                    lease.__exit__()
+            if lease and lease.lost.is_set():
+                # The database may already have reclaimed this job. Never mark it
+                # complete or failed as the former owner; the new lease owner decides.
+                self._last_job_error = "lease lost"
+                try:
+                    d.rpc("intel_agent_log", {"p_action": "job_lease_lost", "p_entity_type": "job",
+                        "p_entity_id": str(job.get("id", "")), "p_detail": {"kind": job.get("kind"), "reason": self._last_job_error}})
+                except Exception:
+                    pass
+                return
             if isinstance(result, dict) and result.get("reason") in DEFER:
                 result = {**result, "deferred": True}
-            d.rpc("intel_agent_complete_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id, "p_result": result if isinstance(result, dict) else {"value": result}})
+            completed = d.rpc("intel_agent_complete_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
+                "p_result": result if isinstance(result, dict) else {"value": result}})
+            if completed is not True:
+                self._last_job_error = "job completion rejected because lease ownership was lost"
+                return
+            self._last_job_completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(d.clock()))
+            self._last_job_error = None
         except TransientError as exc:
-            d.rpc("intel_agent_fail_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id, "p_error": f"transient: {exc}", "p_retry_seconds": min(30 * 2 ** max(job["attempts"] - 1, 0), 3600)})
+            if lease and lease.lost.is_set():
+                self._last_job_error = "lease lost during transient failure"
+                return
+            d.rpc("intel_agent_fail_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
+                "p_error": f"transient: {exc}", "p_retry_seconds": min(30 * 2 ** max(job["attempts"] - 1, 0), 3600)})
+            self._last_job_error = type(exc).__name__
         except (PermanentError, RpcError) as exc:
-            d.rpc("intel_agent_fail_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id, "p_error": f"permanent: {exc}", "p_retry_seconds": 86400})
+            if lease and lease.lost.is_set():
+                self._last_job_error = "lease lost during failure"
+                return
+            d.rpc("intel_agent_fail_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
+                "p_error": f"permanent: {exc}", "p_retry_seconds": 86400})
+            self._last_job_error = type(exc).__name__
         except Exception as exc:  # never let one bad job stop the worker
-            d.rpc("intel_agent_fail_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id, "p_error": f"unexpected {type(exc).__name__}: {exc}"[:400], "p_retry_seconds": 300})
+            if lease and lease.lost.is_set():
+                self._last_job_error = "lease lost during unexpected failure"
+                return
+            d.rpc("intel_agent_fail_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
+                "p_error": f"unexpected {type(exc).__name__}: {exc}"[:400], "p_retry_seconds": 300})
+            self._last_job_error = type(exc).__name__
             traceback.print_exc()
+        finally:
+            self._active_job = None
 
     def run_forever(self, stop: threading.Event) -> None:
         backoff = 0

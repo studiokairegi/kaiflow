@@ -26,7 +26,8 @@ class Config:
     max_fetch_bytes: int = 1_500_000
     per_host_delay: float = 2.0
     contact_url: str = ""
-    mail_provider: str = "none"       # none (safe default), zoho, gmail, or resend
+    mail_provider: str = "none"       # adapter key; none is the fail-closed default
+    mail_account_id: str = ""          # optional account selector during the staged dispatcher rollout
 
     @property
     def user_agent(self) -> str:
@@ -76,9 +77,21 @@ def load(env: dict | None = None) -> Config:
         poll_seconds=int(e.get("KAIRFLOW_POLL_SECONDS") or 15),
         contact_url=e.get("KAIRFLOW_CONTACT_URL") or "",
         mail_provider=(e.get("KAIRFLOW_MAIL_PROVIDER") or "none").strip().lower(),
+        mail_account_id=(e.get("KAIRFLOW_MAIL_ACCOUNT_ID") or "").strip(),
     )
-    if cfg.mail_provider not in ("none", "zoho", "gmail", "resend"):
-        raise ConfigError("KAIRFLOW_MAIL_PROVIDER must be none, zoho, gmail or resend")
+    if cfg.mail_provider != "none" and (not cfg.mail_provider or len(cfg.mail_provider) > 64 or
+            not cfg.mail_provider.replace("-", "").replace("_", "").isalnum()):
+        raise ConfigError("KAIRFLOW_MAIL_PROVIDER must be a normalized adapter identifier")
+    if cfg.mail_provider != "none":
+        # Validate against reviewed, code-installed adapters rather than a fixed provider enum.
+        from .providers import build_registry, ProviderNotInstalled
+        registry = build_registry()
+        try:
+            manifest = registry.manifest(cfg.mail_provider)
+        except ProviderNotInstalled as exc:
+            raise ConfigError(str(exc)) from exc
+        if manifest.account_selection_required and not cfg.mail_account_id:
+            raise ConfigError(f"KAIRFLOW_MAIL_ACCOUNT_ID is required for {cfg.mail_provider}")
     if not cfg.supabase_url.startswith("https://"):
         raise ConfigError("KAIRFLOW_SUPABASE_URL must be https")
     _loopback_only(cfg.ollama_url)

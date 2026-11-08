@@ -6,13 +6,25 @@ import re
 from .entity import is_social_or_platform
 
 WDQS = "https://query.wikidata.org/sparql"
-DEFAULT_CLASSES = ["animation studio", "anime studio", "animation production company"]
+# Candidate labels are matched against actual Wikidata class labels below; absent labels
+# yield no rows rather than broadening to an unrelated class.
+DEFAULT_CLASSES = ["animation studio", "anime studio", "animation production company",
+                   "アニメーション制作会社", "アニメ制作会社", "作画スタジオ"]
 PAGE = 100
 STUDIO_WORDS = re.compile(r"anim|anime|studio|production|アニメ|制作|スタジオ|プロダクション", re.I)
 
 
 def studios_query(classes: list[str], limit: int = PAGE, offset: int = 0) -> str:
-    values = " ".join(f'"{c.replace(chr(34), "")}"@en' for c in classes if re.fullmatch(r"[A-Za-z0-9 \-]{3,60}", c))
+    labels = []
+    for c in classes:
+        if not isinstance(c, str):
+            continue
+        is_ja = bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff]", c))
+        valid = re.fullmatch(r"[A-Za-z0-9 \-]{3,60}", c) if not is_ja else re.fullmatch(r"[\u3040-\u30ff\u3400-\u9fffー・ ]{2,60}", c)
+        if valid:
+            lang = "ja" if is_ja else "en"
+            labels.append('"' + c + '"@' + lang)
+    values = " ".join(labels) if labels else '"__no_valid_class_label__"@en'
     return f"""SELECT ?item ?itemLabel ?ja ?site ?countryLabel WHERE {{
   VALUES ?clsLabel {{ {values} }}
   ?cls rdfs:label ?clsLabel .

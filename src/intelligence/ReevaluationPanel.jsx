@@ -3,17 +3,34 @@ import { intelApi } from "./api.js";
 
 export default function ReevaluationPanel({ supabase, tick }) {
   const [status, setStatus] = useState(null);
+  const [audit, setAudit] = useState(null);
   const [preview, setPreview] = useState(null);
-  const [name, setName] = useState("Studio rejected-prospect reevaluation");
+  const [name, setName] = useState("Studio prospect pre-outreach reevaluation");
   const [limit, setLimit] = useState(10);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [auditError, setAuditError] = useState("");
 
   const refresh = async () => {
-    try {
-      const result = await intelApi.reevalStatus(supabase);
-      setStatus(result);
-    } catch (e) { setError(e.message || "Could not load reevaluation status"); }
+    const [statusResult, auditResult] = await Promise.allSettled([
+      intelApi.reevalStatus(supabase),
+      intelApi.phase6ScoreAudit(supabase),
+    ]);
+
+    if (statusResult.status === "fulfilled") {
+      setStatus(statusResult.value);
+      setError("");
+    } else {
+      setError(statusResult.reason?.message || "Could not load reevaluation status");
+    }
+
+    if (auditResult.status === "fulfilled") {
+      setAudit(auditResult.value);
+      setAuditError("");
+    } else {
+      setAudit(null);
+      setAuditError(auditResult.reason?.message || "Could not load score and ownership inventory");
+    }
   };
 
   useEffect(() => { refresh(); }, [supabase, tick]);
@@ -45,7 +62,7 @@ export default function ReevaluationPanel({ supabase, tick }) {
     setPreview(fresh);
     const count = Number(fresh?.eligible || 0);
     if (!count) throw new Error("There are no eligible prospects to reevaluate.");
-    if (!window.confirm(`This will queue all ${count} eligible rejected studio prospects. Human-rejected, contacted, linked and suppressed prospects are excluded. Continue?`)) return;
+    if (!window.confirm(`This will queue all ${count} eligible pre-outreach discovered studio prospects. Human-rejected, suppressed, contacted and taken-over records are excluded; existing CRM links are preserved. Continue?`)) return;
     const result = await intelApi.reevalStart(supabase, {
       name, limit: null, dryRun: false, all: true, expectCount: count,
     });
@@ -66,9 +83,9 @@ export default function ReevaluationPanel({ supabase, tick }) {
   return (
     <section style={{ border: "1px solid var(--border, #444)", borderRadius: 10, padding: 16, display: "grid", gap: 12 }}>
       <div>
-        <h3 style={{ margin: 0 }}>Rejected studio prospect reevaluation</h3>
+        <h3 style={{ margin: 0 }}>Pre-outreach studio prospect reevaluation</h3>
         <p style={{ margin: "6px 0 0", opacity: .75 }}>
-          Rechecks previously rejected discovered animation studios. It does not send emails or create CRM leads.
+          Rechecks discovered animation studios previously rejected, under review, or qualified but not yet contacted. Linked pre-outreach CRM leads remain linked; no CRM lead, conversation, draft or email is created or changed. Human-rejected, suppressed, contacted and taken-over records are excluded.
         </p>
       </div>
       {error && <div role="alert" style={{ color: "#d66" }}>{error}</div>}
@@ -93,6 +110,11 @@ export default function ReevaluationPanel({ supabase, tick }) {
         <b>Latest preview / start result</b>
         <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12 }}>{JSON.stringify(preview, null, 2)}</pre>
       </div>}
+      <div>
+        <b>Existing score and ownership inventory</b>
+        <p style={{ margin: "6px 0", fontSize: 12, opacity: .75 }}>Read-only baseline: current scores by model/status, historical score versions, origin classifications and the pre-outreach studio population. Scores and CRM records are not changed by this report.</p>
+        <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12 }}>{audit ? JSON.stringify(audit, null, 2) : auditError ? `Inventory unavailable: ${auditError}` : "Loading inventory…"}</pre>
+      </div>
       <div>
         <b>Latest run</b>
         {runInfo ? <>

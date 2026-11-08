@@ -28,7 +28,14 @@ STUDIO = {
     "role_coloring": r"colou?ring|finishing|仕上げ|彩色",
     "production_active": r"in production|now airing|currently producing|upcoming (series|season|film)|season \d|制作中|放送中",
     "expansion": r"expand|expansion|new (studio|office|team)|scaling up|増員|拡大",
-    "multiple_titles": r"our (works|productions|titles|projects)|filmography|works list|制作実績",
+    # Require an actual multi-entry list, not a portfolio-page heading or plural label.
+    "multiple_titles": (
+        r"our\s+(?:works|productions|titles|projects)\s+(?:include|are)\s+"
+        r"[^.!?\n]{2,100}(?:,\s*(?:and\s+)?|\band\b|\s&\s)[^.!?\n]{2,100}"
+        r"|filmography\s*[:：]\s*[^.!?\n]{2,100}(?:,\s*(?:and\s+)?|\band\b|\s&\s)[^.!?\n]{2,100}"
+        r"|works\s+list\s*[:：]\s*[^.!?\n]{2,100}(?:,\s*(?:and\s+)?|\band\b|\s&\s)[^.!?\n]{2,100}"
+        r"|制作実績\s*[:：]\s*[^。！？\n]{2,80}(?:、|・|と)[^。！？\n]{2,80}"
+    ),
     "business_inquiry": r"business (inquir|enquir)|contact us|お問い合わせ|ご依頼|work with us",
     # Phase 1 (studio-v2 scoring): evidence of what the studio actually produces and whether it works with outside parties.
     "role_character": r"character animation|characters? animators?|キャラクターアニメーション|作画",

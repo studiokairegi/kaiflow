@@ -1,0 +1,630 @@
+# KairFlow Intelligence — Revised Implementation Roadmap
+
+**Studio Kairegi | 6 November 2026**
+
+**ONE PHASE PER CLAUDE SESSION • SMALL SCOPE • TESTED BEFORE HANDOFF**
+
+## Implementation rules
+
+The phases below must be completed in the exact numbered order. Do not reorder them based on technical dependencies or combine phases.
+
+Each phase must:
+
+- Fit into one manageable Claude session.
+- Have one clearly defined objective.
+- Inspect only the files and dependencies relevant to that objective.
+- Make the smallest necessary changes.
+- Add or update targeted tests.
+- Run relevant regression tests.
+- Inspect the final diff.
+- Produce a short handoff report and file that changed only.
+
+Do not attempt to complete several phases in one session.
+
+If a phase becomes too large, stop, explain why, and propose splitting that phase into smaller sub-phases. Do not consume the remaining session budget attempting to finish an oversized task.
+
+The next phase must not begin until the previous phase has been reviewed and accepted.
+
+**Global restrictions:**
+
+- Never modify the `indie_game_developer` qualification path while working on studio scoring.
+- Preserve the existing Supabase, worker, CRM, authorization and email architecture.
+- Do not introduce paid AI services.
+- Do not deploy, push, activate the worker, enable autonomy or send real emails.
+- Preserve human approval, kill switch, suppression, unsubscribe and daily limits.
+- Do not remove existing functionality without demonstrating why it is necessary.
+
+---
+
+## PHASE 1 — Fix studio qualification criteria and scoring
+
+**Objective:** Make KairFlow Intelligence correctly recognize suitable animation studios, including small independent studios that are not hiring or advertising outsourcing opportunities.
+
+### Required scoring model
+
+| Criterion                                 | Maximum points |
+| ----------------------------------------- | -------------: |
+| Pipeline fit                              |             65 |
+| 2D animation relevance                    |             15 |
+| External collaboration suitability        |             15 |
+| English/Japanese communication preference |              5 |
+| **Total**                                 |        **100** |
+
+### Rules
+
+- Pipeline fit must be based on actual production capabilities and evidence.
+- Relevant capabilities include layout, key animation, in-betweens, douga, coloring, finishing, character animation and 2D anime production.
+- Recruitment and outsourcing announcements are supplementary signals only.
+- A studio must not need to be hiring to qualify.
+- No minimum employee count, production volume or project count.
+- Small and independent studios must remain eligible.
+- Global targeting.
+- English and Japanese are preferences, not mandatory requirements.
+- Uncertainty in pipeline fit, 2D relevance or external collaboration suitability forces Needs Review, even when the numerical score is 70 or higher.
+
+Thresholds:
+
+- 70–100: Qualified on suitability.
+- 50–69: Needs Review.
+- Below 50: Rejected.
+
+### Session scope
+
+1. Inspect the existing studio scoring functions and signals.
+2. Identify which existing signals can support the new criteria.
+3. Propose a defensible breakdown of the 65 pipeline-fit points using actual available evidence.
+4. Do not invent unsupported scoring categories.
+5. Implement the approved studio-only scoring model.
+6. Add uncertainty handling and evidence traceability.
+7. Preserve old scores and identify the scoring-model version.
+8. Test the new scoring against representative studios.
+
+### Acceptance criteria
+
+- The weights total exactly 100.
+- A suitable studio without recruitment or outsourcing announcements can qualify.
+- Recruitment alone cannot qualify a studio.
+- Uncertain evidence produces Needs Review.
+- Every awarded point is explainable.
+- Existing indie qualification tests pass unchanged.
+- Previously scored studio prospects are not silently overwritten or discarded.
+
+**Deliverable:** Updated studio scoring, tests, proposed or approved pipeline breakdown, and a list of any previously scored prospects requiring re-evaluation.
+
+**STOP after Phase 1.**
+
+---
+
+## PHASE 2 — Individualized English emails, follow-ups and replies
+
+**Objective:** Eliminate generic, repeated email templates. Every message must be individually composed for its actual recipient.
+
+This phase covers:
+
+- Initial outreach.
+- Follow-up emails.
+- Responses to incoming emails.
+- Re-engagement messages.
+
+It covers both indie game developers and animation studios.
+
+### Required behaviour
+
+Every email must be written around the actual prospect and available research evidence.
+
+The agent must consider:
+
+- The prospect's actual work.
+- Their portfolio and projects.
+- Their services and capabilities.
+- Relevant production or development activities.
+- The most appropriate Studio Kairegi service.
+- Previous outreach and actual conversation history.
+
+For example, an indie game developer may need anime-style 2D promotional animation, while an animation studio may be a potential client for layout, key animation, in-betweens or coloring support.
+
+These are possible approaches, not reusable templates.
+
+### No superficial personalization
+
+The following do not count as personalization:
+
+- Changing the recipient's name.
+- Changing the company name.
+- Changing the location.
+- Replacing a few words with synonyms.
+- Rotating between a small collection of fixed templates.
+
+The actual message, reasoning, opening, collaboration angle and wording must be developed for the individual recipient.
+
+### Replies and follow-ups
+
+- Read and understand the actual incoming message.
+- Respond to the question or issue raised.
+- Use the real conversation history.
+- Never claim that a prospect expressed interest when they did not.
+- Never repeat the initial pitch mechanically.
+- Never use the same generic reply for unrelated prospects.
+- Keep consequential replies under the existing human-approval workflow.
+
+### Similarity and quality controls
+
+Implement:
+
+- Exact duplicate detection.
+- Near-duplicate detection.
+- Name-swapping and company-swapping detection.
+- Structural repetition detection.
+- Regeneration or manual review when a draft is insufficiently individualized.
+
+Similarity thresholds must be established through tests, not arbitrary guesses.
+
+Do not use random synonym replacement to manufacture uniqueness.
+
+### Evidence requirements
+
+- Every personalized claim must have supporting prospect evidence.
+- Record which evidence informed the draft.
+- Do not invent projects, needs, staffing shortages or outsourcing intentions.
+- Insufficient research must trigger additional research or manual review, never a generic fallback email.
+
+### Acceptance criteria
+
+Test several different prospects from both categories.
+
+- Their messages must be substantively different.
+- Name-swapped copies must fail uniqueness checks.
+- Generic templates must not enter the send-ready workflow.
+- Replies must address the actual incoming message.
+- Follow-ups must reflect actual previous conversations.
+- Insufficient evidence must trigger review.
+- Existing sending controls must remain unchanged.
+
+**Deliverable:** Individualized English drafting and reply generation, similarity checks, evidence-grounding tests and a report identifying the original cause of repeated templates.
+
+**STOP after Phase 2.**
+
+---
+
+## PHASE 3 — Japanese-language emails, follow-ups and replies
+
+**Objective:** Japanese prospects must receive natural, professionally written Japanese communication rather than English emails or awkward literal translations.
+
+This is a separate phase from English individualization. Do not consider Phase 2 complete for Japanese communication.
+
+### Required behaviour
+
+When a prospect is Japanese and Japanese is the appropriate communication language:
+
+- Initial outreach must be written in Japanese.
+- Follow-ups must be written in Japanese.
+- Replies must be written in Japanese.
+- Re-engagement messages must be written in Japanese.
+
+The agent must determine the appropriate language using available evidence, such as the studio's website language, business communication language and previous correspondence.
+
+An existing conversation in Japanese must continue in Japanese unless the recipient indicates otherwise.
+
+### Japanese writing quality
+
+Messages must:
+
+- Use natural Japanese business communication.
+- Use appropriate professional politeness.
+- Use correct anime-production terminology.
+- Distinguish correctly between レイアウト, 原画, 動画, 仕上げ and related production terminology.
+- Avoid unnatural direct translations from English.
+- Avoid excessive formality or awkward machine-translated expressions.
+- Use Japanese company and recipient names accurately.
+- Preserve the actual meaning of Studio Kairegi's service offering.
+
+### Individualization
+
+All Phase 2 uniqueness requirements also apply in Japanese.
+
+- Japanese emails must be individually composed.
+- Japanese replies must reflect actual incoming messages.
+- Name-swapped and near-duplicate Japanese drafts must be detected.
+- Similarity checks must work with Japanese text and must not rely exclusively on space-separated word comparison.
+- Insufficient evidence must trigger research or review.
+
+### Testing
+
+Use representative Japanese animation studios and actual or representative Japanese business correspondence.
+
+Evaluate:
+
+- Naturalness.
+- Grammar.
+- Politeness.
+- Industry terminology.
+- Factual accuracy.
+- Personalization.
+- Correct names.
+- Japanese similarity detection.
+
+Do not claim Japanese quality is acceptable merely because the output contains Japanese characters.
+
+**Deliverable:** Japanese-language generation and reply handling, language-selection logic, Japanese uniqueness tests and a quality evaluation report.
+
+**STOP after Phase 3.**
+
+---
+
+## PHASE 4 — Improve discovery of leads and suitable studios
+
+**Objective:** Find more relevant potential clients without relying on recruitment announcements, outsourcing advertisements or manually supplied websites.
+
+### Discovery targets
+
+Primary:
+
+- Indie game developers.
+
+Secondary:
+
+- Animation studios suitable for production support.
+
+### Required behaviour
+
+Expand discovery using relevant independent public sources and evidence of actual work.
+
+Preserve existing working sources, including:
+
+- Wikidata.
+- AniList.
+- GDELT.
+- RSS and feeds.
+- Common Crawl.
+- Public studio websites and portfolios.
+
+Investigate additional discovery opportunities through:
+
+- Studio portfolios.
+- Production credits.
+- Published animation works.
+- Animation production company listings.
+- Game development projects.
+- Publicly documented studio activity.
+
+### Studio discovery must not depend on hiring
+
+A studio must not be excluded merely because it:
+
+- Has no recruitment page.
+- Is not hiring.
+- Has no outsourcing announcement.
+- Has a small team.
+- Has only a limited number of published projects.
+
+### Japanese discovery
+
+Use valid English and Japanese discovery terms.
+
+Examples:
+
+- Animation studio.
+- Anime production studio.
+- 2D animation studio.
+- Animation production company.
+- アニメーション制作会社
+- アニメ制作会社
+- 作画スタジオ
+- 2Dアニメーション
+- 制作実績
+
+Validate Wikidata classes against actual labels before adding them.
+
+### Discovery quality
+
+- Deduplicate candidates across sources.
+- Preserve source provenance.
+- Validate official websites.
+- Reject social-only pages as official websites.
+- Support pagination.
+- Avoid repeatedly discovering the same entities.
+- Preserve source registry, quotas and compliance controls.
+- Do not require the user to manually provide studio URLs.
+
+### Acceptance criteria
+
+- Relevant small studios can be discovered.
+- Portfolio-based discovery works.
+- Studios without hiring signals remain discoverable.
+- English and Japanese discovery terms work.
+- Cross-source duplicates are controlled.
+- Existing source controls cannot be bypassed.
+
+**Deliverable:** Expanded discovery pipeline, validated source/term configuration, tests and discovery coverage report.
+
+**STOP after Phase 4.**
+
+---
+
+## PHASE 5 — Contactability and email verification
+
+**Status: Completed (local implementation and regression tests passed).**
+
+**Objective:** Establish whether a discovered prospect has an acceptable business email contact.
+
+Contactability must remain separate from suitability scoring.
+
+### Required outcomes
+
+| Contact situation                                    | Result       |
+| ---------------------------------------------------- | ------------ |
+| Verified studio business email                       | Pass         |
+| Verified employee business email belonging to studio | Pass         |
+| Email found but ownership or validity uncertain      | Needs Review |
+| No email                                             | Rejected     |
+| Invalid or bounced email                             | Rejected     |
+| Contact form only                                    | Rejected     |
+
+### Requirements
+
+Distinguish:
+
+- Syntax validity.
+- Source provenance.
+- Official domain association.
+- Employee affiliation.
+- Deliverability evidence.
+- Bounce and complaint status.
+
+A published email address must not automatically be called verified.
+
+Define the verification standard before implementation. Never fabricate mailbox verification.
+
+Generic addresses such as `info@` must follow the same evidence rules as named addresses.
+
+**Deliverable:** Separate contactability decision, evidence record, tests and an explanation of what constitutes verification.
+
+**STOP after Phase 5.**
+
+---
+
+## PHASE 6 — Re-evaluate existing studio prospects and protect CRM ownership
+
+**Objective:** Prevent suitable existing prospects from being lost after the new scoring model and contactability rules are introduced.
+
+### Requirements
+
+- Measure prospects classified under the old scoring model.
+- Preserve old scores and evidence.
+- Identify the scoring model used for every score.
+- Re-evaluate existing rejected and review-stage studios under the approved model.
+- Re-evaluate previously Qualified prospects before outreach.
+- Do not silently overwrite CRM records.
+
+Also address Intelligence-taken-over leads:
+
+- Record manual, discovered and taken-over origins.
+- Record takeover state, date and actor.
+- Provide a separate view or filter for taken-over leads.
+- Preserve conversation history and suppression status.
+- Make takeover reversible.
+- Prevent manual and automated workflows from contacting the same lead independently.
+
+**Deliverable:** Re-evaluation report, CRM ownership handling, migration if required, and regression tests.
+
+**STOP after Phase 6.**
+
+---
+
+## PHASE 7 — Fix delivery events, bounces and complaint processing
+
+**Objective:** Make the email delivery lifecycle reliable.
+
+Address:
+
+- Delivered events.
+- Delayed events.
+- Bounced emails.
+- Complaints.
+- Failed messages.
+- Idempotent webhook processing.
+- Suppression consistency.
+- CRM and Intelligence message-status reconciliation.
+
+Do not mark a prospect contactable after a bounce.
+
+**Deliverable:** Corrected delivery-event handling and tests for duplicate, delayed and out-of-order events.
+
+**STOP after Phase 7.**
+
+---
+
+## PHASE 8 — Secure the final sending boundary
+
+**Objective:** Ensure every message is checked again immediately before sending.
+
+The final sending boundary must atomically verify:
+
+- Human approval.
+- Kill switch.
+- Suppression.
+- Unsubscribe status.
+- Contactability.
+- Prospect and campaign eligibility.
+- Reply and conversation state.
+- Daily limits.
+- Send windows.
+- Ownership and takeover state.
+
+Also address the confirmed send-state race and unknown-outcome reconciliation.
+
+No unverified email may enter the sending process.
+
+**Deliverable:** Atomic send eligibility checks and race-condition tests.
+
+**STOP after Phase 8.**
+
+---
+
+## PHASE 9 — Fix discovery source-registry enforcement
+
+**Objective:** Ensure every discovery pathway respects source enablement, approved terms, budgets and source compliance.
+
+Address the indie discovery bypass and verify every other discovery path.
+
+**Deliverable:** Fail-closed source enforcement and bypass tests.
+
+**STOP after Phase 9.**
+
+---
+
+## PHASE 10 — Fix schema, migrations and email-provider integration
+
+**Objective:** Resolve the remaining database and provider integration defects.
+
+Address:
+
+- M-01: migration schema mismatch.
+- M-02: legacy Gmail/Zoho mailbox prerequisite.
+- M-03: Resend webhook secret mismatch.
+- M-08: Resend mailbox status.
+- Provider authority and actual worker configuration.
+
+Produce a clear Zoho-versus-Resend responsibility report before removing or changing existing integrations.
+
+Use disposable databases for migration testing.
+
+**Deliverable:** Migration verification, provider report and targeted integration tests.
+
+**STOP after Phase 10.**
+
+---
+
+## PHASE 11 — Security and controller hardening
+
+**Status: Local implementation complete; deployed/database acceptance remains pending.**
+
+Address:
+
+- Controller authentication.
+- DNS rebinding and SSRF protection.
+- Edge Function CORS.
+- Endpoint-by-endpoint controller review.
+- Deployed authorization, RLS, grants and privileged-user protection verification.
+- Safe handling of any exposed environment secrets.
+
+Do not expose secret values in reports.
+
+**Deliverable:** Security findings, minimal fixes and security regression tests.
+
+**STOP after Phase 11.**
+
+---
+
+## PHASE 12 — Worker reliability and operational status
+
+Address:
+
+- Duplicate worker installation modes.
+- Worker restart and recovery.
+- Send-window deferral.
+- Unified health status.
+- Log rotation.
+- Queue recovery.
+- Reply association using RFC Message-ID, In-Reply-To and References.
+
+**Deliverable:** Worker reliability fixes and recovery tests.
+
+**Status:** Phase 12 local implementation complete; PostgreSQL migration replay, Windows scheduled-task acceptance and frontend production build remain deployment checks.
+
+**STOP after Phase 12.**
+
+---
+
+## PHASE 13 — Capacity, evidence retention and model benchmarks
+
+**Status: Local retention proposal, read-only diagnostics and benchmark harness complete; target database and Windows/Ollama benchmark acceptance pending.**
+
+Separate reports or small sub-sessions if necessary.
+
+Evaluate:
+
+- Evidence and message retention.
+- Database growth and indexing.
+- Safe cleanup policy.
+- Local Ollama performance on the actual Windows machine.
+- GTX 1650 4 GB VRAM and 16 GB RAM constraints.
+- English and Japanese extraction and drafting quality.
+- Model timeout and failure behaviour.
+
+Do not delete evidence as part of this phase.
+
+**Deliverable:** Retention proposal and local-model benchmark report.
+
+**STOP after Phase 13.**
+
+---
+
+## PHASE 14 — Final end-to-end verification
+
+Run the complete verification process after all preceding phases have been accepted.
+
+Test:
+
+- Frontend.
+- Python worker.
+- SQL on a disposable database.
+- Production build.
+- Authorization.
+- Discovery.
+- Qualification.
+- Contactability.
+- English personalized outreach.
+- Japanese personalized outreach.
+- Replies and follow-ups.
+- CRM ownership.
+- Delivery events and suppression.
+- Final send eligibility.
+- Worker recovery.
+- Staging lifecycle.
+
+No production activation or real email sending.
+
+**Deliverable:** Final acceptance report with actual test evidence and remaining blockers.
+
+**STOP after Phase 14.**
+
+---
+
+## Mandatory handoff format for every phase
+
+At the end of each Claude session, provide:
+
+1. Phase number and objective.
+2. What was inspected.
+3. What was changed.
+4. Files modified.
+5. Database migrations created or modified, if any.
+6. Tests run and exact results.
+7. Regression tests and results.
+8. Remaining defects or decisions.
+9. Confirmation that no deployment, push, worker activation, autonomy change or real email sending occurred.
+10. Exact next phase and its scope.
+
+Update this roadmap's phase status only after the work has actually been completed and verified.
+
+**The next phase must never be started automatically.**
+
+# Final priority order
+
+1. Studio qualification criteria and scoring.
+2. Individualized English emails, follow-ups and replies.
+3. Japanese emails, follow-ups and replies.
+4. Lead discovery expansion.
+5. Contactability.
+6. Existing prospect re-evaluation and CRM ownership.
+7. Delivery and bounce lifecycle.
+8. Final sending safety.
+9. Source-registry enforcement.
+10. Schema and provider integration.
+11. Security.
+12. Worker reliability.
+13. Retention and local-model benchmarking.
+14. Final verification.
+
+This order is deliberate and must be followed.

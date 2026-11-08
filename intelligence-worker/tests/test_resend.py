@@ -55,12 +55,12 @@ class ResendAdapterTests(unittest.TestCase):
         c = ResendClient(self.cfg, self.supa, Session())
         self.assertIsNone(c.find_sent("kf" + "a" * 32, "to@x.test", 0))
 
-    def test_provider_config_accepts_resend_and_defaults_to_none(self):
+    def test_resend_is_not_a_prospect_dispatcher_adapter(self):
         self.assertEqual(config.Config.__dataclass_fields__["mail_provider"].default, "none")
         env = {"KAIRFLOW_SUPABASE_URL": "https://example.supabase.co", "KAIRFLOW_SUPABASE_ANON_KEY": "anon",
                "KAIRFLOW_AGENT_EMAIL": "agent@example.test", "KAIRFLOW_AGENT_PASSWORD": "pw",
                "KAIRFLOW_OLLAMA_URL": "http://127.0.0.1:11434", "KAIRFLOW_MAIL_PROVIDER": "resend"}
-        self.assertEqual(config.load(env).mail_provider, "resend")
+        with self.assertRaises(config.ConfigError): config.load(env)
 
     def test_resend_inbound_sync_is_webhook_only(self):
         d = SimpleNamespace(zoho=SimpleNamespace(provider="resend"))

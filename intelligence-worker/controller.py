@@ -1,8 +1,9 @@
 """Loopback-only controller for starting/stopping the local KairFlow worker.
 
 The browser app cannot spawn a process on the user's computer. This small
-companion runs locally and exposes a tightly origin-restricted HTTP API on
-127.0.0.1 only. It never returns environment variables or credentials.
+companion runs locally and exposes a tightly origin-restricted, per-install
+token-authenticated HTTP API on 127.0.0.1 only. It never returns environment
+variables or credentials.
 """
 from __future__ import annotations
 
@@ -11,8 +12,8 @@ import json
 import os
 import re
 import signal
+import hmac
 import subprocess
-import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -20,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 HOST = "127.0.0.1"
 PORT = 17843
 ALLOWED_ORIGINS = {
@@ -54,8 +55,9 @@ def allowed_origin(origin: str | None) -> bool:
 
 
 class WorkerController:
-    def __init__(self, worker_dir: Path, env_file: Path, python: Path, log_file: Path):
+    def __init__(self, worker_dir: Path, env_file: Path, python: Path, log_file: Path, token_file: Path):
         self.worker_dir = worker_dir.resolve()
+        self.token_file = token_file.resolve()
         self.env_file = env_file.resolve()
         self.python = python.resolve()
         self.log_file = log_file.resolve()
@@ -70,6 +72,46 @@ class WorkerController:
         self.monitor_thread = threading.Thread(target=self._monitor, daemon=True)
         self.monitor_thread.start()
 
+    def authenticate(self, authorization: str) -> bool:
+        match = re.fullmatch(r"Bearer\s+(\S+)", authorization or "", re.I)
+        if not match or not self.token_file.is_file():
+            return False
+        try:
+            expected = self.token_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return False
+        supplied = match.group(1)
+        # Installer tokens are base64-encoded 32-byte random values (44 chars).
+        if len(expected) < 43 or len(supplied) < 43:
+            return False
+        return hmac.compare_digest(supplied, expected)
+
+    def _capture_output(self, proc: subprocess.Popen) -> None:
+        stream = getattr(proc, "stdout", None)
+        if stream is None:
+            return
+        def read_early_output():
+            try:
+                for line in stream:
+                    # The worker switches its own stdout/stderr to the rotating
+                    # handler after startup. This pipe captures only interpreter,
+                    # import and pre-logger failures; open per line so it never
+                    # holds the log file open across live rotations.
+                    try:
+                        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+                        with self.log_file.open("a", encoding="utf-8") as log:
+                            log.write(line)
+                    except OSError:
+                        pass
+            except (OSError, ValueError):
+                pass
+            finally:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        threading.Thread(target=read_early_output, name="kairflow-worker-output", daemon=True).start()
+
     def _spawn(self) -> None:
         if not self.env_file.is_file():
             raise RuntimeError(f"Worker settings file not found: {self.env_file}")
@@ -79,11 +121,11 @@ class WorkerController:
             raise RuntimeError(f"Worker package not found in: {self.worker_dir}")
         env = os.environ.copy()
         env.update(read_env_file(self.env_file))
+        env["KAIRFLOW_WORKER_LOG_FILE"] = str(self.log_file)
         ollama_url = env.get("KAIRFLOW_OLLAMA_URL", "http://127.0.0.1:11434")
         if not LOCAL_OLLAMA.fullmatch(ollama_url):
             raise RuntimeError("KAIRFLOW_OLLAMA_URL must point to this computer (127.0.0.1/localhost).")
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
-        log = self.log_file.open("a", encoding="utf-8", buffering=1)
         creationflags = 0
         if os.name == "nt":
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -91,12 +133,13 @@ class WorkerController:
             self.process = subprocess.Popen(
                 [str(self.python), "-m", "kairflow_intel", "run"],
                 cwd=str(self.worker_dir), env=env,
-                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
                 creationflags=creationflags,
             )
         except Exception:
-            log.close()
             raise
+        self._capture_output(self.process)
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.last_error = None
         self.last_exit_code = None
@@ -113,6 +156,7 @@ class WorkerController:
     def stop(self) -> dict:
         with self.lock:
             self.desired_running = False
+            self.restart_at = 0
             proc = self.process
             if proc is not None and proc.poll() is None:
                 try:
@@ -126,6 +170,10 @@ class WorkerController:
                     proc.kill()
                     proc.wait(timeout=5)
                 self.last_exit_code = proc.returncode
+            elif proc is not None:
+                self.last_exit_code = proc.returncode
+                self.process = None
+                self.started_at = None
             return self.status()
 
     def status(self) -> dict:
@@ -138,6 +186,7 @@ class WorkerController:
                 "worker_pid": self.process.pid if running and self.process else None,
                 "worker_started_at": self.started_at if running else None,
                 "last_exit_code": self.last_exit_code,
+                "duplicate_worker_detected": self.last_exit_code == 73,
                 "last_error": self.last_error,
             }
 
@@ -149,7 +198,11 @@ class WorkerController:
                     self.last_exit_code = proc.returncode
                     self.process = None
                     self.started_at = None
-                    if self.desired_running:
+                    if proc.returncode == 73:
+                        self.last_error = "Another worker instance is already running; controller will not start a duplicate."
+                        self.desired_running = False
+                        self.restart_at = 0
+                    elif self.desired_running:
                         self.restart_at = time.monotonic() + 20
                 if self.desired_running and self.process is None and self.restart_at and time.monotonic() >= self.restart_at:
                     try:
@@ -177,7 +230,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         if self.headers.get("Access-Control-Request-Private-Network", "").lower() == "true":
             self.send_header("Access-Control-Allow-Private-Network", "true")
         return True
@@ -194,8 +247,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _valid_request(self) -> bool:
-        # Prevent DNS-rebinding and cross-site requests from unapproved origins.
+    def _valid_request(self, require_auth: bool = True) -> bool:
+        # Origin + Host checks constrain browser callers; the per-install bearer token
+        # independently authenticates control operations (CORS is not authentication).
         host = self.headers.get("Host", "").lower()
         if host not in (f"{HOST}:{PORT}", f"localhost:{PORT}"):
             self._json(403, {"ok": False, "error": "Invalid local host header."})
@@ -203,10 +257,13 @@ class Handler(BaseHTTPRequestHandler):
         if not allowed_origin(self.headers.get("Origin")):
             self._json(403, {"ok": False, "error": "This app origin is not allowed."})
             return False
+        if require_auth and not self.controller.authenticate(self.headers.get("Authorization", "")):
+            self._json(401, {"ok": False, "error": "Local controller authentication is required. Enter the token from controller.token in KairFlow Settings."})
+            return False
         return True
 
     def do_OPTIONS(self):
-        if not self._valid_request():
+        if not self._valid_request(require_auth=False):
             return
         self.send_response(204)
         self._cors()
@@ -252,8 +309,9 @@ def main() -> int:
     parser.add_argument("--env-file", required=True)
     parser.add_argument("--python", required=True)
     parser.add_argument("--log-file", required=True)
+    parser.add_argument("--token-file", required=True)
     args = parser.parse_args()
-    controller = WorkerController(Path(args.worker_dir), Path(args.env_file), Path(args.python), Path(args.log_file))
+    controller = WorkerController(Path(args.worker_dir), Path(args.env_file), Path(args.python), Path(args.log_file), Path(args.token_file))
     Handler.controller = controller
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True

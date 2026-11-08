@@ -69,3 +69,17 @@ test("mail status distinguishes a provider check failure from a disconnected mai
   assert.equal(mailStatusLabel({ status: "check_failed", provider: "zoho" }), "Zoho Mail status check failed");
   assert.equal(mailStatusLabel({ status: "disconnected", provider: "zoho" }), "Mail not connected");
 });
+
+test("dynamic provider account status does not imply a single configured mailbox", async () => {
+  assert.equal(mailStatusLabel({ status: "connected", provider: "multiple", accounts: [
+    { provider_key: "gmail", status: "connected" },
+    { provider_key: "zoho", status: "disconnected" },
+    { provider_key: "smtp", status: "connected" },
+  ] }), "2 of 3 provider accounts connected");
+});
+
+test("OAuth success messaging no longer tells operators to select a global worker provider", () => {
+  assert.match(OAUTH_RESULTS.gmail_connected.text, /durable account assignment/);
+  assert.match(OAUTH_RESULTS.zoho_connected.text, /durable account assignment/);
+  assert.doesNotMatch(OAUTH_RESULTS.gmail_connected.text + OAUTH_RESULTS.zoho_connected.text, /KAIRFLOW_MAIL_PROVIDER/);
+});

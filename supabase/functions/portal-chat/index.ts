@@ -14,7 +14,7 @@
 //   Replies and reactions are validated against the thread the credential resolved to, never a thread id from the browser.
 //
 // JSON for everything; `send` may be multipart/form-data (fields + up to 5 `files`).
-// Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY (defaults), PORTAL_HASH_PEPPER (optional),
+// Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY (defaults), PORTAL_HASH_PEPPER (required; 32+ characters),
 //      DRIVE_TOKEN_ENCRYPTION_KEY, DOWNLOAD_SIGNING_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.
 //
 // Attachment bytes never touch Supabase Storage. They live in the studio's own Google Drive under
@@ -28,6 +28,7 @@ import { corsHeaders, handleOptions } from "../_shared/cors.ts";
 import { decryptText } from "../_shared/crypto.ts";
 import { createDriveFolder, fetchDriveFileStream, findChildFolder, findRootFolder, getAccessToken, trashDriveFile, uploadFileToDrive } from "../_shared/google.ts";
 import { signTicket, verifyTicket } from "../_shared/download_ticket.ts";
+import { rateLimitIpHash } from "../_shared/rate_limit_identity.ts";
 
 const TICKET_TTL_SECONDS = 60;
 const TICKET_SCOPE = "portal:"; // keeps these tickets unusable by client-final-download, which shares the signing key
@@ -183,8 +184,8 @@ Deno.serve(async (req) => {
     }
 
     // Per-network ceiling, then a stop for anyone who keeps presenting bad credentials.
-    const forwarded = req.headers.get("cf-connecting-ip") || (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "unknown";
-    const ipHash = await sha256Hex(`${Deno.env.get("PORTAL_HASH_PEPPER") || ""}|${forwarded}`);
+    const ipHash = await rateLimitIpHash(req, Deno.env.get("PORTAL_HASH_PEPPER"));
+    if (!ipHash) return json({ error: "rate_limit_not_configured" }, 503);
     const limited = async (scope: string, subject: string, limit: number, seconds: number) => {
       const { data } = await admin.rpc("portal_rate_limit", { p_scope: scope, p_subject_hash: subject, p_limit: limit, p_window_seconds: seconds });
       return data !== true;

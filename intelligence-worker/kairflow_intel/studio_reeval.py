@@ -1,4 +1,4 @@
-"""Targeted reevaluation of REJECTED, DISCOVERED animation-studio prospects with the studio-v2 model.
+"""Targeted reevaluation of pre-outreach DISCOVERED animation-studio prospects with the studio-v2 model.
 
 One job per prospect (kind 'reeval_studio', payload {run_id, prospect_id}) does everything in a single pass: recover a missing official website
 (cautiously), re-read the site, store the new evidence under the run, score only from evidence collected after the run began, and record the
@@ -11,18 +11,20 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import replace
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
 from . import classify_org, entity, research, wikidata
 from .errors import PermanentError, RpcError, TransientError
-from .safety import html_to_text
+from .safety import MeteredFetcher, html_to_text
 
 REEVAL_TYPE = "animation_studio_support"
 REEVAL_ORIGIN = "discovered"
+REEVAL_ELIGIBLE_STATUSES = frozenset({"rejected", "needs_review", "qualified", "lead_linked"})
 JOB_KIND = "reeval_studio"
-DEFAULT_RUN_NAME = "studio-v2-rejected-animation-reeval"
+DEFAULT_RUN_NAME = "studio-v2-pre-outreach-animation-reeval"
 MIN_TEXT_CHARS = 200            # less readable text than this is "unreadable or empty", not "a studio with no signals"
 MAX_CANDIDATES = 3
 GENERIC_LABELS = {"studio", "studios", "anime", "animation", "production", "productions", "films", "pictures", "works", "group", "company"}
@@ -173,6 +175,11 @@ def _skip_out_of_scope(d, run_id, pid, reason):
     return {"skipped": reason[:160]}
 
 
+def eligible_prospect(p: dict) -> bool:
+    """Only discovered animation studios not yet contacted; takeover/manual CRM records stay out of automated rescoring."""
+    return p.get("type") == REEVAL_TYPE and p.get("origin") == REEVAL_ORIGIN and p.get("status") in REEVAL_ELIGIBLE_STATUSES
+
+
 def _criteria(d, ptype):
     st = d.rpc("intel_agent_settings", {}) or {}
     return next((c.get("criteria") or {} for c in st.get("campaigns", []) if c.get("type") == ptype), {})
@@ -193,7 +200,7 @@ def h_reeval_studio(d, job):
                 "run_not_found", "run_cancelled", "run_completed",
                 "not_in_run", "item_not_queued", "prospect_not_found",
                 "item_org_mismatch", "out_of_scope_type", "out_of_scope_origin",
-                "status_changed", "human_rejected", "prospect_linked",
+                "status_changed", "human_rejected", "prospect_linked", "prospect_link_mismatch",
                 "prospect_contacted", "prospect_has_history", "prospect_suppressed",
             }
             if reason in scope_reasons:
@@ -210,11 +217,16 @@ def _reeval_one(d, job, run_id: str, pid: str):
     item, p, run = ctx["item"], ctx["prospect"], ctx["run"]
     if item["state"] != "queued":
         return {"skipped": f"already {item['state']}"}                      # repeated or duplicate job: harmless no-op
-    if p.get("type") != REEVAL_TYPE or p.get("origin") != REEVAL_ORIGIN:
+    if not eligible_prospect(p):
         return {"skipped": "out of scope"}                                  # defence in depth; the database refuses these too
-    if p.get("status") != "rejected" or p.get("lead_id"):
-        reason = "status_changed" if p.get("status") != "rejected" else "prospect_linked"
+    if not eligible_prospect(p):
+        reason = "status_changed"
         return _skip_out_of_scope(d, run_id, pid, reason)
+    registry = d.rpc("intel_agent_sources", {}) or {}
+    if "site_crawler" not in registry:
+        return _finish(d, run_id, pid, "needs_manual", "source_unavailable", {"source": "site_crawler"})
+    metered = replace(d, fetcher=MeteredFetcher(d.fetcher, lambda: int(d.rpc("intel_agent_source_use", {"p_key": "site_crawler", "p_n": 1}) or 0) == 1))
+    d = metered
     final_attempt = int(job.get("attempts") or 1) >= int(job.get("max_attempts") or 5)
     stage = "recover"
     try:

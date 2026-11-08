@@ -48,6 +48,12 @@ test("criteriaPatch clamps scores and normalizes lists", () => {
   assert.equal(statusInfo("zzz").tone, "muted");
 });
 
+test("studio-v2 criteriaPatch always emits the fixed Phase 1 thresholds", () => {
+  const p = criteriaPatch({ keywords: "anime", seedUrls: "https://studio.example", qualifyMin: 30, reviewMin: 20, prospectType: "animation_studio_support" });
+  assert.equal(p.qualify_min, 70);
+  assert.equal(p.review_min, 50);
+});
+
 test("missingKb lists exactly the approved entries the agent still needs", () => {
   assert.equal(missingKb([]).length, 4);
   const all = ["studio.about", "services.indie_game_developer", "services.animation_studio_support", "portfolio.main"].map((key) => ({ key, approved: true, body: "x" }));

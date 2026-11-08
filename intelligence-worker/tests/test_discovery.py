@@ -2,11 +2,101 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from kairflow_intel import anilist, apis, classify_org, commoncrawl, discovery, entity, feeds, gdelt, jobs, manual_post, profile, siteanalysis, wikidata
+from kairflow_intel import anilist, apis, classify_org, commoncrawl, discovery, entity, feeds, gdelt, jobs, manual_post, profile, siteanalysis, sources, wikidata
 from kairflow_intel.errors import PermanentError, TransientError
 from .helpers import CFG, FakeSession, Resp, resolver_for
 
 PUB = resolver_for({h: ["93.184.216.34"] for h in ("query.wikidata.org", "www.wikidata.org", "graphql.anilist.co", "api.gdeltproject.org", "index.commoncrawl.org", "evil.test")})
+
+
+
+class SourceRegistryEnforcement(unittest.TestCase):
+    def test_indie_discovery_uses_only_registry_enabled_sources_and_reserves_each_request(self):
+        from unittest.mock import patch
+        calls = []
+        class Fetcher:
+            def fetch(self, url):
+                calls.append(("fetch", url))
+                return (url, "ok")
+        def fake_steam(fetcher, keywords):
+            fetcher.fetch("https://steam.test/search")
+            fetcher.fetch("https://steam.test/details")
+            return [{"name": "Steam Dev", "website": "https://steamdev.test"}]
+        def fake_itch(fetcher, keywords):
+            fetcher.fetch("https://itch.test/tag")
+            return [{"name": "Itch Dev", "website": "https://itchdev.test"}]
+        def reserve(key):
+            calls.append(("reserve", key))
+            return True
+        with patch("kairflow_intel.sources.steam", side_effect=fake_steam), patch("kairflow_intel.sources.itch", side_effect=fake_itch):
+            rows = sources.discover(Fetcher(), "indie_game_developer",
+                {"sources": ["steam", "itch"], "keywords": ["2d"]},
+                enabled_sources={"steam"}, reserve_source=reserve)
+        self.assertEqual([r["name"] for r in rows], ["Steam Dev"])
+        self.assertEqual([x for x in calls if x[0] == "reserve"], [("reserve", "steam"), ("reserve", "steam")])
+
+    def test_indie_discovery_fails_closed_without_registry_or_campaign_terms(self):
+        self.assertEqual(sources.discover(object(), "indie_game_developer", {"sources": ["steam"], "keywords": ["2d"]}), [])
+        self.assertEqual(sources.discover(object(), "indie_game_developer", {"sources": None, "keywords": None}, enabled_sources={"steam"}, reserve_source=lambda _: True), [])
+        self.assertEqual(sources.discover(object(), "animation_studio_support", None, enabled_sources={"site_crawler"}, reserve_source=lambda _: True), [])
+        self.assertEqual(sources.discover(object(), "indie_game_developer", {"sources": ["steam"], "keywords": []}, enabled_sources={"steam"}, reserve_source=lambda _: True), [])
+
+    def test_phase4_source_budget_rpc_returns_reservation_decision_not_remaining_quota(self):
+        from pathlib import Path
+        migration = Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261109170000_intelligence_discovery.sql"
+        sql = migration.read_text()
+        start = sql.index("create or replace function public.intel_agent_source_use(")
+        end = sql.index("end $$;", start) + len("end $$;")
+        rpc = sql[start:end]
+        # Exact-quota reservations must succeed (1); denied or over-budget reservations
+        # must return 0 without incrementing used_today.
+        for fragment in ("returns int", "if v_n < 1", "enabled is true", "tos_status = 'confirmed'",
+                         "circuit_open_until <= now()", "<= daily_budget", "if found then return 1", "return 0"):
+            self.assertIn(fragment, rpc)
+        self.assertIn("used_on is distinct from v_today", rpc)
+        self.assertNotIn("return coalesce(v, 0)", rpc)
+
+    def test_source_budget_rpc_is_atomic_and_checks_registry_terms_circuit_and_daily_limit(self):
+        from pathlib import Path
+        migration = Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261129100000_intelligence_phase9_source_registry_enforcement.sql"
+        sql = migration.read_text()
+        for fragment in ("enabled is true", "tos_status = 'confirmed'", "circuit_open_until <= now()", "<= daily_budget", "return 1", "return 0", "grant execute on function public.intel_agent_source_use(text, int) to authenticated"):
+            self.assertIn(fragment, sql)
+        self.assertIn("used_on is distinct from v_today", sql)
+
+    def test_phase9_adapter_failure_is_reported_to_registry(self):
+        from unittest.mock import patch
+        reports = []
+        class Fetcher:
+            def fetch(self, url):
+                raise PermanentError("registry reservation denied")
+        with patch("kairflow_intel.sources.steam", side_effect=PermanentError("registry reservation denied")):
+            rows = sources.discover(Fetcher(), "indie_game_developer",
+                {"sources": ["steam"], "keywords": ["2d"]},
+                enabled_sources={"steam"}, reserve_source=lambda _: True,
+                report_source=lambda key, ok, err="": reports.append((key, ok, str(err))))
+        self.assertEqual(rows, [])
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0][0:2], ("steam", False))
+        self.assertIn("registry reservation denied", reports[0][2])
+
+    def test_phase9_malformed_requested_source_fails_closed(self):
+        self.assertEqual(sources.discover(object(), "indie_game_developer",
+            {"sources": ["steam", {"source": "itch"}], "keywords": ["2d"]},
+            enabled_sources={"steam", "itch"}, reserve_source=lambda _: True), [])
+
+    def test_denied_budget_reservation_prevents_network_fetch(self):
+        from unittest.mock import patch
+        class Fetcher:
+            called = False
+            def fetch(self, url): self.called = True; return (url, "ok")
+        fetcher = Fetcher()
+        def fake_steam(metered, keywords):
+            with self.assertRaises(PermanentError): metered.fetch("https://steam.test/search")
+            return []
+        with patch("kairflow_intel.sources.steam", side_effect=fake_steam):
+            self.assertEqual(sources.discover(fetcher, "indie_game_developer", {"sources": ["steam"], "keywords": ["2d"]}, enabled_sources={"steam"}, reserve_source=lambda _: False), [])
+        self.assertFalse(fetcher.called)
 
 
 class Entity(unittest.TestCase):
@@ -37,6 +127,14 @@ class WikidataTests(unittest.TestCase):
     def test_query_is_safe_and_paginated(self):
         q = wikidata.studios_query(["animation studio", 'x" } DROP {', "anime studio"], 100, 200)
         self.assertIn('"animation studio"@en', q); self.assertIn("OFFSET 200", q); self.assertNotIn("DROP", q)
+
+    def test_query_matches_actual_english_and_japanese_class_labels_only(self):
+        q = wikidata.studios_query(["animation studio", "アニメーション制作会社", 'x" } DROP {'])
+        self.assertIn('"animation studio"@en', q)
+        self.assertIn('"アニメーション制作会社"@ja', q)
+        self.assertNotIn("DROP", q)
+        empty = wikidata.studios_query(['x" } DROP {'])
+        self.assertIn('"__no_valid_class_label__"@en', empty)
 
     def test_parse_drops_social_unnamed_and_duplicates(self):
         rows = {"results": {"bindings": [
@@ -72,9 +170,30 @@ class Parsers(unittest.TestCase):
 
     def test_common_crawl_validates_inputs(self):
         class Api:
-            def get_ndjson(self, url, params=None): return [{"url": "https://s.jp/recruit/", "status": "200"}, {"url": "ftp://x", "status": "200"}, {"url": "https://s.jp/x", "status": "404"}]
+            def get_ndjson(self, url, params=None): return [
+                {"url": "https://s.jp/recruit/", "status": "200"},
+                {"url": "ftp://s.jp/recruit/", "status": "200"},
+                {"url": "https://s.jp/x", "status": "404"},
+                {"url": "https://attacker.example/recruit/", "status": "200"},
+                {"url": "https://not-s.jp/recruit/", "status": "200"},
+                {"url": "https://s.jp.attacker.example/recruit/", "status": "200"},
+            ]
         self.assertEqual([r["url"] for r in commoncrawl.recruit_pages(Api(), "CC-MAIN-2026-30", "s.jp")], ["https://s.jp/recruit/"])
         self.assertEqual(commoncrawl.recruit_pages(Api(), "../../etc", "s.jp"), []); self.assertEqual(commoncrawl.recruit_pages(Api(), "CC-MAIN-2026-30", "s.jp/../x"), [])
+
+    def test_common_crawl_queries_portfolio_and_japanese_credit_paths(self):
+        class Api:
+            def __init__(self): self.params = None
+            def get_ndjson(self, url, params=None):
+                self.params = params
+                return [{"url": "https://s.jp/works/", "status": "200"},
+                        {"url": "https://s.jp/制作実績/", "status": "200"},
+                        {"url": "https://s.jp/portfolio/", "status": "200"}]
+        api = Api()
+        rows = commoncrawl.evidence_pages(api, "CC-MAIN-2026-30", "s.jp")
+        self.assertEqual(len(rows), 3)
+        self.assertIn("portfolio", api.params["filter"])
+        self.assertIn("制作実績", api.params["filter"])
 
     def test_feeds_rss_atom_and_no_entity_expansion(self):
         rss = '<rss><channel><item><title>原画募集のお知らせ</title><link>https://s.jp/n/1</link><description>We are hiring key animators</description><pubDate>Mon</pubDate></item></channel></rss>'
@@ -99,6 +218,12 @@ class Parsers(unittest.TestCase):
         got = siteanalysis.credit_candidates(html, "https://own.jp/works", "own.jp")
         self.assertEqual([c["domain"] for c in got], ["partner-studio.co.jp", "third.jp"])
 
+    def test_credit_page_selection_covers_public_portfolios_and_japanese_works(self):
+        urls = ["https://s.jp/recruit/", "https://s.jp/works/", "https://s.jp/portfolio/2d",
+                "https://s.jp/制作実績/", "https://s.jp/about/"]
+        got = siteanalysis.pick_credit_pages(urls, limit=3)
+        self.assertEqual(set(got), {"https://s.jp/works/", "https://s.jp/portfolio/2d", "https://s.jp/制作実績/"})
+
 
 class Api(unittest.TestCase):
     def mk(self, routes): return apis.ApiClient(CFG, FakeSession(routes), resolver=PUB, sleep=lambda s: None)
@@ -107,6 +232,31 @@ class Api(unittest.TestCase):
         c = self.mk({})
         with self.assertRaises(PermanentError): c.get_json("https://evil.test/x")
         with self.assertRaises(PermanentError): c.get_json("http://127.0.0.1/x")
+
+    def test_production_api_transport_pins_validated_dns_and_disables_proxy_env(self):
+        from unittest.mock import patch
+        class Transport:
+            def __init__(self): self.adapters = {}; self.trust_env = True; self.closed = False; self.response = Resp(200, b'{"ok":true}')
+            def mount(self, prefix, adapter): self.adapters[prefix] = adapter
+            def get(self, url, **kwargs):
+                self.kwargs = kwargs
+                return self.response
+            def close(self): self.closed = True
+        transport = Transport()
+        resolver_calls = []
+        def resolver(host, port):
+            resolver_calls.append(host)
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+        with patch.object(apis.requests, "Session", return_value=transport):
+            client = apis.ApiClient(CFG, resolver=resolver, sleep=lambda _s: None)
+            self.assertEqual(client.get_json("https://query.wikidata.org/sparql"), {"ok": True})
+        self.assertEqual(resolver_calls, ["query.wikidata.org"])
+        self.assertFalse(transport.trust_env)
+        self.assertEqual(transport.adapters["https://"].dns_pin, "93.184.216.34")
+        self.assertEqual(transport.adapters["http://"].dns_pin, "93.184.216.34")
+        self.assertFalse(transport.kwargs["allow_redirects"])
+        self.assertTrue(transport.closed)
+        self.assertTrue(transport.response is not None)
 
     def test_json_ndjson_and_throttle_handling(self):
         c = self.mk({"https://api.gdeltproject.org/api/v2/doc/doc?query=a": Resp(200, b"Please limit requests to one every 5 seconds"),
@@ -177,6 +327,39 @@ class Handlers(unittest.TestCase):
         spent = FakeD({**base, "intel_agent_sources": {"wikidata": {}}, "intel_agent_source_use": 0}, api=Api())
         self.assertIn("skipped", discovery.h_seed_sources(spent, {"payload": {}}))
 
+    def test_anilist_seeding_includes_finished_production_credits(self):
+        class Api:
+            def __init__(self): self.statuses = []
+            def post_json(self, url, payload):
+                self.statuses.append(payload["variables"]["status"])
+                return {"data": {"Page": {"pageInfo": {"hasNextPage": False}, "media": []}}}
+        base = {"intel_agent_settings": self.CRIT, "intel_agent_sources": {"anilist": {}},
+                "intel_agent_source_use": 10, "intel_agent_source_report": None}
+        api = Api()
+        out = discovery.h_seed_sources(FakeD(base, api=api), {"payload": {"type": "animation_studio_support"}})
+        self.assertIn("FINISHED", api.statuses)
+        self.assertEqual(out["anilist"]["studios"], 0)
+        # The handler must reserve five calls: 2 releasing + 1 unreleased + 2 finished.
+        quota = FakeD(base, api=api)
+        discovery.h_seed_sources(quota, {"payload": {"type": "animation_studio_support"}})
+        self.assertEqual(quota.named("intel_agent_source_use")[-1]["p_n"], 5)
+
+    def test_common_crawl_indexes_portfolios_for_known_domains_through_registry(self):
+        class Api:
+            def get_json(self, url, params=None, accept=None):
+                return [{"id": "CC-MAIN-2026-30"}]
+            def get_ndjson(self, url, params=None):
+                return [{"url": "https://studio.jp/works/", "status": "200", "timestamp": "20261101000000"}]
+        base = {"intel_agent_sources": {"commoncrawl": {}}, "intel_agent_source_use": 5,
+                "intel_agent_source_report": None, "intel_agent_known_domains": [{"domain": "studio.jp", "prospect_id": "P1"}],
+                "intel_agent_record_item": {}, "intel_agent_enqueue_job": "job"}
+        d = FakeD(base, api=Api())
+        out = discovery.h_crawl_index(d, {"payload": {}})
+        self.assertEqual(out["pages"], 1)
+        items = d.named("intel_agent_record_item")
+        self.assertEqual(items[0]["p_type"], "public_work_page")
+        self.assertEqual(items[0]["p_prospect_id"], "P1")
+
     def test_a_failing_source_reports_so_the_circuit_can_open(self):
         class Api:
             def get_json(self, *a, **k): raise TransientError("503")
@@ -238,9 +421,16 @@ class Analyze(unittest.TestCase):
 
     def run_analyze(self, pages, prospect=None, budget=5):
         p = {"id": "P1", "type": "animation_studio_support", "name": "Example Studio", "website": "https://example.jp", "domain": "example.jp", "facts": {"verified": {}}, **(prospect or {})}
+        class BudgetedFetcher:
+            def __init__(self, inner): self.inner, self.remaining = inner, budget
+            def fetch(self, url):
+                if self.remaining < 1: raise PermanentError("site_crawler budget exhausted")
+                self.remaining -= 1
+                return self.inner.fetch(url)
+            def sitemaps(self, url): return self.inner.sitemaps(url)
         d = FakeD({"intel_agent_record_item": {}, "intel_agent_add_evidence": True, "intel_agent_flag_prospect": None, "intel_agent_source_use": budget,
                    "intel_agent_resolve_entity": {"prospect_id": None}, "intel_agent_upsert_prospect": {"prospect_id": "N", "created": True, "suppressed": False}, "intel_agent_add_alias": None, "intel_agent_enqueue_job": "j"},
-                  fetcher=self.Fetcher(pages))
+                  fetcher=BudgetedFetcher(self.Fetcher(pages)))
         return d, siteanalysis.analyze(d, {"prospect": p})
 
     def test_finds_recruit_pages_via_sitemap_feed_and_snowballs_credits(self):
@@ -265,8 +455,8 @@ class Analyze(unittest.TestCase):
         home = '<html><body>株式会社Example Studio 制作会社。<a href="https://partner-a.co.jp/">パートナーA</a></body></html>'
         d, out = self.run_analyze({"https://example.jp": home}, prospect={"facts": {"verified": {"depth": 2}}})
         self.assertEqual(out["spawned"], 0)
-        d, out = self.run_analyze({"https://example.jp": home}, budget=0)
-        self.assertEqual(out.get("budget"), "exhausted")
+        with self.assertRaisesRegex(PermanentError, "budget exhausted"):
+            self.run_analyze({"https://example.jp": home}, budget=0)
 
 
 class Registry(unittest.TestCase):

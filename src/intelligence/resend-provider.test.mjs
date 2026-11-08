@@ -14,9 +14,10 @@ const worker = read("../../intelligence-worker/kairflow_intel/resend.py");
 const main = read("../../intelligence-worker/kairflow_intel/main.py");
 const mailops = read("../../intelligence-worker/kairflow_intel/mailops.py");
 
-test("Resend provider is opt-in and worker never receives a Resend API key", () => {
-  assert.match(main, /cfg\.mail_provider == "resend"/);
+test("Resend remains outside the prospect adapter registry and worker never receives a Resend API key", () => {
   assert.match(read("../../intelligence-worker/kairflow_intel/config.py"), /mail_provider: str = "none"/);
+  assert.match(read("../../intelligence-worker/kairflow_intel/providers/registry.py"), /Resend is deliberately absent/);
+  assert.doesNotMatch(read("../../intelligence-worker/kairflow_intel/providers/registry.py"), /provider_key="resend"/);
   assert.doesNotMatch(worker, /RESEND_API_KEY/);
   assert.match(worker, /functions\/v1\/intel-resend-send/);
 });
@@ -65,5 +66,5 @@ test("Resend reconciliation never assumes a Sent folder or marks unknown absent"
   assert.match(worker, /def find_sent[\s\S]*return None/);
   assert.match(worker, /def verify_sent/);
   assert.match(mailops, /provider_id = m\.get\("provider_message_id"\)/);
-  assert.match(mailops, /elif getattr\(zoho, "provider", ""\) == "resend"/);
+  assert.match(mailops, /elif getattr\(provider, "provider", ""\) == "resend"/);
 });

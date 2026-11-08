@@ -1,0 +1,386 @@
+"""Rejected-studio reevaluation (studio-v2). The fake database below answers ONLY the intel_agent_reeval_* functions plus three read-only
+settings/source functions. Any other RPC (resolve, draft, send, enqueue, settings writes, ordinary set_score/upsert/add_evidence) raises, so a
+reevaluation that reached CRM, drafting or sending would fail these tests. The fake mirrors the SQL rules; the SQL itself is not executed here
+(no Postgres in the test environment), so StaticMigrationGuards only checks the migration text for the invariants."""
+import json
+import pathlib
+import re
+import unittest
+from types import SimpleNamespace
+
+from kairflow_intel import jobs, research, scoring, studio_reeval
+from kairflow_intel.errors import PermanentError, RpcError, TransientError
+from tests.test_studio_scoring import SMALL_2D_NO_HIRING
+
+RUN, PID = "run-1", "p1"
+STARTED, NOW, BEFORE = "2026-11-07T10:00:00+00:00", "2026-11-07T10:05:00+00:00", "2026-11-01T09:00:00+00:00"
+LEGACY = [{"criterion": "active_production", "points": 0, "max": 20, "why": "no production evidence"}]
+HOME = ('<html lang="en"><head><title>Studio Hoshi</title></head><body><h1>Studio Hoshi</h1>' + "".join(f"<p>{l}</p>" for l in SMALL_2D_NO_HIRING.split("\n"))
+        + '<a href="mailto:info@hoshi.example">info@hoshi.example</a></body></html>')
+EMPTY = '<html lang="en"><body><p>Welcome.</p></body></html>'
+NO_SIGNALS = '<html lang="en"><head><title>Studio Hoshi</title></head><body><p>' + "Welcome to our website, we are glad you are here and we hope you enjoy your visit today. " * 5 + "</p></body></html>"
+RECOVERED = ('<html lang="en"><head><title>Studio Hoshi | 2D Animation</title></head><body><h1>Studio Hoshi</h1>' + "".join(f"<p>{l}</p>" for l in SMALL_2D_NO_HIRING.split("\n"))
+             + "<p>Studio Hoshi was founded in Osaka.</p></body></html>")
+
+
+def prospect(**kw):
+    p = {"id": PID, "type": "animation_studio_support", "origin": "discovered", "status": "rejected", "lead_id": None, "name": "Studio Hoshi", "website": "https://hoshi.example/",
+         "domain": "hoshi.example", "contact_email": "", "contact_name": "", "contact_source_url": "", "score": 12, "score_breakdown": LEGACY, "language": "en",
+         "facts": {"verified": {}, "estimates": {"scoring_model": "studio-v1"}}}
+    p.update(kw)
+    return p
+
+
+class FakeDB:
+    ALLOWED = {"intel_agent_settings", "intel_agent_sources", "intel_agent_source_use"}
+
+    def __init__(self, p=None, item_state="queued", run_state="running", old_evidence=(), item_urls=(), domain_aliases=(), website_conflict=None):
+        self.p, self.run_state, self.conflict = p or prospect(), run_state, website_conflict
+        self.item = {"state": item_state, "outcome": "", "prev_status": self.p["status"], "new_decision": None}
+        self.evidence = [dict(e) for e in old_evidence]
+        self.item_urls, self.domain_aliases = list(item_urls), list(domain_aliases)
+        self.calls = []
+
+    def __call__(self, name, params=None):
+        self.calls.append((name, params or {}))
+        if name in self.ALLOWED:
+            return {"campaigns": [{"type": "animation_studio_support", "criteria": {}}]} if name == "intel_agent_settings" else ({} if name == "intel_agent_sources" else 0)
+        if not name.startswith("intel_agent_reeval_"):
+            raise AssertionError(f"a reevaluation must not call {name}")
+        return getattr(self, "r_" + name[len("intel_agent_reeval_"):])(**(params or {}))
+
+    def names(self):
+        return [n for n, _ in self.calls]
+
+    def r_context(self, p_run_id, p_prospect_id):
+        if self.run_state != "running":
+            return {"out_of_scope": "run_" + self.run_state}
+        if self.p["type"] != "animation_studio_support" or self.p["origin"] != "discovered":
+            return {"out_of_scope": "out_of_scope_type"}
+        fresh = [e for e in self.evidence if e.get("reeval_run") == p_run_id and e["fetched_at"] >= STARTED]
+        return {"run": {"id": RUN, "started_at": STARTED, "state": "running"}, "item": dict(self.item), "prospect": json.loads(json.dumps(self.p)), "evidence": fresh,
+                "domain_aliases": self.domain_aliases, "name_aliases": [], "item_urls": self.item_urls}
+
+    def r_add_evidence(self, p_run_id, p_prospect_id, p_source, p_url, p_fact_type, p_snippet, p_content_hash, p_verified):
+        for e in self.evidence:
+            if (e["fact_type"], e["content_hash"]) == (p_fact_type, p_content_hash):
+                e.update(fetched_at=NOW, reeval_run=p_run_id, url=p_url, verified=p_verified)      # a re-seen sentence is refreshed, like the SQL
+                return True
+        self.evidence.append({"source": p_source, "url": p_url, "fact_type": p_fact_type, "snippet": p_snippet, "content_hash": p_content_hash, "verified": p_verified, "fetched_at": NOW, "reeval_run": p_run_id})
+        return True
+
+    def r_set_website(self, p_run_id, p_prospect_id, p_website, p_detail=None):
+        if self.conflict:
+            return {"ok": False, "reason": "domain_belongs_to_other_prospect"}
+        self.p.update(website=p_website, domain=re.sub(r"^https?://|/.*$", "", p_website), status=self.p["status"])
+        self.item["website_recovery"] = p_detail
+        return {"ok": True}
+
+    def r_record_research(self, p_run_id, p_prospect_id, p_verified, p_contact_name="", p_contact_email="", p_contact_source_url=""):
+        v = self.p["facts"].setdefault("verified", {})
+        v.update(p_verified); v.update(reeval_run=p_run_id, researched_at=NOW)
+        if not self.p["contact_email"] and p_contact_email:
+            self.p["contact_email"] = p_contact_email
+        return {"ok": True}
+
+    def r_set_score(self, p_run_id, p_prospect_id, p_score, p_breakdown, p_decision, p_reason="", p_estimates=None):
+        assert (p_estimates or {}).get("scoring_model") == "studio-v2"
+        if self.item["state"] != "queued":
+            return {"ok": True, "already": self.item["state"]}
+        assert self.p["facts"]["verified"].get("reeval_run") == p_run_id, "no research recorded in this run"
+        status = "rejected" if p_decision == "rejected" else "needs_review"      # 'qualified' is never stored as a status by a reevaluation
+        self.p.update(score=p_score, score_breakdown=p_breakdown, status=status)
+        self.item.update(state="scored", outcome="rescored", new_decision=p_decision, new_status=status, new_score=p_score)
+        return {"ok": True, "status": status, "decision": p_decision}
+
+    def r_finish_item(self, p_run_id, p_prospect_id, p_state, p_outcome, p_detail=None):
+        if self.item["state"] == "queued":
+            self.item.update(state=p_state, outcome=p_outcome, detail=p_detail)
+        return {"ok": True}
+
+
+class Fetch:
+    def __init__(self, pages): self.pages, self.calls = pages, []
+    def fetch(self, url):
+        self.calls.append(url)
+        v = self.pages.get(url)
+        if v is None: raise PermanentError("404")
+        if isinstance(v, Exception): raise v
+        return url, v
+
+
+class LLM:
+    def generate_json(self, *a, **k): return {"language": "en", "contact_name": None, "contact_role": None, "country_hint": None}
+
+
+class DownLLM:
+    def generate_json(self, *a, **k): raise TransientError("ollama down")
+
+
+def deps(db, pages, llm=None):
+    return SimpleNamespace(rpc=db, fetcher=Fetch(pages), llm=llm or LLM(), api=None, clock=lambda: 0, cfg=SimpleNamespace(worker_id="w1"))
+
+
+def job(attempts=1, max_attempts=5, **pl):
+    return {"id": "j1", "kind": "reeval_studio", "attempts": attempts, "max_attempts": max_attempts, "payload": {"run_id": RUN, "prospect_id": PID, **pl}}
+
+
+def stale_strong_evidence():
+    """Old rows (before the run, no run id) that WOULD qualify the studio if they were allowed to count."""
+    return [{"source": "web", "url": "https://hoshi.example/", "fact_type": sig, "snippet": s, "content_hash": sig, "verified": True, "fetched_at": BEFORE, "reeval_run": None}
+            for sig, s in {"role_layout": "We do layout.", "role_key": "We do key animation.", "role_inbetween": "We do in-betweens.", "role_coloring": "We do coloring.",
+                           "style_2d": "We are a 2D studio.", "anime_production": "We produce anime series.", "external_collab": "We take client work.",
+                           "production_active": "Our series is in production.", "multiple_titles": "Our works include A."}.items()]
+
+
+class HappyPath(unittest.TestCase):
+    def test_rejected_studio_is_rescored_from_fresh_evidence_only(self):
+        db = FakeDB(); out = jobs.studio_reeval.h_reeval_studio(deps(db, {"https://hoshi.example/": HOME}), job())
+        self.assertEqual(out["decision"], "qualified"); self.assertGreaterEqual(out["score"], 70)
+        self.assertEqual(db.item["new_decision"], "qualified"); self.assertEqual(db.p["status"], "needs_review")       # never silently 'qualified'
+        s = next(a for n, a in db.calls if n == "intel_agent_reeval_set_score")
+        self.assertEqual(s["p_estimates"]["scoring_model"], "studio-v2"); self.assertTrue(all(b["model"] == "studio-v2" for b in s["p_breakdown"]))
+        ev = [a for n, a in db.calls if n == "intel_agent_reeval_add_evidence"]
+        self.assertTrue(ev and all(a["p_run_id"] == RUN and a["p_verified"] for a in ev))                                  # provenance: run id on every row
+        self.assertTrue(all(e["fetched_at"] >= STARTED and e["reeval_run"] == RUN for e in db.evidence))                      # timestamps are after the run began
+
+    def test_reevaluation_never_touches_crm_drafts_sending_settings_or_other_jobs(self):
+        db = FakeDB(); jobs.studio_reeval.h_reeval_studio(deps(db, {"https://hoshi.example/": HOME}), job())
+        banned = ("intel_agent_enqueue_job", "intel_agent_resolve_lead", "intel_agent_upsert_draft", "intel_agent_reserve_send", "intel_agent_flag_prospect", "intel_agent_set_score",
+                  "intel_agent_upsert_prospect", "intel_agent_add_evidence", "intel_agent_log")
+        self.assertFalse(set(db.names()) & set(banned)); self.assertFalse(any("settings" in n and n != "intel_agent_settings" for n in db.names()))
+        self.assertIsNone(db.p["lead_id"])
+        # Static guard: every database function the module can name is a reeval function or one of three read-only settings/source functions.
+        named = set(re.findall(r'"(intel_agent_[a-z_]+)"', pathlib.Path(studio_reeval.__file__).read_text(encoding="utf-8")))
+        self.assertTrue(named)
+        self.assertEqual({n for n in named if not n.startswith("intel_agent_reeval_")}, {"intel_agent_settings", "intel_agent_sources"})
+
+    def test_handler_is_registered_and_worker_completes_the_job(self):
+        self.assertIs(jobs.HANDLERS["reeval_studio"], studio_reeval.h_reeval_studio)
+        db = FakeDB(); recorded = []
+        def rpc(name, params=None):
+            if name.startswith("intel_agent_") and not name.startswith("intel_agent_reeval_") and name not in FakeDB.ALLOWED:
+                recorded.append((name, params)); return True
+            return db(name, params)
+        w = jobs.Worker(jobs.Deps(cfg=SimpleNamespace(worker_id="w1"), rpc=rpc, fetcher=Fetch({"https://hoshi.example/": HOME}), zoho=None, llm=LLM()), lease_thread=False)
+        w.run_job(job())
+        self.assertEqual([n for n, _ in recorded], ["intel_agent_complete_job"]); self.assertEqual(db.item["state"], "scored")
+
+
+class StaleEvidence(unittest.TestCase):
+    def test_stale_rows_are_excluded_by_fresh_evidence(self):
+        rows = stale_strong_evidence() + [
+            {"fact_type": "a", "verified": True, "fetched_at": NOW, "reeval_run": RUN},                       # fresh
+            {"fact_type": "b", "verified": True, "fetched_at": NOW, "reeval_run": "other-run"},              # another run
+            {"fact_type": "c", "verified": False, "fetched_at": NOW, "reeval_run": RUN},                     # unverified
+            {"fact_type": "d", "verified": True, "fetched_at": "garbage", "reeval_run": RUN},                # unreadable timestamp: fails closed
+            {"fact_type": "e", "verified": True, "reeval_run": RUN},                                         # no timestamp
+            {"fact_type": "f", "verified": True, "fetched_at": "2026-11-07T09:59:59+00:00", "reeval_run": RUN}]  # a second before the run
+        self.assertEqual([e["fact_type"] for e in research.fresh_evidence(rows, RUN, STARTED)], ["a"])
+        self.assertEqual(research.fresh_evidence(rows, RUN, "not a time"), [])
+
+    def test_old_evidence_cannot_decide_the_new_score(self):
+        db = FakeDB(old_evidence=stale_strong_evidence())
+        out = studio_reeval.h_reeval_studio(deps(db, {"https://hoshi.example/": NO_SIGNALS}), job())
+        self.assertEqual(out["decision"], "rejected"); self.assertLess(out["score"], 50)                       # the strong stale rows did not count
+        self.assertEqual(db.p["status"], "rejected")
+
+    def test_qualify_filters_even_if_the_database_returned_stale_rows(self):
+        ctx = {"prospect": prospect(facts={"verified": {"language": "en", "reeval_run": RUN}, "estimates": {}}), "evidence": stale_strong_evidence()}
+        rpc = FakeDB(); rpc.p = ctx["prospect"]
+        res = research.qualify(rpc, ctx, {}, reeval=research.ReevalScope(RUN, STARTED))
+        self.assertLess(res.score, 50)
+
+
+class LegacyAndScope(unittest.TestCase):
+    def ctx(self, **kw):
+        return {"prospect": prospect(**kw), "evidence": [{"fact_type": "style_2d", "snippet": "We are a 2D studio.", "verified": True}]}
+
+    def test_ordinary_qualification_still_preserves_the_legacy_score(self):
+        calls = []
+        res = research.qualify(lambda n, a: calls.append((n, a)), self.ctx(score=88), {})
+        self.assertTrue(res.held); self.assertEqual([n for n, _ in calls], ["intel_agent_add_evidence"])         # candidate recorded, nothing overwritten
+        self.assertFalse(any(n in ("intel_agent_set_score", "intel_agent_reeval_set_score") for n, _ in calls))
+
+    def test_only_an_explicit_scope_permits_the_deliberate_rescore(self):
+        c = self.ctx(score=88, facts={"verified": {"language": "en", "reeval_run": RUN}, "estimates": {}})
+        for e in c["evidence"]: e.update(fetched_at=NOW, reeval_run=RUN)
+        calls = []
+        res = research.qualify(lambda n, a: calls.append((n, a)) or {"ok": True}, c, {}, reeval=research.ReevalScope(RUN, STARTED))
+        self.assertFalse(res.held); self.assertEqual([n for n, _ in calls], ["intel_agent_reeval_set_score"])
+
+    def test_indie_prospects_are_refused_everywhere(self):
+        ind = prospect(type="indie_game_developer")
+        calls = []
+        with self.assertRaises(PermanentError): research.qualify(lambda *a: calls.append(a), {"prospect": ind, "evidence": []}, {}, reeval=research.ReevalScope(RUN, STARTED))
+        with self.assertRaises(PermanentError): research.research(lambda *a: calls.append(a), Fetch({}), lambda t: {}, {"prospect": ind}, run_id=RUN)
+        self.assertEqual(calls, [])
+        db = FakeDB(p=ind); self.assertIn("skipped", studio_reeval.h_reeval_studio(deps(db, {"https://hoshi.example/": HOME}), job()))
+        self.assertEqual(set(db.names()), {"intel_agent_reeval_context"})
+
+    def test_ordinary_indie_qualification_is_unchanged(self):
+        calls = []
+        res = research.qualify(lambda n, a: calls.append(n), {"prospect": prospect(type="indie_game_developer", score=75, score_breakdown=[{"criterion": "active_development"}]), "evidence": []}, {})
+        self.assertEqual(calls, ["intel_agent_set_score"]); self.assertFalse(res.held); self.assertEqual(res.model, "")
+
+    def test_wrong_origin_or_status_or_existing_lead_never_proceeds(self):
+        for kw in ({"origin": "crm_existing"}, {"status": "needs_review"}, {"lead_id": "L1"}):
+            db = FakeDB(p=prospect(**kw)); out = studio_reeval.h_reeval_studio(deps(db, {"https://hoshi.example/": HOME}), job())
+            self.assertTrue("skipped" in out or out.get("state") == "skipped", (kw, out))                    # out of scope, or recorded as a skipped item
+            self.assertFalse({"intel_agent_reeval_set_score", "intel_agent_reeval_add_evidence", "intel_agent_reeval_record_research"} & set(db.names()), kw)
+            self.assertEqual((db.p["status"], db.p["score"]), (kw.get("status", "rejected"), 12), kw)         # prospect untouched
+
+
+class WebsiteRecovery(unittest.TestCase):
+    def missing(self, **kw):
+        return FakeDB(p=prospect(website="", domain=""), **kw)
+
+    def test_verified_candidate_is_recovered_with_provenance_then_researched(self):
+        db = self.missing(item_urls=["https://hoshi-anime.example/about"])
+        out = studio_reeval.h_reeval_studio(deps(db, {"https://hoshi-anime.example": RECOVERED}), job())
+        ws = next(a for n, a in db.calls if n == "intel_agent_reeval_set_website")
+        self.assertEqual(ws["p_website"], "https://hoshi-anime.example"); self.assertIn("name_in_page_identity", ws["p_detail"]["cues"]); self.assertEqual(ws["p_detail"]["method"], "source_item")
+        self.assertTrue(any(e["fact_type"] == "website_recovery" and e["reeval_run"] == RUN for e in db.evidence)); self.assertIn("decision", out)
+
+    def test_no_candidate_goes_to_manual_review_and_nothing_is_scored(self):
+        db = self.missing(); out = studio_reeval.h_reeval_studio(deps(db, {}), job())
+        self.assertEqual((db.item["state"], db.item["outcome"]), ("needs_manual", "website_not_recovered")); self.assertEqual(db.p["website"], "")
+        self.assertFalse({"intel_agent_reeval_set_score", "intel_agent_reeval_set_website"} & set(db.names())); self.assertEqual(db.p["score"], 12)
+
+    def test_unrelated_social_individual_and_single_cue_sites_are_rejected(self):
+        other = '<html><head><title>Random Games Inc</title></head><body><p>' + "We make animation and studio tools for everyone. " * 8 + "</p></body></html>"
+        indiv = '<html><head><title>Studio Hoshi</title></head><body><p>I am a freelance animator. Commissions open. My portfolio. Studio Hoshi studio Hoshi animation.</p></body></html>'
+        onecue = '<html><head><title>Studio Hoshi</title></head><body><p>' + "We are an animation business that makes cartoons. " * 8 + "</p></body></html>"
+        for url, page in (("https://random.example/x", other), ("https://x.com/hoshi", RECOVERED), ("https://freelance.example/x", indiv), ("https://onecue.example/x", onecue)):
+            db = self.missing(item_urls=[url]); studio_reeval.h_reeval_studio(deps(db, {url.rsplit("/", 1)[0]: page, "https://x.com": RECOVERED}), job())
+            self.assertEqual(db.item["outcome"], "website_not_recovered", url); self.assertEqual(db.p["website"], "", url)
+
+    def test_two_different_verified_sites_are_ambiguous(self):
+        db = self.missing(item_urls=["https://hoshi-a.example/", "https://hoshi-b.example/"])
+        studio_reeval.h_reeval_studio(deps(db, {"https://hoshi-a.example": RECOVERED, "https://hoshi-b.example": RECOVERED}), job())
+        self.assertEqual(db.item["detail"]["reason"], "ambiguous_candidates"); self.assertEqual(db.p["website"], "")
+
+    def test_domain_owned_by_another_prospect_is_refused_by_the_database(self):
+        db = self.missing(item_urls=["https://hoshi-anime.example/"], website_conflict=True)
+        studio_reeval.h_reeval_studio(deps(db, {"https://hoshi-anime.example": RECOVERED}), job())
+        self.assertEqual(db.item["outcome"], "website_not_recovered"); self.assertNotIn("intel_agent_reeval_record_research", db.names())
+
+    def test_short_name_cannot_be_verified(self):
+        db = FakeDB(p=prospect(website="", domain="", name="Sky"), item_urls=["https://sky.example/"])
+        studio_reeval.h_reeval_studio(deps(db, {"https://sky.example": RECOVERED}), job())
+        self.assertEqual(db.item["detail"]["reason"], "name_too_short_to_verify")
+
+
+class Failures(unittest.TestCase):
+    def test_unreadable_site_is_manual_review_not_a_crash_or_a_score(self):
+        db = FakeDB(); out = studio_reeval.h_reeval_studio(deps(db, {"https://hoshi.example/": PermanentError("blocked by robots.txt")}), job())
+        self.assertEqual((db.item["state"], db.item["outcome"]), ("needs_manual", "site_unreadable")); self.assertEqual(db.p["status"], "rejected"); self.assertEqual(db.p["score"], 12)
+
+    def test_empty_site_is_incomplete_research_not_a_silent_rejection(self):
+        db = FakeDB(); studio_reeval.h_reeval_studio(deps(db, {"https://hoshi.example/": EMPTY}), job())
+        self.assertEqual(db.item["outcome"], "site_unreadable_or_empty"); self.assertNotIn("intel_agent_reeval_set_score", db.names())
+
+    def test_transient_failure_retries_then_is_recorded_when_attempts_run_out(self):
+        pages = {"https://hoshi.example/": TransientError("timeout")}
+        db = FakeDB()
+        with self.assertRaises(TransientError): studio_reeval.h_reeval_studio(deps(db, pages), job(attempts=2))
+        self.assertEqual(db.item["state"], "queued")
+        studio_reeval.h_reeval_studio(deps(db, pages), job(attempts=5))
+        self.assertEqual((db.item["state"], db.item["outcome"]), ("failed", "transient_retries_exhausted"))
+
+    def test_model_outage_does_not_stop_a_reevaluation(self):
+        db = FakeDB(); out = studio_reeval.h_reeval_studio(deps(db, {"https://hoshi.example/": HOME}, llm=DownLLM()), job())
+        self.assertIn("decision", out)
+
+    def test_worker_survives_a_failing_reevaluation_job(self):
+        calls = []
+        def rpc(name, params=None):
+            if name == "intel_agent_reeval_context": raise TransientError("supabase blip")
+            calls.append(name); return True
+        w = jobs.Worker(jobs.Deps(cfg=SimpleNamespace(worker_id="w1"), rpc=rpc, fetcher=None, zoho=None, llm=None), lease_thread=False)
+        w.run_job(job(attempts=1)); self.assertEqual(calls, ["intel_agent_fail_job"])                       # back to the database queue with backoff
+
+
+class IdempotencyAndRestart(unittest.TestCase):
+    def test_second_run_of_the_same_job_changes_nothing(self):
+        db = FakeDB(); pages = {"https://hoshi.example/": HOME}
+        studio_reeval.h_reeval_studio(deps(db, pages), job()); n = len(db.calls); snap = json.dumps(db.p, sort_keys=True)
+        out = studio_reeval.h_reeval_studio(deps(db, pages), job())
+        self.assertEqual(out, {"skipped": "already scored"}); self.assertEqual(len(db.calls) - n, 1); self.assertEqual(json.dumps(db.p, sort_keys=True), snap)
+
+    def test_duplicate_or_late_job_for_a_finished_item_is_a_noop(self):
+        for st in ("scored", "needs_manual", "failed", "skipped"):
+            db = FakeDB(item_state=st); out = studio_reeval.h_reeval_studio(deps(db, {"https://hoshi.example/": HOME}), job())
+            self.assertIn("already", out["skipped"]); self.assertEqual(db.names(), ["intel_agent_reeval_context"])
+
+    def test_cancelled_run_stops_quietly(self):
+        db = FakeDB(run_state="cancelled"); out = studio_reeval.h_reeval_studio(deps(db, {"https://hoshi.example/": HOME}), job())
+        self.assertIn("skipped", out); self.assertEqual(db.names(), ["intel_agent_reeval_context"])
+
+    def test_database_refusal_is_a_quiet_skip(self):
+        def rpc(name, params=None):
+            if name == "intel_agent_reeval_context": return FakeDB().r_context(RUN, PID)
+            raise RpcError("reevaluation refused: run_cancelled")
+        self.assertIn("skipped", studio_reeval.h_reeval_studio(deps(rpc, {"https://hoshi.example/": HOME}), job()))
+
+    def test_malformed_payload_is_a_permanent_error(self):
+        with self.assertRaises(PermanentError): studio_reeval.h_reeval_studio(deps(FakeDB(), {}), {"payload": {}})
+
+    def test_repeat_research_refreshes_instead_of_trusting_old_timestamps(self):
+        old = [{"source": "web", "url": "https://hoshi.example/", "fact_type": "style_2d", "snippet": "x", "content_hash": research._h("We handle layout, key animation, in-betweens and coloring for TV anime series."), "verified": True, "fetched_at": BEFORE, "reeval_run": None}]
+        db = FakeDB(); db.evidence = old; db.r_add_evidence(RUN, PID, "web", "u", "style_2d", "x", old[0]["content_hash"], True)
+        self.assertEqual((db.evidence[0]["fetched_at"], db.evidence[0]["reeval_run"]), (NOW, RUN))
+
+
+class Cli(unittest.TestCase):
+    def run_cli(self, argv, eligible=278):
+        calls, lines = [], []
+        def rpc(name, params=None):
+            calls.append((name, params))
+            return {"eligible": eligible} if params and params.get("p_dry_run") else {"run_id": RUN}
+        return research and (studio_reeval.cli(rpc, argv, out=lines.append), calls, lines)
+
+    def test_preview_is_a_dry_run_only(self):
+        code, calls, _ = self.run_cli(["preview"])
+        self.assertEqual(code, 0); self.assertTrue(all(a["p_dry_run"] for _, a in calls))
+
+    def test_start_refuses_without_a_limit_or_an_explicit_full_population(self):
+        for argv in (["start"], ["start", "--limit", "0"], ["start", "--limit", "x"], ["start", "--limit", "5", "--all"], ["start", "--all"], ["start", "--all", "--expect", "10"]):
+            code, calls, _ = self.run_cli(argv); self.assertEqual(code, 2, argv); self.assertFalse([1 for _, a in calls if not a["p_dry_run"]], argv)
+
+    def test_pilot_and_full_start(self):
+        code, calls, _ = self.run_cli(["start", "--limit", "5"]); self.assertEqual(code, 0)
+        self.assertEqual([a["p_limit"] for _, a in calls if not a["p_dry_run"]], [5])
+        code, calls, _ = self.run_cli(["start", "--all", "--expect", "278"]); self.assertEqual(code, 0)
+        self.assertEqual([a["p_limit"] for _, a in calls if not a["p_dry_run"]], [None])
+
+    def test_cli_only_calls_reeval_functions(self):
+        for argv in (["preview"], ["start", "--limit", "3"], ["status"], ["cancel", RUN]):
+            _, calls, _ = self.run_cli(argv); self.assertTrue(all(n.startswith("intel_agent_reeval_") for n, _ in calls), argv)
+
+
+class StaticMigrationGuards(unittest.TestCase):
+    """Text checks on the unexecuted migration. They catch accidental edits; they do not prove the SQL runs."""
+    SQL = (pathlib.Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261117090000_intelligence_studio_reevaluation.sql").read_text()
+
+    def test_every_per_prospect_function_rechecks_scope(self):
+        for fn in ("reeval_context", "reeval_add_evidence", "reeval_set_website", "reeval_record_research", "reeval_set_score", "reeval_finish_item"):
+            body = self.SQL.split(f"function public.intel_agent_{fn}(", 1)[1].split("end $$;", 1)[0]
+            self.assertIn("_intel_reeval_check(", body, fn)
+        chk = self.SQL.split("function public._intel_reeval_check", 1)[1].split("end $$;", 1)[0]
+        self.assertIn("'animation_studio_support'", chk); self.assertIn("'discovered'", chk)
+
+    def test_migration_never_writes_settings_leads_messages_or_sends(self):
+        sql = re.sub(r"--[^\n]*", "", self.SQL)
+        for pat in (r"update\s+public\.intel_settings", r"insert\s+into\s+public\.leads", r"update\s+public\.leads", r"insert\s+into\s+public\.intel_messages", r"update\s+public\.intel_messages", r"intel_agent_reserve_send", r"kill_switch\s*="):
+            self.assertIsNone(re.search(pat, sql, re.I), pat)
+        self.assertIn("else 'needs_review'", sql); self.assertIn("'reeval_studio'", sql); self.assertIn("p_dry_run boolean default true", sql)
+
+    def test_job_kind_list_keeps_every_earlier_kind(self):
+        for k in ("discover", "research", "qualify", "resolve", "draft", "send", "sync_mail", "classify", "reconcile", "followup_scan", "retention", "chat", "seed_sources", "analyze_site",
+                  "news_scan", "feed_poll", "crawl_index", "manual_post", "profile_terms", "takeover"):
+            self.assertIn(f"'{k}'", self.SQL.split("intel_jobs_kind_check check", 1)[1].split(";", 1)[0], k)
+
+
+if __name__ == "__main__":
+    unittest.main()

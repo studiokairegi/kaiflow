@@ -1,3 +1,4 @@
+// Deploy with --no-verify-jwt: the per-shot share token is the capability credential.
 // POST /freelancer-drive-upload
 // multipart/form-data with fields: token (the shot's share token), file
 //

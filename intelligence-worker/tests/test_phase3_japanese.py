@@ -41,6 +41,30 @@ def writer_for(body, subject="青空アニメーション様の制作実績に�
     return writer
 
 
+
+class JapaneseInitialDraftFallback(unittest.TestCase):
+    def test_missing_recipient_evidence_uses_honest_approved_studio_intro(self):
+        called = []
+        result = drafting.compose_japanese(
+            PROSPECT, [], KB, SETTINGS,
+            llm=lambda *args: called.append(args),
+            kind="initial",
+        )
+        self.assertFalse(result["model_written"])
+        self.assertIn("Studio Kairegiは2Dアニメーション制作を行うスタジオです。", result["body"])
+        self.assertIn("レイアウト、原画、動画、仕上げ", result["body"])
+        self.assertIn("青空アニメーション", result["subject"])
+        self.assertNotIn("多くのアニメーション作品", result["body"])
+        self.assertEqual(called, [])
+
+    def test_unsupported_japanese_volume_claim_is_rejected(self):
+        body = ("ご担当者様\n\n突然のご連絡失礼いたします。"
+                "貴社の作品を拝見し、多くのアニメーション作品を制作されてきたと感じました。")
+        with self.assertRaises(PermanentError):
+            drafting.compose_japanese(PROSPECT, EVIDENCE, KB, SETTINGS,
+                                      writer_for(body), kind="initial")
+
+
 class JapaneseLanguageSelection(unittest.TestCase):
     def test_site_language_and_country_select_japanese(self):
         self.assertTrue(drafting.should_use_japanese(PROSPECT))
@@ -397,10 +421,12 @@ class JapaneseComposer(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertTrue(drafting._is_consequential_japanese_inbound({"body": message}))
 
-    def test_missing_research_fails_closed(self):
-        with self.assertRaises(PermanentError):
-            drafting.compose_japanese(PROSPECT, [], KB, SETTINGS,
-                writer_for("佐藤花子様\n\nご連絡ありがとうございます。"), kind="initial")
+    def test_missing_research_uses_non_personalized_approved_intro(self):
+        result = drafting.compose_japanese(PROSPECT, [], KB, SETTINGS,
+            writer_for("佐藤花子様\\n\\nご連絡ありがとうございます。"), kind="initial")
+        self.assertFalse(result["model_written"])
+        self.assertEqual(result["evidence_ids"], [])
+        self.assertIn("Studio Kairegiは2Dアニメーション制作を行うスタジオです。", result["body"])
 
     def test_japanese_duplicate_and_name_swap_detection(self):
         a = "佐藤花子様\n\n貴社が公開されたテレビアニメの制作実績を拝見しました。原画と動画の制作協力に対応しています。"

@@ -20,12 +20,12 @@ export default function CampaignView({ type, supabase, tick, onChanged, onOpenLe
   const [f, setF] = useState(null);
   const [open, setOpen] = useState(null);
   useEffect(() => {
-    if (c && !f) setF({ keywords: joinLines(c.criteria?.keywords), seedUrls: joinLines(c.criteria?.seed_urls), qualifyMin: c.criteria?.qualify_min ?? 70, reviewMin: c.criteria?.review_min ?? 50, dailyCap: c.daily_cap });
+    if (c && !f) setF({ keywords: joinLines(c.criteria?.keywords), seedUrls: joinLines(c.criteria?.seed_urls), qualifyMin: type === "animation_studio_support" ? 70 : c.criteria?.qualify_min ?? 70, reviewMin: type === "animation_studio_support" ? 50 : c.criteria?.review_min ?? 50, dailyCap: c.daily_cap });
   }, [c, f]);
   if (camps.loading || !c || !f) return <Muted>{camps.error || "Loading…"}</Muted>;
   const mine = (pros.data || []).filter((p) => p.type === type);
   const save = () => run(async () => {
-    await intelApi.updateCampaign(supabase, type, { daily_cap: Number(f.dailyCap), criteria: criteriaPatch(f) });
+    await intelApi.updateCampaign(supabase, type, { daily_cap: Number(f.dailyCap), criteria: criteriaPatch({ ...f, prospectType: type }) });
     await camps.reload();
   });
   const setStatus = (status) => run(async () => { await intelApi.updateCampaign(supabase, type, { status }); await camps.reload(); await onChanged(); });
@@ -38,8 +38,12 @@ export default function CampaignView({ type, supabase, tick, onChanged, onOpenLe
           <Btn small disabled={busy} onClick={() => run(async () => { await intelApi.enqueue(supabase, "discover", { type }); await onChanged(); })}>Run discovery now</Btn></div>}>
         <div style={S.grid(200)}>
           <Field label="Daily introductions (this campaign)"><Input type="number" min="0" max="30" value={f.dailyCap} onChange={(e) => setF({ ...f, dailyCap: e.target.value })} /></Field>
-          <Field label="Score to qualify" hint="0-100"><Input type="number" min="0" max="100" value={f.qualifyMin} onChange={(e) => setF({ ...f, qualifyMin: e.target.value })} /></Field>
-          <Field label="Score to flag for review"><Input type="number" min="0" max="100" value={f.reviewMin} onChange={(e) => setF({ ...f, reviewMin: e.target.value })} /></Field>
+          {type === "indie_game_developer" ? <>
+            <Field label="Score to qualify" hint="0-100"><Input type="number" min="0" max="100" value={f.qualifyMin} onChange={(e) => setF({ ...f, qualifyMin: e.target.value })} /></Field>
+            <Field label="Score to flag for review"><Input type="number" min="0" max="100" value={f.reviewMin} onChange={(e) => setF({ ...f, reviewMin: e.target.value })} /></Field>
+          </> : <Field label="Studio qualification thresholds" hint="Fixed Phase 1 studio-v2 policy; campaign settings cannot override these bands.">
+            <div style={{ fontSize: 13, lineHeight: 1.6 }}>70–100: Qualified when evidence criteria are confirmed<br />50–69: Needs Review<br />Below 50: Rejected<br />Any uncertainty in pipeline fit, 2D relevance or external collaboration requires review.</div>
+          </Field>}
         </div>
         <Field label="Keywords (one per line)" hint="Search terms and store tags the agent prioritizes."><TextArea value={f.keywords} onChange={(e) => setF({ ...f, keywords: e.target.value })} /></Field>
         {type === "animation_studio_support" && <Field label="Studio pages to watch (one URL per line)" hint="Recruitment, careers or outsourcing pages of studios you want to approach. Robots rules are respected."><TextArea value={f.seedUrls} onChange={(e) => setF({ ...f, seedUrls: e.target.value })} placeholder="https://example-studio.jp/recruit" /></Field>}

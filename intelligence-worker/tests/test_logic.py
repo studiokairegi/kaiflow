@@ -24,10 +24,10 @@ class Scoring(unittest.TestCase):
         self.assertEqual(sum(b["points"] for b in r.breakdown), r.score)
         self.assertTrue(all(b["points"] <= b["max"] for b in r.breakdown))
 
-    def test_no_email_never_qualifies(self):
+    def test_suitability_is_not_rejected_for_missing_contact(self):
         sig = {"style_2d": "x", "style_anime": "x", "upcoming_release": "x", "kickstarter": "x", "seeking_animation": "x", "trailer": "x"}
         r = scoring.score_indie(sig, {"recent_activity": True, "price_present": True}, {"form_url": "https://x"})
-        self.assertEqual(r.decision, "needs_review")
+        self.assertEqual(r.decision, "qualified")  # contactability is assessed separately
 
     def test_nothing_known_is_rejected_and_budget_not_assumed(self):
         r = scoring.score_indie({}, {}, None)

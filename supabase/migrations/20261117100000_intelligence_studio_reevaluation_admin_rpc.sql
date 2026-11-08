@@ -1,4 +1,4 @@
--- Admin-facing controls for studio prospect reevaluation.
+-- Admin-facing controls for pre-outreach studio prospect reevaluation (rejected, review and qualified).
 -- Keep worker RPCs and intel_agent_org() unchanged.
 -- Every admin RPC resolves its organization through intel_admin_org(),
 -- which enforces Admin AND active Master User authorization.
@@ -15,8 +15,9 @@ begin
   insert into pg_temp._reeval_pool
   select p.id, coalesce(p.website, '') <> '', p.created_at
     from public.intel_prospects p
-   where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status = 'rejected' and p.lead_id is null
-     and not exists (select 1 from public.leads l where l.intel_prospect_id = p.id)
+   where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status in ('rejected','needs_review','qualified','lead_linked')
+     and ((p.lead_id is null and not exists (select 1 from public.leads l where l.intel_prospect_id=p.id))
+       or (p.lead_id is not null and exists (select 1 from public.leads l where l.id=p.lead_id and l.intel_prospect_id=p.id)))
      and not exists (select 1 from public.intel_messages m where m.prospect_id = p.id)
      and not exists (select 1 from public.intel_lead_history h where h.prospect_id = p.id)
      and not exists (
@@ -38,16 +39,16 @@ begin
           )
      )
      and (coalesce(p_include_previous, false) or not exists (select 1 from public.intel_reeval_items i where i.prospect_id = p.id and i.state = 'scored'));
-  select count(*) into v_total from public.intel_prospects p where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status = 'rejected';
+  select count(*) into v_total from public.intel_prospects p where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status in ('rejected','needs_review','qualified','lead_linked');
   select count(*) into v_human from public.intel_prospects p
-   where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status = 'rejected'
+   where p.organization_id = v_org and p.type = 'animation_studio_support' and p.origin = 'discovered' and p.status in ('rejected','needs_review','qualified','lead_linked')
      and exists (select 1 from public.intel_actions a where a.organization_id = v_org and a.action = 'review_prospect_reject' and a.entity_type = 'prospect' and a.entity_id = p.id::text);
   -- A person's rejection is a decision, not a model result: those prospects are never selected.
   delete from pg_temp._reeval_pool where prospect_id in (select p.id from public.intel_prospects p join public.intel_actions a on a.entity_id = p.id::text and a.entity_type = 'prospect' and a.action = 'review_prospect_reject' and a.organization_id = v_org);
   select count(*), count(*) filter (where not has_website) into v_eligible, v_noweb from pg_temp._reeval_pool;
   if p_dry_run is distinct from false then
-    return jsonb_build_object('dry_run', true, 'rejected_discovered_studios', v_total, 'eligible', v_eligible, 'eligible_with_website', v_eligible - v_noweb,
-                              'eligible_without_website', v_noweb, 'excluded_rejected_by_a_person', v_human);
+    return jsonb_build_object('dry_run', true, 'pre_outreach_discovered_studios', v_total, 'eligible', v_eligible, 'eligible_with_website', v_eligible - v_noweb,
+                              'eligible_without_website', v_noweb, 'excluded_human_rejections', v_human);
   end if;
   if btrim(coalesce(p_name, '')) = '' then raise exception 'run name required'; end if;
   if length(btrim(p_name)) > 80 then raise exception 'run name must be 80 characters or fewer'; end if;

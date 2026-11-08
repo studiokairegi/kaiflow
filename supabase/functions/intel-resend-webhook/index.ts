@@ -1,3 +1,4 @@
+// Deploy with --no-verify-jwt: Resend is authenticated by the Svix signature below.
 // Intelligence-only inbound Resend webhook. Configure a Resend webhook subscription
 // for email.received pointing here. It intentionally does not use normal Inbox routing.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
