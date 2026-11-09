@@ -29,7 +29,7 @@ interface OAuthAdapter {
 const gmailAdapter: OAuthAdapter = {
   apiBase: GMAIL_API_BASE,
   authorizationUrl(state, deps) {
-    const clientId = deps.env("GOOGLE_CLIENT_ID"), redirectUri = deps.env("GOOGLE_REDIRECT_URI");
+    const clientId = deps.env("GOOGLE_GMAIL_CLIENT_ID"), redirectUri = deps.env("GOOGLE_GMAIL_REDIRECT_URI");
     if (!clientId || !redirectUri) throw new Error("Gmail OAuth is not configured");
     const u = new URL(GOOGLE_AUTH_URL);
     u.searchParams.set("client_id", clientId);
@@ -44,8 +44,8 @@ const gmailAdapter: OAuthAdapter = {
   },
   async exchange(code, deps) {
     const form = new URLSearchParams({ grant_type: "authorization_code", code,
-      client_id: deps.env("GOOGLE_CLIENT_ID")!, client_secret: deps.env("GOOGLE_CLIENT_SECRET")!,
-      redirect_uri: deps.env("GOOGLE_REDIRECT_URI")! });
+      client_id: deps.env("GOOGLE_GMAIL_CLIENT_ID")!, client_secret: deps.env("GOOGLE_GMAIL_CLIENT_SECRET")!,
+      redirect_uri: deps.env("GOOGLE_GMAIL_REDIRECT_URI")! });
     const response = await deps.fetch(GOOGLE_TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.access_token || !data.refresh_token || !hasAllScopes(data.scope)) throw new Error("Gmail authorization did not grant the required offline send/read scopes");
@@ -59,7 +59,7 @@ const gmailAdapter: OAuthAdapter = {
   },
   async refresh(refreshToken, deps) {
     const form = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken,
-      client_id: deps.env("GOOGLE_CLIENT_ID")!, client_secret: deps.env("GOOGLE_CLIENT_SECRET")! });
+      client_id: deps.env("GOOGLE_GMAIL_CLIENT_ID")!, client_secret: deps.env("GOOGLE_GMAIL_CLIENT_SECRET")! });
     const response = await deps.fetch(GOOGLE_TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
     const data = await response.json().catch(() => ({}));
     return { ok: response.ok && !!data.access_token, status: response.status, data };
@@ -143,6 +143,7 @@ export async function handleProviderConnect(req: Request, deps: ProviderOAuthDep
 export async function handleProviderCallback(req: Request, deps: ProviderOAuthDeps): Promise<Response> {
   const app = deps.env("APP_URL") || "/";
   const back = (flag: string) => Response.redirect(`${app}${app.includes("?") ? "&" : "?"}intelligence=${flag}`, 302);
+  let diagnosticStage = 'callback_start';
   try {
     const url = new URL(req.url);
     if (url.searchParams.get("error")) return back("provider_cancelled");
@@ -165,9 +166,13 @@ export async function handleProviderCallback(req: Request, deps: ProviderOAuthDe
     const { data: authorized } = await deps.service.rpc("intel_is_authorized_user", { p_user_id: st.user_id, p_organization_id: st.organization_id });
     if (authorized !== true) return back("provider_denied");
 
+    diagnosticStage = 'google_token_exchange';
     const token = await adapter.exchange(code, deps, st.metadata || {});
+    diagnosticStage = 'gmail_identity_lookup';
     const identity = await adapter.identify(token.access_token, deps, st.metadata || {});
+    diagnosticStage = 'credential_encryption';
     const credentials = await deps.encrypt(JSON.stringify({ refresh_token: token.refresh_token, ...(st.metadata || {}) }));
+    diagnosticStage = 'account_database_save';
     const { data: account, error } = await deps.service.from("intel_provider_accounts").upsert({
       organization_id: st.organization_id, provider_key: st.provider_key,
       external_account_id: identity.externalAccountId, mailbox: identity.mailbox,
@@ -179,7 +184,8 @@ export async function handleProviderCallback(req: Request, deps: ProviderOAuthDe
     }, { onConflict: "organization_id,provider_key,mailbox" }).select("id").single();
     if (error || !account) return back("provider_save_error");
     return back("provider_connected");
-  } catch {
+  } catch (error) {
+    console.error('[Intelligence OAuth] Callback failed at:', diagnosticStage, error instanceof Error ? error.message : 'Unknown error');
     return back("provider_error"); // never echo OAuth codes, credentials, or provider internals to the browser
   }
 }

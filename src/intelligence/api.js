@@ -36,6 +36,13 @@ export const intelApi = {
   disconnectMail: (s) => call(s, "intel_admin_disconnect_mail"),
   providerCatalog: (s) => call(s, "intel_admin_provider_catalog"),
   providerAccounts: (s) => call(s, "intel_admin_provider_accounts"),
+  checkProviderHealth: async (s, accountId) => {
+    const { data, error } = await s.functions.invoke("intel-provider-health", {
+      body: { account_id: accountId },
+    });
+    if (error) throw new Error(error.message || "Could not check provider health");
+    return data || { ok: false, error: "Health check returned no result." };
+  },
   updateProviderAccount: (s, id, patch) => call(s, "intel_admin_update_provider_account", { p_account_id: id, p_patch: patch }),
   disconnectProviderAccount: (s, id) => call(s, "intel_admin_disconnect_provider_account", { p_account_id: id }),
   setContactPermission: (s, a) => call(s, "intel_admin_set_contact_permission", { p_email: a.email, p_purpose: a.purpose, p_evidence_type: a.evidenceType, p_evidence_reference: a.evidenceReference || "", p_granted: a.granted !== false }),
