@@ -23,7 +23,7 @@ class Deps:
     rpc: Callable            # rpc(name, params)
     fetcher: object
     zoho: object
-    llm: object              # OllamaClient
+    llm: object              # OllamaClient, or FallbackLLM (Gemini for Agent Chat planning, Ollama for everything else)
     api: object = None       # ApiClient for the documented discovery APIs
     sleep: Callable = time.sleep
     clock: Callable = time.time
@@ -572,6 +572,7 @@ class Worker:
         d = self.d
         info = {
             "ollama": bool(getattr(d.llm, "is_up", lambda: False)()),
+            "chat_llm": getattr(d.llm, "last_backend", "ollama"),
             "worker_version": "1.1.0",
             "pid": __import__("os").getpid(),
             "active_job": self._active_job,

@@ -16,17 +16,33 @@ the Supabase service-role key or any Zoho secret. It can only call `intel_agent_
 4. Put the settings from `.env.example` into machine environment variables (or a file outside the repository). For the
    password, prefer Windows Credential Manager: `pip install keyring`, then
    `python -c "import keyring; keyring.set_password('kairflow-intelligence','AGENT_EMAIL','PASSWORD')"` and leave `KAIRFLOW_AGENT_PASSWORD` unset.
+5. Optional, Gemini for Agent Chat: set `KAIRFLOW_GEMINI_API_KEY` (and optionally `KAIRFLOW_GEMINI_MODEL`, default `gemini-2.5-flash`) in worker.env, or store the key in Windows Credential Manager under service `kairflow-intelligence-gemini`, user `api-key`. Gemini then plans Agent Chat turns and Ollama is the automatic fallback (a bad key or model pauses Gemini for 10 minutes). Research, classification and drafting stay on local Ollama. Chat text and tool results (prospect names, statuses, counts) are sent to Google, so use a billing-enabled project key. The worker heartbeat reports which backend answered last as `chat_llm`. Check it with `python -m kairflow_intel selftest gemini`.
 5. Check everything without sending anything: `python -m kairflow_intel selftest`
-   (`selftest zoho` is read-only: it lists Zoho folders, nothing else. `selftest resend` checks local provider selection only; it does not send email.)
+   (`selftest gmail` and `selftest zoho` are read-only mailbox checks; neither sends email.)
 
-## Resend provider (server-side only)
+## Phase 2 production hardening migration
 
-- Keep `KAIRFLOW_MAIL_PROVIDER=none` until the local migration has been reviewed/applied and both Intelligence Edge Functions have been deployed.
-- Configure `RESEND_API_KEY` and `RESEND_WEBHOOK_SECRET` as Supabase Edge Function secrets; never add them to the worker environment.
-- Configure a Resend webhook subscription for `email.received` to `/functions/v1/intel-resend-webhook`. Keep the existing `/functions/v1/resend-webhook` subscription for the normal Inbox.
-- The worker calls `/functions/v1/intel-resend-send` using its limited agent JWT. That function loads the reserved/sending message from the agent RPC and refuses sends while the database kill switch is ON.
-- Resend has no Sent mailbox. A saved Resend email id can be checked through the server-side verification proxy. If the id was not saved or cannot be verified, the message remains `unknown` for manual resolution; it is never automatically resent.
-- `python -m kairflow_intel selftest resend` is read-only and does not contact Resend or send a message.
+Before deploying the Phase 2 worker update, apply `supabase/migrations/20261119090000_intelligence_phase2_global_send_pacing.sql` after the existing Intelligence migrations. This migration adds the organization-wide send-spacing reservation, an emergency-stop recheck immediately before the provider-call state, and the bounded outbound-history RPC used for cross-recipient duplicate checks. If the migration is not applied, the worker intentionally fails closed rather than sending without the new coordination contract.
+
+
+## Phase 3 — Japanese-language drafting
+
+Japanese-language prospects and Japanese inbound conversations use the Japanese model composer for initial outreach, follow-ups, re-engagement and replies. The composer uses the same local Ollama client, verified-evidence trace, organization-wide similarity history, one-regeneration rule, outbound policy validation and human-approval boundary as Phase 2. It does not use fixed Japanese email templates.
+
+Before Japanese drafting is available, approve these Knowledge base entries in Intelligence > Settings:
+- `studio.about.ja`
+- `services.animation_studio_support.ja`
+- `services.indie_game_developer.ja`
+- `portfolio.main.ja` (must use an already-approved Studio Kairegi URL)
+- `policy.opt_out.ja`
+
+The service entry matching the prospect type is required. If any required entry or verified prospect research is missing, the draft is flagged for human review; English fallback is not used. Japanese pricing, contract, deadline, capacity, complaint and opt-out replies remain human-review cases. All model-written drafts stay pending approval (`auto_ok=false`).
+
+## Resend responsibility boundary
+
+Resend is **not** an installed prospect-outreach adapter in this worker. The prospect dispatcher supports account-scoped Gmail and Zoho Mail receive/send adapters and SMTP send-only accounts. The provider registry intentionally excludes Resend; `KAIRFLOW_MAIL_PROVIDER=resend` is therefore invalid and must not be configured.
+
+The separate Resend transactional/Inbox Edge Functions remain independent of Emma's prospect dispatcher. Their credentials belong only in Supabase Edge Function secrets, never in the worker environment. Intelligence cold-outreach drafts must use an enabled Gmail/Zoho/SMTP account, and inbound replies to those accounts are synchronized by the worker. Resend webhooks do not substitute for syncing those mailboxes.
 
 ## Agent Chat and existing leads
 The worker also answers Agent Chat messages and prepares follow-up drafts for existing CRM leads you bring in. Neither can send email: sending is only ever
@@ -44,30 +60,17 @@ Never-contacted CRM leads with an email can also get an introduction draft from 
 
 Apply `supabase/migrations/20261116090000_intelligence_crm_takeover.sql`, then restart the worker (Settings > Stop Emma / Start Emma). Needs Ollama running and the approved knowledge base filled in, as for other drafts.
 
-## Reevaluating rejected animation studios with studio-v2 (one-off)
-Re-reads the sites of previously **rejected, discovered `animation_studio_support`** prospects and rescores them with studio-v2, using only evidence collected after the run began.
-It never creates or links CRM leads, never drafts or sends, never changes `kill_switch`, autonomy, caps or sending permissions, and cannot reach `indie_game_developer` prospects (the database re-checks type and origin on every call).
-A studio-v2 result of "qualified" is stored as **needs_review** (the true decision is kept in the run item), so a person approves it in the existing review queue. Prospects whose site cannot be read, whose website cannot be recovered with confidence, or whose research is incomplete keep their old status and score and are listed for manual review.
-
-1. Review, then apply `supabase/migrations/20261117090000_intelligence_studio_reevaluation.sql` (not applied automatically). Restart the worker afterwards.
-2. `python -m kairflow_intel reeval-studio preview` - counts only; creates nothing.
-3. `python -m kairflow_intel reeval-studio start --limit 5` - a pilot of 5. Let the worker process them, then `reeval-studio status` and inspect `intel_reeval_items`.
-4. `python -m kairflow_intel reeval-studio start --all --expect <eligible count from preview>` - queues the rest. Running `start` again with the same name is safe: it tops up missing items and re-queues dead jobs without duplicating anything.
-5. `reeval-studio status [RUN_ID]` shows counts by state/outcome and any queued item without a live job; `reeval-studio cancel RUN_ID` cancels queued work.
-
-Jobs live in the database queue, so a worker restart loses nothing. Missing websites are recovered only from URLs discovery already stored for that studio or an exact-name Wikidata match, and only if the page itself identifies the studio and a second independent cue agrees; two different matching sites mean manual review.
-
 ## 2. Run from the KairFlow app (Windows, recommended)
 
 The browser cannot launch a Python process on your computer by itself. Install the small local controller once; it runs on `127.0.0.1` only and accepts control requests only from `https://app.studiokairegi.com` (plus the local Vite development origin). It requires a per-install bearer token in addition to exact Origin/Host checks, and never returns or logs worker credentials or the controller token.
 
 1. Complete the Python environment setup above.
 2. In a normal PowerShell window, run `.\windows\install-controller.ps1` from this folder. It creates `%LOCALAPPDATA%\KairFlowIntelligence\worker.env` and a random per-install `controller.token`; fill in the Supabase URL, anon key and agent email. Prefer storing the agent password in Windows Credential Manager using the `keyring` instructions above, leaving `KAIRFLOW_AGENT_PASSWORD` blank. If you put the password in the file instead, keep the file private.
-3. The controller starts automatically at Windows sign-in. Open KairFlow → Intelligence → Settings, paste the contents of `%LOCALAPPDATA%\KairFlowIntelligence\controller.token` into the Local controller access token field, then use **Start Emma** / **Stop Emma**. The token stays in memory while this Settings view is open and is never persisted by the app; never share it. Chrome may ask permission for KairFlow to access your local network; allow it.
+3. The controller starts automatically at Windows sign-in and launches Emma automatically (`--auto-start`). Complete `worker.env` first; if it is incomplete, the controller keeps the automatic-start request and retries periodically. Open KairFlow → Intelligence → Settings and pair this browser once by pasting `%LOCALAPPDATA%\KairFlowIntelligence\controller.token`. KairFlow remembers the token in this browser profile on this computer, so you do not need to enter it again. The token is not uploaded to Supabase or your account. Use **Stop Emma** only when you intentionally want to pause the worker; the controller will not restart it after a manual stop. Chrome may ask permission for KairFlow to access your local network; allow it.
    To update an already-installed controller after updating the worker files, first use **Stop Emma** in Settings, then rerun the installer. It safely stops and replaces the old scheduled controller task.
 4. Starting Emma resumes queued worker activity. If sending is enabled and the emergency stop is OFF, approved messages may be sent under the existing rules.
 
-Do not run the older `KairFlow Intelligence Worker` scheduled task at the same time as the controller-managed worker; that would create two workers. If you previously installed that task, disable it before using the in-app controls. The older `run-worker.ps1` console method remains available for troubleshooting, but do not use it while the in-app worker is running.
+Choose exactly one worker installation mode: controller-managed (`install-controller.ps1`, recommended) OR the legacy SYSTEM scheduled worker (`install-task.ps1`). The installers refuse to coexist, and the worker also acquires a machine-wide singleton lock so manual starts cannot create a second instance. The scheduled-task wrapper runs the worker once; Task Scheduler is its only restart supervisor. NSSM/manual service mode is also mutually exclusive with these modes. The worker process rotates `worker.log` continuously at 5 MB with three retained backups.
 
 To remove only the controller auto-start, run `.\windows\uninstall-controller.ps1`. This leaves the worker settings and logs in place.
 
@@ -75,15 +78,16 @@ To remove only the controller auto-start, run `.\windows\uninstall-controller.ps
 - Try it in a console: `python -m kairflow_intel run` (Ctrl+C stops it cleanly). `python -m kairflow_intel once` drains the queue once.
 - Keep it running across reboots (recommended, no extra software): in an Administrator PowerShell run
   `.\windows\install-task.ps1 -ManageOllama`, fill in `C:\ProgramData\KairFlowIntelligence\worker.env`, then
-  `Start-ScheduledTask -TaskName 'KairFlow Intelligence Worker'`. The task starts at boot with no login, restarts on failure, keeps the password
+  `Start-ScheduledTask -TaskName 'KairFlow Intelligence Worker'`. This mutually exclusive legacy mode starts at boot with no login, restarts on failure, keeps the password
   in a file only SYSTEM and Administrators can read, and `-ManageOllama` starts Ollama on 127.0.0.1 only and blocks inbound port 11434.
   (Windows Credential Manager is per-user, so it is not used by the boot task. These scripts were not run on a Windows machine while writing them: read them first.)
-- Alternative with NSSM (free):
+- Alternative with NSSM (free; do not use alongside either scheduled-task mode or the controller):
   `nssm install KairFlowIntelligence "C:\path\.venv\Scripts\python.exe" "-m kairflow_intel run"`
   `nssm set KairFlowIntelligence AppDirectory C:\path\intelligence-worker`
   `nssm set KairFlowIntelligence AppExit Default Restart`
+  `nssm set KairFlowIntelligence AppEnvironmentExtra KAIRFLOW_WORKER_LOG_FILE=C:\ProgramData\KairFlowIntelligence\worker.log`
   Also turn off sleep and hibernate while plugged in. A crash, reboot or lost connection is safe: the job queue lives in Supabase,
-  unfinished jobs return to the queue when their lease expires, and a message that might have been sent is **never** sent again. Mailbox providers use their Sent folder; Resend uses a saved provider id through the server-side verification proxy. If delivery cannot be verified, it stays "Delivery unverified" until you decide.
+  unfinished jobs return to the queue when their lease expires, and a message that might have been sent is **never** sent again. Gmail/Zoho use their Sent folders; SMTP outcomes that cannot be independently verified remain unknown for manual resolution. If delivery cannot be verified, it stays "Delivery unverified" until you decide.
 
 ## 4. Phase 0 feasibility spike (once, optional but recommended)
 `python spikes/phase0_feasibility.py` makes about 60 small, polite, read-only requests to Wikidata, AniList, GDELT and Common Crawl, checks robots.txt on sample studios, and writes `phase0_report.json`. It needs no keys and does not touch Supabase.
@@ -92,5 +96,13 @@ To remove only the controller auto-start, run `.\windows\uninstall-controller.ps
 `python -m unittest discover -s tests -t .`
 
 ## What is NOT verified here
-The Zoho Mail endpoints in `kairflow_intel/zoho.py` follow Zoho's public documentation but have not been run against a real account. The Resend Intelligence transport uses `intel-resend-send` and `intel-resend-webhook`; its live API behavior must be verified against the actual Resend account before enabling it.
+The Zoho Mail endpoints in `kairflow_intel/zoho.py` and Gmail endpoints in `kairflow_intel/gmail.py` follow their public API contracts but still require read-only acceptance tests against real connected accounts. SMTP is send-only; it does not synchronize inbound replies. The separate Resend transactional integration is not an Emma prospect-mail provider.
 Run `selftest zoho` after connecting and adjust response parsing in that one file if anything differs.
+
+## Phase 12 operations
+
+- The Overview > Worker operations panel combines the last database heartbeat, active job, Ollama signal, queue counts, expired leases and dead/failed jobs.
+- Jobs in `dead` or `failed` state can be manually requeued from Agent Activity Logs. Requeueing does not bypass message approval, recipient consent, kill-switch, provider assignment, quota or final send-boundary checks.
+- Initial and follow-up messages outside the configured send window are deferred to the next local opening time; the database final-send gate remains authoritative. Replies are not subject to the initial/follow-up send window.
+- Expired job leases are recovered by the next claim transaction, with a bounded lease-expiry diagnostic. A worker that loses/uncertainly renews a lease will not mark the job complete or failed as the former owner.
+- RFC threading association checks exact Message-ID tokens, preferring `In-Reply-To` over `References`, and requires the inbound sender to match the outbound recipient before associating the reply.

@@ -20,6 +20,8 @@ class Config:
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen2.5:3b-instruct"
     ollama_fast_model: str = "qwen2.5:1.5b-instruct"
+    gemini_api_key: str = ""            # optional; when set, Agent Chat planning tries Gemini first and falls back to Ollama
+    gemini_model: str = "gemini-2.5-flash"
     worker_id: str = ""
     poll_seconds: int = 15
     fetch_timeout: int = 15
@@ -65,6 +67,15 @@ def load(env: dict | None = None) -> Config:
     if not password:
         raise ConfigError("agent password not set (KAIRFLOW_AGENT_PASSWORD or Windows Credential Manager)")
 
+    gemini_key = (e.get("KAIRFLOW_GEMINI_API_KEY") or "").strip()
+    if not gemini_key:
+        try:  # optional Windows Credential Manager support, same pattern as the agent password
+            import keyring  # type: ignore
+
+            gemini_key = (keyring.get_password("kairflow-intelligence-gemini", "api-key") or "").strip()
+        except Exception:
+            gemini_key = ""
+
     cfg = Config(
         supabase_url=need("KAIRFLOW_SUPABASE_URL").rstrip("/"),
         supabase_anon_key=need("KAIRFLOW_SUPABASE_ANON_KEY"),
@@ -73,6 +84,8 @@ def load(env: dict | None = None) -> Config:
         ollama_url=(e.get("KAIRFLOW_OLLAMA_URL") or "http://127.0.0.1:11434").rstrip("/"),
         ollama_model=e.get("KAIRFLOW_OLLAMA_MODEL") or "qwen2.5:3b-instruct",
         ollama_fast_model=e.get("KAIRFLOW_OLLAMA_FAST_MODEL") or "qwen2.5:1.5b-instruct",
+        gemini_api_key=gemini_key,
+        gemini_model=(e.get("KAIRFLOW_GEMINI_MODEL") or "gemini-2.5-flash").strip(),
         worker_id=e.get("KAIRFLOW_WORKER_ID") or f"{socket.gethostname()}-{os.getpid()}",
         poll_seconds=int(e.get("KAIRFLOW_POLL_SECONDS") or 15),
         contact_url=e.get("KAIRFLOW_CONTACT_URL") or "",

@@ -8,6 +8,7 @@ import threading
 from . import config as cfgmod
 from .jobs import Deps, Worker
 from .ollama import OllamaClient
+from .gemini import FallbackLLM, GeminiClient
 from .safety import Fetcher
 from .supa import SupabaseAgent
 from .apis import ApiClient
@@ -32,7 +33,10 @@ def build(cfg):
         except ProviderNotInstalled as exc:
             raise cfgmod.ConfigError(str(exc)) from exc
     zoho = DynamicProviderRouter(cfg, supa, fallback=mail)
-    return supa, Deps(cfg=cfg, rpc=supa.rpc, fetcher=Fetcher(cfg), zoho=zoho, llm=OllamaClient(cfg), api=ApiClient(cfg))
+    llm = OllamaClient(cfg)
+    if getattr(cfg, "gemini_api_key", ""):
+        llm = FallbackLLM(GeminiClient(cfg.gemini_api_key, getattr(cfg, "gemini_model", "")), llm)   # chat planning only; see gemini.py
+    return supa, Deps(cfg=cfg, rpc=supa.rpc, fetcher=Fetcher(cfg), zoho=zoho, llm=llm, api=ApiClient(cfg))
 
 
 def selftest(cfg, what: str) -> int:
@@ -63,6 +67,16 @@ def selftest(cfg, what: str) -> int:
                         line(f"Ollama structured output: {model}", False, str(exc)[:180])
         except Exception as exc:
             line("ollama reachable on loopback", False, str(exc)[:180])
+    if what in ("all", "gemini"):
+        if not getattr(cfg, "gemini_api_key", ""):
+            print("SKIP gemini: KAIRFLOW_GEMINI_API_KEY not set (Agent Chat uses Ollama only)")
+        else:
+            try:
+                schema = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
+                out = d.llm.primary.chat_json("Return exactly {\"ok\":true}.", [{"role": "user", "content": "health check only"}], schema)
+                line(f"Gemini structured output: {cfg.gemini_model}", out.get("ok") is True)
+            except Exception as exc:
+                line(f"Gemini structured output: {cfg.gemini_model}", False, str(exc)[:180])
     if what in ("all", "supabase"):
         try:
             st = d.rpc("intel_agent_settings", {})
