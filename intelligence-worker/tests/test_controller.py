@@ -87,6 +87,27 @@ class ControllerSecurityTests(unittest.TestCase):
             self.assertFalse(handler._valid_request())
             self.assertEqual(errors[-1][0], 403)
 
+
+    def test_auto_start_retries_when_worker_configuration_is_not_ready(self):
+        with tempfile.TemporaryDirectory() as d:
+            instance = controller.WorkerController.__new__(controller.WorkerController)
+            instance.lock = threading.RLock()
+            instance.process = None
+            instance.desired_running = False
+            instance.restart_at = 0
+            instance.last_error = None
+            instance.last_exit_code = None
+            instance.started_at = None
+            instance.env_file = Path(d) / "missing.env"
+            instance.python = Path(d) / "missing-python.exe"
+            instance.worker_dir = Path(d)
+            instance.log_file = Path(d) / "worker.log"
+            result = instance.auto_start()
+            self.assertTrue(instance.desired_running)
+            self.assertIsNotNone(instance.restart_at)
+            self.assertIn("Worker settings file not found", instance.last_error)
+            self.assertFalse(result["worker_running"])
+
     def test_remote_ollama_urls_are_not_local(self):
         self.assertTrue(controller.LOCAL_OLLAMA.fullmatch("http://127.0.0.1:11434"))
         self.assertTrue(controller.LOCAL_OLLAMA.fullmatch("http://localhost:11434/"))

@@ -59,14 +59,15 @@ $manualController = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue 
   $_.Name -match '^python(w)?\.exe$' -and $_.CommandLine -match 'controller\.py'
 }
 if ($manualController) { throw "A local KairFlow controller process is already running. Stop it before installing the scheduled controller." }
-$arguments = "`"$controller`" --worker-dir `"$workerDir`" --env-file `"$envFile`" --python `"$python`" --log-file `"$logFile`" --token-file `"$tokenFile`""
+$arguments = "`"$controller`" --worker-dir `"$workerDir`" --env-file `"$envFile`" --python `"$python`" --log-file `"$logFile`" --token-file `"$tokenFile`" --auto-start"
 $action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $workerDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName "KairFlow Local Worker Controller" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName "KairFlow Local Worker Controller"
-Write-Host "Installed and started the local controller. Worker settings: $envFile"
+Write-Host "Installed and started the local controller. It will start automatically at Windows sign-in and launch Emma when worker.env is configured."
+Write-Host "Worker settings: $envFile"
 Write-Host "Local controller token file: $tokenFile"
-Write-Host "Paste the contents of controller.token into KairFlow > Intelligence > Settings. Keep this token private; it controls the local worker."
-Write-Host "Use Start Emma there after completing the worker settings file."
+Write-Host "Pair KairFlow with this computer once by entering controller.token in Intelligence > Settings. The browser will remember the pairing on this computer."
+Write-Host "After worker.env is configured, Emma starts automatically. Use Stop Emma in KairFlow only when you intentionally want to pause it."

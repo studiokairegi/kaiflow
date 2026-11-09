@@ -14,6 +14,9 @@ test("Emma worker controls use only the local controller and expose start/stop",
   assert.match(source, /Authorization: `Bearer \${token}`/);
   assert.match(source, /controller\.token/);
   assert.match(source, /setControllerToken/);
+  assert.match(source, /localStorage\.getItem\(CONTROLLER_TOKEN_STORAGE_KEY\)/);
+  assert.match(source, /localStorage\.setItem\(CONTROLLER_TOKEN_STORAGE_KEY/);
+  assert.match(source, /This browser is paired/);
 });
 
 test("starting Emma requires confirmation and explains that approved mail may send", () => {

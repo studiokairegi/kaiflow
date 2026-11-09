@@ -212,6 +212,24 @@ class WorkerController:
                         self.last_error = str(exc)[:500]
                         self.restart_at = time.monotonic() + 60
 
+    def auto_start(self) -> dict:
+        """Start the worker when the controller launches with --auto-start.
+
+        If local prerequisites are not ready yet (for example worker.env is
+        still being completed), retain the desired state and retry in the
+        monitor loop. A manual Stop clears desired_running and prevents restart.
+        """
+        with self.lock:
+            self.desired_running = True
+            try:
+                if self.process is None or self.process.poll() is not None:
+                    self._spawn()
+                self.restart_at = 0
+            except Exception as exc:
+                self.last_error = str(exc)[:500]
+                self.restart_at = time.monotonic() + 30
+            return self.status()
+
     def close(self) -> None:
         self.closed.set()
         self.stop()
@@ -310,8 +328,11 @@ def main() -> int:
     parser.add_argument("--python", required=True)
     parser.add_argument("--log-file", required=True)
     parser.add_argument("--token-file", required=True)
+    parser.add_argument("--auto-start", action="store_true", help="Start the worker automatically when the controller launches")
     args = parser.parse_args()
     controller = WorkerController(Path(args.worker_dir), Path(args.env_file), Path(args.python), Path(args.log_file), Path(args.token_file))
+    if args.auto_start:
+        controller.auto_start()
     Handler.controller = controller
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True

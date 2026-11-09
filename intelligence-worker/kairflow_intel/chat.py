@@ -126,9 +126,24 @@ def render(tool: str, r: dict) -> str:
         return "The request ran, but I could not summarise the result. See the Agent Activity Logs."
 
 
+def _render_failure(r: dict) -> str:
+    reason = r.get("reason") or "unknown reason"
+    searched = r.get("searched")
+    names = [str(c.get("name")) for c in (r.get("candidates") or []) if isinstance(c, dict) and c.get("name")]
+    if reason == "prospect_not_found":
+        what = f" matching {searched!r}" if searched else ""
+        tail = (" Closest names I can see: " + "; ".join(names[:8]) + ".") if names else ""
+        return (f"I couldn't find a prospect{what}.{tail} Use the exact name shown in Intelligence > Prospects, "
+                "or ask me to list prospects first.")
+    if reason == "ambiguous_prospect":
+        return ("More than one prospect matches" + (f" {searched!r}" if searched else "") + ": " + "; ".join(names[:8]) +
+                ". Tell me which one (exact name).")
+    return f"I could not do that: {reason}."
+
+
 def _render(tool: str, r: dict) -> str:
     if not isinstance(r, dict) or r.get("ok") is False:
-        return f"I could not do that: {(r or {}).get('reason', 'unknown reason')}."
+        return _render_failure(r if isinstance(r, dict) else {})
     if tool == "campaign_status":
         cs = "; ".join(f"{c['name']}: {c['status']}, {c['prospects']} prospects" for c in r.get("campaigns", []))
         return f"{cs}. Sending is {'stopped' if r.get('sending_stopped') else 'ON'}. {r.get('waiting_for_approval', 0)} message(s) wait for your approval."
@@ -213,6 +228,59 @@ def _draft_target(request: str) -> str:
     return value[:60].strip()
 
 
+_RESOLVABLE = ("prospect_detail", "research_prospect", "review_prospect")
+
+
+def _name_hit(name: str, hints: list[str]) -> bool:
+    key = _company_key(name)
+    if len(key) < 2:
+        return False
+    for h in hints:
+        hk = _company_key(h)
+        if len(hk) >= 2 and (hk == key or hk in key or (len(key) >= 3 and key in hk)):
+            return True
+    return False
+
+
+def _resolve_prospect(d, thread: str, mid: int, args: dict, request: str, used: list[str]) -> tuple[str | None, dict]:
+    """Find exactly one prospect the model/administrator meant when the database could not match its query or id.
+    Read-only (list_prospects). Returns (prospect_id or None, info) where info carries 'searched' and 'candidates' for the message."""
+    hints = [h for h in (args.get("query"), args.get("name"), _draft_target(request)) if isinstance(h, str) and h.strip()]
+    searched = hints[0] if hints else None
+    pool: dict[str, dict] = {}
+
+    def fetch(query: str | None):
+        a = {"limit": 25}
+        if query:
+            a["query"] = query
+        res = d.rpc("intel_agent_chat_tool", {"p_thread_id": thread, "p_message_id": mid, "p_tool": "list_prospects", "p_args": clean_args("list_prospects", a)})
+        used.append("list_prospects")
+        if isinstance(res, dict) and res.get("ok") is not False:
+            for p in res.get("prospects", []):
+                if isinstance(p, dict) and p.get("id") and p.get("name"):
+                    pool[p["id"]] = p
+
+    try:
+        for h in hints[:2]:
+            fetch(h)
+        if not pool:
+            for w in [w for h in hints[:1] for w in re.split(r"\s+", h) if len(w) >= 3][:3]:
+                fetch(w)
+        if not pool:
+            fetch(None)                                              # newest prospects; matched below against the request text
+    except RpcError:
+        pass
+    haystack = [*hints, request]
+    hits = [p for p in pool.values() if _name_hit(p["name"], haystack)]
+    if len(hits) > 1:                                                # "Pixel Moon" beats "Moon": keep only the longest name match
+        longest = max(len(_company_key(p["name"])) for p in hits)
+        hits = [p for p in hits if len(_company_key(p["name"])) == longest]
+    cands = [{"id": p["id"], "name": p["name"], "status": p.get("status")} for p in (hits or list(pool.values()))[:8]]
+    if len(hits) == 1:
+        return hits[0]["id"], {"searched": searched, "candidates": cands}
+    return None, {"searched": searched, "candidates": cands, "ambiguous": len(hits) > 1}
+
+
 def _handle_explicit_draft(d, thread: str, mid: int, request: str, used: list[str]):
     """Deterministic draft path: resolve one exact prospect, compose and persist before confirming."""
     target = _draft_target(request)
@@ -292,13 +360,31 @@ def handle(d, payload: dict) -> dict:
         fn = "intel_agent_chat_propose" if tool in PROPOSALS else "intel_agent_chat_tool"   # proposals can only be PREPARED, never run, from here
         res = d.rpc(fn, {"p_thread_id": thread, "p_message_id": mid, "p_tool": tool, "p_args": args})
         used.append(tool)
+        if tool in _RESOLVABLE and isinstance(res, dict) and res.get("ok") is False and res.get("reason") == "prospect_not_found" \
+                and not (tool == "research_prospect" and args.get("website")):
+            # The model's name or id did not match exactly. Look the prospect up (read-only) and retry once with its real id.
+            pid, info = _resolve_prospect(d, thread, mid, args, request, used)
+            if pid:
+                args = {**{k: v for k, v in args.items() if k not in ("query", "name")}, "prospect_id": pid}
+                res = d.rpc(fn, {"p_thread_id": thread, "p_message_id": mid, "p_tool": tool, "p_args": args})
+                used.append(tool)
+            else:
+                res = {"ok": False, "reason": "ambiguous_prospect" if info.get("ambiguous") else "prospect_not_found",
+                       "searched": info.get("searched"), "candidates": info.get("candidates")}
         last_tool = (tool, res)
         return args, res
 
+    model_down = False
     for _ in range(MAX_STEPS):
         try:
-            plan = d.llm.chat_json(system, messages, PLAN_SCHEMA)
+            try:
+                plan = d.llm.chat_json(system, messages, PLAN_SCHEMA)
+            except TransientError as exc:
+                if "invalid JSON" not in str(exc):
+                    raise
+                plan = d.llm.chat_json(system, messages, PLAN_SCHEMA)   # one retry when the model answered but not in the required shape
         except (TransientError, PermanentError, ValueError, AttributeError):
+            model_down = True
             break                                                    # model unavailable: deterministic fallback below
         if plan["action"] == "reply" and plan.get("reply", "").strip():
             _reply(d, thread, mid, plan["reply"].strip())
@@ -318,7 +404,8 @@ def handle(d, payload: dict) -> dict:
         messages.append({"role": "user", "content": f"Tool result for {tool}:\n<untrusted>\n{_short(res)}\n</untrusted>\nContinue: call another tool or reply."})
 
     if last_tool and used:                                           # we have real results but no model answer
-        _reply(d, thread, mid, render(*last_tool) + " (The language model was unavailable, so this is a plain summary.)")
+        note = "(The language model was unavailable, so this is a plain summary.)" if model_down else "(This is a plain summary of the last result.)"
+        _reply(d, thread, mid, render(*last_tool) + " " + note)
         return {"replied": True, "tools": used, "fallback": True}
     fb = fallback_plan(request)
     if fb:

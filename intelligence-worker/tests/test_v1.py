@@ -18,7 +18,9 @@ class FakeLLM:
     def chat_json(self, system, messages, schema, **kw):
         self.calls.append(messages)
         if self.down: raise TransientError("ollama down")
+        if not self.plans and self.down_when_empty: raise TransientError("ollama down")
         return self.plans.pop(0)
+    down_when_empty = False
 
 
 class ChatRpc:
@@ -144,6 +146,66 @@ class ChatAllowlist(unittest.TestCase):
             self.assertEqual(out["draft_error"], reason)
             draft.assert_not_called()
             self.assertEqual(rpc.replies[0]["p_status"], "error")
+
+    def test_prospect_not_found_is_resolved_by_name_and_retried_with_the_real_id(self):
+        class R(ChatRpc):
+            def __call__(self, name, p=None):
+                p = p or {}; self.calls.append((name, p))
+                if name == "intel_agent_chat_context":
+                    return {"ok": True, "answered": False, "request": "show me details for Pixel Moon Studio", "history": []}
+                if name == "intel_agent_chat_tool":
+                    if p["p_tool"] == "prospect_detail":
+                        if p["p_args"].get("prospect_id") == U:
+                            return {"ok": True, "prospect": {"id": U, "name": "Pixel Moon", "status": "researched"}}
+                        return {"ok": False, "reason": "prospect_not_found"}
+                    if p["p_tool"] == "list_prospects":
+                        return {"ok": True, "prospects": [{"id": U, "name": "Pixel Moon", "status": "researched"}]} if p["p_args"].get("query") != "Pixel Moon Studio" else {"ok": True, "prospects": []}
+                if name == "intel_agent_chat_reply": self.replies.append(p); return {"ok": True}
+                raise AssertionError(name)
+        rpc = R()
+        llm = FakeLLM([{"action": "tool", "tool": "prospect_detail", "args": {"query": "Pixel Moon Studio"}}, {"action": "reply", "reply": "ok"}])
+        chat.handle(deps(rpc, llm), {"thread_id": "t", "message_id": 1})
+        detail_calls = [p for n, p in rpc.calls if n == "intel_agent_chat_tool" and p["p_tool"] == "prospect_detail"]
+        self.assertEqual(len(detail_calls), 2)
+        self.assertEqual(detail_calls[1]["p_args"], {"prospect_id": U})
+        fed_back = json.dumps(llm.calls[1]); self.assertIn("Pixel Moon", fed_back); self.assertNotIn("prospect_not_found", fed_back)
+
+    def test_prospect_not_found_with_model_down_gives_a_readable_message_not_the_raw_reason(self):
+        class R(ChatRpc):
+            def __call__(self, name, p=None):
+                p = p or {}; self.calls.append((name, p))
+                if name == "intel_agent_chat_context":
+                    return {"ok": True, "answered": False, "request": "details for Nonexistent Games", "history": []}
+                if name == "intel_agent_chat_tool":
+                    if p["p_tool"] == "list_prospects":
+                        return {"ok": True, "prospects": [{"id": U, "name": "Pixel Moon", "status": "researched"}]}
+                    return {"ok": False, "reason": "prospect_not_found"}
+                if name == "intel_agent_chat_reply": self.replies.append(p); return {"ok": True}
+                raise AssertionError(name)
+        rpc = R()
+        llm = FakeLLM([{"action": "tool", "tool": "prospect_detail", "args": {"query": "Nonexistent Games"}}]); llm.down_when_empty = True
+        out = chat.handle(deps(rpc, llm), {"thread_id": "t", "message_id": 1})
+        text = rpc.replies[0]["p_text"]
+        self.assertNotIn("prospect_not_found", text); self.assertIn("couldn't find a prospect", text); self.assertIn("Pixel Moon", text)
+        self.assertTrue(out["fallback"])
+
+    def test_ambiguous_prospect_is_not_guessed(self):
+        class R(ChatRpc):
+            def __call__(self, name, p=None):
+                p = p or {}; self.calls.append((name, p))
+                if name == "intel_agent_chat_context":
+                    return {"ok": True, "answered": False, "request": "details for Moon Games", "history": []}
+                if name == "intel_agent_chat_tool":
+                    if p["p_tool"] == "list_prospects":
+                        return {"ok": True, "prospects": [{"id": U, "name": "Moon Games"}, {"id": "22222222-2222-3333-4444-555555555555", "name": "Moon-Games"}]}
+                    return {"ok": False, "reason": "prospect_not_found"}
+                if name == "intel_agent_chat_reply": self.replies.append(p); return {"ok": True}
+                raise AssertionError(name)
+        rpc = R()
+        llm = FakeLLM([{"action": "tool", "tool": "prospect_detail", "args": {"query": "Moon Games"}}]); llm.down_when_empty = True
+        chat.handle(deps(rpc, llm), {"thread_id": "t", "message_id": 1})
+        self.assertEqual(len([1 for n, p in rpc.calls if n == "intel_agent_chat_tool" and p["p_tool"] == "prospect_detail"]), 1)
+        self.assertIn("More than one prospect", rpc.replies[0]["p_text"])
 
     def test_no_tool_can_send_approve_delete_or_change_settings(self):
         import re

@@ -359,13 +359,27 @@ def h_send(d: Deps, job):
     return r
 
 def h_sync_mail(d: Deps, job):
-    if getattr(d.zoho, "provider", "") == "resend":
-        return {"skipped": "Resend inbound is handled by the signed Supabase webhook"}
-    if _mail_paused(d):
-        return {"skipped": "mail provider paused"}
-    st = d.rpc("intel_agent_settings", {})
+    provider_key = str(getattr(d.zoho, "provider", "") or "").lower()
+    if provider_key == "resend":
+        return {"skipped": "Resend is a separate transactional integration, not an Intelligence mailbox adapter"}
     try:
-        return mailops.sync_inbox(d.rpc, d.zoho, {st["sender_email"].lower()} if st["sender_email"] else set())
+        # The account registry is authoritative after multi-account dispatch. It
+        # must be checked before the legacy fallback's `disabled` flag: with the
+        # safe `KAIRFLOW_MAIL_PROVIDER=none` default, registered Gmail/Zoho accounts
+        # still need to receive replies through their account-scoped adapters.
+        accounts = d.rpc("intel_agent_receive_accounts", {}) or []
+        if accounts:
+            st = d.rpc("intel_agent_settings", {})
+            own = {st["sender_email"].lower()} if st.get("sender_email") else set()
+            return mailops.sync_provider_accounts(d.rpc, d.zoho, own, accounts=accounts)
+        if provider_key == "smtp":
+            return {"skipped": "SMTP is send-only; connect Gmail or Zoho Mail to synchronize inbound replies"}
+        if _mail_paused(d):
+            return {"skipped": "mail provider paused"}
+        st = d.rpc("intel_agent_settings", {})
+        own = {st["sender_email"].lower()} if st.get("sender_email") else set()
+        # Legacy single-mailbox bridge for installations with no registry accounts.
+        return mailops.sync_inbox(d.rpc, d.zoho, own)
     except PermanentError as exc:
         return {"skipped": str(exc)}
 

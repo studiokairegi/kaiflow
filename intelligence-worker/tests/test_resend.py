@@ -64,7 +64,7 @@ class ResendAdapterTests(unittest.TestCase):
 
     def test_resend_inbound_sync_is_webhook_only(self):
         d = SimpleNamespace(zoho=SimpleNamespace(provider="resend"))
-        self.assertIn("webhook", jobs.h_sync_mail(d, {})["skipped"])
+        self.assertIn("not an Intelligence mailbox adapter", jobs.h_sync_mail(d, {})["skipped"])
 
 
 class ResendReconciliationTests(unittest.TestCase):

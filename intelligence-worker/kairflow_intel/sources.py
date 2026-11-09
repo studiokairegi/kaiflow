@@ -56,7 +56,12 @@ def steam_candidate(d: dict, appid: str, now: datetime | None = None) -> dict | 
     if d.get("type") != "game" or not d.get("developers"):
         return None
     devs, pubs = d["developers"], d.get("publishers") or []
-    if pubs and any(p.lower() not in {x.lower() for x in devs} for p in pubs) and len(pubs) > 0 and len(devs) == 0:
+    # Keep only genuinely self-published titles. The previous condition also
+    # required len(devs) == 0 immediately after rejecting empty developer lists,
+    # so it could never reject a third-party publisher.
+    developer_names = {str(x).strip().casefold() for x in devs if str(x).strip()}
+    publisher_names = {str(x).strip().casefold() for x in pubs if str(x).strip()}
+    if publisher_names and not publisher_names.issubset(developer_names):
         return None
     rel = d.get("release_date") or {}
     now = now or datetime.now(timezone.utc)

@@ -17,7 +17,7 @@ the Supabase service-role key or any Zoho secret. It can only call `intel_agent_
    password, prefer Windows Credential Manager: `pip install keyring`, then
    `python -c "import keyring; keyring.set_password('kairflow-intelligence','AGENT_EMAIL','PASSWORD')"` and leave `KAIRFLOW_AGENT_PASSWORD` unset.
 5. Check everything without sending anything: `python -m kairflow_intel selftest`
-   (`selftest zoho` is read-only: it lists Zoho folders, nothing else. `selftest resend` checks local provider selection only; it does not send email.)
+   (`selftest gmail` and `selftest zoho` are read-only mailbox checks; neither sends email.)
 
 ## Phase 2 production hardening migration
 
@@ -37,14 +37,11 @@ Before Japanese drafting is available, approve these Knowledge base entries in I
 
 The service entry matching the prospect type is required. If any required entry or verified prospect research is missing, the draft is flagged for human review; English fallback is not used. Japanese pricing, contract, deadline, capacity, complaint and opt-out replies remain human-review cases. All model-written drafts stay pending approval (`auto_ok=false`).
 
-## Resend provider (server-side only)
+## Resend responsibility boundary
 
-- Keep `KAIRFLOW_MAIL_PROVIDER=none` until the local migration has been reviewed/applied and both Intelligence Edge Functions have been deployed.
-- Configure `RESEND_API_KEY` and `RESEND_WEBHOOK_SECRET` as Supabase Edge Function secrets; never add them to the worker environment.
-- Configure a Resend webhook subscription for `email.received` to `/functions/v1/intel-resend-webhook`. Keep the existing `/functions/v1/resend-webhook` subscription for the normal Inbox.
-- The worker calls `/functions/v1/intel-resend-send` using its limited agent JWT. That function loads the reserved/sending message from the agent RPC and refuses sends while the database kill switch is ON.
-- Resend has no Sent mailbox. A saved Resend email id can be checked through the server-side verification proxy. If the id was not saved or cannot be verified, the message remains `unknown` for manual resolution; it is never automatically resent.
-- `python -m kairflow_intel selftest resend` is read-only and does not contact Resend or send a message.
+Resend is **not** an installed prospect-outreach adapter in this worker. The prospect dispatcher supports account-scoped Gmail and Zoho Mail receive/send adapters and SMTP send-only accounts. The provider registry intentionally excludes Resend; `KAIRFLOW_MAIL_PROVIDER=resend` is therefore invalid and must not be configured.
+
+The separate Resend transactional/Inbox Edge Functions remain independent of Emma's prospect dispatcher. Their credentials belong only in Supabase Edge Function secrets, never in the worker environment. Intelligence cold-outreach drafts must use an enabled Gmail/Zoho/SMTP account, and inbound replies to those accounts are synchronized by the worker. Resend webhooks do not substitute for syncing those mailboxes.
 
 ## Agent Chat and existing leads
 The worker also answers Agent Chat messages and prepares follow-up drafts for existing CRM leads you bring in. Neither can send email: sending is only ever
@@ -68,7 +65,7 @@ The browser cannot launch a Python process on your computer by itself. Install t
 
 1. Complete the Python environment setup above.
 2. In a normal PowerShell window, run `.\windows\install-controller.ps1` from this folder. It creates `%LOCALAPPDATA%\KairFlowIntelligence\worker.env` and a random per-install `controller.token`; fill in the Supabase URL, anon key and agent email. Prefer storing the agent password in Windows Credential Manager using the `keyring` instructions above, leaving `KAIRFLOW_AGENT_PASSWORD` blank. If you put the password in the file instead, keep the file private.
-3. The controller starts automatically at Windows sign-in. Open KairFlow → Intelligence → Settings, paste the contents of `%LOCALAPPDATA%\KairFlowIntelligence\controller.token` into the Local controller access token field, then use **Start Emma** / **Stop Emma**. The token stays in memory while this Settings view is open and is never persisted by the app; never share it. Chrome may ask permission for KairFlow to access your local network; allow it.
+3. The controller starts automatically at Windows sign-in and launches Emma automatically (`--auto-start`). Complete `worker.env` first; if it is incomplete, the controller keeps the automatic-start request and retries periodically. Open KairFlow → Intelligence → Settings and pair this browser once by pasting `%LOCALAPPDATA%\KairFlowIntelligence\controller.token`. KairFlow remembers the token in this browser profile on this computer, so you do not need to enter it again. The token is not uploaded to Supabase or your account. Use **Stop Emma** only when you intentionally want to pause the worker; the controller will not restart it after a manual stop. Chrome may ask permission for KairFlow to access your local network; allow it.
    To update an already-installed controller after updating the worker files, first use **Stop Emma** in Settings, then rerun the installer. It safely stops and replaces the old scheduled controller task.
 4. Starting Emma resumes queued worker activity. If sending is enabled and the emergency stop is OFF, approved messages may be sent under the existing rules.
 
@@ -89,7 +86,7 @@ To remove only the controller auto-start, run `.\windows\uninstall-controller.ps
   `nssm set KairFlowIntelligence AppExit Default Restart`
   `nssm set KairFlowIntelligence AppEnvironmentExtra KAIRFLOW_WORKER_LOG_FILE=C:\ProgramData\KairFlowIntelligence\worker.log`
   Also turn off sleep and hibernate while plugged in. A crash, reboot or lost connection is safe: the job queue lives in Supabase,
-  unfinished jobs return to the queue when their lease expires, and a message that might have been sent is **never** sent again. Mailbox providers use their Sent folder; Resend uses a saved provider id through the server-side verification proxy. If delivery cannot be verified, it stays "Delivery unverified" until you decide.
+  unfinished jobs return to the queue when their lease expires, and a message that might have been sent is **never** sent again. Gmail/Zoho use their Sent folders; SMTP outcomes that cannot be independently verified remain unknown for manual resolution. If delivery cannot be verified, it stays "Delivery unverified" until you decide.
 
 ## 4. Phase 0 feasibility spike (once, optional but recommended)
 `python spikes/phase0_feasibility.py` makes about 60 small, polite, read-only requests to Wikidata, AniList, GDELT and Common Crawl, checks robots.txt on sample studios, and writes `phase0_report.json`. It needs no keys and does not touch Supabase.
@@ -98,7 +95,7 @@ To remove only the controller auto-start, run `.\windows\uninstall-controller.ps
 `python -m unittest discover -s tests -t .`
 
 ## What is NOT verified here
-The Zoho Mail endpoints in `kairflow_intel/zoho.py` follow Zoho's public documentation but have not been run against a real account. The Resend Intelligence transport uses `intel-resend-send` and `intel-resend-webhook`; its live API behavior must be verified against the actual Resend account before enabling it.
+The Zoho Mail endpoints in `kairflow_intel/zoho.py` and Gmail endpoints in `kairflow_intel/gmail.py` follow their public API contracts but still require read-only acceptance tests against real connected accounts. SMTP is send-only; it does not synchronize inbound replies. The separate Resend transactional integration is not an Emma prospect-mail provider.
 Run `selftest zoho` after connecting and adjust response parsing in that one file if anything differs.
 
 ## Phase 12 operations

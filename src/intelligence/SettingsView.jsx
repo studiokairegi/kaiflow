@@ -5,14 +5,26 @@ import { AUTONOMY, KB_KINDS, fmtWhen, missingJapaneseKb, missingKb, sourceState 
 import { Input, Muted, Section, Select, TextArea, useLoad, confirmAction } from "./kit.jsx";
 
 const WORKER_CONTROL_URL = "http://127.0.0.1:17843";
+const CONTROLLER_TOKEN_STORAGE_KEY = "kairflow.intelligence.controller-token.v1";
 
 function WorkerControlCard() {
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [checkedAt, setCheckedAt] = useState(null);
-  // Keep the local process-control credential in component memory only; never persist it.
-  const [controllerToken, setControllerToken] = useState("");
+  // Pair this browser once. The token remains on this device/browser profile;
+  // it is never sent to Supabase or included in application API requests.
+  const [controllerToken, setControllerToken] = useState(() => {
+    try { return window.localStorage.getItem(CONTROLLER_TOKEN_STORAGE_KEY) || ""; }
+    catch { return ""; }
+  });
+
+  useEffect(() => {
+    try {
+      if (controllerToken.trim()) window.localStorage.setItem(CONTROLLER_TOKEN_STORAGE_KEY, controllerToken.trim());
+      else window.localStorage.removeItem(CONTROLLER_TOKEN_STORAGE_KEY);
+    } catch { /* Browser storage may be disabled; manual pairing remains available. */ }
+  }, [controllerToken]);
 
   const request = async (path, method = "GET") => {
     const token = controllerToken.trim();
@@ -58,7 +70,7 @@ function WorkerControlCard() {
   const online = Boolean(status);
   const running = Boolean(status?.worker_running);
   return (
-    <Section title="Emma" hint="Controls the local Python worker on this computer. A small loopback-only controller must be installed once because the browser cannot launch local processes by itself.">
+    <Section title="Emma" hint="Emma and the local controller load automatically when you sign in to Windows. Pair this browser once; after that KairFlow reconnects automatically.">
       <div style={{ ...S.row, justifyContent: "space-between", flexWrap: "wrap" }}>
         <div style={S.row}>
           <Pill tone={!online ? "warn" : running ? "ok" : "muted"}>{!online ? "Emma status unavailable" : running ? "Emma is online" : "Emma is offline"}</Pill>
@@ -72,9 +84,9 @@ function WorkerControlCard() {
           <Btn kind="link" disabled={busy} onClick={refresh}>Refresh</Btn>
         </div>
       </div>
-      {!online && <Banner tone="warn">{controllerToken ? "The local controller is not reachable or rejected the token. Check the controller installation and token, then refresh." : "Paste the contents of %LOCALAPPDATA%\\KairFlowIntelligence\\controller.token below. If the controller is not installed yet, run intelligence-worker\\windows\\install-controller.ps1 once in PowerShell."} If Chrome asks to allow local network access, allow it for KairFlow.</Banner>}
-      <Field label="Local controller access token" hint="This per-computer token authorizes starting and stopping Emma. It stays in memory while this Settings view is open and is never persisted by the app."><Input type="password" value={controllerToken} onChange={(e) => setControllerToken(e.target.value)} placeholder="Paste controller.token contents" /></Field>
-      {controllerToken && <div><Btn kind="link" onClick={() => setControllerToken("")}>Clear controller token</Btn></div>}
+      {!online && <Banner tone="warn">{controllerToken ? "The saved local pairing could not reach the controller. Check that the controller is installed and running, then refresh." : "Pair this computer once: enter the contents of %LOCALAPPDATA%\\KairFlowIntelligence\\controller.token below. If the controller is not installed yet, run intelligence-worker\\windows\\install-controller.ps1 once."} If Chrome asks to allow local network access, allow it for KairFlow.</Banner>}
+      {!controllerToken && <Field label="Pair this computer (one time)" hint="Paste the local controller token once. KairFlow remembers it in this browser on this computer; it is not uploaded to your account or Supabase."><Input type="password" value={controllerToken} onChange={(e) => setControllerToken(e.target.value)} placeholder="Paste controller.token contents once" /></Field>}
+      {controllerToken && <div style={S.row}><Pill tone="ok">This browser is paired</Pill><Btn kind="link" onClick={() => setControllerToken("")}>Forget this computer</Btn></div>}
       {error && <Banner tone="bad">{error}</Banner>}
       {status?.last_error && <Banner tone="bad">Worker restart problem: {status.last_error}</Banner>}
       {online && !running && status?.last_exit_code !== null && status?.last_exit_code !== undefined && <Banner tone="warn">The worker exited with code {status.last_exit_code}. Check `%LOCALAPPDATA%\KairFlowIntelligence\worker.log` for details.</Banner>}

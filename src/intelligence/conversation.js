@@ -251,7 +251,7 @@ export const TAKEOVER_ACTIONS = Object.freeze({
 
 export function takeoverInfo(t) {
   if (!t || typeof t !== "object" || !t.state) return null;
-  if (t.state === "pending") return { label: "Reading…", tone: "info", help: "The worker is reading the pasted conversation. It must be running (Settings > Start Emma) and Ollama must be up.", detail: "" };
+  if (t.state === "pending") return { label: "Reading…", tone: "info", help: "The worker is reading the pasted conversation. Emma starts automatically with Windows when the local controller is installed; Ollama must also be running.", detail: "" };
   if (t.state === "failed") return { label: "Could not analyse", tone: "bad", help: t.error || "The analysis failed. Use Re-analyse to try again.", detail: t.error || "" };
   const a = TAKEOVER_ACTIONS[t.next_action] || TAKEOVER_ACTIONS.none;
   return { label: a.label, tone: a.tone, help: a.help, detail: t.reason || "" };

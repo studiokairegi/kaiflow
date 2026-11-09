@@ -7,24 +7,32 @@ the first thing that fails.
 
 ## A. Before anything
 1. Back up the database (Supabase dashboard).
-2. Confirm `trg_protect_privileged_user_settings` exists: run `docs/verify_live_database.sql` (read-only). The first migration only warns if it is missing, so do not skip this.
-3. Run the SQL tests on a throwaway local Postgres 16: `PGUSER=postgres ./supabase/tests/run_intelligence_auth.sh`. They have never been run: run them before step B (they now also cover the V1 migration, `intelligence_v1.test.sql`).
+2. The two historical Intelligence authorization migrations now install the `is_admin`/`plan` protection before defining Intelligence access functions. The later `20261201090000_intelligence_phase11_privileged_user_guard.sql` is retained as a corrective, idempotent guard migration for databases that already applied the older sequence.
+3. Run `docs/verify_live_database.sql` against the target database and require the trigger check to pass. A migration file in Git is not proof that the live trigger exists.
+4. Run the SQL tests on a throwaway local Postgres 16: `PGUSER=postgres ./supabase/tests/run_intelligence_auth.sh` before deployment.
 
-## B. Database (apply in this order; each is safe to run twice)
-`20261109090000_intelligence_authorization.sql`, `20261109100000_intelligence_core_tables.sql`,
-`20261109110000_intelligence_crm_notifications.sql`, `20261109120000_intelligence_rpcs.sql`, `20261109130000_intelligence_zoho_oauth.sql`, `20261109140000_intelligence_v1_completion.sql`, `20261109150000_intelligence_gmail_provider.sql`, `20261109160000_intelligence_chat_actions.sql`, `20261109170000_intelligence_discovery.sql`.
-The sixth adds the existing-lead review, Agent Chat, and tightens `crm_find_lead_duplicates` (see `INTELLIGENCE_V1_COMPLETION.md`). The last one adds autonomous discovery (sources, items, aliases, customer profile; section H). The core and RPC migrations also carry the sending window (08:00-18:00 weekdays by default, editable in Settings) and the Disconnect-mailbox function.
-They all sort after your newest earlier migration (`20261108090000_portal_message_participant_identity`). Do not rename them.
-They only add tables, functions, an index and three columns on `leads` (`source_kind` defaults to `manual`, the other two are NULL for every existing lead).
+## B. Database migrations
+
+Do not deploy only the original nine-file Intelligence starter sequence. The repository now contains incremental migrations for CRM takeover, re-engagement, reevaluation, contactability, provider accounts, multi-account dispatch, SMTP, delivery events, the final-send boundary, source-registry enforcement, schema alignment, privileged-user protection, worker reliability, and multi-account inbound synchronization.
+
+For a normal Supabase deployment, first run `supabase migration list` and review the local/remote history. Then apply **all pending repository migrations** in timestamp order using the project's standard migration workflow (for example, `supabase db push`) against staging first. Do not cherry-pick later phases or manually mark migrations applied without verifying their SQL effects. The required Intelligence sequence starts after the existing `20261108090000_portal_message_participant_identity` baseline and includes, in timestamp order:
+
+- `20261108130000_intelligence_authorization.sql` (includes the privileged-user guard before access functions) and the corresponding `20261109*` canonical Intelligence base migrations
+- `20261109140000_intelligence_v1_completion.sql` through `20261109170000_intelligence_discovery.sql`
+- `20261110090000_email_resend_core.sql` through `20261112090000_email_resend_intelligence.sql` (separate transactional integration)
+- All subsequent `20261113*` through `20261130*` Intelligence migrations, including the provider registry, multi-account dispatch, final-send boundary and source registry
+- `20261201090000_intelligence_phase11_privileged_user_guard.sql`, `20261202090000_intelligence_phase12_worker_reliability.sql`, and `20261203090000_intelligence_multi_account_inbox_sync.sql`
+
+The migration directory is the source of truth for the complete sequence; preserve filenames and timestamps. The Phase 13 migration adds account-scoped receive cursors and agent-only RPCs. It does not enable sending or change provider account gates. After deployment, verify the guard trigger, provider registry, receive-account RPCs and worker RPC signatures before starting Emma.
 
 ## C. App code
 This repository already contains everything: the Intelligence files, the wiring in `src/App.jsx` and `src/notifications/logic.js`, the worker in
 `intelligence-worker/`, and the Edge Functions in `supabase/functions/intel-zoho-*`. No patches to apply. Verify:
 ```
 npm ci
-npm test                 # 639 tests expected to pass
-npm run build            # must finish without errors (not yet run: needs your machine)
-cd intelligence-worker && python -m unittest discover -s tests -t .      # 111 tests
+npm test                 # 831 tests passed in the source-patch verification
+npm run build            # run after npm ci; not verified in the patch environment
+cd intelligence-worker && python -m unittest discover -s tests -t .      # 482 tests passed in the source-patch verification
 ```
 
 ## D. Mailbox provider: Gmail (recommended, free) or Zoho Mail
@@ -124,4 +132,8 @@ See `PHASE_2_5_MULTI_ACCOUNT_DISPATCH.md`. Apply migration `20261125090000_intel
 
 ### Phase 2.6 SMTP adapter
 
-See [`PHASE_2_6_SMTP_ADAPTER.md`](./PHASE_2_6_SMTP_ADAPTER.md) for SMTP account setup, security behavior, deployment files, and the send-only limitations.
+See [`PHASE_2_6_SMTP_ADAPTER.md`](./PHASE_2_6_SMTP_ADAPTER.md) for SMTP account setup, security behavior, deployment files, and the send-only limitations. SMTP cannot synchronize inbound replies; connect Gmail or Zoho for reply tracking.
+
+### Phase 13 multi-account inbound synchronization
+
+Apply `20261203090000_intelligence_multi_account_inbox_sync.sql` after the provider registry and Phase 10 schema-alignment migrations. The worker now enumerates connected, enabled Gmail/Zoho accounts and keeps an independent sync cursor per account. Provider-local message IDs are namespaced by provider and account before they enter the existing inbound idempotency path. SMTP remains send-only, and Resend remains outside the prospect dispatcher. Keep the kill switch ON until each mailbox has passed a read-only sync test and a controlled reply has been matched to the correct outbound conversation.

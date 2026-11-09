@@ -5,8 +5,9 @@
 --     AND user_settings.is_admin is true                       (for that same user)
 --     AND an ACTIVE studio_memberships row with role = 'master_user'   (for that same user)
 --
--- This migration ADDS functions only. It creates no tables, changes no rows, changes no roles,
--- does not touch payments_is_admin(), chat_is_org_master() or any existing policy.
+-- This migration installs the privileged-field guard and adds authorization functions.
+-- It creates no tables, changes no existing user rows or roles, and does not touch
+-- payments_is_admin(), chat_is_org_master() or any existing policy.
 -- Safe to run more than once. Apply to production only after review.
 --
 -- How the rest of Intelligence must use it (no Intelligence table exists yet):
@@ -23,6 +24,49 @@
 --     Under the service-role key auth.uid() is null, so these functions return false.
 
 begin;
+
+-- Install the privileged-field trigger before exposing any Intelligence authorization
+-- function. Without this prerequisite, a signed-in user could self-set is_admin.
+create or replace function public.protect_privileged_user_settings()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+begin
+  if coalesce(auth.role(), '') = 'service_role' then
+    return new;
+  end if;
+  if tg_op = 'INSERT' then
+    new.is_admin := false;
+    new.plan := 'free';
+  else
+    new.is_admin := old.is_admin;
+    new.plan := old.plan;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.protect_privileged_user_settings() from public, anon, authenticated;
+drop trigger if exists trg_protect_privileged_user_settings on public.user_settings;
+create trigger trg_protect_privileged_user_settings
+before insert or update on public.user_settings
+for each row execute function public.protect_privileged_user_settings();
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_trigger t
+    join pg_class c on c.oid = t.tgrelid
+    join pg_namespace n on n.oid = c.relnamespace
+    where t.tgname = 'trg_protect_privileged_user_settings'
+      and n.nspname = 'public' and c.relname = 'user_settings'
+      and not t.tgisinternal and t.tgenabled in ('O','A')
+  ) then
+    raise exception 'Privileged user_settings guard is not enabled';
+  end if;
+end;
+$$;
 
 -- 1. Organization-scoped check: the strict rule, with the Master membership required in the
 --    SPECIFIC studio that owns the data. Use this in RLS for any table that has organization_id.

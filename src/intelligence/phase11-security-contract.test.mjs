@@ -40,6 +40,12 @@ test("privileged user fields are guarded in the ordered migration chain", () => 
   assert.match(migration, /new\.plan := old\.plan/);
   assert.match(migration, /before insert or update on public\.user_settings/);
   assert.match(migration, /tgenabled in \('O', 'A'\)/);
+  const baseAuthorization = read("supabase/migrations/20261108130000_intelligence_authorization.sql");
+  const canonicalAuthorization = read("supabase/migrations/20261109090000_intelligence_authorization.sql");
+  for (const source of [baseAuthorization, canonicalAuthorization]) {
+    assert.ok(source.indexOf("create or replace function public.protect_privileged_user_settings") < source.indexOf("create or replace function public.intel_is_authorized"), "guard precedes authorization functions");
+    assert.match(source, /before insert or update on public\.user_settings/);
+  }
   const runner = read("supabase/tests/run_intelligence_auth.sh");
   assert.match(runner, /20261201090000_intelligence_phase11_privileged_user_guard\.sql/);
   const sqlTests = read("supabase/tests/intelligence_authorization.test.sql");

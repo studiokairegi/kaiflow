@@ -301,6 +301,59 @@ class Inbox(unittest.TestCase):
             mailops.sync_inbox(r, z, set(), overlap_ms=0)
         self.assertEqual(r.cursor.get("last_time_ms", 0), 0)
 
+    def test_multi_account_sync_uses_account_scoped_cursors_and_ids(self):
+        class Provider(FakeZoho):
+            def __init__(self, account):
+                super().__init__(); self.account = account
+                self.inbox = [{"id": "same-local-id", "folder_id": "inbox", "subject": "Re: hello",
+                               "from": "rina@example.com", "to": "", "time_ms": 1_700_000_100_000,
+                               "thread_id": f"thread-{account}"}]
+            def iter_messages(self, folder, page_size=50): return iter(self.inbox)
+            def content_text(self, folder_id, message_id): return "A reply"
+            def rfc_headers(self, folder_id, message_id): return {"Message-ID": f"<{self.account}@example.com>"}
+
+        accounts = [
+            {"id": "acct-a", "provider_key": "gmail", "mailbox": "a@studio.test", "receive_enabled": True},
+            {"id": "acct-b", "provider_key": "zoho", "mailbox": "b@studio.test", "receive_enabled": True},
+        ]
+        class Rpc:
+            def __init__(self): self.calls=[]; self.inbound=[]; self.cursors={}; self.jobs=[]
+            def __call__(self, name, params=None):
+                params=params or {}; self.calls.append((name, params))
+                if name == "intel_agent_receive_sync_state":
+                    key=params["p_account_id"]
+                    if params.get("p_set") is not None: self.cursors[key]=params["p_set"]
+                    return self.cursors.get(key, {})
+                if name == "intel_agent_record_inbound":
+                    self.inbound.append(params); return {"message_id": f"msg-{len(self.inbound)}", "duplicate": False}
+                if name == "intel_agent_enqueue_job": self.jobs.append(params); return "job"
+                return None
+        class Registry:
+            def __init__(self): self.clients={}
+            def create(self, key, **ctx):
+                account=ctx["account_id"]; self.clients[account]=Provider(account); return self.clients[account]
+        class Router:
+            cfg=object(); supa=object()
+            registry=Registry()
+        rpc, router = Rpc(), Router()
+        result=mailops.sync_provider_accounts(rpc, router, set(), overlap_ms=0, accounts=accounts)
+        self.assertEqual(result, {"accounts": 2, "seen": 2, "new": 2})
+        ids={x["p_zoho_message_id"] for x in rpc.inbound}
+        self.assertEqual(ids, {"in:gmail:acct-a:same-local-id", "in:zoho:acct-b:same-local-id"})
+        self.assertEqual(set(rpc.cursors), {"acct-a", "acct-b"})
+        self.assertEqual(len(rpc.jobs), 2)
+
+    def test_disabled_registry_account_is_not_polled(self):
+        class Registry:
+            def create(self, *args, **kwargs): raise AssertionError("disabled account must not be instantiated")
+        class Router:
+            registry = Registry(); cfg = object(); supa = object()
+        rpc = lambda name, params=None: []
+        result = mailops.sync_provider_accounts(rpc, Router(), set(), accounts=[
+            {"id": "acct-disabled", "provider_key": "gmail", "mailbox": "a@studio.test", "receive_enabled": False}
+        ])
+        self.assertEqual(result, {"accounts": 0, "seen": 0, "new": 0})
+
     def test_sync_is_idempotent_and_skips_own_mail(self):
         r, z = FakeRpc(), FakeZoho()
         z.inbox = [{"id": "i1", "folder_id": "f", "subject": "Re: hi", "from": "Rina <rina@pixelmoon.com>", "to": "", "time_ms": 1_700_000_100_000, "thread_id": ""},

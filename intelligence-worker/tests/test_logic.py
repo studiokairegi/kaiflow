@@ -60,6 +60,18 @@ class Signals(unittest.TestCase):
         self.assertIsNone(sources.steam_candidate({**d, "type": "dlc"}, "1"))
         self.assertIsNone(sources.steam_candidate({**d, "release_date": {"coming_soon": False, "date": "Mar 3, 2012"}}, "1"))
 
+    def test_steam_candidate_rejects_third_party_publisher(self):
+        d = {"type": "game", "developers": ["Pixel Moon"], "publishers": ["Big Publisher"],
+             "release_date": {"coming_soon": True, "date": "Coming soon"}}
+        self.assertIsNone(sources.steam_candidate(d, "2"))
+
+    def test_steam_candidate_accepts_multiple_developers_when_all_are_publishers(self):
+        d = {"type": "game", "developers": ["Pixel Moon", "Studio Two"], "publishers": ["studio two", "PIXEL MOON"],
+             "release_date": {"coming_soon": True, "date": "Coming soon"}}
+        candidate = sources.steam_candidate(d, "3")
+        self.assertIsNotNone(candidate)
+        self.assertTrue(candidate["meta"]["self_published"])
+
 
 class Policy(unittest.TestCase):
     def test_unsubscribe_and_complaint_are_hard(self):
