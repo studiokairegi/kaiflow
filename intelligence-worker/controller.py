@@ -121,6 +121,9 @@ class WorkerController:
             raise RuntimeError(f"Worker package not found in: {self.worker_dir}")
         env = os.environ.copy()
         env.update(read_env_file(self.env_file))
+        for key in ('PYTHONHOME', 'PYTHONPATH', 'PYTHONUSERBASE', 'PYTHONSTARTUP'):
+            env.pop(key, None)
+        env['PYTHONNOUSERSITE'] = '1'
         env["KAIRFLOW_WORKER_LOG_FILE"] = str(self.log_file)
         ollama_url = env.get("KAIRFLOW_OLLAMA_URL", "http://127.0.0.1:11434")
         if not LOCAL_OLLAMA.fullmatch(ollama_url):
