@@ -507,10 +507,9 @@ test("Gmail and Zoho are refused with 410 unless their flag is on; unreadable fl
   assert.equal((await providerPausedResponse({ rpc: async () => { throw new Error("down"); } }, "zoho")).status, 410);
 });
 
-test("every Gmail and Zoho Edge Function checks the pause flag first, and none was deleted", () => {
-  for (const [prov, name] of [["gmail", "connect"], ["gmail", "callback"], ["gmail", "token"], ["zoho", "connect"], ["zoho", "callback"], ["zoho", "token"]]) {
-    const src = fs.readFileSync(new URL(`../../supabase/functions/intel-${prov}-${name}/index.ts`, import.meta.url), "utf8");
-    assert.match(src, new RegExp(`providerPausedResponse\\(pauseGuard, "${prov}"\\)\\) \\?\\? handle`), `${prov}-${name} must be guarded`);
+test("legacy singleton Gmail/Zoho Edge Functions are gone; shared constants and worker adapters remain", () => {
+  for (const prov of ["gmail", "zoho"]) for (const name of ["connect", "callback", "token"]) {
+    assert.ok(!fs.existsSync(new URL(`../../supabase/functions/intel-${prov}-${name}`, import.meta.url)), `intel-${prov}-${name} must stay removed`);
   }
   for (const f of ["intel_gmail_logic.ts", "intel_zoho_logic.ts"]) assert.ok(fs.existsSync(new URL(`../../supabase/functions/_shared/${f}`, import.meta.url)), `${f} must be kept`);
   for (const f of ["gmail.py", "zoho.py"]) assert.ok(fs.existsSync(new URL(`../../intelligence-worker/kairflow_intel/${f}`, import.meta.url)), `${f} must be kept`);

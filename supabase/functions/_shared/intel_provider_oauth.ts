@@ -26,11 +26,37 @@ interface OAuthAdapter {
   apiBase: string;
 }
 
+type GmailOAuthConfig = { clientId: string; clientSecret: string; redirectUri?: string; source: "gmail" | "legacy" };
+
+function gmailOAuthConfig(deps: ProviderOAuthDeps): GmailOAuthConfig {
+  const gmail = {
+    clientId: deps.env("GOOGLE_GMAIL_CLIENT_ID"),
+    clientSecret: deps.env("GOOGLE_GMAIL_CLIENT_SECRET"),
+    redirectUri: deps.env("GOOGLE_GMAIL_REDIRECT_URI"),
+  };
+  if (gmail.clientId && gmail.clientSecret) {
+    return { ...gmail, source: "gmail" };
+  }
+  const legacy = {
+    clientId: deps.env("GOOGLE_CLIENT_ID"),
+    clientSecret: deps.env("GOOGLE_CLIENT_SECRET"),
+    redirectUri: deps.env("GOOGLE_REDIRECT_URI"),
+  };
+  if (legacy.clientId && legacy.clientSecret) {
+    return { ...legacy, source: "legacy" };
+  }
+  throw new Error("Gmail OAuth is not configured");
+}
+
+function gmailTokenRequest(config: GmailOAuthConfig, params: Record<string, string>): URLSearchParams {
+  return new URLSearchParams({ ...params, client_id: config.clientId, client_secret: config.clientSecret });
+}
+
 const gmailAdapter: OAuthAdapter = {
   apiBase: GMAIL_API_BASE,
   authorizationUrl(state, deps) {
-    const clientId = deps.env("GOOGLE_GMAIL_CLIENT_ID"), redirectUri = deps.env("GOOGLE_GMAIL_REDIRECT_URI");
-    if (!clientId || !redirectUri) throw new Error("Gmail OAuth is not configured");
+    const { clientId, redirectUri } = gmailOAuthConfig(deps);
+    if (!redirectUri) throw new Error("Gmail OAuth is not configured");
     const u = new URL(GOOGLE_AUTH_URL);
     u.searchParams.set("client_id", clientId);
     u.searchParams.set("redirect_uri", redirectUri);
@@ -43,9 +69,9 @@ const gmailAdapter: OAuthAdapter = {
     return u.toString();
   },
   async exchange(code, deps) {
-    const form = new URLSearchParams({ grant_type: "authorization_code", code,
-      client_id: deps.env("GOOGLE_GMAIL_CLIENT_ID")!, client_secret: deps.env("GOOGLE_GMAIL_CLIENT_SECRET")!,
-      redirect_uri: deps.env("GOOGLE_GMAIL_REDIRECT_URI")! });
+    const config = gmailOAuthConfig(deps);
+    if (!config.redirectUri) throw new Error("Gmail OAuth is not configured");
+    const form = gmailTokenRequest(config, { grant_type: "authorization_code", code, redirect_uri: config.redirectUri });
     const response = await deps.fetch(GOOGLE_TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.access_token || !data.refresh_token || !hasAllScopes(data.scope)) throw new Error("Gmail authorization did not grant the required offline send/read scopes");
@@ -58,11 +84,21 @@ const gmailAdapter: OAuthAdapter = {
     return { mailbox: String(profile.emailAddress).trim().toLowerCase(), externalAccountId: "me" };
   },
   async refresh(refreshToken, deps) {
-    const form = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken,
-      client_id: deps.env("GOOGLE_GMAIL_CLIENT_ID")!, client_secret: deps.env("GOOGLE_GMAIL_CLIENT_SECRET")! });
-    const response = await deps.fetch(GOOGLE_TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
-    const data = await response.json().catch(() => ({}));
-    return { ok: response.ok && !!data.access_token, status: response.status, data };
+    const config = gmailOAuthConfig(deps);
+    const request = async (candidate: GmailOAuthConfig) => {
+      const form = gmailTokenRequest(candidate, { grant_type: "refresh_token", refresh_token: refreshToken });
+      const response = await deps.fetch(GOOGLE_TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
+      const data = await response.json().catch(() => ({}));
+      return { ok: response.ok && !!data.access_token, status: response.status, data };
+    };
+    const primary = await request(config);
+    if (config.source === "gmail" && primary.status === 400 && primary.data?.error === "invalid_grant") {
+      const legacy = { clientId: deps.env("GOOGLE_CLIENT_ID"), clientSecret: deps.env("GOOGLE_CLIENT_SECRET") };
+      if (legacy.clientId && legacy.clientSecret) {
+        return request({ ...legacy, source: "legacy" });
+      }
+    }
+    return primary;
   },
 };
 

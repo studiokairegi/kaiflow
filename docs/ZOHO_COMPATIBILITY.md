@@ -40,7 +40,7 @@ In order of least change:
 3. A different provider only with your explicit decision. Intelligence does **not** silently substitute one. The mail layer is isolated in `zoho.py`/`mailops.py`, so a replacement is a contained change.
 
 ## Test sequence (you run it; nothing here sends email)
-1. Create the OAuth client in the Zoho API Console (Server-based, Offline), set the redirect URI to the `intel-zoho-callback` function URL, store `ZOHO_CLIENT_ID`/`ZOHO_CLIENT_SECRET` as Supabase function secrets.
+1. Create the OAuth client in the Zoho API Console (Server-based, Offline), set the redirect URI to the `intel-provider-callback` function URL, store `ZOHO_CLIENT_ID`/`ZOHO_CLIENT_SECRET` as Supabase function secrets.
 2. In KairFlow > Intelligence > Settings, press **Connect Zoho** (this is the step that starts OAuth; it only happens when you press it).
 3. `python -m kairflow_intel selftest zoho` must print `zoho folders readable: OK`.
 4. Only after that, and only if you decide to, send a single test message from the Outreach tab to an address you own, with sending turned on for that one message.

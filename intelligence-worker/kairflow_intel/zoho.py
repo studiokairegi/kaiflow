@@ -4,7 +4,6 @@ after connecting, and fix any response-shape difference in THIS file only. Every
 from __future__ import annotations
 
 import re
-import time
 
 import requests
 
@@ -14,31 +13,6 @@ from .safety import html_to_text
 
 class ZohoRejected(MailRejected):
     """Zoho definitively refused the request (4xx). The message was NOT sent."""
-
-
-class EdgeTokenProvider:
-    """Short-lived Zoho access tokens come from the intel-zoho-token Edge Function, which holds the refresh token.
-    The worker authenticates to it with the agent's own JWT; Zoho secrets never reach this machine."""
-
-    def __init__(self, cfg, supa, session: requests.Session | None = None, clock=time.time, function: str = "intel-zoho-token"):
-        self.cfg, self.supa, self.s, self.clock, self.function = cfg, supa, session or requests.Session(), clock, function
-        self._tok = None
-
-    def get(self, force: bool = False) -> dict:
-        if self._tok and not force and self.clock() < self._tok["exp"]:
-            return self._tok
-        try:
-            r = self.s.post(f"{self.cfg.supabase_url}/functions/v1/{self.function}", json={}, timeout=20,
-                            headers={"apikey": self.cfg.supabase_anon_key, "Authorization": f"Bearer {self.supa.token()}"})
-        except requests.RequestException as exc:
-            raise TransientError(f"token function unreachable: {exc}") from exc
-        if r.status_code >= 500 or r.status_code == 429:
-            raise TransientError(f"token function {r.status_code}")
-        if r.status_code != 200:
-            raise PermanentError(f"Zoho is not connected or the agent is not allowed to use it ({r.status_code})")
-        d = r.json()
-        self._tok = {"access_token": d["access_token"], "base": d["api_base"].rstrip("/"), "account_id": str(d["account_id"]), "mailbox": str(d.get("mailbox") or ""), "exp": self.clock() + int(d.get("expires_in", 3000)) - 120}
-        return self._tok
 
 
 class ZohoClient:

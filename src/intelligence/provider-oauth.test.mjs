@@ -35,8 +35,8 @@ test("OAuth callback consumes one-time state, rechecks authorization and stores 
   const { service, saved } = callbackService();
   const calls = [];
   const deps = {
-    env: (k) => ({ APP_URL: "https://app.test/", GOOGLE_CLIENT_ID: "client", GOOGLE_CLIENT_SECRET: "secret",
-      GOOGLE_REDIRECT_URI: "https://project.test/functions/v1/intel-provider-callback" })[k],
+    env: (k) => ({ APP_URL: "https://app.test/", GOOGLE_GMAIL_CLIENT_ID: "gmail-client", GOOGLE_GMAIL_CLIENT_SECRET: "gmail-secret",
+      GOOGLE_GMAIL_REDIRECT_URI: "https://project.test/functions/v1/intel-provider-callback" })[k],
     createClient: () => ({}), service,
     fetch: async (url) => {
       calls.push(url);
@@ -58,6 +58,46 @@ test("OAuth callback consumes one-time state, rechecks authorization and stores 
   assert.equal(saved.account.value.send_enabled, false);
   assert.equal(saved.account.value.credentials_ciphertext, 'enc:{"refresh_token":"long"}');
   assert.deepEqual(calls, ["https://oauth2.googleapis.com/token", `${GMAIL_API_BASE}/users/me/profile`]);
+});
+
+test("Gmail OAuth prefers the Gmail-specific environment variables", async () => {
+  const { service, saved } = callbackService();
+  const calls = [];
+  const deps = {
+    env: (k) => ({ APP_URL: "https://app.test/", GOOGLE_GMAIL_CLIENT_ID: "gmail-client", GOOGLE_GMAIL_CLIENT_SECRET: "gmail-secret",
+      GOOGLE_GMAIL_REDIRECT_URI: "https://project.test/functions/v1/intel-provider-callback", GOOGLE_CLIENT_ID: "legacy-client",
+      GOOGLE_CLIENT_SECRET: "legacy-secret", GOOGLE_REDIRECT_URI: "https://legacy.test/callback" })[k],
+    createClient: () => ({}), service,
+    fetch: async (url, init) => { calls.push({ url, body: init?.body });
+      if (url === "https://oauth2.googleapis.com/token") return new Response(JSON.stringify({ access_token: "short", refresh_token: "long", scope: GMAIL_SCOPES, expires_in: 3600 }), { status: 200 });
+      return new Response(JSON.stringify({ emailAddress: "Studio+One@gmail.com" }), { status: 200 });
+    },
+    encrypt: async (value) => `enc:${value}`, decrypt: async (value) => value, now: () => NOW,
+  };
+  await handleProviderCallback(new Request(`https://project.test/functions/v1/intel-provider-callback?code=auth-code&state=${STATE}`), deps);
+  assert.match(String(calls[0].body), /client_id=gmail-client/);
+  assert.doesNotMatch(String(calls[0].body), /legacy-client/);
+  assert.equal(saved.account.value.mailbox, "studio+one@gmail.com");
+});
+
+test("Gmail refresh retries once with the legacy OAuth client after invalid_grant", async () => {
+  const service = tokenService();
+  let count = 0;
+  const deps = {
+    env: (k) => ({ GOOGLE_GMAIL_CLIENT_ID: "gmail-client", GOOGLE_GMAIL_CLIENT_SECRET: "gmail-secret", GOOGLE_CLIENT_ID: "legacy-client",
+      GOOGLE_CLIENT_SECRET: "legacy-secret" })[k],
+    createClient: () => ({ auth: { async getUser() { return { data: { user: { id: "agent-1" } }, error: null }; } } }),
+    service, fetch: async (_url, init) => { count += 1;
+      if (count === 1) return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+      return new Response(JSON.stringify({ access_token: "legacy-short", expires_in: 3600 }), { status: 200 });
+    },
+    encrypt: async (v) => v, decrypt: async () => JSON.stringify({ refresh_token: "refresh-only" }), now: () => NOW,
+  };
+  const req = new Request("https://project.test/functions/v1/intel-provider-token", { method: "POST", headers: { Authorization: "Bearer agent-jwt", "Content-Type": "application/json" }, body: JSON.stringify({ account_id: ACCOUNT }) });
+  const response = await handleProviderToken(req, deps);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).access_token, "legacy-short");
+  assert.equal(count, 2);
 });
 
 function tokenService(accountOverrides = {}, providerOverrides = {}) {
@@ -84,7 +124,7 @@ function tokenService(accountOverrides = {}, providerOverrides = {}) {
 test("worker token endpoint is account-scoped and returns only short-lived access token material", async () => {
   const service = tokenService();
   const deps = {
-    env: (k) => ({ GOOGLE_CLIENT_ID: "client", GOOGLE_CLIENT_SECRET: "secret" })[k],
+    env: (k) => ({ GOOGLE_GMAIL_CLIENT_ID: "gmail-client", GOOGLE_GMAIL_CLIENT_SECRET: "gmail-secret" })[k],
     createClient: () => ({ auth: { async getUser() { return { data: { user: { id: "agent-1" } }, error: null }; } } }),
     service, fetch: async () => new Response(JSON.stringify({ access_token: "short-lived", expires_in: 3600 }), { status: 200 }),
     encrypt: async (v) => v, decrypt: async () => JSON.stringify({ refresh_token: "refresh-only" }), now: () => NOW,

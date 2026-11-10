@@ -184,34 +184,6 @@ def _rfc_header(headers: dict, name: str) -> str:
     return ""
 
 
-def sync_inbox(rpc, zoho, own_addresses: set[str], overlap_ms: int = 3_600_000, limit: int = 50) -> dict:
-    """Pull new inbox messages. Overlap + database idempotency make repeated or interrupted syncs harmless."""
-    cursor = rpc("intel_agent_sync_state", {"p_set": None}) or {}
-    since = int(cursor.get("last_time_ms", 0)) - overlap_ms
-    newest, seen, fresh = int(cursor.get("last_time_ms", 0)), 0, 0
-    items = zoho.iter_messages("inbox", page_size=limit) if hasattr(zoho, "iter_messages") else iter(zoho.list_messages("inbox", limit=limit))
-    for item in items:
-        if item["time_ms"] and item["time_ms"] < since:
-            continue
-        sender = re.sub(r".*<([^>]+)>.*", r"\1", item["from"]).strip().lower()
-        if sender in own_addresses:
-            continue
-        seen += 1
-        body = zoho.content_text(item["folder_id"], item["id"])
-        hdr = zoho.rfc_headers(item["folder_id"], item["id"])
-        tok = TOKEN_RE.search(f"{item['subject']}\n{body}")
-        r = rpc("intel_agent_record_inbound", {
-            "p_zoho_message_id": item["id"], "p_rfc_message_id": _rfc_header(hdr, "Message-ID"), "p_in_reply_to": _rfc_header(hdr, "In-Reply-To"),
-            "p_references": _rfc_header(hdr, "References"), "p_from_email": sender, "p_subject": item["subject"], "p_body_text": body,
-            "p_received_at": _iso(item["time_ms"]), "p_thread_id": item["thread_id"], "p_token": tok.group(0) if tok else None})
-        if not r.get("duplicate"):
-            fresh += 1
-            rpc("intel_agent_enqueue_job", {"p_kind": "classify", "p_payload": {"message_id": r["message_id"]}, "p_idempotency_key": f"classify:{item['id']}", "p_run_after": None, "p_priority": 5})
-        newest = max(newest, item["time_ms"] or 0)
-    rpc("intel_agent_sync_state", {"p_set": {"last_time_ms": newest}})
-    return {"seen": seen, "new": fresh}
-
-
 def sync_provider_accounts(rpc, router, own_addresses: set[str], overlap_ms: int = 3_600_000, limit: int = 50, accounts=None) -> dict:
     """Synchronize every enabled Gmail/Zoho account with an account-scoped cursor.
 
@@ -224,8 +196,7 @@ def sync_provider_accounts(rpc, router, own_addresses: set[str], overlap_ms: int
         return {"accounts": 0, "seen": 0, "new": 0}
     totals = {"accounts": 0, "seen": 0, "new": 0}
     for account in accounts:
-        # An existing but disabled/disconnected registry account must suppress
-        # the legacy-singleton fallback; never bypass its receive enablement.
+        # A disabled or disconnected registry account is never polled.
         if account.get("receive_enabled") is False:
             continue
         account_id = str(account["id"])

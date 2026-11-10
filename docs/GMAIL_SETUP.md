@@ -17,21 +17,21 @@ It is the one free option that can send, read replies and set `In-Reply-To`/`Ref
 3. **OAuth consent screen**: user type **External**; app name, support email; add your Gmail address as a test user for now.
 4. **Scopes**: add exactly `.../auth/gmail.send` and `.../auth/gmail.readonly`. Nothing else.
 5. **Credentials > Create credentials > OAuth client ID > Web application**. Authorized redirect URI:
-   `https://<your-project-ref>.supabase.co/functions/v1/intel-gmail-callback`
+   `https://<your-project-ref>.supabase.co/functions/v1/intel-provider-callback`
 6. Copy the client ID and secret.
 7. **Publish the consent screen to "In production".** While it is in *Testing*, Google expires refresh tokens after 7 days and the connection will break weekly. For one personal account you do not need Google's verification; Google shows an "unverified app" warning once at connect time (Advanced > continue). Confirm both points on your own consent screen: Google's rules change.
 
 ## 2. Supabase secrets and functions (run by you, staging first)
 ```
-supabase secrets set GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... \
-  GOOGLE_REDIRECT_URI=https://<ref>.supabase.co/functions/v1/intel-gmail-callback \
+supabase secrets set GOOGLE_GMAIL_CLIENT_ID=... GOOGLE_GMAIL_CLIENT_SECRET=... \
+  GOOGLE_GMAIL_REDIRECT_URI=https://<ref>.supabase.co/functions/v1/intel-provider-callback \
   APP_URL=https://<your KairFlow URL> INTEL_TOKEN_ENCRYPTION_KEY=<same secret the Zoho functions use, 32 random bytes base64>
 supabase db push        # applies 20261109150000_intelligence_gmail_provider.sql (after the earlier Intelligence migrations)
-supabase functions deploy intel-gmail-connect
-supabase functions deploy intel-gmail-token
-supabase functions deploy intel-gmail-callback --no-verify-jwt     # Google's redirect carries no session; trust comes from the single-use state
+supabase functions deploy intel-provider-connect
+supabase functions deploy intel-provider-token
+supabase functions deploy intel-provider-callback --no-verify-jwt     # Google's redirect carries no session; trust comes from the single-use state
 ```
-The refresh token is encrypted with `INTEL_TOKEN_ENCRYPTION_KEY` and never leaves the server: the worker only receives short-lived access tokens, and only the registered agent account can ask for one.
+The refresh token is encrypted with `INTEL_TOKEN_ENCRYPTION_KEY` and never leaves the server: the worker only receives short-lived access tokens, and only the registered agent account can ask for one. Gmail uses the `GOOGLE_GMAIL_*` variables above. The older `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI` names remain supported as a compatibility fallback for existing installations; Drive continues to use the older Google variables. If an existing Gmail refresh token returns `invalid_grant` with the new OAuth client, KairFlow makes one controlled retry with the legacy Google client when those legacy variables are still configured.
 
 ## 3. Connect (this is the step that starts OAuth)
 KairFlow > Intelligence > Settings > **Connections** > choose **Gmail** > **Connect Gmail**. Sign in with the dedicated account and leave **both** permissions ticked. KairFlow shows a result banner: connected / cancelled / missing permission / error. If only one permission is granted, nothing is saved.

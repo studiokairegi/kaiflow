@@ -27,7 +27,7 @@ The migration directory is the source of truth for the complete sequence; preser
 
 ## C. App code
 This repository already contains everything: the Intelligence files, the wiring in `src/App.jsx` and `src/notifications/logic.js`, the worker in
-`intelligence-worker/`, and the Edge Functions in `supabase/functions/intel-zoho-*`. No patches to apply. Verify:
+`intelligence-worker/`, and the Edge Functions in `supabase/functions/intel-provider-*`. No patches to apply. Verify:
 ```
 npm ci
 npm test                 # 831 tests passed in the source-patch verification
@@ -40,11 +40,11 @@ For Gmail follow `docs/GMAIL_SETUP.md` and skip the rest of this section; set `K
 1. Check your Zoho plan allows API access (Zoho says availability depends on plan and permissions). If it does not, stop here: Intelligence still
    researches and drafts, and you can send manually.
 2. In Zoho's API console (use your data center's console) create a **Server-based** client. Redirect URI =
-   `https://<project>.supabase.co/functions/v1/intel-zoho-callback`.
+   `https://<project>.supabase.co/functions/v1/intel-provider-callback`.
 3. Supabase Edge Function secrets (names only): `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REDIRECT_URI`, `INTEL_TOKEN_ENCRYPTION_KEY`
    (new random 32-byte key, base64; do not reuse the Drive key), `APP_URL`.
-4. Deploy: `supabase functions deploy intel-zoho-connect`, `supabase functions deploy intel-zoho-token`,
-   `supabase functions deploy intel-zoho-callback --no-verify-jwt`.
+4. Deploy: `supabase functions deploy intel-provider-connect`, `supabase functions deploy intel-provider-token`,
+   `supabase functions deploy intel-provider-callback --no-verify-jwt`.
 5. In the app: Intelligence > Settings > Connect Zoho Mail.
 6. Add DNS records for your sending domain if not already present (SPF, DKIM, DMARC) before sending anything.
 
@@ -92,7 +92,7 @@ Environment variables are listed in `intelligence-worker/.env.example`; Supabase
 3. [ ] SQL tests pass on a disposable PG16, `npm test`, `npm run build`, worker tests all pass.
 4. [ ] Apply migrations B in order to a **staging** Supabase project first; click through every Intelligence tab as the admin Master User, as a Master User who is not admin (must see nothing), and as an ordinary member (must see nothing).
 5. [ ] Run `intel_admin_bootstrap`, register the agent account (a separate Supabase user, not an admin), leave sending **OFF** and autonomy at **shadow**.
-6. [ ] Deploy the Edge Functions for your provider (`intel-gmail-*` or `intel-zoho-*`); set secrets.
+6. [ ] Deploy the Edge Functions for your provider (`intel-provider-*`); set secrets.
 7. [ ] Existing Leads tab: review the counts. Bring in a handful, check the drafts read well. Sending stays off.
 8. [ ] Mailbox: read-only `selftest gmail` or `selftest zoho` (see `GMAIL_SETUP.md` / `ZOHO_COMPATIBILITY.md`). Decide separately about one test send to your own address.
 9. [ ] Only then consider enabling sending: warm-up and the 30/day cap apply; keep approvals on.

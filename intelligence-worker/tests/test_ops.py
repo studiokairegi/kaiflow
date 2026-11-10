@@ -264,42 +264,30 @@ class Sending(unittest.TestCase):
 
 
 class Inbox(unittest.TestCase):
-    def test_sync_paginates_backlog_before_advancing_cursor(self):
-        r, z = FakeRpc(), FakeZoho()
-        base = 1_700_000_100_000
-        z.inbox = [{"id": f"old{i}", "folder_id": "f", "subject": "reply", "from": f"u{i}@example.com",
-                    "to": "", "time_ms": base - i * 1000, "thread_id": ""} for i in range(125)]
-        z.iter_messages = lambda folder, page_size: (item for item in z.inbox)
-        got = mailops.sync_inbox(r, z, set(), overlap_ms=0, limit=50)
-        self.assertEqual(got["new"], 125)
-        self.assertEqual(len(r.inbound), 125)
-        self.assertEqual(r.cursor["last_time_ms"], base)
-
-    def test_inbound_rfc_headers_are_case_insensitive_across_providers(self):
-        r, z = FakeRpc(), FakeZoho()
-        z.inbox = [{"id": "lowercase", "folder_id": "f", "subject": "Re: hi", "from": "rina@pixelmoon.com",
-                    "to": "studio@test", "time_ms": 1_700_000_100_000, "thread_id": "t"}]
-        z.iter_messages = lambda folder, page_size: iter(z.inbox)
-        z.rfc_headers = lambda *_: {"message-id": "<reply@pixelmoon.com>", "in-reply-to": "<outbound@studio.test>",
-                                    "references": "<older@studio.test> <outbound@studio.test>"}
-        mailops.sync_inbox(r, z, set(), overlap_ms=0)
-        payload = next(p for name, p in r.calls if name == "intel_agent_record_inbound")
+    def test_inbound_rfc_headers_are_case_insensitive_for_account_sync(self):
+        class Provider(FakeZoho):
+            def iter_messages(self, folder, page_size=50):
+                return iter([{"id": "lowercase", "folder_id": "f", "subject": "Re: hi", "from": "rina@pixelmoon.com",
+                              "to": "studio@test", "time_ms": 1_700_000_100_000, "thread_id": "t"}])
+            def content_text(self, folder_id, message_id): return "reply"
+            def rfc_headers(self, *_): return {"message-id": "<reply@pixelmoon.com>", "in-reply-to": "<outbound@studio.test>",
+                                               "references": "<older@studio.test> <outbound@studio.test>"}
+        class Registry:
+            def create(self, key, **ctx): return Provider()
+        class Router:
+            cfg = object(); supa = object(); registry = Registry()
+        calls = []
+        def rpc(name, params=None):
+            calls.append((name, params or {}))
+            if name == "intel_agent_receive_sync_state": return {}
+            if name == "intel_agent_record_inbound": return {"message_id": "m1", "duplicate": False}
+            return None
+        mailops.sync_provider_accounts(rpc, Router(), set(), overlap_ms=0,
+                                       accounts=[{"id": "a", "provider_key": "gmail", "mailbox": "s@studio.test", "receive_enabled": True}])
+        payload = next(p for name, p in calls if name == "intel_agent_record_inbound")
         self.assertEqual(payload["p_rfc_message_id"], "<reply@pixelmoon.com>")
         self.assertEqual(payload["p_in_reply_to"], "<outbound@studio.test>")
         self.assertEqual(payload["p_references"], "<older@studio.test> <outbound@studio.test>")
-
-    def test_cursor_does_not_advance_when_persisting_page_fails(self):
-        class BrokenRpc(FakeRpc):
-            def __call__(self, name, p=None):
-                if name == "intel_agent_record_inbound":
-                    raise RuntimeError("db unavailable")
-                return super().__call__(name, p)
-        r, z = BrokenRpc(), FakeZoho()
-        z.inbox = [{"id": "one", "folder_id": "f", "subject": "reply", "from": "u@example.com",
-                    "to": "", "time_ms": 1_700_000_100_000, "thread_id": ""}]
-        with self.assertRaises(RuntimeError):
-            mailops.sync_inbox(r, z, set(), overlap_ms=0)
-        self.assertEqual(r.cursor.get("last_time_ms", 0), 0)
 
     def test_multi_account_sync_uses_account_scoped_cursors_and_ids(self):
         class Provider(FakeZoho):
@@ -353,18 +341,6 @@ class Inbox(unittest.TestCase):
             {"id": "acct-disabled", "provider_key": "gmail", "mailbox": "a@studio.test", "receive_enabled": False}
         ])
         self.assertEqual(result, {"accounts": 0, "seen": 0, "new": 0})
-
-    def test_sync_is_idempotent_and_skips_own_mail(self):
-        r, z = FakeRpc(), FakeZoho()
-        z.inbox = [{"id": "i1", "folder_id": "f", "subject": "Re: hi", "from": "Rina <rina@pixelmoon.com>", "to": "", "time_ms": 1_700_000_100_000, "thread_id": ""},
-                   {"id": "i2", "folder_id": "f", "subject": "x", "from": "alex@studio.test", "to": "", "time_ms": 1_700_000_200_000, "thread_id": ""}]
-        first = mailops.sync_inbox(r, z, {"alex@studio.test"}); second = mailops.sync_inbox(r, z, {"alex@studio.test"})
-        self.assertEqual((first["new"], second["new"]), (1, 0))
-        self.assertEqual(len(r.inbound), 1); self.assertEqual(len([k for k in r.jobs if k.startswith("classify:")]), 1)
-        rec = next(p for n, p in r.calls if n == "intel_agent_record_inbound")
-        self.assertEqual((rec["p_from_email"], rec["p_token"]), ("rina@pixelmoon.com", "kf" + "a" * 32))
-        self.assertEqual(r.cursor["last_time_ms"], 1_700_000_100_000)
-
 
 class WorkerLoop(unittest.TestCase):
     def mk(self):

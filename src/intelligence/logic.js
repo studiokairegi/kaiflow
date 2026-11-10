@@ -216,7 +216,7 @@ export function awaitingAnswer(messages) {
 export const newClientKey = () => `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 export const countAiGeneratedLeads = (leads) => (leads || []).filter(isAiGeneratedLead).length;
 
-// ---- Mail provider (Gmail or Zoho) ---------------------------------------------------------------------------------------
+// ---- Mail provider labels (Gmail, Zoho Mail, SMTP) ---------------------------------------------------------------------------------------
 export const MAIL_PROVIDERS = Object.freeze({ gmail: "Gmail", zoho: "Zoho Mail" });
 export const mailProviderName = (mail) => MAIL_PROVIDERS[mail?.provider] || MAIL_PROVIDERS.zoho;
 /** "Gmail connected (studio@gmail.com)" / "Mail not connected". */
@@ -233,16 +233,15 @@ export const mailStatusLabel = (mail) => {
   if (mail.status === "error" || mail.status === "check_failed") return `${mailProviderName(mail)} status check failed`;
   return `${mailProviderName(mail)}: ${String(mail.status).replace(/[_-]+/g, " ")}`;
 };
-/** What the person sees after Google/Zoho send them back to KairFlow (?intelligence=<flag>). Unknown flags show nothing. */
+/** What the person sees after a provider sends them back to KairFlow (?intelligence=<flag>). Unknown flags show nothing. */
 export const OAUTH_RESULTS = Object.freeze({
-  gmail_connected: { tone: "ok", text: "Gmail is connected. Refresh provider accounts in Settings; outbound messages use their durable account assignment." },
-  gmail_cancelled: { tone: "warn", text: "Gmail connection cancelled. Nothing was saved." },
-  gmail_scope: { tone: "bad", text: "Gmail needs both permissions (send and read replies). Connect again and leave both ticked. Nothing was saved." },
-  gmail_denied: { tone: "bad", text: "Only an administrator who is also an active Master User can connect Gmail. Nothing was saved." },
-  gmail_error: { tone: "bad", text: "Gmail could not be connected. Nothing was saved. Check the Google app settings and try again." },
-  zoho_connected: { tone: "ok", text: "Zoho Mail is connected. Refresh provider accounts in Settings; outbound messages use their durable account assignment." },
-  zoho_denied: { tone: "bad", text: "Only an administrator who is also an active Master User can connect Zoho Mail. Nothing was saved." },
-  zoho_error: { tone: "bad", text: "Zoho Mail could not be connected. Nothing was saved." },
+  provider_connected: { tone: "ok", text: "Mail account connected. Refresh provider accounts in Settings; outbound messages use their durable account assignment." },
+  provider_cancelled: { tone: "warn", text: "Connection cancelled. Nothing was saved." },
+  provider_denied: { tone: "bad", text: "Only an administrator who is also an active Master User can connect a mail account. Nothing was saved." },
+  provider_disabled: { tone: "bad", text: "That provider is not enabled. Nothing was saved." },
+  provider_adapter_missing: { tone: "bad", text: "That provider is not installed on the worker. Nothing was saved." },
+  provider_save_error: { tone: "bad", text: "The account could not be saved. Nothing was saved. Try again." },
+  provider_error: { tone: "bad", text: "The account could not be connected. Nothing was saved. Check the provider app settings and try again." },
 });
 export const oauthResult = (flag) => OAUTH_RESULTS[flag] || null;
 

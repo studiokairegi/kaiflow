@@ -15,7 +15,7 @@
 
 - Newly connected Zoho accounts start with `is_enabled=false` and `send_enabled=false`; the provider-wide `sending_enabled` gate remains false in this migration.
 - Zoho's only permitted purpose in the manifest is `business_correspondence`; no consented-prospecting purpose is granted by this adapter.
-- The old `intel-zoho-*` singleton functions remain for backwards compatibility. The new dynamic worker uses the `intel-provider-*` account-scoped path when configured with `KAIRFLOW_MAIL_PROVIDER=zoho` and `KAIRFLOW_MAIL_ACCOUNT_ID=<account uuid>`.
+- The old `intel-zoho-*` singleton functions have been removed. The new dynamic worker uses the `intel-provider-*` account-scoped path when configured with `KAIRFLOW_MAIL_PROVIDER=zoho` and `KAIRFLOW_MAIL_ACCOUNT_ID=<account uuid>`.
 - Zoho REST API response shapes and OAuth grants have not been exercised against a live Zoho tenant. The existing Zoho REST client documentation continues to mark live API compatibility as unverified. Verify the chosen data center and required plan/API access before activating any mailbox.
 - No automatic fallback between mailboxes is introduced. Message/account assignment remains durable through the Phase 2.5 dispatch layer.
 

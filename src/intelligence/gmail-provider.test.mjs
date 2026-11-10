@@ -5,12 +5,11 @@ import { MAIL_PROVIDERS, OAUTH_RESULTS, mailProviderName, mailStatusLabel, oauth
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
 const sql = read("../../supabase/migrations/20261109150000_intelligence_gmail_provider.sql");
-const gmailEdge = read("../../supabase/functions/_shared/intel_gmail_logic.ts");
-const zohoEdge = read("../../supabase/functions/_shared/intel_zoho_logic.ts");
+const providerOauth = read("../../supabase/functions/_shared/intel_provider_oauth.ts");
 const worker = read("../../intelligence-worker/kairflow_intel/gmail.py");
 
 test("every result flag the Edge functions can redirect with has a message for the person", () => {
-  for (const src of [gmailEdge, zohoEdge]) {
+  for (const src of [providerOauth]) {
     const flags = [...src.matchAll(/back\("(\w+)"\)/g)].map((m) => m[1]);
     assert.ok(flags.length >= 4);
     for (const f of flags) assert.ok(OAUTH_RESULTS[f], `no message for ?intelligence=${f}`);
@@ -43,26 +42,12 @@ test("the kill switch still refuses to enable sending without a connected mailbo
   assert.match(f, /intel_mail_account/); assert.match(f, /connected/); assert.match(f, /agent_user_id/);
 });
 
-test("Gmail edge: least-privilege scopes, no secrets in redirects, agent-only token endpoint, provider checked", () => {
-  assert.ok(!/refresh_token_enc[^\n]*back\(/.test(gmailEdge));
-  assert.match(gmailEdge, /s\.agent_user_id !== uid/); assert.match(gmailEdge, /acct\.provider !== "gmail"/); assert.match(gmailEdge, /st\.provider !== "gmail"/);
-  assert.match(gmailEdge, /intel_is_authorized_user/); assert.match(gmailEdge, /requireIntelligenceAdmin/);
-  assert.match(gmailEdge, /\.is\("used_at", null\)/, "state is claimed atomically");
-});
-
 test("worker Gmail client never sends from a different address, never retries a send, and refuses header injection", () => {
   assert.match(worker, /from_addr\.strip\(\)\.lower\(\) != mailbox/);
   assert.match(worker, /header injection/);
   const send = worker.slice(worker.indexOf("def send("), worker.indexOf("def _headers_of"));
   assert.ok(!/for attempt|retry|sleep/.test(send), "no retry loop around the send call");
   assert.match(worker, /429 or r\.status_code >= 500/);
-});
-
-test("each function wrapper points at the matching logic module", () => {
-  for (const fn of ["connect", "callback", "token"]) {
-    const src = read(`../../supabase/functions/intel-gmail-${fn}/index.ts`);
-    assert.match(src, /intel_gmail_logic\.ts/); assert.ok(!/zoho/i.test(src.replace(/Zoho's/g, "")), `${fn} wrapper mentions Zoho`);
-  }
 });
 
 test("mail status distinguishes a provider check failure from a disconnected mailbox", () => {
@@ -79,7 +64,6 @@ test("dynamic provider account status does not imply a single configured mailbox
 });
 
 test("OAuth success messaging no longer tells operators to select a global worker provider", () => {
-  assert.match(OAUTH_RESULTS.gmail_connected.text, /durable account assignment/);
-  assert.match(OAUTH_RESULTS.zoho_connected.text, /durable account assignment/);
-  assert.doesNotMatch(OAUTH_RESULTS.gmail_connected.text + OAUTH_RESULTS.zoho_connected.text, /KAIRFLOW_MAIL_PROVIDER/);
+  assert.match(OAUTH_RESULTS.provider_connected.text, /durable account assignment/);
+  assert.doesNotMatch(OAUTH_RESULTS.provider_connected.text, /KAIRFLOW_MAIL_PROVIDER/);
 });
