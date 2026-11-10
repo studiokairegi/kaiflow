@@ -15,6 +15,7 @@ declare
   v_unread integer;
   v_direction text;
   v_snippet text;
+  v_at timestamptz;
 begin
   if tg_op = 'INSERT' then
     v_new_non_draft := new.status <> 'draft';
