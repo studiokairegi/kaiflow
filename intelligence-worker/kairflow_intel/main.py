@@ -8,6 +8,7 @@ import threading
 from . import config as cfgmod
 from .jobs import Deps, Worker
 from .ollama import OllamaClient
+from .airouter import RouterSettings
 from .gemini import FallbackLLM, GeminiClient
 from .safety import Fetcher
 from .supa import SupabaseAgent
@@ -33,10 +34,19 @@ def build(cfg):
         except ProviderNotInstalled as exc:
             raise cfgmod.ConfigError(str(exc)) from exc
     zoho = DynamicProviderRouter(cfg, supa, fallback=mail)
-    llm = OllamaClient(cfg)
+    ai = getattr(cfg, "ai_router", None) or RouterSettings()
+    gemini = None
     if getattr(cfg, "gemini_api_key", ""):
-        llm = FallbackLLM(GeminiClient(cfg.gemini_api_key, getattr(cfg, "gemini_model", "")), llm)   # chat planning only; see gemini.py
+        gemini = GeminiClient(cfg.gemini_api_key, getattr(cfg, "gemini_model", "") or ai.model, thinking=ai.thinking,
+                              max_output_fast=ai.max_output_fast, max_output=ai.max_output, json_model=ai.model)
+    # Always wrapped so call sites get generate_json_ex (per-call provenance). With no key, or with the default policy, every call still goes to Ollama.
+    llm = FallbackLLM(gemini, OllamaClient(cfg), settings=ai)
     return supa, Deps(cfg=cfg, rpc=supa.rpc, fetcher=Fetcher(cfg), zoho=zoho, llm=llm, api=ApiClient(cfg))
+
+
+ROUTED_SITES = ("discovery.news", "discovery.manual_post", "discovery.studio_profile", "research.entity", "research.studio_reeval",
+                "drafting.initial", "drafting.followup", "drafting.reply", "drafting.takeover", "drafting.takeover_followup",
+                "drafting.takeover_reply", "drafting.takeover_analysis", "classification.inbound", "chat.plan")
 
 
 def selftest(cfg, what: str) -> int:
@@ -61,7 +71,7 @@ def selftest(cfg, what: str) -> int:
                 if present:
                     try:
                         schema = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
-                        out = d.llm.generate_json("Return exactly {\"ok\":true}.", "health check only", schema, fast=fast, timeout=90)
+                        out = d.llm.generate_json("Return exactly {\"ok\":true}.", "health check only", schema, fast=fast, timeout=90, site="health.ollama")
                         line(f"Ollama structured output: {model}", out.get("ok") is True)
                     except Exception as exc:
                         line(f"Ollama structured output: {model}", False, str(exc)[:180])
@@ -69,14 +79,39 @@ def selftest(cfg, what: str) -> int:
             line("ollama reachable on loopback", False, str(exc)[:180])
     if what in ("all", "gemini"):
         if not getattr(cfg, "gemini_api_key", ""):
-            print("SKIP gemini: KAIRFLOW_GEMINI_API_KEY not set (Agent Chat uses Ollama only)")
+            print("SKIP gemini: KAIRFLOW_GEMINI_API_KEY not set (every call site uses Ollama only)")
         else:
-            try:
-                schema = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
-                out = d.llm.primary.chat_json("Return exactly {\"ok\":true}.", [{"role": "user", "content": "health check only"}], schema)
-                line(f"Gemini structured output: {cfg.gemini_model}", out.get("ok") is True)
-            except Exception as exc:
-                line(f"Gemini structured output: {cfg.gemini_model}", False, str(exc)[:180])
+            # Phase 6: both checks go through the shared router (sites health.chat and health.gemini), so they exercise the real path, and a PASS
+            # means GEMINI served the call. A call the router sent to Ollama (rollback flag, cooldown, a Gemini failure) is reported as it is.
+            schema = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
+            def gemini_line(name, call):
+                try:
+                    res = call()
+                except Exception as exc:
+                    line(name, False, str(exc)[:180])
+                    return
+                if res.provider == "gemini":
+                    u = res.usage or {}
+                    line(f"{name}: {res.model}", res.data.get("ok") is True and res.finish_reason == "STOP",
+                         f"finish={res.finish_reason} tokens in/out/thinking={u.get('promptTokens')}/{u.get('outputTokens')}/{u.get('thoughtsTokens')}"
+                         f" reported_model={res.model_reported}")
+                elif res.route_reason == "forced_ollama":
+                    print(f"SKIP {name}: KAIRFLOW_AI_FORCE_OLLAMA=1 (rollback flag); Gemini was not called")
+                else:
+                    line(name, False, f"served by Ollama instead; reason={res.route_reason}")
+            gemini_line("Gemini Agent Chat planning (router)", lambda: d.llm.chat_json_ex(
+                "health.chat", "Return exactly {\"ok\":true}.", [{"role": "user", "content": "health check only"}], schema))
+            gemini_line("Gemini structured output (router)", lambda: d.llm.generate_json_ex(
+                "health.gemini", "Return exactly {\"ok\":true}.", "health check only", schema, fast=True))
+        # Routing report: where each call site goes right now (secret-free; shows D1, the policy, the rollback flag and any cooldown).
+        try:
+            st = d.llm.ai_status()
+            print(f"INFO routing: d1={st['d1']} forced_ollama={st['forced_ollama']} gemini_configured={st['gemini_configured']} gemini_block={st['gemini_block']}")
+            for site in ROUTED_SITES:
+                route, why = d.llm.router.resolve(site, "gemini_first" if site.startswith("chat.") else "ollama")
+                print(f"INFO   {site} -> {'gemini, then ollama' if route == 'gemini_first' else 'ollama'}" + (f" ({why})" if why else ""))
+        except Exception as exc:
+            print(f"INFO routing: unavailable ({type(exc).__name__})")
     if what in ("all", "supabase"):
         try:
             st = d.rpc("intel_agent_settings", {})

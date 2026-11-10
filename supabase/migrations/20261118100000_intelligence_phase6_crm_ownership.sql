@@ -53,6 +53,30 @@ create table if not exists public.intel_score_history (
   recorded_at timestamptz not null default now()
 );
 create index if not exists intel_score_history_prospect_idx on public.intel_score_history(organization_id, prospect_id, recorded_at desc);
+
+-- Immutable pre-refresh evidence versions. Re-evaluation refreshes matching evidence rows
+-- in place; retain the exact prior values so the score-history trigger can snapshot the
+-- evidence that supported the score being replaced.
+create table if not exists public.intel_evidence_versions (
+  id bigserial primary key,
+  original_evidence_id uuid not null,
+  organization_id uuid not null references public.studio_organizations(id) on delete cascade,
+  prospect_id uuid not null references public.intel_prospects(id) on delete cascade,
+  source text not null,
+  url text not null default '',
+  fact_type text not null,
+  snippet text not null default '',
+  content_hash text not null default '',
+  verified boolean not null default false,
+  fetched_at timestamptz not null,
+  original_reeval_run uuid,
+  archived_by_run uuid not null references public.intel_reeval_runs(id) on delete cascade,
+  archived_at timestamptz not null default now()
+);
+create index if not exists intel_evidence_versions_run_prospect_idx
+  on public.intel_evidence_versions(archived_by_run, prospect_id, fact_type, content_hash);
+alter table public.intel_evidence_versions enable row level security;
+revoke all on public.intel_evidence_versions from public, anon, authenticated;
 alter table public.intel_score_history enable row level security;
 revoke all on public.intel_score_history from public, anon, authenticated;
 grant select on public.intel_score_history to authenticated;
@@ -72,9 +96,10 @@ select p.organization_id, p.id, p.status, p.score, p.score_model, coalesce(p.sco
 
 create or replace function public._intel_phase6_capture_score_history() returns trigger
 language plpgsql security definer set search_path = pg_catalog, public as $$
-declare v_model text;
+declare v_model text; v_reeval_run text;
 begin
   if new.score is distinct from old.score or new.score_breakdown is distinct from old.score_breakdown then
+    v_reeval_run := nullif(new.facts -> 'estimates' ->> 'reeval_run','');
     v_model := coalesce(
       (select x ->> 'model' from jsonb_array_elements(case when jsonb_typeof(new.score_breakdown)='array' then new.score_breakdown else '[]'::jsonb end) x where x ? 'model' limit 1),
       new.facts -> 'estimates' ->> 'scoring_model',
@@ -83,8 +108,31 @@ begin
     new.score_model := v_model;
     insert into public.intel_score_history(organization_id, prospect_id, prior_status, prior_score, prior_model, prior_breakdown, prior_review_reason, evidence_snapshot, change_source, actor_user_id)
     select old.organization_id, old.id, old.status, old.score, coalesce(old.score_model,'legacy-unknown'), coalesce(old.score_breakdown,'{}'::jsonb), coalesce(old.review_reason,''),
-           coalesce((select jsonb_agg(jsonb_build_object('id',e.id,'source',e.source,'url',e.url,'fact_type',e.fact_type,'snippet',e.snippet,'verified',e.verified,'fetched_at',e.fetched_at) order by e.fetched_at)
-                       from (select * from public.intel_evidence e where e.prospect_id=old.id order by e.fetched_at desc limit 100) e), '[]'::jsonb),
+           coalesce((
+             select jsonb_agg(snap.item order by snap.fetched_at)
+               from (
+                 select candidate.item, candidate.fetched_at
+                   from (
+                     -- Rows refreshed by this run are represented by their archived pre-run
+                     -- versions, never by the newly fetched values.
+                     select jsonb_build_object('id',v.original_evidence_id,'source',v.source,'url',v.url,'fact_type',v.fact_type,
+                                               'snippet',v.snippet,'verified',v.verified,'fetched_at',v.fetched_at) as item,
+                            v.fetched_at
+                       from public.intel_evidence_versions v
+                      where v.prospect_id=old.id and v.archived_by_run::text=v_reeval_run
+                     union all
+                     -- Untouched rows remain exactly as they were; evidence first added by
+                     -- this run is excluded because it did not support the prior score.
+                     select jsonb_build_object('id',e.id,'source',e.source,'url',e.url,'fact_type',e.fact_type,
+                                               'snippet',e.snippet,'verified',e.verified,'fetched_at',e.fetched_at) as item,
+                            e.fetched_at
+                       from public.intel_evidence e
+                      where e.prospect_id=old.id
+                        and (v_reeval_run is null or e.reeval_run::text is distinct from v_reeval_run)
+                   ) candidate
+                  order by candidate.fetched_at desc limit 100
+               ) snap
+           ), '[]'::jsonb),
            case when coalesce(new.facts -> 'estimates' ->> 'reeval_run','') <> '' then 'reevaluation' else 'score_update' end,
            auth.uid();
   end if;
@@ -114,8 +162,11 @@ begin
     begin
       select * into v_history from public.intel_lead_history where id=(new.takeover ->> 'history_id')::uuid and organization_id=new.organization_id;
       if not found then raise exception 'takeover history record not found'; end if;
-      new.takeover_actor := coalesce(auth.uid(),v_history.created_by);
-      new.takeover_at := coalesce(v_history.created_at,now());
+      -- Attribute the takeover to the administrator who created this exact history
+      -- record. The current auth.uid() may be a different administrator performing a
+      -- later edit or removal, and must not rewrite historical provenance.
+      new.takeover_actor := v_history.created_by;
+      new.takeover_at := v_history.created_at;
       new.origin_detail := coalesce(new.origin_detail,'{}'::jsonb) || jsonb_build_object('kind','taken_over','history_id',v_history.id,'actor_id',new.takeover_actor,'taken_over_at',new.takeover_at);
     exception when invalid_text_representation then
       raise exception 'invalid takeover history id';
@@ -173,10 +224,23 @@ begin
       from (select prior_model model,count(*) n from public.intel_score_history where organization_id=v_org group by prior_model) q),'[]'::jsonb),
     'origin_counts', coalesce((select jsonb_agg(jsonb_build_object('origin',q.origin,'kind',q.kind,'count',q.n) order by q.origin,q.kind)
       from (select origin,coalesce(origin_detail->>'kind','unknown') kind,count(*) n from public.intel_prospects where organization_id=v_org group by origin,coalesce(origin_detail->>'kind','unknown')) q),'[]'::jsonb),
-    'pre_outreach_studio_candidates', (select count(*) from public.intel_prospects p where p.organization_id=v_org and p.type='animation_studio_support' and p.origin='discovered'
-      and p.status in ('rejected','needs_review','qualified','lead_linked')
-      and not exists(select 1 from public.intel_messages m where m.prospect_id=p.id)
-      and not exists(select 1 from public.intel_lead_history h where h.prospect_id=p.id)),
+    -- Match the default pilot selector, not the broader pre-outreach population.
+    -- This prevents the administrator inventory from counting records that the
+    -- re-evaluation start function will reject or silently omit.
+    'pre_outreach_studio_candidates', (select count(*) from public.intel_prospects p
+      where p.organization_id=v_org and p.type='animation_studio_support' and p.origin='discovered'
+        and p.status in ('rejected','needs_review','qualified','lead_linked')
+        and ((p.lead_id is null and not exists(select 1 from public.leads l where l.intel_prospect_id=p.id))
+          or (p.lead_id is not null and exists(select 1 from public.leads l where l.id=p.lead_id and l.intel_prospect_id=p.id)))
+        and not exists(select 1 from public.intel_messages m where m.prospect_id=p.id)
+        and not exists(select 1 from public.intel_lead_history h where h.prospect_id=p.id)
+        and not exists(select 1 from public.intel_actions a where a.organization_id=v_org and a.action='review_prospect_reject'
+          and a.entity_type='prospect' and a.entity_id=p.id::text)
+        and not exists(select 1 from public.intel_suppressions s where s.organization_id=v_org and (
+          (s.kind='domain' and s.value in (coalesce(p.domain,''),coalesce(public.intel_domain_of(coalesce(p.website,'')),'')))
+          or (s.kind='email' and (s.value=coalesce(public.intel_norm_email(p.contact_email),'')
+            or (coalesce(public.intel_norm_email(p.contact_email),'')<>'' and coalesce(public.intel_norm_email(p.contact_email),'') like '%@'||s.value)))))
+        and not exists(select 1 from public.intel_reeval_items i where i.prospect_id=p.id and i.state='scored')),
     'score_history_rows', (select count(*) from public.intel_score_history where organization_id=v_org)
   );
 end $$;

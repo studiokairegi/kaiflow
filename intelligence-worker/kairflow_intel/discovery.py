@@ -5,15 +5,43 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 
+from .ai_call import call_json
 from . import anilist, commoncrawl, entity, feeds, gdelt, manual_post, profile, signals, siteanalysis, wikidata
 from .errors import PermanentError, TransientError
-from .safety import norm
+from .safety import name_in_text, norm
 
 ITEM_SOURCE = {"credit_link": "site_crawler"}
 NEWS_SCHEMA = {"type": "object", "required": ["items"], "properties": {"items": {"type": "array", "items": {"type": "object", "required": ["index", "organization"],
                "properties": {"index": {"type": "integer", "minimum": 0, "maximum": 99}, "organization": {"type": ["string", "null"], "maxLength": 100}}}}}}
 NEWS_INSTRUCTION = ("Each numbered line is a news headline. For each, give the animation studio or production company it is about, exactly as written in the headline, "
                     "or null if none is named. Do not guess.")
+
+
+_NEWS_CACHE_TTL, _NEWS_CACHE_MAX = 6 * 3600, 64
+
+
+def _news_extract(d, lang: str, text: str):
+    """Ask the model about these numbered headlines. The answer is remembered on the llm object for a few hours, so a retried job (one query
+    answered, a later one failed) does not spend Gemini quota again on headlines it already answered."""
+    cache = d.llm.__dict__.get("_news_cache") if hasattr(d.llm, "__dict__") else None
+    if cache is None:
+        cache = {}
+        try:
+            d.llm._news_cache = cache
+        except Exception:
+            pass
+    now = d.clock()
+    key = (lang, text)
+    hit = cache.get(key)
+    if hit and hit[0] > now:
+        return hit[1], hit[2]
+    data, ai = call_json(d.llm, "discovery.news", NEWS_INSTRUCTION, text, NEWS_SCHEMA, fast=True)
+    for k in [k for k, v in cache.items() if v[0] <= now]:
+        del cache[k]
+    while len(cache) >= _NEWS_CACHE_MAX:
+        cache.pop(next(iter(cache)))
+    cache[key] = (now + _NEWS_CACHE_TTL, data, ai)
+    return data, ai
 
 
 def _enq(d, kind, payload, key, delay=0):
@@ -166,12 +194,15 @@ def h_news_scan(d, job):
             raise
         if not arts:
             continue
-        found = d.llm.generate_json(NEWS_INSTRUCTION, "\n".join(f"{i}. {a['title']}" for i, a in enumerate(arts)), NEWS_SCHEMA, fast=True)
+        # Only the numbered headlines leave the machine on the Gemini path: no URLs, domains, dates, credentials or internal IDs.
+        for a in arts:
+            a["title"] = " ".join(str(a.get("title") or "").split())      # one line per headline, so a newline cannot fake a numbered entry
+        found, ai = _news_extract(d, lang, "\n".join(f"{i}. {a['title']}" for i, a in enumerate(arts)))
         for it in found["items"]:
             if not (0 <= it["index"] < len(arts)):
                 continue
             a, org = arts[it["index"]], (it.get("organization") or "").strip()
-            if not org or norm(org) not in norm(a["title"]):
+            if not org or not name_in_text(org, a["title"]):
                 continue              # the model must quote the headline; otherwise it is ignored
             hit = _site_for(d, avail, org)
             pid = None
@@ -179,7 +210,7 @@ def h_news_scan(d, job):
                 pid, created = ingest(d, ptype, {"name": hit["name"], "website": hit["website"], "meta": {"source": "gdelt", "wikidata": hit["wikidata"]}}, "gdelt")
                 n_new += 1 if created else 0
             d.rpc("intel_agent_record_item", {"p_source": "gdelt", "p_type": "news", "p_url": a["url"], "p_title": a["title"], "p_snippet": org, "p_language": lang, "p_prospect_id": pid,
-                                              "p_meta": {"domain": a["domain"], "seen": a["seen"], "attribution": gdelt.ATTRIBUTION}})
+                                              "p_meta": {"domain": a["domain"], "seen": a["seen"], "attribution": gdelt.ATTRIBUTION, "ai": ai}})
     return {"new": n_new}
 
 
@@ -242,20 +273,27 @@ def h_manual_post(d, job):
     item = d.rpc("intel_agent_item", {"p_item_id": job["payload"]["item_id"]})
     if not item:
         raise PermanentError("post not found")
-    llm = lambda text: d.llm.generate_json(manual_post.INSTRUCTION, text, manual_post.SCHEMA, fast=True)
-    return manual_post.analyze(d, item, job["payload"].get("type", "animation_studio_support"), llm, d.api)
+    ai: dict = {}                                    # filled when the model is actually asked (not for posts the deterministic check settles)
+
+    def llm(text):
+        data, prov = call_json(d.llm, "discovery.manual_post", manual_post.INSTRUCTION, text, manual_post.SCHEMA, fast=True)
+        ai.update(prov)
+        return data
+    out = manual_post.analyze(d, item, job["payload"].get("type", "animation_studio_support"), llm, d.api, ai_info=ai)
+    return {**out, "ai": dict(ai)} if ai else out
 
 
 def h_profile_terms(d, job):
     ptype = job["payload"].get("type", "animation_studio_support")
     desc = ((_criteria(d, ptype).get("profile") or {}).get("description") or "").strip()
     base = profile.DEFAULT_TERMS[ptype]
+    ai, starter = None, False
     try:
-        out = d.llm.generate_json(profile.INSTRUCTION, desc or "animation studios that outsource work", profile.SCHEMA, fast=False)
+        out, ai = call_json(d.llm, "discovery.studio_profile", profile.INSTRUCTION, desc or "animation studios that outsource work", profile.SCHEMA, fast=False)
         terms = {"terms_en": profile.clean(out["terms_en"]), "terms_ja": profile.clean(out["terms_ja"]), "exclude": profile.clean(out["exclude"])}
         if not terms["terms_en"] and not terms["terms_ja"]:
             raise TransientError("empty proposal")
     except (TransientError, PermanentError):
-        terms = base                                 # model unavailable: the built-in starter terms (still need your approval)
+        terms, ai, starter = base, None, True        # model unavailable: the built-in starter terms (still need your approval)
     d.rpc("intel_agent_propose_terms", {"p_type": ptype, "p_terms_en": terms["terms_en"], "p_terms_ja": terms["terms_ja"], "p_exclude": terms["exclude"]})
-    return {"proposed": True}
+    return {"proposed": True, "ai": ai} if ai else {"proposed": True, **({"starter_terms": True} if starter else {})}

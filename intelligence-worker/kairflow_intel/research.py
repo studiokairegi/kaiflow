@@ -13,8 +13,9 @@ from bs4 import BeautifulSoup
 
 from . import contactability, scoring, signals
 from .errors import PermanentError, TransientError
+from .ai_call import call_json
 from .ollama import validate
-from .safety import extract_emails, html_to_text, quote_in_text
+from .safety import extract_emails, html_to_text, quote_in_text_cjk, role_near_name
 
 PAGE_HINT = re.compile(r"portfolio|works|productions?|projects?|animation|services?|2d|anime|studio|profile|about|company|clients?|partners?|process|contact|business|career|recruit|job|press|news|team|採用|求人|募集|お問い合わせ|会社|作品|実績|制作|事業|業務|会社概要", re.I | re.U)
 PAGE_LIMIT = 8
@@ -27,13 +28,19 @@ def _page_rank(url: str, anchor: str) -> tuple[int, str]:
     if re.search(r"contact|business|お問い合わせ|ご依頼", value): return (3, url)
     if re.search(r"career|recruit|job|採用|求人|募集", value): return (4, url)
     return (5, url)
-ENTITY_SCHEMA = {"type": "object", "required": ["language", "contact_name", "contact_role"], "properties": {
-    "language": {"type": "string", "enum": ["en", "ja", "other"]},
-    "country_hint": {"type": ["string", "null"], "maxLength": 60},
+# Only the contact is asked for. The site language is decided from the pages themselves (_validated_language) and the country is never stored
+# (the prospect upsert keeps the existing country), so asking the model for either would only cost output tokens.
+ENTITY_SCHEMA = {"type": "object", "required": ["contact_name", "contact_role"], "properties": {
     "contact_name": {"type": ["string", "null"], "maxLength": 80},
     "contact_role": {"type": ["string", "null"], "maxLength": 80}}}
-ENTITY_INSTRUCTION = ("From the page text, give: the main language of the site (en, ja or other); the country if stated; and, ONLY if a specific person "
-                      "responsible for business enquiries, production or recruitment is named, their name and role. Otherwise null. Do not guess.")
+ENTITY_INSTRUCTION = ("From the page text, ONLY if a specific person responsible for business enquiries, production or recruitment is named, give their name "
+                      "and role exactly as written on the page, with the role as written next to that person's name. Otherwise null. Do not guess.")
+
+
+def entity_llm(llm, site: str):
+    """The model call used by research and by the studio reevaluation: routed (Gemini first, Ollama fallback) when `llm` is the AI router,
+    plain Ollama otherwise. Returns (data, provenance). Only the public page text is sent; the instruction and schema are fixed."""
+    return lambda text: call_json(llm, site, ENTITY_INSTRUCTION, text, ENTITY_SCHEMA, fast=True)
 
 
 def _h(s: str) -> str:
@@ -72,7 +79,7 @@ def _page_language(html: str) -> str | None:
 
 
 def _validated_language(model_value, pages) -> str:
-    # Explicit HTML lang on the homepage is authoritative; then use page text; the optional model is last resort.
+    # Explicit HTML lang is authoritative; then the page text. The model's answer (model_value) is deliberately ignored: it is unverified.
     for _, html in pages:
         soup = BeautifulSoup(html, "lxml")
         raw = (soup.html.get("lang") or "").strip().lower() if soup.html else ""
@@ -139,15 +146,20 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
     preset = (p.get("contact_email") or "")
     contact = choose_contact(emails, p["domain"], preset if p["type"] == "indie_game_developer" else "")
 
-    ent = {"language": None, "country_hint": None, "contact_name": None, "contact_role": None}
+    ent = {"contact_name": None, "contact_role": None}
+    ai_extraction = {"status": "ok", "provider": "unrecorded"}          # provenance of the model's extraction; stored with the prospect, never read by scoring
     try:
         model_ent = llm(text[:9000])
+        if isinstance(model_ent, tuple) and len(model_ent) == 2:         # (data, provenance) from entity_llm
+            model_ent, prov = model_ent
+            ai_extraction = {"status": "ok", **(prov if isinstance(prov, dict) else {})}
         if isinstance(model_ent, dict): ent = {**ent, **model_ent}
-    except (TransientError, PermanentError, ValueError, TypeError):
-        pass
+    except (TransientError, PermanentError, ValueError, TypeError) as exc:
+        ai_extraction = {"status": "unavailable", "error": type(exc).__name__}     # both providers failed (or no model): deterministic extraction only
     language = _validated_language(ent.get("language"), pages)
-    name = ent.get("contact_name") if ent.get("contact_name") and quote_in_text(ent["contact_name"], text, min_len=4) else None
-    role = ent.get("contact_role") if name and ent.get("contact_role") and quote_in_text(ent["contact_role"], text, min_len=3) else None
+    name = ent.get("contact_name") if ent.get("contact_name") and quote_in_text_cjk(ent["contact_name"], text, min_len=4) else None
+    role = (ent.get("contact_role") if name and ent.get("contact_role") and quote_in_text_cjk(ent["contact_role"], text, min_len=3)
+            and role_near_name(name, ent["contact_role"], text) else None)
 
     for sig, evidence_rows in found.items():
         for sent, url in evidence_rows:
@@ -166,7 +178,7 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
     src = next((e["url"] for e in emails if contact and e["email"] == contact["email"]), "") if website_verified else ""
     if website_verified:
         add_evidence(src, "contact_email", contact["email"], _h(contact["email"]))
-    verified = {"signals": sorted(found), "language": language, "contact_role": role or "", "pages_read": len(pages)}
+    verified = {"signals": sorted(found), "language": language, "contact_role": role or "", "pages_read": len(pages), "ai_extraction": ai_extraction}
     if contact and contact.get("how") == "store" and p["type"] == "indie_game_developer":
         src = p.get("contact_source_url") or ""
         verified.update({"contact_verification": "store_listing", "contact_email": contact["email"], "contact_source_url": src})
@@ -198,7 +210,7 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
                                                    "p_contact_email": contact["email"] if contact and not existing else "", "p_contact_source_url": (src if website_verified else "")})
         return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "contactability": contact_assessment, "pages": len(pages), "text_chars": len(text)}
     rpc("intel_agent_upsert_prospect", {"p_type": p["type"], "p_name": p["name"], "p_website": p["website"], "p_contact_name": name or "", "p_contact_email": contact["email"] if contact and not existing else "",
-                                        "p_contact_source_url": (src if website_verified else ""), "p_country": ent.get("country_hint") or "", "p_language": language, "p_verified": verified})
+                                        "p_contact_source_url": (src if website_verified else ""), "p_country": "", "p_language": language, "p_verified": verified})
     return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "contactability": contact_assessment, "pages": len(pages), "text_chars": len(text)}
 
 

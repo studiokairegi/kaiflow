@@ -25,6 +25,7 @@ class DeliveryEventTests(unittest.TestCase):
             "email.delivered": "delivered",
             "delivery_delayed": "delayed",
             "hard_bounce": "bounced",
+            "soft_bounce": "delayed",
             "email.complained": "complained",
             "email.failed": "failed",
             "message.sent": "accepted",
@@ -43,6 +44,10 @@ class DeliveryEventTests(unittest.TestCase):
 
     def test_explicit_event_type_wins_over_conflicting_adapter_status(self):
         self.assertEqual(normalize_status("email.bounced", "delivered"), "bounced")
+
+    def test_explicit_soft_bounce_status_overrides_generic_bounced_event_name(self):
+        self.assertEqual(normalize_status("email.bounced", "soft_bounce"), "delayed")
+        self.assertEqual(normalize_status("email.bounced", "hard_bounce"), "bounced")
 
     def test_rejects_unknown_event_status(self):
         with self.assertRaisesRegex(ValueError, "unsupported"):

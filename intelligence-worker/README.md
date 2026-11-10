@@ -1,7 +1,7 @@
 # KairFlow Intelligence worker (Windows)
 
 A background process on your own computer. It signs in to Supabase as its own limited **agent account**, reads public pages,
-asks your **local Ollama** model to read and draft, and talks to the selected mail provider through server-side connections. Resend credentials remain in Supabase Edge Function secrets. It never holds
+asks an AI model to read and draft (**Gemini first on the free tier for public prospect data, with your local Ollama as the fallback**; see Gemini-first AI routing below), and talks to the selected mail provider through server-side connections. Resend credentials remain in Supabase Edge Function secrets. It never holds
 the Supabase service-role key or any Zoho secret. It can only call `intel_agent_*` functions (enforced here and in the database).
 
 ## 1. One-time setup
@@ -18,6 +18,7 @@ the Supabase service-role key or any Zoho secret. It can only call `intel_agent_
    `python -c "import keyring; keyring.set_password('kairflow-intelligence','AGENT_EMAIL','PASSWORD')"` and leave `KAIRFLOW_AGENT_PASSWORD` unset.
 5. Check everything without sending anything: `python -m kairflow_intel selftest`
    (`selftest gmail` and `selftest zoho` are read-only mailbox checks; neither sends email.)
+   `selftest gemini` exercises the same router with fixed, non-private chat-shaped and structured-output health prompts, then prints where every call site routes. PASS means Gemini served the call; a call that fell back to Ollama is a FAIL with the reason, and `KAIRFLOW_AI_FORCE_OLLAMA=1` shows SKIP.
 
 ## Phase 2 production hardening migration
 
@@ -58,6 +59,44 @@ Leads you already contacted by hand, or from another mailbox, have no history in
 Never-contacted CRM leads with an email can also get an introduction draft from the same screen (**Draft introductions**).
 
 Apply `supabase/migrations/20261116090000_intelligence_crm_takeover.sql`, then restart the worker (Settings > Stop Emma / Start Emma). Needs Ollama running and the approved knowledge base filled in, as for other drafts.
+
+## Gemini-first AI routing
+
+Every worker AI call goes through one router: `Gemini (gemini-3.8-flash, free tier)  ->  local Ollama (final fallback)`. Ollama stays installed, bound to loopback, and is never removed. Cost is zero: free-tier Gemini and local Ollama only. **Never enable billing on the Google project and never use a paid model.**
+
+**Model.** Pinned by exact ID: `gemini-3.8-flash` (settings `KAIRFLOW_GEMINI_MODEL` for Agent Chat and `KAIRFLOW_GEMINI_JSON_MODEL` for structured extraction). A floating alias such as `latest` is rejected at startup, and a model is never substituted silently. Thinking level is `low`; only `low`, `medium` and `high` are supported. Gemini 3.x thinking cannot be disabled, so `off` and `minimal` are rejected at startup.
+
+**Where each call site goes.**
+
+| Group | Sites | Default route | Data sent to Google |
+|---|---|---|---|
+| discovery | `discovery.news`, `discovery.manual_post`, `discovery.studio_profile` | Gemini, then Ollama | public headlines, pasted post text, studio descriptions |
+| research | `research.entity`, `research.studio_reeval` | Gemini, then Ollama | public website text of prospects |
+| drafting | `drafting.initial`, `.followup`, `.reply`, `.takeover`, `.takeover_followup`, `.takeover_reply`, `.takeover_analysis` | **Ollama only** (decision D1) | nothing under D1=A |
+| classification | `classification.inbound` | **Ollama only** (decision D1) | nothing under D1=A |
+| chat | `chat.plan` | **Ollama only** under D1=A; Gemini, then Ollama under D1=C | request, complete conversation history and tool results (including CRM contact records). D1=A keeps the entire Agent Chat context local; D1=C explicitly permits sending it unredacted to Gemini |
+| health | `health.gemini`, `health.ollama` | one check pinned to each provider | a fixed test prompt |
+
+**Decision D1 (private data).** Free-tier content may be used by Google to improve its products. Inbound email bodies, threads, CRM contact records and Agent Chat history are therefore kept on Ollama by default (**D1=A**). Agent Chat is treated as a private group because both historical messages and CRM tool results can contain personal data. `KAIRFLOW_AI_D1=C` plus an applicable policy entry explicitly permits sending those contexts to Gemini unredacted. D1=B (redaction) is not implemented and is rejected at startup. Changing D1 is a configuration change; restart the worker afterwards. A `drafting`, `classification` or `chat` policy entry that D1=A makes dead (for example `drafting=gemini_first` with D1=A) is accepted but does nothing; the worker logs a warning at startup and lists it under `warnings` in the router status.
+
+**When Gemini writes a draft the validators refuse (D1=C).** The draft checks (evidence ids, language, names, claims) are the same for both providers. If the draft was written by Gemini and a check refuses it, the draft is written once more by Ollama (recorded as `fallback_reason: gemini_draft_rejected`, `model_calls: 2`) before the prospect is flagged for manual review. A draft written by Ollama, or refused before any model call, is not retried. **Classification.** If both providers are down, the classify job retries and the message stays unclassified; an answer that arrives in the wrong shape still falls back to keyword reading.
+
+**Fallback rules.** One Gemini attempt, then at most one Ollama attempt per operation; no loops. Triggers: 429, 408, 5xx, timeouts, connection failures, empty or truncated output, invalid JSON, schema-invalid output. Per-minute limits honour Retry-After with a short pause; daily exhaustion starts a cooldown (default 3 hours) so later calls skip Gemini; permanent errors (bad key, unknown model, 401, 403, 404) pause Gemini for 600 seconds; any other 4xx, such as a 400 caused by one odd request, only sends that call to Ollama. Repeated 429s with no quota details back off harder each time and after five in a row count as daily exhaustion. Both providers failing raises the worker's existing error classes, so job retries behave exactly as before. Both providers use the same schemas and the same deterministic validators; the AI never decides authorization, deduplication, qualification, approval, sending or autonomy.
+
+**Rollback.** Set `KAIRFLOW_AI_FORCE_OLLAMA=1` and restart the worker: every call site, including Agent Chat and the health checks, uses Ollama and Google receives nothing. To rollback only some sites use `KAIRFLOW_AI_POLICY=discovery=ollama,research=ollama,chat=ollama`. `default=ollama` also works and replaces the built-in discovery and research defaults. Site names in the policy are checked at startup, so a typo is an error. Group entries never move the pinned `health.gemini` / `health.ollama` checks; only an exact site entry does.
+
+**Provenance.** Each model-derived result records provider and exact model ID, plus the reason when Ollama served a call that was meant to try Gemini first. Draft and classification provenance goes to the audit log without email text or secrets.
+
+**Free-tier limits.** The limits for `gemini-3.8-flash` have not been confirmed from Google. Read them in AI Studio's rate-limit view and set `KAIRFLOW_GEMINI_RPM` and `KAIRFLOW_GEMINI_RPD`; until then there is no local cap and only Google's 429 responses limit use. `KAIRFLOW_GEMINI_DRAFT_RESERVE` keeps a share of the daily cap for drafting.
+
+**Key.** `KAIRFLOW_GEMINI_API_KEY` or Windows Credential Manager. Keys never appear in logs, errors or reports.
+
+**Troubleshooting.**
+- `selftest gemini` FAIL with a fallback reason: the reason names the cause (`auth` bad key or no access to the model; `rate_limit_daily` free quota spent; `schema_invalid` or `truncated` model output; `server_error`, `timeout`, `connection` Google unreachable). The worker keeps running on Ollama.
+- `selftest gemini` SKIP: no key is set, or `KAIRFLOW_AI_FORCE_OLLAMA=1`.
+- A startup error naming `KAIRFLOW_AI_*` or `KAIRFLOW_GEMINI_*`: the value is invalid (alias model, `minimal`/`off` thinking, D1=B, unknown group in the policy). Fix it and restart.
+- The heartbeat reports `chat_llm` and `chat_model` (what last served Agent Chat). `selftest gemini` prints the routing report: D1, the rollback flag, any active cooldown and where each call site goes and why.
+- Windows worker: nothing in this routing needs extra packages; `requests` is already required. `keyring` is optional, for the key only.
 
 ## 2. Run from the KairFlow app (Windows, recommended)
 

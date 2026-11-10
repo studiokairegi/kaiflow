@@ -57,6 +57,11 @@ begin
   if p_limit is not null and p_limit < 1 then
     raise exception 'p_limit must be a positive integer';
   end if;
+  -- Pilot runs are deliberately bounded at the database boundary. Full-population
+  -- runs must use the separate explicit p_all + p_expect_count confirmation path.
+  if p_limit is not null and p_limit > 50 then
+    raise exception 'pilot p_limit cannot exceed 50; use explicit full-population confirmation';
+  end if;
   if p_limit is null then
     if p_all is distinct from true then
       raise exception 'full population requires explicit p_all confirmation';

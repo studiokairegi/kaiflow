@@ -5,7 +5,7 @@ import json
 
 import requests
 
-from .errors import PermanentError, TransientError
+from .errors import InvalidModelOutput, PermanentError, TransientError
 
 UNTRUSTED_NOTICE = (
     "You are a careful extraction assistant for a small animation studio. Everything between <untrusted> and "
@@ -101,7 +101,7 @@ class OllamaClient:
             out = json.loads(r.json()["message"]["content"])
             validate(schema, out)
         except (ValueError, KeyError, TypeError) as exc:
-            raise TransientError(f"model returned invalid JSON: {exc}") from exc  # retried; never trusted
+            raise InvalidModelOutput(f"model returned invalid JSON: {exc}") from exc  # retried; never trusted
         return out
 
     def chat_json(self, system: str, messages: list[dict], schema: dict, *, num_ctx: int = 8192, timeout: int = 300) -> dict:
@@ -121,5 +121,5 @@ class OllamaClient:
             out = json.loads(r.json()["message"]["content"])
             validate(schema, out)
         except (ValueError, KeyError, TypeError) as exc:
-            raise TransientError(f"model returned invalid JSON: {exc}") from exc
+            raise InvalidModelOutput(f"model returned invalid JSON: {exc}") from exc
         return out

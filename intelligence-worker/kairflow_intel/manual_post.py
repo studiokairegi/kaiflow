@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from . import classify_org, entity, wikidata
 from .errors import PermanentError, TransientError
-from .safety import norm, quote_in_text
+from .safety import name_in_text, norm, quote_in_text
 
 URL = re.compile(r"https?://[^\s<>\"')\]]+", re.I)
 SCHEMA = {"type": "object", "required": ["organization", "recruiting_for_studio"], "properties": {
@@ -30,7 +30,7 @@ def external_sites(text: str) -> list[str]:
     return out
 
 
-def analyze(d, item: dict, ptype: str, llm, api) -> dict:
+def analyze(d, item: dict, ptype: str, llm, api, ai_info: dict | None = None) -> dict:
     text = ((item.get("meta") or {}).get("text") or item.get("snippet") or "")[:4000]
     url = item.get("url") or ""
     verdict = classify_org.classify(text)
@@ -38,14 +38,14 @@ def analyze(d, item: dict, ptype: str, llm, api) -> dict:
         d.rpc("intel_agent_record_item", {"p_source": "x_manual", "p_type": "manual_post", "p_url": url, "p_title": "", "p_snippet": text[:500], "p_language": "", "p_prospect_id": None,
                                           "p_meta": {"result": "individual", "reasons": verdict["reasons"], "text": text}})
         return {"result": "individual"}
-    org = None
+    org, model_failed = None, False
     try:
         out = llm(text)
         cand = (out.get("organization") or "").strip()
-        if cand and (norm(cand) in norm(text)) and out.get("recruiting_for_studio"):
+        if cand and name_in_text(cand, text) and out.get("recruiting_for_studio"):
             org = cand
     except (TransientError, PermanentError):
-        pass
+        model_failed = True
     sites = external_sites(text)
     site = sites[0] if sites else ""
     if not site and org:
@@ -55,13 +55,15 @@ def analyze(d, item: dict, ptype: str, llm, api) -> dict:
         except (TransientError, PermanentError):
             site = ""
     if not (org or site):
+        if model_failed:      # an outage is not a verdict: let the job retry instead of recording the post as "no studio" for good
+            raise TransientError("model unavailable; post not analysed yet")
         d.rpc("intel_agent_record_item", {"p_source": "x_manual", "p_type": "manual_post", "p_url": url, "p_title": "", "p_snippet": text[:500], "p_language": "", "p_prospect_id": None,
-                                          "p_meta": {"result": "no_studio_found", "text": text}})
+                                          "p_meta": {"result": "no_studio_found", "text": text, **({"ai": dict(ai_info)} if ai_info else {})}})
         return {"result": "no_studio_found"}
     from .discovery import ingest
     pid, _ = ingest(d, ptype, {"name": org or entity.registrable_domain(site), "website": site, "meta": {"source": "x_manual", "x_post_url": url, "verified_by": "administrator"}}, via="x_manual")
     if pid:
         d.rpc("intel_agent_add_evidence", {"p_prospect_id": pid, "p_source": "x_manual", "p_url": url, "p_fact_type": "manual_post", "p_snippet": text[:600], "p_content_hash": norm(text)[:40] or "post", "p_verified": True})
         d.rpc("intel_agent_record_item", {"p_source": "x_manual", "p_type": "manual_post", "p_url": url, "p_title": org or "", "p_snippet": text[:500], "p_language": "", "p_prospect_id": pid,
-                                          "p_meta": {"result": "studio", "text": text}})
+                                          "p_meta": {"result": "studio", "text": text, **({"ai": dict(ai_info)} if ai_info else {})}})
     return {"result": "studio", "prospect_id": pid}

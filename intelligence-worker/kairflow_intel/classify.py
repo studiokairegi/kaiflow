@@ -3,6 +3,7 @@ The model can only choose among the allowed labels, and it can never downgrade a
 from __future__ import annotations
 
 from . import policy
+from .errors import InvalidModelOutput, TransientError
 
 LABELS = ["positive", "meeting_request", "pricing", "negotiation", "portfolio_request", "project_opportunity", "rejection", "unsubscribe", "ambiguous", "complaint", "other"]
 SCHEMA = {"type": "object", "required": ["label", "confidence", "summary"], "properties": {
@@ -14,7 +15,12 @@ MIN_CONFIDENCE = 0.7
 
 
 def classify(msg: dict, own_addresses: set[str], llm=None) -> dict:
-    """Returns {class, confidence, escalate, summary, related_email, auto_ok}. `llm` is a callable(subject, body)->dict or None."""
+    """Returns {class, confidence, escalate, summary, related_email, auto_ok}. `llm` is a callable(subject, body)->dict or None.
+
+    A model OUTAGE (TransientError: Ollama and, under D1=C, Gemini both unavailable) is raised, not read as "no label": the caller leaves the message
+    pending and the job retries, so a positive or portfolio reply is not saved for good as a keyword-guessed `ambiguous`. A model that ANSWERS badly
+    (InvalidModelOutput, or any other error) still falls back to the conservative keyword reading: retrying the same request would give the same
+    answer, and one such message must not block the ones behind it."""
     subject, body, frm = msg.get("subject", ""), msg.get("body_text", ""), msg.get("from_email", "")
     if policy.is_bounce(frm, subject):
         rel, perm = policy.bounce_details(body, own_addresses)
@@ -36,6 +42,10 @@ def classify(msg: dict, own_addresses: set[str], llm=None) -> dict:
         try:
             out = llm(subject, policy.first_unquoted(body))
             label, conf, summary = out["label"], float(out["confidence"]), out.get("summary", "")
+        except InvalidModelOutput:
+            label = None
+        except TransientError:
+            raise
         except Exception:
             label = None
     if label is None:  # model unavailable or invalid: fall back to simple keyword reading, conservatively

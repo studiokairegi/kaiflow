@@ -4,6 +4,7 @@ from __future__ import annotations
 import ipaddress
 import codecs
 import re
+import unicodedata
 import socket
 import time
 import urllib.robotparser
@@ -296,6 +297,64 @@ def extract_emails(html: str) -> list[dict]:
 
 def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").lower()).strip()
+
+
+GENERIC_NAME_WORDS = frozenset({"studio", "studios", "animation", "animations", "anime", "production", "productions", "company", "games", "game", "inc", "ltd",
+                                "co", "corp", "group", "media", "works", "pictures", "film", "films", "team", "staff", "japan", "スタジオ", "アニメ", "制作", "会社", "株式会社", "アニメーション"})
+
+
+def fold(s: str) -> str:
+    """Comparable form for checking a model-supplied name against the source text: NFKC (full-width and half-width forms match), lower case, one space."""
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s or "").lower()).strip()
+
+
+def name_in_text(name: str, text: str) -> bool:
+    """A model-supplied organization name counts only if it literally appears in the text it was read from. Too-short and generic names
+    ("a", "Studio") would match almost any text, so they never count."""
+    n = fold(name)
+    if len(n) < (2 if any(ord(c) > 0x2FF for c in n) else 3) or n in GENERIC_NAME_WORDS:
+        return False
+    return n in fold(text)
+
+
+def _has_cjk(s: str) -> bool:
+    return any(0x3040 <= ord(c) <= 0x30FF or 0x3400 <= ord(c) <= 0x9FFF or 0xFF66 <= ord(c) <= 0xFF9F for c in s)
+
+
+def _compact(s: str, cjk: bool) -> str:
+    """fold(), and for CJK text also drop all spaces: Japanese names are written both as "山田 太郎" and "山田太郎"."""
+    f = fold(s)
+    return re.sub(r"\s+", "", f) if cjk else f
+
+
+def quote_in_text_cjk(quote: str, text: str, min_len: int = 4, cjk_min: int = 2) -> bool:
+    """quote_in_text for names and roles: NFKC-folded, space-insensitive for CJK, and a shorter minimum for CJK (two characters can be a whole
+    name or title: 社長, 佐藤), where `min_len` characters would drop almost every Japanese contact."""
+    cjk = _has_cjk(quote)
+    q = _compact(quote, cjk)
+    return len(q) >= (cjk_min if cjk else min_len) and q in _compact(text, cjk)
+
+
+def role_near_name(name: str, role: str, text: str) -> bool:
+    """True only if the role is written with THIS person: on the same line as the name, or on the line directly next to a line that holds
+    nothing but the name (or, the other way round, nothing but the role). A role that merely appears elsewhere on the page belongs to someone
+    else, so it must not be attached to the contact."""
+    cjk = _has_cjk(name) or _has_cjk(role)
+    n, r = _compact(name, cjk), _compact(role, cjk)
+    if not n or not r:
+        return False
+    lines = [_compact(x, cjk) for x in (text or "").splitlines()]
+    for i, line in enumerate(lines):
+        if n not in line:
+            continue
+        if r in line:
+            return True
+        if len(line) <= len(n) + 6:                                   # the line is just the name: the role sits on the neighbouring line
+            if i + 1 < len(lines) and r in lines[i + 1]:
+                return True
+            if i > 0 and r in lines[i - 1] and len(lines[i - 1]) <= len(r) + 6:
+                return True
+    return False
 
 
 def quote_in_text(quote: str, text: str, min_len: int = 12) -> bool:

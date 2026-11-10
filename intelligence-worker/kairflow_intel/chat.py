@@ -113,6 +113,36 @@ SYSTEM = (
 )
 
 
+_INBOUND_TEXT_KEYS = ("summary", "last_summary")          # model-written summary of a stranger's reply
+_MESSAGE_TEXT_KEYS = ("summary", "subject")               # per-message text in prospect_detail: a reply's summary and subject, our own draft subjects
+
+
+def scrub_private(tool: str, res):
+    """A copy of a tool result without the text that comes from private correspondence: the summary of each inbound reply (opportunities,
+    prospect_detail) and each message's subject. Labels, states, counts, names and dates stay, so the planner can still answer from them.
+    Defence-in-depth redaction for any caller that deliberately sends a partial tool context to Gemini. Under D1=A the router keeps Agent Chat
+    on Ollama as a whole, so normal operation does not need to redact its local planner context."""
+    if not isinstance(res, dict):
+        return res
+    out = dict(res)
+    if tool == "opportunities" and isinstance(out.get("opportunities"), list):
+        out["opportunities"] = [{k: v for k, v in o.items() if k not in _INBOUND_TEXT_KEYS} if isinstance(o, dict) else o for o in out["opportunities"]]
+    if tool == "prospect_detail" and isinstance(out.get("recent_messages"), list):
+        out["recent_messages"] = [{k: v for k, v in m.items() if k not in _MESSAGE_TEXT_KEYS} if isinstance(m, dict) else m for m in out["recent_messages"]]
+    if tool == "crm_followup_review" and isinstance(out.get("leads"), list):
+        # CRM review rows contain direct identifiers (email/contact person) and company-linked contact records.
+        # Keep aggregate counts only; do not rely on a partial list of sensitive keys staying current.
+        out["leads"] = [{k: v for k, v in lead.items() if k not in {"lead_id", "company_name", "contact_person", "email"}}
+                         for lead in out["leads"] if isinstance(lead, dict)]
+    return out
+
+
+def _planner_may_see_private_text(llm) -> bool:
+    """False only when a router says chat.plan may be served by Gemini while D1 keeps private data local. A plain local client answers True."""
+    allowed = getattr(llm, "private_text_allowed", None)
+    return bool(allowed("chat.plan")) if callable(allowed) else True
+
+
 def _short(result, limit: int = 5000) -> str:
     text = json.dumps(result, ensure_ascii=False, default=str)
     return text if len(text) <= limit else text[:limit] + " ...[truncated]"
@@ -374,6 +404,7 @@ def handle(d, payload: dict) -> dict:
         last_tool = (tool, res)
         return args, res
 
+    private_ok = _planner_may_see_private_text(d.llm)
     model_down = False
     for _ in range(MAX_STEPS):
         try:
@@ -401,7 +432,7 @@ def handle(d, payload: dict) -> dict:
         except RpcError as exc:
             res, args = {"ok": False, "reason": f"tool error: {str(exc)[:120]}"}, {}
         messages.append({"role": "assistant", "content": json.dumps({"action": "tool", "tool": tool, "args": args})})
-        messages.append({"role": "user", "content": f"Tool result for {tool}:\n<untrusted>\n{_short(res)}\n</untrusted>\nContinue: call another tool or reply."})
+        messages.append({"role": "user", "content": f"Tool result for {tool}:\n<untrusted>\n{_short(res if private_ok else scrub_private(tool, res))}\n</untrusted>\nContinue: call another tool or reply."})
 
     if last_tool and used:                                           # we have real results but no model answer
         note = "(The language model was unavailable, so this is a plain summary.)" if model_down else "(This is a plain summary of the last result.)"

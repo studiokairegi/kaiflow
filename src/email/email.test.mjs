@@ -400,24 +400,28 @@ test("webhook: a failure answers 500 so Resend retries, logs the failure, and th
   assert.equal(h.log.ingested.length, 1);
 });
 
-test("webhook: delivery, bounce and complaint events update the message; unrelated old events are ignored", async () => {
+test("webhook: delivery, transient bounce and complaint events update the message; unmatched events remain queued", async () => {
   const h = hookHarness();
   const ev = (type, extra = {}) => ({ type, created_at: new Date(NOW).toISOString(), data: { email_id: "re_sent_1", ...extra } });
   assert.equal((await hook(ev("email.delivered"), h.deps, { id: "e1" })).status, 200);
   assert.equal((await hook(ev("email.bounced", { bounce: { message: "Mailbox full", type: "Transient" } }), h.deps, { id: "e2" })).status, 200);
   assert.equal((await hook(ev("email.complained"), h.deps, { id: "e3" })).status, 200);
-  assert.deepEqual(h.log.events.map((e) => [e.status, e.provider_event_id]), [["delivered", "e1"], ["bounced", "e2"], ["complained", "e3"]]);
+  assert.deepEqual(h.log.events.map((e) => [e.status, e.provider_event_id]), [["delivered", "e1"], ["delivery_delayed", "e2"], ["complained", "e3"]]);
   assert.deepEqual(h.log.intelEvents.map((e) => [e.event_type, e.provider_event_id]), [["email.delivered", "e1"], ["email.bounced", "e2"], ["email.complained", "e3"]]);
   assert.equal(h.log.events[1].detail.reason, "Mailbox full");
   assert.equal((await hook(ev("email.opened"), h.deps, { id: "e4" })).status, 200);
   assert.equal(h.log.events.length, 3);                                    // opens are not stored as status changes
 
   const unknownRecent = hookHarness({ eventFound: false });
-  assert.equal((await hook(ev("email.delivered"), unknownRecent.deps, { id: "e5" })).status, 500);   // our DB write may not have landed yet: retry
+  const recent = await hook(ev("email.delivered"), unknownRecent.deps, { id: "e5" });
+  assert.equal(recent.status, 200);
+  assert.equal(unknownRecent.log.webhooks.get("e5").status, "ignored");
+  assert.match(unknownRecent.log.webhooks.get("e5").error, /queued for reconciliation/);
   const unknownOld = hookHarness({ eventFound: false });
   const old = { ...ev("email.delivered"), created_at: new Date(NOW - 10 * 60_000).toISOString() };
   assert.equal((await hook(old, unknownOld.deps, { id: "e6" })).status, 200);
   assert.equal(unknownOld.log.webhooks.get("e6").status, "ignored");
+  assert.match(unknownOld.log.webhooks.get("e6").error, /queued for reconciliation/);
 });
 
 test("webhook: acknowledged and ignored while Resend is switched off", async () => {

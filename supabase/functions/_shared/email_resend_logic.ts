@@ -125,7 +125,12 @@ const EVENT_STATUS: Record<string, string> = {
   "email.suppressed": "rejected",
   "email.rejected": "rejected",
 };
-export const statusForEvent = (type: string): string | null => EVENT_STATUS[type] || null;
+export const statusForEvent = (type: string, bounceType?: unknown): string | null => {
+  // Resend reports temporary/transient/soft bounce classes inside the event payload.
+  // They are delivery delays, not permanent contactability failures.
+  if (type === "email.bounced" && /temporary|transient|soft/i.test(String(bounceType || ""))) return "delivery_delayed";
+  return EVENT_STATUS[type] || null;
+};
 
 export async function handleSend(req: Request, deps: SendDeps): Promise<Response> {
   try {
@@ -417,7 +422,7 @@ export interface WebhookStore {
   ingestInbound(p: Record<string, unknown>): Promise<{ duplicate: boolean; message_id: string; conversation_id?: string }>;
   applyDeliveryEvent(a: { provider_message_id: string; status: string; event_type: string; provider_event_id: string; occurred_at: string | null; detail: Record<string, unknown> }): Promise<{ found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean }>;
   /** Route authenticated Resend delivery events into Intelligence, matching exact provider message/account provenance. */
-  applyIntelDeliveryEvent(a: { provider_message_id: string; event_type: string; provider_event_id: string; occurred_at: string | null; recipient: string; reason: string }): Promise<{ found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean }>;
+  applyIntelDeliveryEvent(a: { provider_message_id: string; event_type: string; provider_event_id: string; occurred_at: string | null; recipient: string; reason: string; bounce_type: string }): Promise<{ found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean }>;
 }
 export interface WebhookDeps {
   env: (k: string) => string | undefined;
@@ -590,31 +595,41 @@ export async function processInbound(d: WebhookDeps, apiKey: string, data: any):
   return { result: "processed" };
 }
 
-/** Rule for events we cannot apply: no email id or an unsupported type -> ignored; an id that matches two messages -> ignored and logged (never guessed);
- *  an unknown id on a RECENT event -> retried (our own database write of the Resend id may not have landed yet); on an old event -> ignored. */
+/** Unsupported or id-less events are ignored; ambiguous ids are never guessed.
+ * Unmatched signed events remain durably queued in email_webhook_events and are
+ * reconciled by database triggers when the exact provider message id is persisted. */
 export async function processDeliveryEvent(d: WebhookDeps, svixId: string, event: any): Promise<Outcome> {
-  const status = statusForEvent(String(event?.type));
+  const eventType = String(event?.type || "");
+  const bounceType = String(event?.data?.bounce?.type || "");
+  const status = statusForEvent(eventType, bounceType);
   if (!status) return { result: "ignored", reason: "unsupported event type" };
   const emailId = String(event?.data?.email_id || "");
   if (!emailId) return { result: "ignored", reason: "missing email id" };
-  const detail = { reason: String(event?.data?.bounce?.message || event?.data?.failed?.reason || event?.data?.reason || "").slice(0, 400), type: event?.data?.bounce?.type || null };
-  const out = await d.store.applyDeliveryEvent({ provider_message_id: emailId, status, event_type: String(event.type), provider_event_id: svixId, occurred_at: event?.created_at || null, detail });
+  const rawRecipients = Array.isArray(event?.data?.to) ? event.data.to : [];
+  const recipients = rawRecipients.map((x: unknown) => String(x || "").trim().toLowerCase())
+    .filter((x: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x));
+  const detail = {
+    reason: String(event?.data?.bounce?.message || event?.data?.failed?.reason || event?.data?.suppressed?.message || event?.data?.reason || "").slice(0, 400),
+    type: bounceType || null,
+    recipient: recipients.length === 1 ? recipients[0] : "",
+  };
+  const out = await d.store.applyDeliveryEvent({ provider_message_id: emailId, status, event_type: eventType,
+    provider_event_id: svixId, occurred_at: event?.created_at || null, detail });
   if (out.ambiguous) console.error("resend-webhook: provider message id matches several CRM messages; CRM row not updated");
   // CRM Inbox and Intelligence own separate message rows, and either side can
   // exist independently. Route the authenticated event to both idempotent stores.
-  const rawTo = event?.data?.to;
-  const recipients = Array.isArray(rawTo) ? rawTo.map((x: unknown) => String(x || "").trim().toLowerCase()).filter(Boolean) : [];
   const intel = await d.store.applyIntelDeliveryEvent({
-    provider_message_id: emailId, event_type: String(event.type), provider_event_id: svixId,
+    provider_message_id: emailId, event_type: eventType, provider_event_id: svixId,
     occurred_at: event?.created_at || null, recipient: recipients.length === 1 ? recipients[0] : "",
-    reason: detail.reason,
+    reason: detail.reason, bounce_type: bounceType,
   });
   if (intel.ambiguous) throw new Error("Intelligence provider message id is ambiguous");
   if (out.found || intel.found) return { result: "processed" };
   if (out.ambiguous) return { result: "ignored", reason: "ambiguous provider message id" };
-  const age = d.now() - Date.parse(String(event?.created_at || ""));
-  if (Number.isFinite(age) && age < 120_000) throw new Error("Message not recorded yet");
-  return { result: "ignored", reason: "unknown provider message id" };
+  // The signed payload was persisted by claimWebhook before processing. Do not
+  // discard it based on event age: insert/update triggers replay it once the
+  // matching CRM or Intelligence provider id is committed.
+  return { result: "ignored", reason: "awaiting provider message persistence; queued for reconciliation" };
 }
 
 export async function handleWebhook(req: Request, d: WebhookDeps): Promise<Response> {

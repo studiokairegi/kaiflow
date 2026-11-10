@@ -2,6 +2,11 @@ class TransientError(Exception):
     """Worth retrying later: network, 429/5xx, Ollama or a mail provider temporarily unavailable."""
 
 
+class InvalidModelOutput(TransientError):
+    """The model answered but not in the required shape. A TransientError (existing handlers keep working), yet retrying the same temperature-0
+    request cannot help, so callers that must not loop on one poison message (classification) treat it differently from an outage."""
+
+
 class PermanentError(Exception):
     """Retrying cannot help: bad input, missing approved knowledge, policy refusal."""
 

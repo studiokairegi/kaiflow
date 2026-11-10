@@ -12,7 +12,8 @@ import re
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-EMAIL_RE = re.compile(r"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+$", re.I)
+LOCAL_ATOM = r"[A-Z0-9!#$%&'*+/=?^_`{|}~-]+"
+EMAIL_RE = re.compile(r"^" + LOCAL_ATOM + r"(?:\." + LOCAL_ATOM + r")*@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+$", re.I)
 
 
 def _host(value: str) -> str:
@@ -62,15 +63,15 @@ def assess(*, email: str = "", official_domain: str = "", source_url: str = "",
     elif verification == "human_confirmed" and verified_email.strip().lower() == address:
         evidence["deliverability"] = "human_confirmed"
 
-    # A third-party source is acceptable for an employee address only when
-    # employee affiliation has been explicitly established by the caller.
-    # Official-domain contacts still require an official source. Keep domain
-    # association and employee affiliation distinct in the evidence record.
+    # Employee affiliation permits a third-party *source*, but never waives
+    # association between the address and the prospect's official business domain.
+    # Keep the two independent facts separate so a personal mailbox cannot pass
+    # merely because a caller asserts that its owner is an employee.
     employee_path = bool(employee_affiliation)
     if not source_is_official and not employee_path:
         return {"status": "needs_review", "reason": "email source is not proven to be the prospect's official website and employee affiliation is not established", "evidence": evidence}
-    if not (domain_associated or employee_path):
-        return {"status": "needs_review", "reason": "email domain or employee affiliation is not established", "evidence": evidence}
+    if not domain_associated:
+        return {"status": "needs_review", "reason": "email address is not associated with the prospect's official business domain", "evidence": evidence}
     if evidence["deliverability"] == "unknown":
         return {"status": "needs_review", "reason": "published address found, but mailbox deliverability is unverified", "evidence": evidence}
     reason = ("employee business email with documented affiliation and deliverability evidence"

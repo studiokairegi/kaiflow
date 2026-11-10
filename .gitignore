@@ -3,3 +3,8 @@ dist/
 .env
 node_modules/
 paystack-live.env.txt
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*$py.class

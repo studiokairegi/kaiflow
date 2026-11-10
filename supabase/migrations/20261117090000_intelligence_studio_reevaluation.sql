@@ -260,6 +260,11 @@ begin
   if p_limit is not null and p_limit < 1 then
     raise exception 'p_limit must be a positive integer';
   end if;
+  -- Pilot runs are deliberately bounded at the database boundary. Full-population
+  -- runs must use the separate explicit p_all + p_expect_count confirmation path.
+  if p_limit is not null and p_limit > 50 then
+    raise exception 'pilot p_limit cannot exceed 50; use explicit full-population confirmation';
+  end if;
   if p_limit is null then
     if p_all is distinct from true then
       raise exception 'full population requires explicit p_all confirmation';
@@ -361,6 +366,19 @@ language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_org uuid := public.intel_agent_org(); v_bad text := public._intel_reeval_check(v_org, p_run_id, p_prospect_id);
 begin
   if v_bad is not null then raise exception 'reevaluation refused: %', v_bad; end if;
+  -- Preserve the row that supported the old score before refreshing it. Do not archive
+  -- a row already written by this same run (the worker may encounter it more than once).
+  insert into public.intel_evidence_versions(
+    original_evidence_id, organization_id, prospect_id, source, url, fact_type, snippet,
+    content_hash, verified, fetched_at, original_reeval_run, archived_by_run
+  )
+  select e.id, e.organization_id, e.prospect_id, e.source, e.url, e.fact_type, e.snippet,
+         e.content_hash, e.verified, e.fetched_at, e.reeval_run, p_run_id
+    from public.intel_evidence e
+   where e.prospect_id=p_prospect_id and e.organization_id=v_org
+     and e.fact_type=left(p_fact_type,60) and e.content_hash=left(coalesce(p_content_hash,''),64)
+     and e.reeval_run is distinct from p_run_id;
+
   insert into public.intel_evidence(organization_id, prospect_id, source, url, fact_type, snippet, content_hash, verified, reeval_run, fetched_at)
   values (v_org, p_prospect_id, left(p_source, 60), left(coalesce(p_url, ''), 500), left(p_fact_type, 60), left(coalesce(p_snippet, ''), 2000), left(coalesce(p_content_hash, ''), 64), coalesce(p_verified, false), p_run_id, now())
   on conflict (prospect_id, fact_type, content_hash) do update

@@ -9,14 +9,7 @@ $ErrorActionPreference = "Stop"
 if (-not (Test-Path $EnvFile)) { throw "Env file not found: $EnvFile" }
 
 $sec = Read-Host "Paste Gemini API key" -AsSecureString
-$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
-try {
-    $key = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr).Trim()
-}
-finally {
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-    $sec.Dispose()
-}
+$key = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)).Trim()
 if (-not $key) { throw "No key entered." }
 
 # Replace any existing key line, otherwise append. The key is never printed.

@@ -217,9 +217,7 @@ def _reeval_one(d, job, run_id: str, pid: str):
     item, p, run = ctx["item"], ctx["prospect"], ctx["run"]
     if item["state"] != "queued":
         return {"skipped": f"already {item['state']}"}                      # repeated or duplicate job: harmless no-op
-    if not eligible_prospect(p):
-        return {"skipped": "out of scope"}                                  # defence in depth; the database refuses these too
-    if not eligible_prospect(p):
+    if not eligible_prospect(p):               # defence in depth; the database refuses these too. Goes through _skip_out_of_scope so the run item is closed, not left queued
         reason = "status_changed"
         return _skip_out_of_scope(d, run_id, pid, reason)
     registry = d.rpc("intel_agent_sources", {}) or {}
@@ -241,7 +239,7 @@ def _reeval_one(d, job, run_id: str, pid: str):
             d.rpc("intel_agent_reeval_add_evidence", {"p_run_id": run_id, "p_prospect_id": pid, "p_source": "website_recovery", "p_url": rec["final_url"], "p_fact_type": "website_recovery",
                                                       "p_snippet": f"{rec['matched']} ({rec['method']}; {', '.join(rec['cues'])})"[:300], "p_content_hash": _h(rec["final_url"]), "p_verified": True})
             p = {**p, "website": rec["website"], "domain": entity.registrable_domain(rec["website"])}
-        llm = lambda text: d.llm.generate_json(research.ENTITY_INSTRUCTION, text, research.ENTITY_SCHEMA, fast=True)
+        llm = research.entity_llm(d.llm, "research.studio_reeval")
         stage = "research"
         out = research.research(d.rpc, d.fetcher, llm, {"prospect": p}, run_id=run_id)
         stage = "score"
@@ -282,8 +280,10 @@ def cli(rpc, argv: list[str], out=print) -> int:
         return 0
     if cmd == "start":
         name, limit, everything = opt("--name", DEFAULT_RUN_NAME), opt("--limit"), "--all" in rest
-        if everything == (limit is not None) or (limit is not None and not str(limit).isdigit()) or (limit is not None and int(limit) < 1):
-            out("refusing: give exactly one of --limit N (a pilot) or --all --expect COUNT\n" + USAGE)
+        if (everything == (limit is not None)
+                or (limit is not None and not str(limit).isdigit())
+                or (limit is not None and not 1 <= int(limit) <= 50)):
+            out("refusing: give exactly one of --limit N (1–50) or --all --expect COUNT\n" + USAGE)
             return 2
         include_prev = "--include-previous" in rest
         pre = rpc("intel_agent_reeval_start", {"p_name": name, "p_limit": None, "p_dry_run": True, "p_include_previous": include_prev, "p_all": False, "p_expect_count": None})

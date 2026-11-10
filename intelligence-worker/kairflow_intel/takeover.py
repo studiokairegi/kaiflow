@@ -20,6 +20,7 @@ import re
 from datetime import date, timedelta
 
 from . import drafting, policy
+from .ai_call import call_json, composed
 from .errors import PermanentError, RpcError, TransientError
 
 MAX_EMAILS_IN_SEQUENCE = 4          # initial + 3 follow-ups, the same ceiling the CRM review uses
@@ -254,11 +255,11 @@ def _draft_japanese_takeover(d, p: dict, evidence: list[dict], kb: dict, st: dic
     history = _thread_for_composer(thread)
     inbound = _latest_inbound(thread) if kind == "reply" else None
     last_out = next((t for t in reversed(thread) if t.get("who") == "us"), None)
-    return drafting.compose_japanese(
-        p, evidence or [], kb, st,
-        llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
+    rec: list = []
+    return composed(d.llm, "drafting.takeover", rec, lambda llm: drafting.compose_japanese(
+        p, evidence or [], kb, st, llm=llm,
         kind=kind, inbound=inbound, history=history,
-        sent_on=(last_out or {}).get("at"), parent_subject=_subject_for(thread, p, reply=(kind == "reply")), feedback=feedback)
+        sent_on=(last_out or {}).get("at"), parent_subject=_subject_for(thread, p, reply=(kind == "reply")), feedback=feedback))
 
 
 def _vet_japanese_takeover(d, p: dict, kb: dict, st: dict, mail: dict, regenerate) -> dict:
@@ -286,7 +287,8 @@ def draft_followup(d, p: dict, kb: dict, st: dict, thread: list[dict], convo: st
     subject = _subject_for(thread, p, reply=False)
     if not drafting.is_japanese_animation_prospect(p):
         try:
-            para = d.llm.generate_json(FOLLOWUP_INSTRUCTION, convo, PARAGRAPH_SCHEMA)["paragraph"]
+            data, ai = call_json(d.llm, "drafting.takeover_followup", FOLLOWUP_INSTRUCTION, convo, PARAGRAPH_SCHEMA)
+            para = data["paragraph"]
         except TransientError:
             raise
         except Exception:
@@ -295,7 +297,7 @@ def draft_followup(d, p: dict, kb: dict, st: dict, thread: list[dict], convo: st
         if para:
             body = "\n\n".join([drafting.greeting(p), para, kb["portfolio.main"]["body"].strip()]) + "\n" + policy.compliance_footer(st)
             subj = (subject if subject and re.match(r"(?i)^re:", subject) else f"Re: {subject}") if subject else drafting.SUBJECT[p["type"]].format(name=p["name"])
-            return {"subject": subj[:120], "body": body, "model_written": True}
+            return {"subject": subj[:120], "body": body, "model_written": True, "ai": {**ai, "model_calls": 1}}
     mail = drafting.build_followup(p, kb, st, sent_on, subject)
     return {**mail, "model_written": False}
 
@@ -304,7 +306,8 @@ def draft_reply(d, p: dict, kb: dict, st: dict, thread: list[dict], convo: str, 
     subject = _subject_for(thread, p, reply=True)
     if not drafting.is_japanese_animation_prospect(p) and kb.get("studio.about") and kb.get("portfolio.main"):
         try:
-            para = d.llm.generate_json(REPLY_INSTRUCTION.format(about=kb["studio.about"]["body"].strip()[:600]), convo, PARAGRAPH_SCHEMA)["paragraph"]
+            data, ai = call_json(d.llm, "drafting.takeover_reply", REPLY_INSTRUCTION.format(about=kb["studio.about"]["body"].strip()[:600]), convo, PARAGRAPH_SCHEMA)
+            para = data["paragraph"]
         except TransientError:
             raise
         except Exception:
@@ -313,7 +316,7 @@ def draft_reply(d, p: dict, kb: dict, st: dict, thread: list[dict], convo: str, 
         if para:
             body = "\n\n".join([drafting.greeting(p), para, kb["portfolio.main"]["body"].strip(),
                                 f"I will follow up personally on anything specific.\n\n{st.get('sender_name', '').strip()}"]) + "\n"
-            return {"subject": subject[:120], "body": body, "model_written": True}
+            return {"subject": subject[:120], "body": body, "model_written": True, "ai": {**ai, "model_calls": 1}}
     label = "portfolio_request" if "portfolio" in hits else "positive"
     mail = drafting.build_auto_reply(label, p, kb, st, subject or "")
     return {**mail, "model_written": False} if mail else None
@@ -376,7 +379,7 @@ def _run(d, job, ctx, p, lead, history, hid, base, manual) -> dict:
         return {"next_action": "stop", "suppressed": True}
 
     try:
-        a = d.llm.generate_json(ANALYSIS_INSTRUCTION, convo, ANALYSIS_SCHEMA)
+        a, analysis_ai = call_json(d.llm, "drafting.takeover_analysis", ANALYSIS_INSTRUCTION, convo, ANALYSIS_SCHEMA)
     except PermanentError:
         raise
     summary, intent = str(a.get("summary") or "")[:700], a.get("intent", "unclear")
@@ -457,9 +460,10 @@ def _run(d, job, ctx, p, lead, history, hid, base, manual) -> dict:
         res.update({"next_action": "needs_human", "reason": f"The draft was refused: {r.get('reason', 'unknown')}."})
         _save(d, pid, res, notify=res["reason"])
         return {"next_action": "needs_human", "refused": r.get("reason")}
+    from . import jobs
     if mail.get("evidence_trace"):
-        from . import jobs
         jobs._store_evidence_trace(d, r.get("message_id"), mail)
+    jobs._log_draft_ai(d, r.get("message_id"), pid, email_kind, mail, source="takeover", analysis_ai=analysis_ai)
     res.update({"draft_message_id": r.get("message_id"), "drafted_by_model": bool(mail.get("model_written")), "step": step})
     _save(d, pid, res)
     return {"next_action": out["next_action"], "message_id": r.get("message_id"), "created": r.get("created")}

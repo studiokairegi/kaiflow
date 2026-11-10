@@ -59,6 +59,31 @@ class Contactability(unittest.TestCase):
         for kw in ({"bounced": True}, {"complained": True}):
             self.assertEqual(assess(email="info@studio.example", **kw)["status"], "rejected")
 
+    def test_employee_affiliation_does_not_bypass_official_domain_association(self):
+        r = assess(email="producer@gmail.com", official_domain="studio.example",
+                   source_url="https://professional.example/profile/producer",
+                   verification="human_confirmed", verified_email="producer@gmail.com",
+                   employee_affiliation=True)
+        self.assertEqual(r["status"], "needs_review")
+        self.assertFalse(r["evidence"]["official_domain_associated"])
+
+    def test_employee_affiliation_does_not_bypass_domain_on_official_source(self):
+        r = assess(email="producer@gmail.com", official_domain="studio.example",
+                   source_url="https://studio.example/team", verification="human_confirmed",
+                   verified_email="producer@gmail.com", employee_affiliation=True)
+        self.assertEqual(r["status"], "needs_review")
+
+    def test_dot_atom_local_part_validation(self):
+        for address in (".producer@studio.example", "producer.@studio.example", "pro..ducer@studio.example"):
+            with self.subTest(address=address):
+                self.assertEqual(assess(email=address, official_domain="studio.example")["status"], "rejected")
+
+    def test_valid_dotted_local_part_is_accepted(self):
+        r = assess(email="first.last@studio.example", official_domain="studio.example",
+                   source_url="https://studio.example/contact", verification="human_confirmed",
+                   verified_email="first.last@studio.example")
+        self.assertEqual(r["status"], "pass")
+
     def test_unrelated_email_domain_needs_review(self):
         r = assess(email="producer@other.example", official_domain="studio.example",
                    source_url="https://studio.example/contact", verification="human_confirmed",

@@ -2,6 +2,7 @@ import json
 import unittest
 
 from kairflow_intel import chat
+from kairflow_intel.airouter import settings_from_env
 from kairflow_intel.errors import PermanentError, TransientError
 from kairflow_intel.gemini import FallbackLLM, GeminiClient, GEMINI_HOST
 from .helpers import Resp
@@ -33,7 +34,7 @@ class GeminiClientTests(unittest.TestCase):
         self.assertNotIn("responseSchema", json.dumps(kw["json"]))
 
     def test_errors_are_classified_and_never_contain_the_key(self):
-        for status, exc in ((429, TransientError), (503, TransientError), (400, PermanentError), (403, PermanentError)):
+        for status, exc in ((429, TransientError), (503, TransientError), (400, TransientError), (401, PermanentError), (403, PermanentError), (404, PermanentError)):
             with self.assertRaises(exc) as cm:
                 GeminiClient("SECRET", "m", Sess(Resp(status, b"{}"))).chat_json("s", [{"role": "user", "content": "x"}], chat.PLAN_SCHEMA)
             self.assertNotIn("SECRET", str(cm.exception))
@@ -60,18 +61,18 @@ class Fake:
 class FallbackTests(unittest.TestCase):
     def test_gemini_used_when_healthy(self):
         g, o = Fake({"action": "reply", "reply": "g"}), Fake({"action": "reply", "reply": "o"})
-        r = FallbackLLM(g, o)
+        r = FallbackLLM(g, o, settings=settings_from_env({"KAIRFLOW_AI_D1": "C", "KAIRFLOW_AI_POLICY": "chat=gemini_first"}))
         self.assertEqual(r.chat_json("s", [], {})["reply"], "g"); self.assertEqual(r.last_backend, "gemini"); self.assertEqual(o.n, 0)
 
     def test_transient_failure_falls_back_to_ollama_each_time_but_still_retries_gemini(self):
         g, o = Fake(exc=TransientError("429")), Fake({"action": "reply", "reply": "o"})
-        r = FallbackLLM(g, o)
+        r = FallbackLLM(g, o, settings=settings_from_env({"KAIRFLOW_AI_D1": "C", "KAIRFLOW_AI_POLICY": "chat=gemini_first"}))
         r.chat_json("s", [], {}); r.chat_json("s", [], {})
         self.assertEqual((g.n, o.n, r.last_backend), (2, 2, "ollama"))
 
     def test_permanent_failure_pauses_gemini_then_retries_after_cooldown(self):
         t = [0.0]; g, o = Fake(exc=PermanentError("bad key")), Fake({"action": "reply", "reply": "o"})
-        r = FallbackLLM(g, o, clock=lambda: t[0])
+        r = FallbackLLM(g, o, clock=lambda: t[0], settings=settings_from_env({"KAIRFLOW_AI_D1": "C", "KAIRFLOW_AI_POLICY": "chat=gemini_first"}))
         r.chat_json("s", [], {}); r.chat_json("s", [], {})
         self.assertEqual((g.n, o.n), (1, 2)); self.assertIn("bad key", r.last_gemini_error)
         t[0] = 10_000; r.chat_json("s", [], {}); self.assertEqual(g.n, 2)

@@ -23,15 +23,22 @@ def is_forward_transition(current: str, incoming: str) -> bool:
 _STATUS_ALIASES = {
     "accepted": "accepted", "sent": "accepted", "queued": "accepted",
     "delivery_delayed": "delayed", "delayed": "delayed", "deferred": "delayed",
+    "temporary_bounce": "delayed", "transient_bounce": "delayed",
     "delivered": "delivered", "delivery": "delivered",
     "failed": "failed", "rejected": "failed", "undeliverable": "failed",
-    "bounced": "bounced", "bounce": "bounced", "hard_bounce": "bounced", "soft_bounce": "bounced",
+    "bounced": "bounced", "bounce": "bounced", "hard_bounce": "bounced", "soft_bounce": "delayed",
     "complained": "complained", "complaint": "complained", "spam_complaint": "complained",
 }
 
 
 def normalize_status(event_type: str, status: str | None = None) -> str:
     """Map adapter vocabulary to the small canonical status set; reject unknowns."""
+    # A soft/transient bounce is a finer-grained subtype of generic email.bounced.
+    # Honor that one explicit subtype while retaining event_type precedence for
+    # genuinely conflicting lifecycle statuses.
+    status_key = re.sub(r"[^a-z0-9_]+", "_", str(status or "").strip().lower()).strip("_")
+    if status_key in {"soft_bounce", "temporary_bounce", "transient_bounce"}:
+        return "delayed"
     for raw in (event_type, status):
         key = re.sub(r"[^a-z0-9_]+", "_", str(raw or "").strip().lower()).strip("_")
         if key in _STATUS_ALIASES:

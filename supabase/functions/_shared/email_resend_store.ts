@@ -154,7 +154,8 @@ export function makeWebhookStore(service: any): WebhookStore {
         "email.bounced": "bounced", "email.complained": "complained", "email.failed": "failed",
         "email.suppressed": "failed", "email.rejected": "failed",
       };
-      const status = statusMap[a.event_type];
+      const status = a.event_type === "email.bounced" && /temporary|transient|soft/i.test(a.bounce_type || "")
+        ? "delayed" : statusMap[a.event_type];
       if (!status) return { found: false };
       const out = must(await service.rpc("intel_agent_apply_delivery_event", {
         p_provider_key: "resend", p_provider_account_id: row.provider_account_id,

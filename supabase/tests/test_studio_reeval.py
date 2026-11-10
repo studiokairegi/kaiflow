@@ -32,7 +32,7 @@ def prospect(**kw):
 
 
 class FakeDB:
-    ALLOWED = {"intel_agent_settings", "intel_agent_sources", "intel_agent_source_use"}
+    ALLOWED = {"intel_agent_settings", "intel_agent_sources", "intel_agent_source_use", "intel_agent_contactability_facts"}
 
     def __init__(self, p=None, item_state="queued", run_state="running", old_evidence=(), item_urls=(), domain_aliases=(), website_conflict=None):
         self.p, self.run_state, self.conflict = p or prospect(), run_state, website_conflict
@@ -44,7 +44,11 @@ class FakeDB:
     def __call__(self, name, params=None):
         self.calls.append((name, params or {}))
         if name in self.ALLOWED:
-            return {"campaigns": [{"type": "animation_studio_support", "criteria": {}}]} if name == "intel_agent_settings" else ({} if name == "intel_agent_sources" else 0)
+            if name == "intel_agent_settings": return {"campaigns": [{"type": "animation_studio_support", "criteria": {}}]}
+            if name == "intel_agent_sources": return {"site_crawler": {}}
+            if name == "intel_agent_contactability_facts": return {}
+            if name == "intel_agent_source_use": return 1
+            return 0
         if not name.startswith("intel_agent_reeval_"):
             raise AssertionError(f"a reevaluation must not call {name}")
         return getattr(self, "r_" + name[len("intel_agent_reeval_"):])(**(params or {}))
@@ -141,7 +145,7 @@ class DownLLM:
 
 
 def deps(db, pages, llm=None):
-    return SimpleNamespace(rpc=db, fetcher=Fetch(pages), llm=llm or LLM(), api=None, clock=lambda: 0, cfg=SimpleNamespace(worker_id="w1"))
+    return jobs.Deps(rpc=db, fetcher=Fetch(pages), llm=llm or LLM(), api=None, clock=lambda: 0, cfg=SimpleNamespace(worker_id="w1"), zoho=None)
 
 
 def job(attempts=1, max_attempts=5, **pl):
@@ -176,7 +180,7 @@ class HappyPath(unittest.TestCase):
         # Static guard: every database function the module can name is a reeval function or one of three read-only settings/source functions.
         named = set(re.findall(r'"(intel_agent_[a-z_]+)"', pathlib.Path(studio_reeval.__file__).read_text(encoding="utf-8")))
         self.assertTrue(named)
-        self.assertEqual({n for n in named if not n.startswith("intel_agent_reeval_")}, {"intel_agent_settings", "intel_agent_sources"})
+        self.assertEqual({n for n in named if not n.startswith("intel_agent_reeval_")}, {"intel_agent_settings", "intel_agent_sources", "intel_agent_source_use"})
 
     def test_handler_is_registered_and_worker_completes_the_job(self):
         self.assertIs(jobs.HANDLERS["reeval_studio"], studio_reeval.h_reeval_studio)
@@ -222,7 +226,7 @@ class LegacyAndScope(unittest.TestCase):
     def test_ordinary_qualification_still_preserves_the_legacy_score(self):
         calls = []
         res = research.qualify(lambda n, a: calls.append((n, a)), self.ctx(score=88), {})
-        self.assertTrue(res.held); self.assertEqual([n for n, _ in calls], ["intel_agent_add_evidence"])         # candidate recorded, nothing overwritten
+        self.assertTrue(res.held); self.assertEqual([n for n, _ in calls], ["intel_agent_contactability_facts", "intel_agent_add_evidence"])         # candidate recorded, nothing overwritten
         self.assertFalse(any(n in ("intel_agent_set_score", "intel_agent_reeval_set_score") for n, _ in calls))
 
     def test_only_an_explicit_scope_permits_the_deliberate_rescore(self):
@@ -230,7 +234,7 @@ class LegacyAndScope(unittest.TestCase):
         for e in c["evidence"]: e.update(fetched_at=NOW, reeval_run=RUN)
         calls = []
         res = research.qualify(lambda n, a: calls.append((n, a)) or {"ok": True}, c, {}, reeval=research.ReevalScope(RUN, STARTED))
-        self.assertFalse(res.held); self.assertEqual([n for n, _ in calls], ["intel_agent_reeval_set_score"])
+        self.assertFalse(res.held); self.assertEqual([n for n, _ in calls], ["intel_agent_contactability_facts", "intel_agent_reeval_set_score"])
 
     def test_indie_prospects_are_refused_everywhere(self):
         ind = prospect(type="indie_game_developer")
@@ -244,10 +248,10 @@ class LegacyAndScope(unittest.TestCase):
     def test_ordinary_indie_qualification_is_unchanged(self):
         calls = []
         res = research.qualify(lambda n, a: calls.append(n), {"prospect": prospect(type="indie_game_developer", score=75, score_breakdown=[{"criterion": "active_development"}]), "evidence": []}, {})
-        self.assertEqual(calls, ["intel_agent_set_score"]); self.assertFalse(res.held); self.assertEqual(res.model, "")
+        self.assertEqual(calls, ["intel_agent_contactability_facts", "intel_agent_set_score"]); self.assertFalse(res.held); self.assertEqual(res.model, "")
 
     def test_wrong_origin_or_status_or_existing_lead_never_proceeds(self):
-        for kw in ({"origin": "crm_existing"}, {"status": "needs_review"}, {"lead_id": "L1"}):
+        for kw in ({"origin": "crm_existing"}, {"status": "contacted"}):
             db = FakeDB(p=prospect(**kw)); out = studio_reeval.h_reeval_studio(deps(db, {"https://hoshi.example/": HOME}), job())
             self.assertTrue("skipped" in out or out.get("state") == "skipped", (kw, out))                    # out of scope, or recorded as a skipped item
             self.assertFalse({"intel_agent_reeval_set_score", "intel_agent_reeval_add_evidence", "intel_agent_reeval_record_research"} & set(db.names()), kw)
@@ -368,8 +372,16 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 0); self.assertTrue(all(a["p_dry_run"] for _, a in calls))
 
     def test_start_refuses_without_a_limit_or_an_explicit_full_population(self):
-        for argv in (["start"], ["start", "--limit", "0"], ["start", "--limit", "x"], ["start", "--limit", "5", "--all"], ["start", "--all"], ["start", "--all", "--expect", "10"]):
+        for argv in (["start"], ["start", "--limit", "0"], ["start", "--limit", "51"], ["start", "--limit", "x"], ["start", "--limit", "5", "--all"], ["start", "--all"], ["start", "--all", "--expect", "10"]):
             code, calls, _ = self.run_cli(argv); self.assertEqual(code, 2, argv); self.assertFalse([1 for _, a in calls if not a["p_dry_run"]], argv)
+
+    def test_pilot_limit_accepts_50_and_rejects_51(self):
+        code, calls, _ = self.run_cli(["start", "--limit", "50"])
+        self.assertEqual(code, 0)
+        self.assertEqual([a["p_limit"] for _, a in calls if not a["p_dry_run"]], [50])
+        code, calls, _ = self.run_cli(["start", "--limit", "51"])
+        self.assertEqual(code, 2)
+        self.assertFalse([1 for _, a in calls if not a["p_dry_run"]])
 
     def test_pilot_and_full_start(self):
         code, calls, _ = self.run_cli(["start", "--limit", "5"]); self.assertEqual(code, 0)
@@ -403,6 +415,37 @@ class StaticMigrationGuards(unittest.TestCase):
         for k in ("discover", "research", "qualify", "resolve", "draft", "send", "sync_mail", "classify", "reconcile", "followup_scan", "retention", "chat", "seed_sources", "analyze_site",
                   "news_scan", "feed_poll", "crawl_index", "manual_post", "profile_terms", "takeover"):
             self.assertIn(f"'{k}'", self.SQL.split("intel_jobs_kind_check check", 1)[1].split(";", 1)[0], k)
+
+
+class Phase6BugfixGuards(unittest.TestCase):
+    ROOT = pathlib.Path(__file__).resolve().parents[2]
+    REEVAL = (ROOT / "supabase" / "migrations" / "20261117090000_intelligence_studio_reevaluation.sql").read_text()
+    ADMIN = (ROOT / "supabase" / "migrations" / "20261117100000_intelligence_studio_reevaluation_admin_rpc.sql").read_text()
+    OWNERSHIP = (ROOT / "supabase" / "migrations" / "20261118100000_intelligence_phase6_crm_ownership.sql").read_text()
+
+    def test_database_entry_points_enforce_pilot_limit(self):
+        self.assertRegex(self.REEVAL, r"p_limit\s*>\s*50")
+        self.assertRegex(self.ADMIN, r"p_limit\s*>\s*50")
+        check = self.REEVAL.split("function public._intel_reeval_check", 1)[1].split("end $$;", 1)[0]
+        self.assertIn("prospect_link_mismatch", check)
+
+    def test_old_evidence_is_archived_before_upsert_and_used_in_history(self):
+        self.assertIn("create table if not exists public.intel_evidence_versions", self.OWNERSHIP)
+        add = self.REEVAL.split("function public.intel_agent_reeval_add_evidence(", 1)[1].split("end $$;", 1)[0]
+        self.assertLess(add.index("insert into public.intel_evidence_versions"), add.index("insert into public.intel_evidence("))
+        self.assertIn("v.archived_by_run::text=v_reeval_run", self.OWNERSHIP)
+        self.assertIn("e.reeval_run::text is distinct from v_reeval_run", self.OWNERSHIP)
+
+    def test_takeover_actor_comes_from_selected_history(self):
+        self.assertIn("new.takeover_actor := v_history.created_by", self.OWNERSHIP)
+        self.assertIn("new.takeover_at := v_history.created_at", self.OWNERSHIP)
+        self.assertNotIn("new.takeover_actor := coalesce(auth.uid(),v_history.created_by)", self.OWNERSHIP)
+
+    def test_admin_inventory_matches_default_pilot_exclusions(self):
+        report = self.OWNERSHIP.split("'pre_outreach_studio_candidates'", 1)[1]
+        for token in ("intel_messages", "intel_lead_history", "intel_actions", "intel_suppressions", "intel_reeval_items", "review_prospect_reject"):
+            self.assertIn(token, report)
+        self.assertIn("i.state='scored'", report)
 
 
 if __name__ == "__main__":

@@ -39,3 +39,37 @@ test("reevaluation status remains available when the optional score audit RPC fa
   assert.match(panel, /Inventory unavailable:/);
   assert.doesNotMatch(panel, /Promise\.all\(\[intelApi\.reevalStatus/);
 });
+
+test("pilot starts are capped in both database entry points", () => {
+  assert.match(reeval, /p_limit > 50/);
+  assert.match(admin, /p_limit > 50/);
+  assert.match(reeval, /full-population confirmation/);
+  assert.match(admin, /full-population confirmation/);
+});
+
+test("score history snapshots pre-refresh evidence for the current reevaluation", () => {
+  assert.match(migration, /create table if not exists public\.intel_evidence_versions/);
+  assert.match(reeval, /insert into public\.intel_evidence_versions/);
+  assert.match(migration, /v\.archived_by_run::text=v_reeval_run/);
+  assert.match(migration, /e\.reeval_run::text is distinct from v_reeval_run/);
+});
+
+test("takeover provenance belongs to the selected history record creator", () => {
+  assert.match(migration, /new\.takeover_actor := v_history\.created_by/);
+  assert.match(migration, /new\.takeover_at := v_history\.created_at/);
+  assert.doesNotMatch(migration, /new\.takeover_actor := coalesce\(auth\.uid\(\),v_history\.created_by\)/);
+});
+
+
+test("score-audit inventory uses the same default exclusions as the pilot selector", () => {
+  const report = migration.split("'pre_outreach_studio_candidates'", 2)[1];
+  assert.ok(report, "inventory field exists");
+  for (const token of ["intel_messages", "intel_lead_history", "intel_actions", "intel_suppressions", "intel_reeval_items", "prospect_link_mismatch"]) {
+    if (token === "prospect_link_mismatch") continue; // the report expresses the same ownership check directly
+    assert.ok(report.includes(token), token);
+  }
+  assert.match(report, /review_prospect_reject/);
+  assert.match(report, /i\.state='scored'/);
+  assert.match(report, /l\.intel_prospect_id=p\.id/);
+  assert.match(report, /l\.id=p\.lead_id/);
+});

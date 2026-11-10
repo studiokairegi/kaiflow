@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import classify as cls, discovery, drafting, mailops, policy, research, sources, studio_reeval
+from .ai_call import call_json, composed
 from .errors import PermanentError, RpcError, TransientError
 from .safety import MeteredFetcher
 
@@ -95,7 +96,7 @@ def h_research(d: Deps, job):
     if not ctx["prospect"].get("website"):
         d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "official website not found; add it or reject"})
         return {"skipped": "no website"}
-    llm = lambda text: d.llm.generate_json(research.ENTITY_INSTRUCTION, text, research.ENTITY_SCHEMA, fast=True)
+    llm = research.entity_llm(d.llm, "research.entity")
     registry = d.rpc("intel_agent_sources", {}) or {}
     if "site_crawler" not in registry:
         return {"skipped": "site_crawler source is disabled, terms-unconfirmed, over budget or circuit-open"}
@@ -186,6 +187,30 @@ def _store_evidence_trace(d: Deps, message_id, mail: dict) -> None:
             pass
 
 
+def _log_draft_ai(d: Deps, message_id, pid, kind: str, mail: dict, **extra) -> None:
+    """Audit-log which provider and model wrote a model-written draft. Best effort, like the evidence trace: the draft is already stored,
+    so a failure here is never allowed to lose or duplicate it. Holds no draft text and no secret."""
+    ai = mail.get("ai") if isinstance(mail, dict) else None
+    if not (ai and message_id):
+        return
+    try:
+        d.rpc("intel_agent_log", {"p_action": "draft_ai_provenance", "p_entity_type": "message", "p_entity_id": str(message_id),
+                                  "p_detail": {"kind": kind, "prospect_id": str(pid), "ai": ai, **extra}})
+    except RpcError:
+        pass
+
+
+def _log_classify_ai(d: Deps, message_id, ai: dict | None) -> None:
+    """Audit-log which provider and model classified an inbound message (only when a model call produced the label). Best effort: the
+    classification is already saved, so a logging failure never loses it. Holds no email text and no secret."""
+    if not (ai and message_id):
+        return
+    try:
+        d.rpc("intel_agent_log", {"p_action": "classify_ai_provenance", "p_entity_type": "message", "p_entity_id": str(message_id), "p_detail": {"ai": ai}})
+    except RpcError:
+        pass
+
+
 def h_draft(d: Deps, job):
     pid, kind = job["payload"]["prospect_id"], job["payload"].get("kind", "initial")
     force_review = bool((job.get("payload") or {}).get("force_review", False))
@@ -228,9 +253,10 @@ def h_draft(d: Deps, job):
         if p["status"] != "lead_linked":
             return {"skipped": f"status {p['status']}"}
         composer = drafting.compose_japanese if use_japanese else drafting.compose_english
-        compose = lambda feedback=None: composer(p, ctx["evidence"], kb, st,
-            llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
-            kind="initial", history=ctx.get("messages") or [], feedback=feedback)
+        rec = []
+        compose = lambda feedback=None: composed(d.llm, "drafting.initial", rec, lambda llm: composer(
+            p, ctx["evidence"], kb, st, llm=llm,
+            kind="initial", history=ctx.get("messages") or [], feedback=feedback))
         try:
             mail = compose()
         except PermanentError as exc:
@@ -254,9 +280,10 @@ def h_draft(d: Deps, job):
         parent = drafting.thread_parent(msgs)
         anchor = ((initial or {}).get("sent_at") or (initial or {}).get("created_at") or "")[:10] or "recently"
         composer = drafting.compose_japanese if drafting.should_use_japanese(p, msgs) else drafting.compose_english
-        compose = lambda feedback=None: composer(p, ctx.get("evidence") or [], kb, st,
-            llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
-            kind=kind, history=msgs, sent_on=anchor, parent_subject=(parent or {}).get("subject"), feedback=feedback)
+        rec = []
+        compose = lambda feedback=None: composed(d.llm, "drafting.followup", rec, lambda llm: composer(
+            p, ctx.get("evidence") or [], kb, st, llm=llm,
+            kind=kind, history=msgs, sent_on=anchor, parent_subject=(parent or {}).get("subject"), feedback=feedback))
         try:
             mail = compose()
         except PermanentError as exc:
@@ -303,6 +330,7 @@ def h_draft(d: Deps, job):
                                            "p_force_review": force_review})
     if r.get("ok"):
         _store_evidence_trace(d, r.get("message_id"), mail)
+        _log_draft_ai(d, r.get("message_id"), pid, kind, mail)
     if r.get("ok") and r.get("state") == "approved":
         _enq(d, "send", {"message_id": r["message_id"]}, f"send:{r['message_id']}:{int(d.clock() // 900)}")
     return r
@@ -395,8 +423,15 @@ def h_classify(d: Deps, job):
                   " 曖昧な場合は ambiguous を選んでください。JSONのみを返してください。")
         else:
             instruction = "Classify this email reply to a cold introduction from an animation studio. Labels: " + ", ".join(cls.LABELS) + "."
-        return d.llm.generate_json(instruction, f"Subject: {subject}\n{body}", cls.SCHEMA, fast=True)
+        # Phase 6: routed as classification.inbound. The body is private correspondence, so with decision D1=A (the default) the router keeps this
+        # on Ollama whatever the policy says; Gemini is possible only with KAIRFLOW_AI_D1=C and KAIRFLOW_AI_POLICY=classification=gemini_first.
+        # Same schema, same deterministic rules in cls.classify either way. A model outage (TransientError) propagates out of classify() and the job
+        # retries with this message still pending; a badly shaped answer makes classify() read keywords instead (it would not improve on retry).
+        data, prov = call_json(d.llm, "classification.inbound", instruction, f"Subject: {subject}\n{body}", cls.SCHEMA, fast=True)
+        last_ai[:] = [prov]
+        return data
     done = 0
+    last_ai: list = []
     requested_id = (job.get("payload") or {}).get("message_id")
     # Classify jobs are keyed per inbound message. Pull a larger bounded backlog
     # and select the matching row rather than repeatedly classifying the first 20.
@@ -406,9 +441,12 @@ def h_classify(d: Deps, job):
         if not pending:
             return {"done": 0, "skipped": "inbound_message_not_pending"}
     for m in pending:
+        last_ai.clear()                                              # a message never inherits the previous message's provenance
         r = cls.classify(m, own, llm)
-        def save_class(m=m, r=r):
+        ai_prov = dict(last_ai[0]) if last_ai else None              # None when a deterministic rule decided or the model failed
+        def save_class(m=m, r=r, ai_prov=ai_prov):
             d.rpc("intel_agent_classify_inbound", {"p_message_id": m["id"], "p_class": r["class"], "p_confidence": r["confidence"], "p_escalate": r["escalate"], "p_summary": r["summary"], "p_related_email": r["related_email"]})
+            _log_classify_ai(d, m["id"], ai_prov)
         # The classification is saved only after the reply draft is stored (or composition definitively fails), so a
         # model outage or a failed database call leaves the message pending and the whole job retries.
         if not (r["auto_ok"] and m.get("prospect_id")):
@@ -419,10 +457,11 @@ def h_classify(d: Deps, job):
             inbound_context = {"id": m.get("id"), "subject": m.get("subject", ""), "body": m.get("body_text", ""),
                                "class": r["class"], "summary": r.get("summary", "")}
             composer = drafting.compose_japanese if drafting.should_use_japanese(ctx["prospect"], ctx.get("messages") or [], inbound_context) else drafting.compose_english
-            compose = lambda feedback=None, m=m, r=r, ctx=ctx, inbound_context=inbound_context, composer=composer: composer(
-                ctx["prospect"], ctx.get("evidence") or [], kb, st,
-                llm=lambda instruction, payload, schema: d.llm.generate_json(instruction, payload, schema),
-                kind="reply", inbound=inbound_context, history=ctx.get("messages") or [], feedback=feedback)
+            rec = []
+            compose = lambda feedback=None, m=m, r=r, ctx=ctx, inbound_context=inbound_context, composer=composer, rec=rec: composed(
+                d.llm, "drafting.reply", rec, lambda llm: composer(
+                    ctx["prospect"], ctx.get("evidence") or [], kb, st, llm=llm,
+                    kind="reply", inbound=inbound_context, history=ctx.get("messages") or [], feedback=feedback))
             try:
                 reply = compose()
             except PermanentError as exc:
@@ -472,6 +511,7 @@ def h_classify(d: Deps, job):
                                                          "p_references": " ".join(x for x in [(m.get("references_ids") or "").strip(), m.get("rfc_message_id") or ""] if x)[-3900:] or None})
                 if out.get("ok"):
                     _store_evidence_trace(d, out.get("message_id"), reply)
+                    _log_draft_ai(d, out.get("message_id"), m["prospect_id"], "reply", reply, inbound_message_id=m.get("id"))
                 if out.get("ok") and out.get("state") == "approved":
                     _enq(d, "send", {"message_id": out["message_id"]}, f"send:{out['message_id']}:{int(d.clock() // 900)}", priority=3)
             # Saved last: if the history lookup or the draft upsert fails, the message stays pending and the retry
@@ -573,6 +613,7 @@ class Worker:
         info = {
             "ollama": bool(getattr(d.llm, "is_up", lambda: False)()),
             "chat_llm": getattr(d.llm, "last_backend", "ollama"),
+            "chat_model": (getattr(d.llm, "last_chat", None) or {}).get("model"),
             "worker_version": "1.1.0",
             "pid": __import__("os").getpid(),
             "active_job": self._active_job,
