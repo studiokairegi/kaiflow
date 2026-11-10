@@ -44,6 +44,8 @@ Applied the five confirmed Phase 7 delivery-event fixes to the Phase 6 confirmed
 
 ## Verification
 
+> **Historical snapshot:** This report records the test totals at the time of this specific delivery-event bug-fix handoff; these are historical snapshot counts, not the final aggregate Phase 7 suite totals.
+
 - Full JavaScript test suite: **842 passed, 0 failed**.
 - Full Intelligence worker Python suite: **747 passed**.
 - Focused delivery-event Python tests: **13 passed**.

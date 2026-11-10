@@ -38,6 +38,7 @@ import { useTeamAccess, MemberAccessRow, AccessFeedback, DepartmentsDrawer } fro
 import { allowedWorkspaceKeys, friendlyInviteError, readFunctionError } from "./studio/access.js";
 import "./studio/invite.css";
 import { canAccessIntelligence, loadIntelligenceAccess } from "./intelligence/access.js";
+import { canAccessEmail, loadEmailAccess } from "./email/access.js";
 import AiGeneratedBadge, { isAiGeneratedLead } from "./intelligence/AiGeneratedBadge.jsx";
 
 // Used only as a guaranteed-empty UUID filter when a studio has no mapped
@@ -3197,13 +3198,16 @@ export default function ShotTracker() {
   // tab regains focus, so a revoked permission takes effect without a reload.
   const [intelAccess, setIntelAccess] = useState(null);
   const [intelTarget, setIntelTarget] = useState(null); // set by a notification click; consumed by the Intelligence module
+  // General Email has its OWN access check (email_has_access); it is not derived from Intelligence access.
+  const [emailAccess, setEmailAccess] = useState(null);
   useEffect(() => {
     let cancelled = false;
     setIntelAccess(null);
+    setEmailAccess(null);
     if (!userId) return undefined;
     const check = async () => {
-      const ok = await loadIntelligenceAccess(supabase, userId);
-      if (!cancelled) setIntelAccess(ok);
+      const [ok, emailOk] = await Promise.all([loadIntelligenceAccess(supabase, userId), loadEmailAccess(supabase, userId)]);
+      if (!cancelled) { setIntelAccess(ok); setEmailAccess(emailOk); }
     };
     check();
     const onVisible = () => { if (document.visibilityState === "visible") check(); };
@@ -3212,12 +3216,12 @@ export default function ShotTracker() {
   }, [userId, activeStudioOrganizationId]);
   // Direct entry (stale state, a remembered tab) can never land on CRM Intelligence unless allowed: fall back to the pipeline.
   useEffect(() => {
-    if ((crmTab === "intelligence" || crmTab === "inbox") && intelAccess === false) setCrmTab("pipeline");
-  }, [crmTab, intelAccess]);
+    if ((crmTab === "intelligence" && intelAccess === false) || (crmTab === "inbox" && emailAccess === false)) setCrmTab("pipeline");
+  }, [crmTab, intelAccess, emailAccess]);
   // Global activity notifications (bell in the header). Disposes its realtime channel/timers on sign-out.
   const notifications = useNotifications(userId);
   // New email without refreshing the app: background check (same poll as chat), chat message tone on arrival, badge on the CRM Inbox tab.
-  const emailInbox = useEmailUnread(supabase, Boolean(userId) && intelAccess === true, () => { playMessageTone(); });
+  const emailInbox = useEmailUnread(supabase, Boolean(userId) && emailAccess === true, () => { playMessageTone(); });
   // Timer changes made on the dashboard are saved to the account (debounced) so they
   // follow the user to another device.
   const settingsRef = useRef(settings);
@@ -6251,7 +6255,7 @@ export default function ShotTracker() {
       {view === "projects" && workspace === "leads" && (
         <div className="kf-crm-layout">
           <nav className="kf-crm-sidebar" role="tablist" aria-label="CRM sections">
-            {[ ["pipeline", "Pipeline"], ["contacts", "Contacts"], ["portfolio", "Portfolio"], ...(canAccessIntelligence(intelAccess) ? [["inbox", "Inbox"], ["intelligence", "Intelligence"]] : []) ].map(([id, label]) => (
+            {[ ["pipeline", "Pipeline"], ["contacts", "Contacts"], ["portfolio", "Portfolio"], ...(canAccessEmail(emailAccess) ? [["inbox", "Inbox"]] : []), ...(canAccessIntelligence(intelAccess) ? [["intelligence", "Intelligence"]] : []) ].map(([id, label]) => (
               <button
                 key={id}
                 type="button"
@@ -6554,7 +6558,7 @@ export default function ShotTracker() {
         </>
       )}
 
-      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessIntelligence(intelAccess) && <InboxModule access={intelAccess} supabase={supabase} leads={leads} onUnreadChanged={emailInbox.refresh} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
+      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessEmail(emailAccess) && <InboxModule access={emailAccess} supabase={supabase} leads={leads} onUnreadChanged={emailInbox.refresh} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
       {view === "projects" && workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
           </div>
         </div>

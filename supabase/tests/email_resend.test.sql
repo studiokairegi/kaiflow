@@ -23,7 +23,7 @@ begin
   perform ti.throws($q$select count(*) from public.email_webhook_events$q$, 'permission denied', 'the webhook log is service-role only');
   perform ti.throws($q$select public.email_ingest_inbound('{}'::jsonb)$q$, 'permission denied', 'ingest is service-role only');
   perform ti.throws($q$update public.email_provider_flags set enabled = true$q$, 'permission denied', 'no client can flip a provider flag');
-  perform ti.ok(public.email_provider_flags_get() = jsonb_build_object('resend', true, 'gmail', false, 'zoho', false), 'the allowed admin can read the flags');
+  perform ti.ok(public.email_provider_flags_get() = jsonb_build_object('resend', true), 'the allowed admin reads the general Email provider list (registry: Resend only; Gmail/Zoho flags stay Intelligence-only)');
 
   -- 3. account ---------------------------------------------------------------------------------------------------------------------
   acc := public.email_upsert_account('John@StudioKairegi.com', 'Studio Kairegi');
@@ -76,8 +76,10 @@ begin
   perform ti.ok(not (r ->> 'duplicate')::boolean and r ->> 'status' = 'queued', 'outbound message is recorded as queued before anything is sent');
   r := public.email_create_outbound(jsonb_build_object('organization_id', orgA, 'account_id', v_acc, 'conversation_id', v_conv, 'idempotency_key', 'key-1', 'to_emails', jsonb_build_array('ada@client.com'), 'subject', 'x', 'body_text', 'x'));
   perform ti.ok((r ->> 'duplicate')::boolean and (r ->> 'message_id')::uuid = v_out, 'the same idempotency key never creates a second message');
-  update public.email_messages set status = 'sent', provider_message_id = 're_out_1', sent_at = now() where id = v_out;
+  update public.email_messages set status = 'sent', provider_message_id = 're_out_1', sent_at = now() + interval '5 minutes', rfc_message_id = '<outbound@studio.test>' where id = v_out;
   perform ti.ok((select message_count = 3 and last_direction = 'outbound' from public.email_conversations where id = v_conv), 'sending bumps the conversation');
+  perform ti.ok((select last_message_at = now() + interval '5 minutes' from public.email_conversations where id = v_conv), 'provider-confirmed sent_at advances shared Inbox conversation ordering');
+  perform ti.ok(public.email_get_thread_parent(orgA, v_conv, v_acc) ->> 'rfc_message_id' = '<outbound@studio.test>', 'thread-parent RPC selects the newest RFC message across inbound and outbound timestamps');
   perform ti.ok((public.email_apply_delivery_event('re_out_1', 'delivered', 'email.delivered', 'ev1', now(), '{}') ->> 'found')::boolean, 'a delivery event finds the message by its Resend id');
   perform public.email_apply_delivery_event('re_out_1', 'sent', 'email.sent', 'ev2', now(), '{}');
   perform ti.ok((select status = 'delivered' from public.email_messages where id = v_out), 'a late "sent" event never moves delivered back to sent');

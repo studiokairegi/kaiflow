@@ -15,7 +15,8 @@ const toBase64 = (file) => new Promise((resolve, reject) => {
 
 export const emailApi = {
   accounts: (s) => call(s, "email_list_accounts"),
-  addAccount: (s, address, name) => call(s, "email_upsert_account", { p_address: address, p_display_name: name || "" }),
+  providers: (s) => call(s, "email_provider_registry_list"),
+  addAccount: (s, address, name, provider = "resend") => call(s, "email_upsert_account", { p_address: address, p_display_name: name || "", p_provider: provider }),
   list: (s, folder, search) => call(s, "email_list_conversations", { p_folder: folder, p_search: search || null, p_limit: 50, p_offset: 0 }),
   get: (s, id) => call(s, "email_get_conversation", { p_conversation_id: id }),
   markRead: (s, id, read) => call(s, "email_mark_read", { p_conversation_id: id, p_read: read }),
@@ -30,15 +31,24 @@ export const emailApi = {
     for (const f of m.files || []) attachments.push({ filename: f.name, content_type: f.type || "application/octet-stream", content_base64: await toBase64(f) });
     const { data, error } = await s.functions.invoke("email-send", { body: {
       account_id: m.accountId, to: m.to, cc: m.cc, bcc: m.bcc, subject: m.subject, text: m.text, html: m.html, conversation_id: m.conversationId || null,
-      draft_id: m.draftId || null, idempotency_key: m.key, attachments,
+      draft_id: m.draftId || null, idempotency_key: m.key, attachments, crm: m.crmLeadId ? { lead_id: m.crmLeadId } : null,
     } });
     // functions.invoke hides the body of non-2xx answers inside error.context: surface the server's own message.
+    const sendError = (payload, fallback) => {
+      const e = new Error(payload?.error || fallback || "Could not send");
+      e.outcome = payload?.outcome;
+      e.code = payload?.code;
+      e.retry_with_same_key = payload?.retry_with_same_key;
+      e.message_id = payload?.message_id;
+      e.duplicate = payload?.duplicate === true;
+      return e;
+    };
     if (error) {
-      let msg = error.message;
-      try { const j = await error.context?.json?.(); if (j?.error) msg = j.error; } catch { /* keep the generic message */ }
-      throw new Error(msg || "Could not send");
+      let payload = null;
+      try { payload = await error.context?.json?.(); } catch { /* transport response may have no readable body */ }
+      throw sendError(payload, error.message);
     }
-    if (data && data.ok === false) throw new Error(data.error || "Could not send");
+    if (data && data.ok === false) throw sendError(data, "Could not send");
     return data;
   },
   async attachmentUrl(s, path) {

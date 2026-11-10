@@ -32,7 +32,14 @@ const lc = (x) => String(x || "").toLowerCase();
 export function replyRecipients(message, ownAddresses) {
   const own = new Set((ownAddresses || []).map(lc));
   const inbound = message.direction === "inbound";
-  const primary = inbound ? [lc(message.reply_to_address || message.from_email)] : (message.to_emails || []).map(lc);
+  // Inbound records persist Reply-To as a text header (possibly a display-name
+  // address list), not as reply_to_address. Prefer it when valid, then fall back
+  // to From. Outbound messages reply to their original To recipients.
+  const replyTo = inbound ? String(message.reply_to || message.reply_to_address || "") : "";
+  const replyToAddresses = replyTo.match(/[A-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)+/gi) || [];
+  const primary = inbound
+    ? (replyToAddresses.length ? replyToAddresses : [message.from_email]).map(lc)
+    : (message.to_emails || []).map(lc);
   const to = primary.filter((a) => a && !own.has(a));
   return { to: [...new Set(to)] };
 }
@@ -100,6 +107,47 @@ export function composeProblem({ accountId, to, cc, bcc, subject, body }) {
   if (!String(subject || "").trim()) return "Add a subject.";
   if (!String(body || "").trim()) return "Write a message.";
   return "";
+}
+
+/** Provider catalog is authoritative: only enabled registry rows with a real send capability can be selected. */
+export function availableMailProviders(providers) {
+  return (Array.isArray(providers) ? providers : []).filter((p) => p && p.enabled === true && p.capabilities?.send === true);
+}
+
+export function providerForAccount(account, providers) {
+  return (providers || []).find((p) => p.provider_key === account?.provider) || null;
+}
+
+/** Resend-style address providers do not use OAuth; OAuth providers must have a live connection. */
+export function accountCanSend(account, providers) {
+  if (!account || account.status !== "active") return false;
+  const provider = providerForAccount(account, providers);
+  if (!provider || provider.enabled !== true || provider.capabilities?.send !== true) return false;
+  return provider.capabilities?.oauth === true ? account.connection_status === "connected" : true;
+}
+
+export function accountConnectionLabel(account, providers) {
+  if (!account) return "Unavailable";
+  if (account.status !== "active") return "Paused";
+  const provider = providerForAccount(account, providers);
+  if (!provider || provider.enabled !== true) return "Provider unavailable";
+  if (provider.capabilities?.oauth === true) {
+    const labels = { not_connected: "Not connected", connecting: "Connecting", connected: "Connected", reauthorization_required: "Reauthorization required", disconnected: "Disconnected", error: "Connection error" };
+    return labels[account.connection_status] || "Connection status unknown";
+  }
+  return "Sending address configured";
+}
+
+/** Never trust cached provider rows after a registry refresh fails. */
+export function trustedProviderRows(data, error) {
+  return error ? [] : (Array.isArray(data) ? data : []);
+}
+
+/** Distinguishes a successfully empty account list from a failed account request. */
+export function accountListView({ loading, error, data }) {
+  if (loading) return "loading";
+  if (error) return "error";
+  return Array.isArray(data) && data.length ? "ready" : "empty";
 }
 
 /** Providers the Settings screen may offer: only those the database flag turned on. Anything unknown or still loading counts as paused. */

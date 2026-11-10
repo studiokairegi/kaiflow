@@ -69,7 +69,7 @@ test('complaint does not overwrite administrator or independent suppression prov
 
 test('Resend signed delivery webhook is wired to Intelligence RPC with exact account/message identity', () => {
   const logic = readFileSync(new URL('../../supabase/functions/_shared/email_resend_logic.ts', import.meta.url), 'utf8');
-  const store = readFileSync(new URL('../../supabase/functions/_shared/email_resend_store.ts', import.meta.url), 'utf8');
+  const store = readFileSync(new URL('../../supabase/functions/_shared/intel_resend_delivery_sink.ts', import.meta.url), 'utf8');   // Intelligence-owned sink plugged in by resend-webhook/index.ts
   assert.match(logic, /applyIntelDeliveryEvent/);
   assert.match(logic, /out\.found \|\| intel\.found/);
   assert.match(store, /from\("intel_messages"\)[\s\S]*?eq\("provider_key", "resend"\)[\s\S]*?eq\("provider_message_id", a\.provider_message_id\)/);

@@ -24,6 +24,10 @@ Things that need your account: Resend API key, verified domain, webhook secret, 
 
 Rollback: the last lines of the migration list the exact `drop` statements. They remove only the `email_*` objects.
 
+Multi-provider foundation (plan phase 2): after the hardening migration, `20261204090000_email_provider_registry.sql` and `20261204100000_email_provider_scoping.sql` add the provider registry and per-provider account/message scoping. See `docs/EMAIL_PROVIDER_FOUNDATION.md`. They change no Resend behaviour; apply them in order.
+
+Adapter layer (plan phase 3): the Resend code now sits behind a provider adapter (`_shared/email_adapter_resend.ts`) and the shared send service picks the adapter from the sender account's provider in the database. **Apply the two phase 2 migrations BEFORE deploying `email-send` and `resend-webhook`**: the new code reads `email_provider_registry`, and without that table sending answers 500 and the webhook answers 500 (Resend retries; nothing is lost). Deploy the two functions together. No new secrets or environment variables. See `docs/EMAIL_ADAPTER_ARCHITECTURE.md`.
+
 ## 3. Secrets (Supabase, never in the browser or the repo)
 
 ```

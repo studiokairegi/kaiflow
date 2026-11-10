@@ -7,8 +7,9 @@ import {
 } from "../../supabase/functions/_shared/email_resend_logic.ts";
 import { normalizeReceivedEmail, normalizeAttachment, normalizeHeaders } from "../../supabase/functions/_shared/email_resend_logic.ts";
 import { providerPausedResponse } from "../../supabase/functions/_shared/provider_guard.ts";
-import { makeWebhookStore } from "../../supabase/functions/_shared/email_resend_store.ts";
+import { makeSendStore, makeWebhookStore } from "../../supabase/functions/_shared/email_resend_store.ts";
 import { parseRecipients, replyRecipients, inlineReply, buildForward, composeProblem, participantLabel, activeMailProviders, normalizeSubject as uiNorm, attachmentProblem, statusLabel, newArrivals } from "./lib/logic.js";
+import { shouldRotateSendKey } from "./lib/helpers.js";
 
 const ORG = "20000000-0000-0000-0000-00000000000a";
 const ACC = "30000000-0000-0000-0000-00000000000b";
@@ -23,8 +24,27 @@ async function sign(body, { id = "msg_1", ts = Math.floor(NOW / 1000), secret = 
   return { "svix-id": id, "svix-timestamp": String(ts), "svix-signature": `v1,${mac}` };
 }
 const json = (o, status = 200, headers = {}) => new Response(JSON.stringify(o), { status, headers });
+// Phase 3: the shared service reads the account's provider and the provider's registry row from the store. Same shape as the phase 2 seed.
+const RESEND_ROW = { provider_key: "resend", adapter_key: "resend", display_name: "Resend", enabled: true,
+  capabilities: { send: true, inbound_webhook: true, delivery_events: true, attachments_send: true, attachments_receive: true, threading_headers: true, drafts_local: true, remote_sync: false, remote_search: false, remote_folders: false, remote_drafts: false, oauth: false } };
 
 // ---------------------------------------------------------------- helpers
+test("inbound replies prefer the persisted Reply-To header and exclude studio addresses", () => {
+  assert.deepEqual(replyRecipients({ direction: "inbound", from_email: "author@example.com", reply_to: 'Support Team <reply@example.net>' }, ["john@studio.test"]), { to: ["reply@example.net"] });
+  assert.deepEqual(replyRecipients({ direction: "inbound", from_email: "author@example.com", reply_to: "invalid header" }, ["john@studio.test"]), { to: ["author@example.com"] });
+  assert.deepEqual(replyRecipients({ direction: "outbound", to_emails: ["client@example.com", "john@studio.test"] }, ["john@studio.test"]), { to: ["client@example.com"] });
+});
+
+test("inline reply key rotation follows the same safe retry policy as the main composer", () => {
+  assert.equal(shouldRotateSendKey({ outcome: "rejected", retry_with_same_key: false }), true);
+  assert.equal(shouldRotateSendKey({ outcome: "failed", retry_with_same_key: false }), true);
+  for (const e of [{ outcome: "unknown", retry_with_same_key: true }, { outcome: "accepted" }, { code: "database_unavailable" }, new Error("network timeout")]) {
+    assert.equal(shouldRotateSendKey(e), false);
+  }
+  const inline = fs.readFileSync(new URL("./components/InlineReply.jsx", import.meta.url), "utf8");
+  assert.match(inline, /shouldRotateSendKey\(e\)/, "inline replies must not rotate the key on ambiguous failures");
+});
+
 test("subjects, addresses and message ids are normalised", () => {
   assert.equal(normalizeSubject("Re: RE: Fwd: Hello  World"), "hello world");
   assert.equal(uiNorm("AW: Re: Quote"), "quote");
@@ -141,12 +161,19 @@ test("sending retries 429/5xx with the same Idempotency-Key and stops on 4xx", a
 
   const bad = await sendViaResend(async () => json({ message: "domain not verified" }, 403), "k", {}, "key-12345678", { sleep: noSleep });
   assert.equal(bad.ok, false); assert.equal(bad.retryable, false); assert.equal(bad.unknown, false); assert.equal(bad.attempts, 1);
+  const concurrent = await sendViaResend(async () => json({ name: "concurrent_idempotent_requests", message: "in progress" }, 409), "k", {}, "key-12345678", { sleep: noSleep, maxAttempts: 2 });
+  assert.equal(concurrent.unknown, true); assert.equal(concurrent.retryable, true); assert.equal(concurrent.attempts, 2);
+  const payloadConflict = await sendViaResend(async () => json({ name: "invalid_idempotent_request", message: "different payload" }, 409), "k", {}, "key-12345678", { sleep: noSleep });
+  assert.equal(payloadConflict.unknown, false); assert.equal(payloadConflict.retryable, false);
 
   const exhausted = await sendViaResend(async () => json({ message: "x" }, 500), "k", {}, "key-12345678", { sleep: noSleep, maxAttempts: 2 });
-  assert.equal(exhausted.ok, false); assert.equal(exhausted.retryable, true); assert.equal(exhausted.attempts, 2);
+  assert.equal(exhausted.ok, false); assert.equal(exhausted.retryable, true); assert.equal(exhausted.unknown, true); assert.equal(exhausted.attempts, 2);
 
   const net = await sendViaResend(async () => { throw new Error("socket hang up"); }, "k", {}, "key-12345678", { sleep: noSleep });
   assert.equal(net.ok, false); assert.equal(net.unknown, true);               // outcome unknown: never reported as a clean failure
+  const mixed = [json({ message: "upstream" }, 500), json({ message: "slow down" }, 429)];
+  const mixedOut = await sendViaResend(async () => mixed.shift(), "k", {}, "key-12345678", { sleep: noSleep, maxAttempts: 2 });
+  assert.equal(mixedOut.unknown, true, "a later 429 cannot erase an earlier ambiguous 5xx");
   const odd = await sendViaResend(async () => json({}, 200), "k", {}, "key-12345678", { sleep: noSleep });
   assert.equal(odd.unknown, true);
 });
@@ -157,8 +184,11 @@ function sendHarness(over = {}) {
   const rows = [];
   const store = {
     providerEnabled: async () => over.enabled ?? true,
-    getAccount: async (org, id) => (org === ORG && id === ACC ? { id: ACC, address: "john@studiokairegi.com", display_name: "Studio Kairegi", status: "active" } : null),
+    getProviderRegistryRow: async (key) => (over.registryRow !== undefined ? over.registryRow : key === "resend" ? RESEND_ROW : null),
+    getAccount: async (org, id) => (org === ORG && id === ACC ? { id: ACC, organization_id: ORG, provider: over.accountProvider ?? "resend", address: "john@studiokairegi.com", display_name: "Studio Kairegi", status: "active" } : null),
     getThreadParent: async () => over.parent ?? null,
+    getConversationLead: async () => null,
+    recordCrmActivity: async () => ({ recorded: true, duplicate: false }),
     countOutboundSince: async (_o, since) => (Date.parse(since) > NOW - 120_000 ? (over.perMinute ?? 0) : (over.perDay ?? 0)),
     createOutbound: async (p) => {
       const dup = rows.find((r) => r.idempotency_key === p.idempotency_key);
@@ -220,6 +250,32 @@ test("replies can be routed to a separate inbound domain (when Zoho owns the roo
   assert.equal(hk.log.inboundDomain, "abc123.resend.app");
 });
 
+test("email-send: queued-to-sending database failure retries three times and never calls provider", async () => {
+  let transitionAttempts = 0;
+  const h = sendHarness();
+  h.deps.store.markResult = async (_id, patch) => {
+    if (patch.status === "sending") { transitionAttempts++; throw new Error("database unavailable"); }
+    h.log.marks.push(patch);
+  };
+  const res = await handleSend(post(goodReq()), h.deps);
+  const body = await res.json();
+  assert.equal(res.status, 503);
+  assert.equal(body.status, "queued");
+  assert.equal(body.retry_with_same_key, true);
+  assert.equal(body.code, "database_unavailable");
+  assert.equal(transitionAttempts, 3);
+  assert.equal(h.log.fetches.length, 0, "provider must not be called before the sending transition is persisted");
+});
+
+test("email-send: idempotency key conflicts are rejected before provider submission", async () => {
+  const h = sendHarness();
+  h.deps.store.createOutbound = async () => { throw new Error("idempotency_key_conflict"); };
+  const res = await handleSend(post(goodReq()), h.deps);
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).code, "idempotency_conflict");
+  assert.equal(h.log.fetches.length, 0);
+});
+
 test("email-send: double submit with the same key sends once", async () => {
   const { deps, log } = sendHarness();
   const r1 = await handleSend(post(goodReq()), deps);
@@ -236,7 +292,8 @@ test("email-send: refuses callers, missing config, disabled provider, unknown se
   const noKey = sendHarness({ env: { RESEND_API_KEY: "" } });
   assert.equal((await handleSend(post(goodReq()), noKey.deps)).status, 503);
   assert.equal(noKey.log.fetches.length, 0);
-  assert.equal((await handleSend(post(goodReq()), sendHarness({ enabled: false }).deps)).status, 503);
+  assert.equal((await handleSend(post(goodReq()), sendHarness({ registryRow: { ...RESEND_ROW, enabled: false } }).deps)).status, 503);
+  assert.equal((await handleSend(post(goodReq()), sendHarness({ enabled: false }).deps)).status, 200);   // the shared Intelligence flag does not gate general Email
   assert.equal((await handleSend(post(goodReq({ account_id: "30000000-0000-0000-0000-0000000000ff" })), sendHarness().deps)).status, 404);
   const day = await handleSend(post(goodReq()), sendHarness({ perDay: 100 }).deps);
   assert.equal(day.status, 429); assert.match((await day.json()).error, /Daily sending limit/);
@@ -303,6 +360,7 @@ function hookHarness(over = {}) {
   const accountsByAddress = over.accounts || { "john@studiokairegi.com": [{ id: ACC, organization_id: ORG, address: "john@studiokairegi.com" }] };
   const store = {
     providerEnabled: async () => { if (over.flagError) throw new Error("flag read failed"); return over.enabled ?? true; },
+    getProviderRegistryRow: async () => { if (over.registryError) throw new Error("registry read failed"); return over.registryRow !== undefined ? over.registryRow : RESEND_ROW; },
     claimWebhook: async (id, type) => { if (over.claimError) throw new Error("claim failed"); return model.claim(id, type); },
     finishWebhook: async (id, token, status, error) => { log.finishCalls.push([id, status]); if (over.finishError) throw new Error("finish failed"); return model.finish(id, token, status, error); },
     accountsForRecipient: async (addr, inbound) => { log.inboundDomain = inbound; if (over.accountError) throw new Error("account lookup failed"); return accountsByAddress[baseAddress(addr)] || []; },
@@ -424,11 +482,18 @@ test("webhook: delivery, transient bounce and complaint events update the messag
   assert.match(unknownOld.log.webhooks.get("e6").error, /queued for reconciliation/);
 });
 
-test("webhook: acknowledged and ignored while Resend is switched off", async () => {
-  const h = hookHarness({ enabled: false });
+test("webhook: acknowledged and ignored while Resend is switched off in the Email registry", async () => {
+  const h = hookHarness({ registryRow: { ...RESEND_ROW, enabled: false } });
   const res = await hook(receivedEvent, h.deps);
   assert.equal(res.status, 200);
   assert.equal(h.log.ingested.length, 0);
+});
+
+test("webhook: the shared Intelligence flag does not switch general Email off", async () => {
+  const h = hookHarness({ enabled: false });
+  const res = await hook(receivedEvent, h.deps);
+  assert.equal(res.status, 200);
+  assert.equal(h.log.ingested.length, 1);
 });
 
 // ---------------------------------------------------------------- Gmail / Zoho are paused
@@ -518,11 +583,14 @@ test("composer helpers: recipients, replies, forwards, validation", () => {
   assert.deepEqual(statusLabel("bounced"), ["Bounced", "bad"]);
 });
 
-test("the Inbox is wired into the CRM tabs only for people allowed into Intelligence", () => {
+test("the Inbox is wired into the CRM tabs by its OWN access check, independent of Intelligence", () => {
   const app = fs.readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
-  assert.match(app, /canAccessIntelligence\(intelAccess\) \? \[\["inbox", "Inbox"\], \["intelligence", "Intelligence"\]\]/);
-  assert.match(app, /crmTab === "inbox" && canAccessIntelligence\(intelAccess\) && <InboxModule/);
-  assert.match(app, /\(crmTab === "intelligence" \|\| crmTab === "inbox"\) && intelAccess === false/);
+  assert.match(app, /canAccessEmail\(emailAccess\) \? \[\["inbox", "Inbox"\]\] : \[\]/);
+  assert.match(app, /crmTab === "inbox" && canAccessEmail\(emailAccess\) && <InboxModule access=\{emailAccess\}/);
+  assert.match(app, /\(crmTab === "inbox" && emailAccess === false\)/);
+  assert.match(app, /useEmailUnread\(supabase, Boolean\(userId\) && emailAccess === true/);
+  const inbox = fs.readFileSync(new URL("./InboxModule.jsx", import.meta.url), "utf8");
+  assert.equal(/intelligence\/access|canAccessIntelligence|intelAccess/.test(inbox), false, "Inbox must not use Intelligence access");
 });
 
 // =================================================================================================================
@@ -585,24 +653,44 @@ const accountTable = () => [
   { id: ACC_B, organization_id: ORG_B, address: "sales@studiokairegi.com", status: "active", provider: "resend", is_default: true },
 ];
 
+test("send store: provider acceptance persistence uses the monotonic database RPC", async () => {
+  const svc = fakeService({}, { rpc: { email_mark_provider_accepted: (args) => ({ data: { saved: true, status: "delivered" }, error: null }) } });
+  const store = makeSendStore(svc);
+  await store.markResult("50000000-0000-4000-8000-000000000001", { status: "sent", provider_message_id: "re_provider_1", sent_at: "2026-11-10T12:00:00Z", error: "" });
+  assert.deepEqual(svc.calls.find((c) => c[1] === "email_mark_provider_accepted"), ["rpc", "email_mark_provider_accepted", {
+    p_message_id: "50000000-0000-4000-8000-000000000001", p_provider_message_id: "re_provider_1", p_sent_at: "2026-11-10T12:00:00Z",
+  }]);
+  const failed = makeSendStore(fakeService({}, { rpc: { email_mark_provider_accepted: { data: null, error: { message: "db down" } } } }));
+  await assert.rejects(failed.markResult("50000000-0000-4000-8000-000000000001", { status: "sent", provider_message_id: "re_provider_1" }), /mark provider accepted: db down/);
+});
+
+test("send store: RFC thread parent lookup is scoped to organization, conversation and sender account", async () => {
+  const svc = fakeService({}, { rpc: { email_get_thread_parent: (args) => ({ data: { rfc_message_id: "<latest@x>", references_ids: "<old@x>" }, error: null }) } });
+  const store = makeSendStore(svc);
+  assert.deepEqual(await store.getThreadParent(ORG, CONV, ACC), { rfc_message_id: "<latest@x>", references_ids: "<old@x>" });
+  assert.deepEqual(svc.calls.find((c) => c[1] === "email_get_thread_parent"), ["rpc", "email_get_thread_parent", { p_organization_id: ORG, p_conversation_id: CONV, p_account_id: ACC }]);
+  const failed = makeSendStore(fakeService({}, { rpc: { email_get_thread_parent: { data: null, error: { message: "db unavailable" } } } }));
+  await assert.rejects(failed.getThreadParent(ORG, CONV, ACC), /thread parent: db unavailable/);
+});
+
 test("store: an inbox is found only by exact address; no domain catch-all and no default-account fallback", async () => {
   const store = makeWebhookStore(fakeService({ email_accounts: accountTable() }));
-  assert.deepEqual((await store.accountsForRecipient("John+kabc@StudioKairegi.com", "")).map((a) => a.id), [ACC]);   // plus-tag removed
-  assert.deepEqual(await store.accountsForRecipient("anyone@studiokairegi.com", ""), []);                           // another organization's default is never used
-  assert.deepEqual(await store.accountsForRecipient("paused@studiokairegi.com", ""), []);                            // inactive accounts receive nothing
-  assert.deepEqual(await store.accountsForRecipient("nobody@elsewhere.org", ""), []);
+  assert.deepEqual((await store.accountsForRecipient("John+kabc@StudioKairegi.com", "", "resend")).map((a) => a.id), [ACC]);   // plus-tag removed
+  assert.deepEqual(await store.accountsForRecipient("anyone@studiokairegi.com", "", "resend"), []);                           // another organization's default is never used
+  assert.deepEqual(await store.accountsForRecipient("paused@studiokairegi.com", "", "resend"), []);                            // inactive accounts receive nothing
+  assert.deepEqual(await store.accountsForRecipient("nobody@elsewhere.org", "", "resend"), []);
 });
 
 test("store: on the inbound domain the same local part matches, and two matches are reported (so resolution is ambiguous), never one picked", async () => {
   const tables = { email_accounts: [...accountTable(), { id: "30000000-0000-0000-0000-0000000000d1", organization_id: ORG_B, address: "john@other.com", status: "active", provider: "resend", is_default: false }] };
   const store = makeWebhookStore(fakeService(tables));
-  const found = await store.accountsForRecipient("john+k1@abc.resend.app", "abc.resend.app");
+  const found = await store.accountsForRecipient("john+k1@abc.resend.app", "abc.resend.app", "resend");
   assert.equal(found.length, 2);
   assert.equal(resolveInboundAccount([found]).status, "ambiguous");
-  const unique = await makeWebhookStore(fakeService({ email_accounts: accountTable() })).accountsForRecipient("sales+k1@abc.resend.app", "abc.resend.app");
+  const unique = await makeWebhookStore(fakeService({ email_accounts: accountTable() })).accountsForRecipient("sales+k1@abc.resend.app", "abc.resend.app", "resend");
   assert.deepEqual(unique.map((a) => a.id), [ACC_B]);
-  assert.deepEqual(await makeWebhookStore(fakeService({ email_accounts: accountTable() })).accountsForRecipient("sales@abc.resend.app", ""), []);   // no inbound domain configured: no local-part matching
-  assert.deepEqual(await makeWebhookStore(fakeService({ email_accounts: accountTable() })).accountsForRecipient("sa_es@abc.resend.app", "abc.resend.app"), []);   // LIKE wildcards cannot widen the match
+  assert.deepEqual(await makeWebhookStore(fakeService({ email_accounts: accountTable() })).accountsForRecipient("sales@abc.resend.app", "", "resend"), []);   // no inbound domain configured: no local-part matching
+  assert.deepEqual(await makeWebhookStore(fakeService({ email_accounts: accountTable() })).accountsForRecipient("sa_es@abc.resend.app", "abc.resend.app", "resend"), []);   // LIKE wildcards cannot widen the match
 });
 
 test("store: thread lookups are scoped to the organization AND the account", async () => {
@@ -633,13 +721,25 @@ test("store: thread lookups are scoped to the organization AND the account", asy
   assert.deepEqual([tokenCall[2].p_organization_id, tokenCall[2].p_account_id], [ORG, ACC]);
 });
 
+test("webhook store: tagged accepted-send reconciliation passes signed provider evidence to the database", async () => {
+  const svc = fakeService({}, { rpc: { email_reconcile_tagged_delivery_event: (args) => ({ data: { found: true, status: "sent" }, error: null }) } });
+  const store = makeWebhookStore(svc);
+  const input = { message_id: "50000000-0000-4000-8000-000000000001", provider_message_id: "re_accepted_1", event_type: "email.sent", provider_event_id: "svix-1", occurred_at: "2026-11-10T12:00:00Z", detail: {}, sender_email: "sender@example.test", recipients: ["to@example.test"], subject: "Subject" };
+  assert.deepEqual(await store.reconcileTaggedDeliveryEvent(input), { found: true, conflict: false, status: "sent" });
+  assert.deepEqual(svc.calls.find((c) => c[1] === "email_reconcile_tagged_delivery_event"), ["rpc", "email_reconcile_tagged_delivery_event", {
+    p_message_id: input.message_id, p_provider_message_id: input.provider_message_id, p_event_type: input.event_type,
+    p_provider_event_id: input.provider_event_id, p_occurred_at: input.occurred_at, p_detail: input.detail,
+    p_sender_email: input.sender_email, p_recipients: input.recipients, p_subject: input.subject,
+  }]);
+});
+
 test("store: every database error is raised, never read as an empty result", async () => {
   const fails = (svc, fn, re) => assert.rejects(() => fn(makeWebhookStore(svc)), re);
-  await fails(fakeService({}, { rpc: { email_provider_enabled: { data: null, error: { message: "db down" } } } }), (s) => s.providerEnabled(), /provider flag/);
+  await fails(fakeService({}, { rpc: { email_provider_enabled: { data: null, error: { message: "db down" } } } }), (s) => s.providerEnabled("resend"), /provider flag/);
   await fails(fakeService({}, { rpc: { email_webhook_claim: { data: null, error: { message: "db down" } } } }), (s) => s.claimWebhook("m", "t", {}), /webhook claim/);
   await fails(fakeService({}, { rpc: { email_webhook_claim: { data: { state: "weird" }, error: null } } }), (s) => s.claimWebhook("m", "t", {}), /unexpected answer/);
   await fails(fakeService({}, { rpc: { email_webhook_finish: { data: null, error: { message: "db down" } } } }), (s) => s.finishWebhook("m", "tok", "processed"), /webhook finish/);
-  await fails(fakeService({}, { errors: { email_accounts: "db down" } }), (s) => s.accountsForRecipient("john@studiokairegi.com", ""), /account lookup/);
+  await fails(fakeService({}, { errors: { email_accounts: "db down" } }), (s) => s.accountsForRecipient("john@studiokairegi.com", "", "resend"), /account lookup/);
   await fails(fakeService({}, { errors: { email_messages: "db down" } }), (s) => s.threadLookup(ORG, ACC, { token: null, rfcIds: ["<a@b>"], normalizedSubject: "", sender: "x@y.com" }), /thread headers/);
   await fails(fakeService({}, { errors: { email_conversations: "db down" } }), (s) => s.threadLookup(ORG, ACC, { token: null, rfcIds: [], normalizedSubject: "q", sender: "x@y.com" }), /thread subject/);
   await fails(fakeService({}, { rpc: { email_find_conversation_by_token: { data: null, error: { message: "db down" } } } }), (s) => s.threadLookup(ORG, ACC, { token: "aaaaaaaaaaaa", rfcIds: [], normalizedSubject: "", sender: "x@y.com" }), /thread token/);
@@ -654,7 +754,7 @@ test("webhook + real store: an address owned by two organizations is ignored, no
   const tables = { email_accounts: [
     { id: ACC, organization_id: ORG, address: "john@studiokairegi.com", status: "active", provider: "resend" },
     { id: ACC_B, organization_id: ORG_B, address: "john@studiokairegi.com", status: "active", provider: "resend" },
-  ] };
+  ], email_provider_registry: [RESEND_ROW] };
   const claims = claimModel(() => NOW);
   const svc = fakeService(tables, { rpc: {
     email_provider_enabled: { data: true, error: null },
@@ -784,7 +884,7 @@ test("webhook: failed events are retried, then stop at the attempt limit with an
 // ---------------------------------------------------------------- database failures are never acknowledged as success
 test("webhook: a database failure at any step answers 500, never success", async () => {
   const cases = [
-    ["flag read", { flagError: true }, 0],
+    ["registry read", { registryError: true }, 0],
     ["claim", { claimError: true }, 0],
     ["account lookup", { accountError: true }, 1],
     ["thread lookup", { threadError: true }, 1],
@@ -808,7 +908,7 @@ test("webhook signatures: missing headers, wrong secret, stale timestamp, altere
   const body = JSON.stringify(receivedEvent);
   const good = await sign(body, { id: "msg_sig" });
   const run = async (headers, b = body, over = {}) => {
-    const h = hookHarness({ flagError: true, ...over });               // flagError proves no database call happens before verification
+    const h = hookHarness({ registryError: true, ...over });           // registryError proves no database call happens before verification
     const res = await handleWebhook(new Request("https://x", { method: "POST", headers, body: b }), h.deps);
     return { status: res.status, h };
   };

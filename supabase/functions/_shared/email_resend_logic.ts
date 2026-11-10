@@ -1,87 +1,23 @@
-// KairFlow Email on Resend. Every decision here is pure or takes injected dependencies (fetch, clock, a data "store"),
-// so it is unit tested without a network or database. The two index.ts files only wire real dependencies.
-// NOT exercised against a live Resend account: endpoints and payloads follow Resend's public docs (send, receiving, webhooks).
+// KairFlow Email shared service (multi-provider plan, phase 3). Provider-neutral: validation, authorization hand-off, rate limits,
+// idempotency, thread headers, persistence and error normalisation live here. Every provider API call lives in an adapter
+// (email_adapter_*.ts) chosen from the provider stored on the ACCOUNT ROW in the database, never from anything the browser sends.
+// Every decision here is pure or takes injected dependencies (fetch, clock, a data "store"), so it is unit tested without a network
+// or database. The two index.ts files only wire real dependencies.
+// The file keeps its historical name so existing imports keep working. Resend code moved to email_adapter_resend.ts and is
+// re-exported below, unchanged. NOT exercised against a live Resend account.
 // Keep this file to erasable TypeScript (types/interfaces only) so Node's test runner can load it directly.
 import { corsHeaders } from "./cors.ts";
+import { isValidEmail, parseAddress, parseMessageIds, buildThreadHeaders, normalizeSubject, withThreadToken, cleanInboundDomain, baseAddress, extractThreadToken, htmlToText, safeFileName, safeMsg, json, providerEventId } from "./email_common.ts";
+import { resendAdapter, verifySvixSignature, normalizeReceivedEmail, normalizeAttachment, resendGet, statusForEvent } from "./email_adapter_resend.ts";
+import { AdapterError } from "./email_adapter.ts";
+import type { AdapterContext, AdapterAccount, AdapterSendInput, AdapterErrorCode, EmailAdapter } from "./email_adapter.ts";
+import { resolveAdapter, BUILTIN_ADAPTERS } from "./email_adapter_registry.ts";
+import type { RegistryRow } from "./email_adapter_registry.ts";
 
-export const RESEND_API = "https://api.resend.com";
-const safeMsg = (e: unknown): string => String((e as Error)?.message || "error").replace(/\s+/g, " ").slice(0, 200);   // never includes request bodies or keys
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-
-// ---------------------------------------------------------------------------------------------------------------
-// Small pure helpers
-// ---------------------------------------------------------------------------------------------------------------
-const EMAIL_RE = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
-export const isValidEmail = (s: unknown): boolean => typeof s === "string" && s.length <= 254 && EMAIL_RE.test(s.trim());
-
-/** "Ada <ada@x.com>" -> { name: "Ada", email: "ada@x.com" }. A bare address works too. */
-export function parseAddress(input: unknown): { name: string; email: string } {
-  const s = String(input ?? "").trim();
-  const m = /^(.*?)<([^<>]+)>\s*$/.exec(s);
-  if (m) return { name: m[1].trim().replace(/^"+|"+$/g, "").trim(), email: m[2].trim().toLowerCase() };
-  return { name: "", email: s.toLowerCase() };
-}
-
-/** Lower-cased bare addresses from a list of strings or "Name <addr>" strings. */
-export const addressList = (v: unknown): string[] =>
-  (Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",") : []).map((x) => parseAddress(x).email).filter(Boolean);
-
-/** "Re: Re: Fwd: Hello" -> "hello". Used to match a reply to its conversation when headers are missing. */
-export function normalizeSubject(subject: unknown): string {
-  let s = String(subject ?? "").trim();
-  const re = /^\s*(re|fwd?|aw|sv|vs|rv|antw)(\[\d+\])?\s*:\s*/i;
-  for (let i = 0; i < 10 && re.test(s); i++) s = s.replace(re, "");
-  return s.replace(/\s+/g, " ").trim().toLowerCase();
-}
-export const replySubject = (s: string): string => (/^\s*re\s*:/i.test(s) ? s : `Re: ${s}`.trim());
-export const forwardSubject = (s: string): string => (/^\s*fwd?\s*:/i.test(s) ? s : `Fwd: ${s}`.trim());
-
-/** Message-IDs in a header value, with their angle brackets, in order. */
-export const parseMessageIds = (v: unknown): string[] => String(v ?? "").match(/<[^<>\s]+>/g) || [];
-
-/** In-Reply-To / References for a reply to `parent`. Null when the parent has no Message-ID we know. */
-export function buildThreadHeaders(parent: { rfc_message_id?: string | null; references_ids?: string | null } | null): { in_reply_to: string; references: string } | null {
-  const id = parseMessageIds(parent?.rfc_message_id)[0];
-  if (!id) return null;
-  const chain = [...parseMessageIds(parent?.references_ids), id].filter((x, i, a) => a.indexOf(x) === i).slice(-20);
-  return { in_reply_to: id, references: chain.join(" ") };
-}
-
-/** Plus-address token: replies to john+k1a2b3c4d5e6f@domain land in the right conversation even if a mail server rewrites Message-ID. */
-export const threadToken = (conversationId: string): string => conversationId.replace(/-/g, "").slice(0, 12).toLowerCase();
-/** `inboundDomain` lets replies land on a different domain than the one mail is sent from (for example when Zoho owns the root domain's MX). */
-export function withThreadToken(address: string, conversationId: string, inboundDomain = ""): string {
-  const [local, domain] = address.toLowerCase().split("@");
-  return `${local.split("+")[0]}+k${threadToken(conversationId)}@${inboundDomain || domain}`;
-}
-export const cleanInboundDomain = (v: unknown): string => {
-  const d = String(v ?? "").trim().toLowerCase();
-  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(d) ? d : "";
-};
-export const baseAddress = (address: string): string => {
-  const [local, domain] = String(address).toLowerCase().trim().split("@");
-  return domain ? `${local.split("+")[0]}@${domain}` : String(address).toLowerCase();
-};
-export function extractThreadToken(addresses: string[]): string | null {
-  for (const a of addresses) {
-    const m = /\+k([0-9a-f]{12})@/i.exec(a);
-    if (m) return m[1].toLowerCase();
-  }
-  return null;
-}
-
-export function htmlToText(html: string): string {
-  return String(html || "")
-    .replace(/<(style|script)[\s\S]*?<\/\1>/gi, "")
-    .replace(/<br\s*\/?>|<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-    .replace(/\n{3,}/g, "\n\n").trim();
-}
-
-export const safeFileName = (n: unknown): string =>
-  String(n ?? "attachment").replace(/[\\/\u0000-\u001f"<>|?*:]/g, "_").replace(/^\.+/, "").slice(0, 200) || "attachment";
+// Re-exports: the public surface of this module is unchanged (tests, Intelligence contract tests and both index.ts files import these names).
+export * from "./email_common.ts";
+export { RESEND_API, verifySvixSignature, buildResendPayload, sendViaResend, statusForEvent, normalizeReceivedEmail, normalizeAttachment, normalizeHeaders } from "./email_adapter_resend.ts";
+export type { SendOutcome, ReceivedEmail } from "./email_adapter_resend.ts";
 
 // ---------------------------------------------------------------------------------------------------------------
 // Threading: which conversation does an incoming message belong to?
@@ -112,25 +48,6 @@ export function pickConversation(i: PickInput): { conversationId: string | null;
   return hit ? { conversationId: hit.conversation_id, via: "subject" } : { conversationId: null, via: null };
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// Resend events -> message status
-// ---------------------------------------------------------------------------------------------------------------
-const EVENT_STATUS: Record<string, string> = {
-  "email.sent": "sent",
-  "email.delivered": "delivered",
-  "email.delivery_delayed": "delivery_delayed",
-  "email.bounced": "bounced",
-  "email.complained": "complained",
-  "email.failed": "failed",
-  "email.suppressed": "rejected",
-  "email.rejected": "rejected",
-};
-export const statusForEvent = (type: string, bounceType?: unknown): string | null => {
-  // Resend reports temporary/transient/soft bounce classes inside the event payload.
-  // They are delivery delays, not permanent contactability failures.
-  if (type === "email.bounced" && /temporary|transient|soft/i.test(String(bounceType || ""))) return "delivery_delayed";
-  return EVENT_STATUS[type] || null;
-};
 
 export async function handleSend(req: Request, deps: SendDeps): Promise<Response> {
   try {
@@ -138,44 +55,10 @@ export async function handleSend(req: Request, deps: SendDeps): Promise<Response
   } catch (e) {
     // Any unexpected failure (for example a database error) is a safe 500, never an unhandled crash and never a false "sent".
     console.error("email-send failed:", safeMsg(e));
-    return json({ error: "Could not send right now. Check the Sent folder before trying again." }, 500);
+    return refuse(500, "internal_error", "Could not send right now. Check the Sent folder before trying again.");
   }
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// Webhook signature (Svix scheme, which Resend uses): HMAC-SHA256 over "<id>.<timestamp>.<body>", base64.
-// ---------------------------------------------------------------------------------------------------------------
-const b64ToBytes = (b64: string) => {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-};
-const bytesToB64 = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes));
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let d = 0;
-  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return d === 0;
-}
-
-export async function verifySvixSignature(o: { secret: string; id: string; timestamp: string; signature: string; body: string; nowMs: number; toleranceSec?: number }): Promise<boolean> {
-  try {
-    if (!o.secret || !o.id || !o.timestamp || !o.signature) return false;
-    if (!/^\d{1,12}$/.test(o.timestamp)) return false;                 // plain integer seconds only
-    const ts = Number(o.timestamp);
-    if (!Number.isFinite(ts) || Math.abs(o.nowMs / 1000 - ts) > (o.toleranceSec ?? 300)) return false;
-    const key = await crypto.subtle.importKey("raw", b64ToBytes(o.secret.replace(/^whsec_/, "")), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-    const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${o.id}.${o.timestamp}.${o.body}`)));
-    const expected = bytesToB64(mac);
-    return o.signature.split(" ").some((part) => {
-      const [version, sig] = part.split(",");
-      return version === "v1" && !!sig && constantTimeEqual(sig, expected);
-    });
-  } catch {
-    return false;                                       // fail closed
-  }
-}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Sending
@@ -184,6 +67,8 @@ export interface AttachmentIn { filename: string; content_base64: string; conten
 export interface SendRequest {
   account_id: string; to: string[]; cc: string[]; bcc: string[]; subject: string; text: string; html: string; reply_to: string;
   conversation_id: string | null; draft_id: string | null; idempotency_key: string; attachments: AttachmentIn[];
+  /** Phase 4B: optional CRM lead the send is for. A CLAIM, verified server-side against the caller before anything is created. Never forwarded to an adapter. */
+  crm: { lead_id: string } | null;
 }
 export const LIMITS = Object.freeze({ maxRecipients: 50, maxAttachments: 10, maxAttachmentBytes: 10 * 1024 * 1024, maxSubject: 998, maxBody: 200_000, maxRequestBytes: 16 * 1024 * 1024 });
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -210,6 +95,12 @@ export function validateSendRequest(raw: any): { ok: true; value: SendRequest } 
   const conv = raw.conversation_id ? String(raw.conversation_id) : null;
   const draft = raw.draft_id ? String(raw.draft_id) : null;
   if ((conv && !UUID_RE.test(conv)) || (draft && !UUID_RE.test(draft))) return { ok: false, error: "Invalid conversation" };
+  let crm: { lead_id: string } | null = null;
+  if (raw.crm !== undefined && raw.crm !== null) {
+    const id = raw.crm && typeof raw.crm === "object" && !Array.isArray(raw.crm) ? String((raw.crm as { lead_id?: unknown }).lead_id ?? "") : "";
+    if (!UUID_RE.test(id)) return { ok: false, error: "Invalid CRM lead" };
+    crm = { lead_id: id.toLowerCase() };
+  }
   const atts = Array.isArray(raw.attachments) ? raw.attachments : [];
   if (atts.length > LIMITS.maxAttachments) return { ok: false, error: `Too many attachments (max ${LIMITS.maxAttachments})` };
   let total = 0;
@@ -222,77 +113,31 @@ export function validateSendRequest(raw: any): { ok: true; value: SendRequest } 
   }
   if (total > LIMITS.maxAttachmentBytes) return { ok: false, error: "Attachments are over 10 MB in total" };
   const dedupe = (xs: string[]) => xs.filter((x, i) => xs.findIndex((y) => y.toLowerCase() === x.toLowerCase()) === i);
-  return { ok: true, value: { account_id: String(raw.account_id), to: dedupe(to), cc: dedupe(cc), bcc: dedupe(bcc), subject, text, html, reply_to, conversation_id: conv, draft_id: draft, idempotency_key: key, attachments } };
+  return { ok: true, value: { account_id: String(raw.account_id), to: dedupe(to), cc: dedupe(cc), bcc: dedupe(bcc), subject, text, html, reply_to, conversation_id: conv, draft_id: draft, idempotency_key: key, attachments, crm } };
 }
 
-const displayName = (n: string) => n.replace(/["<>\r\n\\]/g, "").trim();
-export function buildResendPayload(o: { fromEmail: string; fromName: string; req: SendRequest; thread: { in_reply_to: string; references: string } | null; replyTo: string }): Record<string, unknown> {
-  const { req } = o;
-  const p: Record<string, unknown> = {
-    from: o.fromName ? `${displayName(o.fromName)} <${o.fromEmail}>` : o.fromEmail,
-    to: req.to,
-    subject: req.subject,
-    text: req.text.trim() ? req.text : htmlToText(req.html),
-  };
-  if (req.html.trim()) p.html = req.html;
-  if (req.cc.length) p.cc = req.cc;
-  if (req.bcc.length) p.bcc = req.bcc;
-  if (o.replyTo) p.reply_to = o.replyTo;
-  if (o.thread) p.headers = { "In-Reply-To": o.thread.in_reply_to, References: o.thread.references };
-  if (req.attachments.length) p.attachments = req.attachments.map((a) => ({ filename: a.filename, content: a.content_base64, content_type: a.content_type }));
-  return p;
-}
 
-export type SendOutcome =
-  | { ok: true; id: string; attempts: number }
-  | { ok: false; unknown: boolean; retryable: boolean; status: number; message: string; attempts: number };
-
-/** Retries only what is safe: the Idempotency-Key makes Resend return the original result instead of sending twice. */
-export async function sendViaResend(fetchFn: typeof fetch, apiKey: string, payload: Record<string, unknown>, idempotencyKey: string,
-                                    opts: { maxAttempts?: number; sleep?: (ms: number) => Promise<void> } = {}): Promise<SendOutcome> {
-  const max = opts.maxAttempts ?? 3;
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  let attempts = 0;
-  let last: SendOutcome = { ok: false, unknown: true, retryable: true, status: 0, message: "No response from the email provider", attempts: 0 };
-  while (attempts < max) {
-    attempts++;
-    let res: Response;
-    try {
-      res = await fetchFn(`${RESEND_API}/emails`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `kf-${idempotencyKey}`.slice(0, 256) },
-        body: JSON.stringify(payload),
-      });
-    } catch {
-      last = { ok: false, unknown: true, retryable: true, status: 0, message: "Network error reaching the email provider", attempts };
-      if (attempts < max) await sleep(400 * 2 ** (attempts - 1));
-      continue;
-    }
-    if (res.ok) {
-      const body = await res.json().catch(() => null) as any;
-      return body?.id ? { ok: true, id: String(body.id), attempts } : { ok: false, unknown: true, retryable: false, status: res.status, message: "The email provider gave an unreadable answer", attempts };
-    }
-    const err = await res.json().catch(() => null) as any;
-    const message = String(err?.message || `Email provider error (${res.status})`).slice(0, 300);
-    if (res.status === 429 || res.status >= 500) {
-      last = { ok: false, unknown: false, retryable: true, status: res.status, message, attempts };
-      const wait = Math.min(Number(res.headers?.get?.("retry-after")) * 1000 || 500 * 2 ** (attempts - 1), 5000);
-      if (attempts < max) await sleep(wait);
-      continue;
-    }
-    return { ok: false, unknown: false, retryable: false, status: res.status, message, attempts };   // 4xx: rejected, do not retry
-  }
-  return last;
-}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Data stores (implemented with Supabase in email_resend_store.ts, faked in tests)
 // ---------------------------------------------------------------------------------------------------------------
 export interface SendStore {
-  providerEnabled(): Promise<boolean>;
-  getAccount(orgId: string, accountId: string): Promise<{ id: string; address: string; display_name: string; status: string } | null>;
-  getThreadParent(orgId: string, conversationId: string): Promise<{ rfc_message_id: string | null; references_ids: string | null } | null>;
-  countOutboundSince(orgId: string, sinceIso: string): Promise<number>;
+  /** The legacy shared kill switch (public.email_provider_flags, also written by Intelligence's admin switch) for `legacyFlagKey`. Throws on database errors. */
+  providerEnabled(legacyFlagKey: string): Promise<boolean>;
+  /** The provider's row in public.email_provider_registry, or null when there is none. Throws on database errors. */
+  getProviderRegistryRow(providerKey: string): Promise<RegistryRow | null>;
+  /** Scoped to the organization. `provider` is the value stored on the account row in the database. */
+  getAccount(orgId: string, accountId: string): Promise<{ id: string; organization_id: string; provider: string; address: string; display_name: string; status: string } | null>;
+  /** Phase 4B. The lead, only when it exists AND is owned by `userId` (leads are per user; decision D1). Null otherwise: "missing" and "not yours" look the same. Throws on database errors. */
+  getLeadForUser(userId: string, leadId: string): Promise<{ id: string } | null>;
+  /** Existing conversation CRM association, scoped to organization and sender account. */
+  getConversationLead(orgId: string, conversationId: string, accountId: string): Promise<{ lead_id: string | null } | null>;
+  /** Atomically writes the CRM timeline entry and its full email activity record. Safe to retry after provider acceptance. */
+  recordCrmActivity(messageId: string): Promise<{ recorded: boolean; duplicate: boolean }>;
+  /** Scoped to the organization AND the account, so another account's thread can never supply reply headers. */
+  getThreadParent(orgId: string, conversationId: string, accountId: string): Promise<{ rfc_message_id: string | null; references_ids: string | null } | null>;
+  /** Outbound messages created since `sinceIso`; when `provider` is given, only that provider's (its quota is its own). */
+  countOutboundSince(orgId: string, sinceIso: string, provider?: string): Promise<number>;
   createOutbound(p: Record<string, unknown>): Promise<{ duplicate: boolean; message_id: string; conversation_id: string; status: string; provider_message_id?: string | null }>;
   markResult(messageId: string, patch: Record<string, unknown>): Promise<void>;
   saveAttachments(orgId: string, messageId: string, files: { filename: string; content_type: string; base64: string }[]): Promise<void>;
@@ -304,77 +149,252 @@ export interface SendDeps {
   sleep?: (ms: number) => Promise<void>;
   authenticate: (req: Request) => Promise<{ ok: true; userId: string; organizationId: string } | { ok: false; status: number; error: string }>;
   store: SendStore;
+  /** Optional audit sink (structured, no addresses, no bodies, no secrets). Defaults to one JSON line on the console. */
+  audit?: (e: AuditEvent) => void;
+  /** Adapters available to this deployment, by adapter_key. Defaults to BUILTIN_ADAPTERS; set only by tests and by future wiring that adds a provider. */
+  adapters?: Readonly<Record<string, EmailAdapter>>;
+}
+
+/** Audit record. Never contains recipient addresses, subjects, bodies, attachment names or credentials. */
+export interface AuditEvent { event: "send_refused" | "send_attempt" | "send_result"; organization_id: string; user_id: string; account_id?: string; provider?: string; code?: string; status?: string; message_id?: string; provider_message_id?: string; attempts?: number }
+const defaultAudit = (e: AuditEvent) => console.log(JSON.stringify({ email_audit: e }));
+
+/** Normalised, browser-safe answer for an adapter/capability error. Never includes secrets or provider response bodies. */
+export function adapterErrorResponse(e: AdapterError): Response {
+  return json({ error: e.message, code: e.code }, e.status);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Phase 4B: one normalised answer shape for email-send. The browser can always branch on `code` (refusals) and `outcome` (results).
+// ---------------------------------------------------------------------------------------------------------------
+/** Why email-send refused or failed. A superset of the adapter codes; EVERY non-2xx answer after the CORS preflight carries one. */
+export type SendErrorCode = AdapterErrorCode | "unauthenticated" | "forbidden" | "method_not_allowed" | "request_too_large" | "invalid_request" | "account_not_found" | "lead_not_found" | "internal_error" | "database_unavailable" | "idempotency_conflict" | "crm_lead_conflict";
+/** What happened to a message that reached the provider step. `unknown` = the provider may have accepted it: resend ONLY with the same idempotency key. */
+export type SendOutcomeKind = "accepted" | "duplicate" | "rejected" | "failed" | "unknown";
+export interface SendResponseV2 {
+  ok: boolean; outcome?: SendOutcomeKind; message_id?: string; conversation_id?: string; status?: string;
+  retry_with_same_key?: boolean; crm?: { lead_id: string; activity: "recorded" | "pending" | "skipped" };
+  warning?: "sent_status_not_saved" | "crm_activity_pending"; code?: SendErrorCode; error?: string; duplicate?: boolean;
+}
+const refuse = (status: number, code: SendErrorCode, error: string) => json({ error, code }, status);
+
+/** Provider-supplied text is untrusted: it may echo a credential, a token or an internal address. This keeps it short, single-line
+ *  and free of anything that looks like a secret. It is what is stored in email_messages.error and (for rejections only) shown to a person. */
+export function sanitizeProviderMessage(v: unknown): string {
+  return String(v ?? "")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "[redacted]")
+    .replace(/\b(api[_ -]?key|token|secret|password|authorization)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+    .replace(/\b(?:re|sk|pk|rk|key|token|secret)_[A-Za-z0-9_-]{8,}/gi, "[redacted]")
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, "[redacted]")
+    .replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
 async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-  if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
+  if (req.method !== "POST") return refuse(405, "method_not_allowed", "Method not allowed");
   const auth = await deps.authenticate(req);
-  if (!auth.ok) return json({ error: auth.error }, auth.status);
+  if (!auth.ok) return refuse(auth.status, auth.status === 401 ? "unauthenticated" : "forbidden", auth.error);
 
   const text = await req.text();
-  if (text.length > LIMITS.maxRequestBytes) return json({ error: "Request is too large" }, 413);
+  if (text.length > LIMITS.maxRequestBytes) return refuse(413, "request_too_large", "Request is too large");
   let raw: unknown;
-  try { raw = JSON.parse(text); } catch { return json({ error: "Invalid request" }, 400); }
+  try { raw = JSON.parse(text); } catch { return refuse(400, "invalid_request", "Invalid request"); }
   const v = validateSendRequest(raw);
-  if (!v.ok) return json({ error: v.error }, 400);
+  if (!v.ok) return refuse(400, "invalid_request", v.error);
   const r = v.value;
 
-  const apiKey = deps.env("RESEND_API_KEY");
-  if (!apiKey) return json({ error: "Email sending is not configured yet" }, 503);
-  if (!(await deps.store.providerEnabled())) return json({ error: "Resend is not the active email provider" }, 503);
-  const account = await deps.store.getAccount(auth.organizationId, r.account_id);
-  if (!account || account.status !== "active") return json({ error: "Sender address not found" }, 404);
+  const audit = deps.audit ?? defaultAudit;
+  const who = { organization_id: auth.organizationId, user_id: auth.userId };
 
-  // Free Resend plan allows 100 emails a day: stop here with a clear message rather than let Resend pause sending.
-  const daily = Number(deps.env("EMAIL_DAILY_LIMIT") || 100);
+  // 1. The account row decides the provider. Nothing from the request body (such as a "provider" field) is ever consulted.
+  //    Ownership: the row must belong to the caller's organization. The store already filters by it; this re-check makes a store
+  //    mistake (or a row with no organization) fail closed. "Not found" and "someone else's" answer identically.
+  const account = await deps.store.getAccount(auth.organizationId, r.account_id);
+  if (!account || account.organization_id !== auth.organizationId) { audit({ event: "send_refused", ...who, account_id: r.account_id, code: "account_not_found" }); return refuse(404, "account_not_found", "Sender address not found"); }
+  if (account.status !== "active") {
+    audit({ event: "send_refused", ...who, account_id: account.id, provider: String(account.provider || ""), code: "account_not_usable" });
+    return adapterErrorResponse(new AdapterError("account_not_usable", "This sender address is paused. Choose another sender.", { provider: String(account.provider || "") }));
+  }
+
+  // 2. Registry row + adapter, validated server-side. Unknown / disabled / not-installed providers are refused with a normalised code.
+  let resolved;
+  try {
+    resolved = resolveAdapter(account.provider, await deps.store.getProviderRegistryRow(String(account.provider || "")), deps.adapters ?? BUILTIN_ADAPTERS);
+  } catch (e) {
+    if (e instanceof AdapterError) { audit({ event: "send_refused", ...who, account_id: account.id, provider: String(account.provider || ""), code: e.code }); return adapterErrorResponse(e); }
+    throw e;
+  }
+  const { adapter } = resolved;
+  const ctx: AdapterContext = { env: deps.env, fetch: deps.fetch, now: deps.now, sleep: deps.sleep };
+
+  // 3. Server-side configuration (for Resend: the API key), then the legacy shared kill switch if the adapter has one.
+  const problem = adapter.configurationProblem(deps.env);
+  if (problem) { audit({ event: "send_refused", ...who, account_id: account.id, provider: adapter.providerKey, code: "not_configured" }); return refuse(503, "not_configured", problem); }
+  if (adapter.legacyFlagKey && !(await deps.store.providerEnabled(adapter.legacyFlagKey))) {
+    audit({ event: "send_refused", ...who, account_id: account.id, provider: adapter.providerKey, code: "provider_disabled" });
+    return refuse(503, "provider_disabled", `${adapter.displayName} is not the active email provider`);
+  }
+
+  // 3b. Optional CRM lead: verify against the authenticated sender before anything is created or sent.
+  // The lead association is persisted on the outbound message; CRM activity is written only after provider acceptance.
+  let crm: SendResponseV2["crm"];
+  let crmLeadId = r.crm?.lead_id ?? null;
+  if (r.conversation_id) {
+    const linked = await deps.store.getConversationLead(auth.organizationId, r.conversation_id, account.id);
+    const linkedLeadId = linked?.lead_id ? String(linked.lead_id).toLowerCase() : null;
+    if (linkedLeadId && crmLeadId && linkedLeadId !== crmLeadId) {
+      audit({ event: "send_refused", ...who, account_id: account.id, provider: adapter.providerKey, code: "crm_lead_conflict" });
+      return refuse(409, "crm_lead_conflict", "This conversation is already linked to a different CRM lead. Update the conversation link before sending.");
+    }
+    crmLeadId = crmLeadId || linkedLeadId;
+  }
+  if (crmLeadId) {
+    const lead = await deps.store.getLeadForUser(auth.userId, crmLeadId);
+    if (!lead || String(lead.id).toLowerCase() !== crmLeadId) { audit({ event: "send_refused", ...who, account_id: account.id, provider: adapter.providerKey, code: "lead_not_found" }); return refuse(404, "lead_not_found", "Lead not found"); }
+    crm = { lead_id: crmLeadId, activity: "pending" };
+  }
+
+  // 4. Limits. Per minute: all of the organization's mail (burst protection). Per day: this provider's own quota (free Resend plan = 100/day).
+  const daily = Number(deps.env(adapter.dailyLimitEnv || "") || adapter.defaultDailyLimit || 100);
   const dayAgo = new Date(deps.now() - 86_400_000).toISOString();
   const minuteAgo = new Date(deps.now() - 60_000).toISOString();
-  if ((await deps.store.countOutboundSince(auth.organizationId, minuteAgo)) >= 20) return json({ error: "Slow down: too many emails in the last minute" }, 429);
-  if ((await deps.store.countOutboundSince(auth.organizationId, dayAgo)) >= daily) return json({ error: `Daily sending limit reached (${daily}). Try again later or upgrade the Resend plan.` }, 429);
+  if ((await deps.store.countOutboundSince(auth.organizationId, minuteAgo)) >= 20) return refuse(429, "rate_limited", "Slow down: too many emails in the last minute");
+  if ((await deps.store.countOutboundSince(auth.organizationId, dayAgo, adapter.providerKey)) >= daily) return refuse(429, "rate_limited", `Daily sending limit reached (${daily}). Try again later or upgrade the ${adapter.displayName} plan.`);
 
-  const parent = r.conversation_id ? await deps.store.getThreadParent(auth.organizationId, r.conversation_id) : null;
+  const parent = r.conversation_id ? await deps.store.getThreadParent(auth.organizationId, r.conversation_id, account.id) : null;
   const thread = buildThreadHeaders(parent);
 
-  const created = await deps.store.createOutbound({
-    organization_id: auth.organizationId, account_id: account.id, conversation_id: r.conversation_id, draft_id: r.draft_id, idempotency_key: r.idempotency_key,
-    user_id: auth.userId, to_emails: r.to, cc_emails: r.cc, bcc_emails: r.bcc, reply_to: r.reply_to, subject: r.subject, body_text: r.text, body_html: r.html,
-    in_reply_to: thread?.in_reply_to ?? null, references_ids: thread?.references ?? null, normalized_subject: normalizeSubject(r.subject),
-  });
-  if (created.duplicate) return json({ ok: true, duplicate: true, message_id: created.message_id, conversation_id: created.conversation_id, status: created.status });
+  let created: Awaited<ReturnType<SendStore["createOutbound"]>>;
+  try {
+    created = await deps.store.createOutbound({
+      organization_id: auth.organizationId, account_id: account.id, conversation_id: r.conversation_id, draft_id: r.draft_id, idempotency_key: r.idempotency_key,
+      user_id: auth.userId, to_emails: r.to, cc_emails: r.cc, bcc_emails: r.bcc, reply_to: r.reply_to, subject: r.subject, body_text: r.text, body_html: r.html,
+      in_reply_to: thread?.in_reply_to ?? null, references_ids: thread?.references ?? null, normalized_subject: normalizeSubject(r.subject),
+      // Included in the database-side immutable idempotency fingerprint (including attachment bytes).
+      attachments: r.attachments.map((a) => ({ filename: a.filename, content_type: a.content_type || "application/octet-stream", content_base64: a.content_base64 })),
+      crm_lead_id: crm?.lead_id ?? null, crm_user_id: crm ? auth.userId : null,
+    });
+  } catch (e) {
+    if (/idempotency_key_conflict/i.test(safeMsg(e))) return refuse(409, "idempotency_conflict", "This request key was already used for a different sender or message. Create a new request key to send this message.");
+    if (/crm_lead_conflict/i.test(safeMsg(e))) {
+      audit({ event: "send_refused", ...who, account_id: account.id, provider: adapter.providerKey, code: "crm_lead_conflict" });
+      return refuse(409, "crm_lead_conflict", "This conversation's CRM lead changed before the message was queued. Refresh the conversation and try again.");
+    }
+    throw e;
+  }
+  // CRM recording is deliberately downstream of provider acceptance. A failed CRM write is
+  // reported as pending; it must never turn an accepted email into a send retry. The recovery RPC
+  // can replay this exact operation from the persisted email_messages row without contacting a provider.
+  const recordCrm = async (messageId: string): Promise<"recorded" | "pending"> => {
+    if (!crm) return "recorded";
+    try {
+      const result = await deps.store.recordCrmActivity(messageId);
+      return result.recorded ? "recorded" : "pending";
+    } catch (e) {
+      console.error("email-send: CRM activity recording pending", safeMsg(e));
+      return "pending";
+    }
+  };
+
+  // Phase 4C: a repeated key is a lookup, never permission to call the provider again.
+  // Only provider-accepted states are successful duplicates. queued/sending are ambiguous/in-flight and must remain unknown.
+  if (created.duplicate) {
+    const prior = String(created.status || "").toLowerCase();
+    const accepted = new Set(["sent", "delivered", "delivery_delayed", "bounced", "complained"]);
+    if (accepted.has(prior)) {
+      const activity = await recordCrm(created.message_id);
+      const crmResult = crm ? { ...crm, activity } : undefined;
+      return json({ ok: true, duplicate: true, outcome: "duplicate", message_id: created.message_id, conversation_id: created.conversation_id, status: prior, ...(crmResult ? { crm: crmResult } : {}), ...(activity === "pending" && crm ? { warning: "crm_activity_pending" as const } : {}) } satisfies SendResponseV2);
+    }
+    if (prior === "rejected") return json({ ok: false, duplicate: true, outcome: "rejected", retry_with_same_key: false, code: "provider_rejected", message_id: created.message_id, conversation_id: created.conversation_id, status: prior, error: "The provider rejected this message. Edit it and try again." } satisfies SendResponseV2, 422);
+    if (prior === "failed") return json({ ok: false, duplicate: true, outcome: "failed", retry_with_same_key: false, code: "provider_unavailable", message_id: created.message_id, conversation_id: created.conversation_id, status: prior, error: "The previous attempt failed. You can try again." } satisfies SendResponseV2, 502);
+    return json({ ok: false, duplicate: true, outcome: "unknown", status: "unknown", retry_with_same_key: true, code: "outcome_unknown", message_id: created.message_id, conversation_id: created.conversation_id, error: "This send is still unconfirmed. Check the Sent folder; do not create a new send." } satisfies SendResponseV2, 202);
+  }
 
   // Replies to this message come back to a plus-address that names the conversation, unless the person chose their own reply-to.
   const tokens = (deps.env("EMAIL_THREAD_TOKENS") || "on").toLowerCase() !== "off";
   // EMAIL_INBOUND_DOMAIN: where replies should arrive (Resend receives there). Needed when another provider (Zoho) owns the sending domain's MX.
   const inboundDomain = cleanInboundDomain(deps.env("EMAIL_INBOUND_DOMAIN"));
   const replyTo = r.reply_to || (tokens ? withThreadToken(account.address, created.conversation_id, inboundDomain) : "");
-  await deps.store.markResult(created.message_id, { status: "sending", reply_to: replyTo });
+  // Claim the queued row before contacting the provider. A transient database failure must never
+  // strand a message silently or allow an untracked provider submission. Retry only this write.
+  let claimed = false;
+  let claimError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await deps.store.markResult(created.message_id, { status: "sending", reply_to: replyTo });
+      claimed = true;
+      break;
+    } catch (e) {
+      claimError = e;
+      if (attempt < 2) await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(100 * (2 ** attempt));
+    }
+  }
+  if (!claimed) {
+    console.error("email-send: queued-to-sending transition failed after retries", safeMsg(claimError));
+    return json({ ok: false, outcome: "failed", status: "queued", retry_with_same_key: true, code: "database_unavailable", message_id: created.message_id, conversation_id: created.conversation_id, error: "The message is safely queued but was not submitted. Retry this request with the same idempotency key." } satisfies SendResponseV2, 503);
+  }
 
-  const payload = buildResendPayload({ fromEmail: account.address, fromName: account.display_name, req: r, thread, replyTo });
-  const out = await sendViaResend(deps.fetch, apiKey, payload, r.idempotency_key, { sleep: deps.sleep });
+  audit({ event: "send_attempt", ...who, account_id: account.id, provider: adapter.providerKey, message_id: created.message_id });
+  const adapterAccount: AdapterAccount = { id: account.id, organization_id: auth.organizationId, provider: adapter.providerKey, address: account.address, display_name: account.display_name, status: account.status };
+  const input: AdapterSendInput = {
+    fromEmail: account.address, fromName: account.display_name, to: r.to, cc: r.cc, bcc: r.bcc, subject: r.subject, text: r.text, html: r.html,
+    replyTo, thread, attachments: r.attachments, idempotencyKey: r.idempotency_key, correlationId: created.message_id,
+  };
+  let outcome;
+  try {
+    outcome = await adapter.send(ctx, adapterAccount, input);
+  } catch (e) {
+    // A throwing adapter must look like "outcome unknown", never like a clean failure that invites a duplicate send.
+    console.error("email-send: adapter threw", adapter.providerKey, safeMsg(e));
+    outcome = { ok: false as const, unknown: true, retryable: false, status: 0, message: "The email provider gave an unreadable answer", attempts: 0 };
+  }
+  const out = outcome.ok ? { ok: true as const, id: outcome.providerMessageId, attempts: outcome.attempts } : outcome;
+  audit({ event: "send_result", ...who, account_id: account.id, provider: adapter.providerKey, message_id: created.message_id, ...(out.ok ? { provider_message_id: out.id } : {}), status: out.ok ? "sent" : out.unknown ? "unknown" : "failed", attempts: out.attempts });
 
   if (out.ok) {
-    try {
-      await deps.store.markResult(created.message_id, { status: "sent", provider_message_id: out.id, sent_at: new Date(deps.now()).toISOString(), error: "" });
-    } catch (e) {
-      // The provider accepted the mail. Never turn that into an error the person might retry: report success and flag the bookkeeping gap.
-      console.error("email-send: sent but status update failed", safeMsg(e));
-      return json({ ok: true, message_id: created.message_id, conversation_id: created.conversation_id, status: "sent", warning: "sent_status_not_saved" });
+    let persisted = false;
+    let persistError: unknown = null;
+    // Provider acceptance is final. Retry only the database write (never the provider call), bounded to three attempts.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await deps.store.markResult(created.message_id, { status: "sent", provider_message_id: out.id, sent_at: new Date(deps.now()).toISOString(), error: "" });
+        persisted = true;
+        break;
+      } catch (e) {
+        persistError = e;
+        if (attempt < 2) await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(100 * (2 ** attempt));
+      }
+    }
+    if (!persisted) {
+      // Never turn accepted mail into a retryable send failure. The opaque provider id is in the audit event for manual repair.
+      console.error("email-send: accepted message status write failed after retries", safeMsg(persistError));
+      return json({ ok: true, outcome: "accepted", message_id: created.message_id, conversation_id: created.conversation_id, status: "sent", warning: "sent_status_not_saved", ...(crm ? { crm: { ...crm, activity: "pending" } } : {}) } satisfies SendResponseV2);
     }
     if (r.attachments.length) {
       try { await deps.store.saveAttachments(auth.organizationId, created.message_id, r.attachments.map((a) => ({ filename: a.filename, content_type: a.content_type || "application/octet-stream", base64: a.content_base64 }))); }
       catch (e) { console.error("email-send: attachment copy failed", (e as Error)?.message); }        // the mail is already sent; never report failure for this
     }
-    return json({ ok: true, message_id: created.message_id, conversation_id: created.conversation_id, status: "sent" });
+    const activity = await recordCrm(created.message_id);
+    const crmResult = crm ? { ...crm, activity } : undefined;
+    return json({ ok: true, outcome: "accepted", message_id: created.message_id, conversation_id: created.conversation_id, status: "sent", ...(crmResult ? { crm: crmResult } : {}), ...(activity === "pending" && crm ? { warning: "crm_activity_pending" as const } : {}) } satisfies SendResponseV2);
   }
   if (out.unknown) {
     // The provider may have accepted it. Never resend automatically; leave it visible as "sending" for a person to check.
     await deps.store.markResult(created.message_id, { status: "sending", error: "Delivery outcome unknown. Check before sending again." });
-    return json({ ok: false, status: "unknown", message_id: created.message_id, error: "We could not confirm the email was sent. Check the Sent folder before trying again." }, 202);
+    return json({ ok: false, outcome: "unknown", status: "unknown", code: "outcome_unknown", retry_with_same_key: true, message_id: created.message_id, error: "We could not confirm the email was sent. Check the Sent folder before trying again." } satisfies SendResponseV2, 202);
   }
-  await deps.store.markResult(created.message_id, { status: out.status >= 400 && out.status < 500 && out.status !== 429 ? "rejected" : "failed", error: out.message });
+  // A clean provider refusal. Provider-supplied text is sanitised before it is stored or shown; for a server-side failure the browser gets a fixed message instead.
+  const rejected = out.status >= 400 && out.status < 500 && out.status !== 429;
+  const detail = sanitizeProviderMessage(out.message);
+  await deps.store.markResult(created.message_id, { status: rejected ? "rejected" : "failed", error: detail });
   console.error("email-send: provider refused", out.status);
-  return json({ ok: false, status: "failed", message_id: created.message_id, error: out.message }, out.status >= 400 && out.status < 500 && out.status !== 429 ? 422 : 502);
+  return json({
+    ok: false, outcome: rejected ? "rejected" : "failed", status: "failed", retry_with_same_key: false, message_id: created.message_id,
+    code: rejected ? "provider_rejected" : out.status === 429 ? "rate_limited" : "provider_unavailable",
+    error: rejected ? (detail || "The email provider rejected this message") : "The email provider could not take this message right now. Try again later.",
+  } satisfies SendResponseV2, rejected ? 422 : 502);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -408,21 +428,26 @@ export const safeSegment = (v: unknown): string => String(v ?? "").replace(/[^A-
 
 export type ClaimResult = { state: "claimed"; token: string; attempts: number } | { state: "done" } | { state: "busy" } | { state: "exhausted" };
 export interface WebhookStore {
-  /** Throws on any database error: a failure must never look like "provider disabled". */
-  providerEnabled(): Promise<boolean>;
+  /** The legacy shared kill switch for `legacyFlagKey`. Throws on any database error: a failure must never look like "provider disabled". */
+  providerEnabled(legacyFlagKey: string): Promise<boolean>;
+  /** The provider's registry row, or null. Throws on any database error (same rule). */
+  getProviderRegistryRow(providerKey: string): Promise<RegistryRow | null>;
   /** Atomic claim (see the claim state machine in the hardening migration). */
   claimWebhook(svixId: string, type: string, payload: unknown): Promise<ClaimResult>;
   /** Records the outcome only while `token` still owns the claim. Returns false when the claim was lost. */
   finishWebhook(svixId: string, token: string, status: "processed" | "failed" | "ignored", error?: string): Promise<boolean>;
-  /** Active Resend accounts for one recipient address, exact match (plus-tag removed) or, for the configured inbound domain, same local part. Throws on database errors. */
-  accountsForRecipient(address: string, inboundDomain: string): Promise<AccountRef[]>;
+  /** Active accounts OF THE GIVEN PROVIDER for one recipient address, exact match (plus-tag removed) or, for the configured inbound domain, same local part. Throws on database errors. */
+  accountsForRecipient(address: string, inboundDomain: string, providerKey: string): Promise<AccountRef[]>;
   /** Scoped to the organization AND the account. Throws on database errors. */
   threadLookup(orgId: string, accountId: string, q: { token: string | null; rfcIds: string[]; normalizedSubject: string; sender: string }): Promise<{ tokenConversationId: string | null; rfcMap: Record<string, string>; candidates: SubjectCandidate[] }>;
   uploadAttachment(path: string, bytes: Uint8Array, contentType: string): Promise<void>;
   ingestInbound(p: Record<string, unknown>): Promise<{ duplicate: boolean; message_id: string; conversation_id?: string }>;
+  /** Bind a signed Resend event carrying our server-generated kf_message_id tag to a previously persisted sending row. */
+  reconcileTaggedDeliveryEvent(a: { message_id: string; provider_message_id: string; event_type: string; provider_event_id: string; occurred_at: string | null; detail: Record<string, unknown>; sender_email: string; recipients: string[]; subject: string }): Promise<{ found: boolean; conflict?: boolean; status?: string }>;
   applyDeliveryEvent(a: { provider_message_id: string; status: string; event_type: string; provider_event_id: string; occurred_at: string | null; detail: Record<string, unknown> }): Promise<{ found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean }>;
-  /** Route authenticated Resend delivery events into Intelligence, matching exact provider message/account provenance. */
-  applyIntelDeliveryEvent(a: { provider_message_id: string; event_type: string; provider_event_id: string; occurred_at: string | null; recipient: string; reason: string; bounce_type: string }): Promise<{ found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean }>;
+  /** OPTIONAL extra delivery sink plugged in by the endpoint wiring (resend-webhook/index.ts). General Email does not implement or import it;
+   *  it exists so Intelligence can apply the same signed event to its own rows without general Email depending on intel_* objects. */
+  applyIntelDeliveryEvent?(a: { provider_message_id: string; event_type: string; provider_event_id: string; occurred_at: string | null; recipient: string; reason: string; bounce_type: string }): Promise<{ found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean }>;
 }
 export interface WebhookDeps {
   env: (k: string) => string | undefined;
@@ -434,19 +459,6 @@ export interface WebhookDeps {
 
 const MAX_ATTACHMENT_DOWNLOAD = 25 * 1024 * 1024;
 const MAX_WEBHOOK_BODY = 1_000_000;
-
-async function resendGet(d: WebhookDeps, apiKey: string, path: string): Promise<any> {
-  const sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  let lastStatus = 0;
-  for (let i = 0; i < 3; i++) {
-    const res = await d.fetch(`${RESEND_API}${path}`, { headers: { Authorization: `Bearer ${apiKey}` } });
-    if (res.ok) return await res.json();
-    lastStatus = res.status;
-    if (res.status !== 429 && res.status < 500) break;       // 4xx (including "not available yet") ends here; the webhook retry handles it, bounded by the claim attempt limit
-    await sleep(400 * 2 ** i);
-  }
-  throw new Error(`Resend ${path.split("/").slice(0, 3).join("/")} failed (${lastStatus})`);   // path without ids: safe to log
-}
 
 /** Reads a download but gives up (null) as soon as it would exceed `cap` bytes, so a huge file is never held in memory. */
 export async function readCapped(res: Response, cap: number): Promise<Uint8Array | null> {
@@ -469,66 +481,6 @@ export async function readCapped(res: Response, cap: number): Promise<Uint8Array
 }
 
 
-// ---------------------------------------------------------------------------------------------------------------
-// Tolerant reading of Resend's "received email" response. Field names follow Resend's public docs but were never checked against a real
-// account, so common variants are accepted (headers as an object or a list, recipients as strings or objects, snake/camel case names).
-// If the essentials are missing the event FAILS with the field names we did see (names only, never values) so the problem is visible in
-// email_webhook_events.error instead of silently storing a blank message.
-// ---------------------------------------------------------------------------------------------------------------
-const asText = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : Array.isArray(v) ? v.map(asText).join(" ") : String(v));
-const addrText = (x: unknown): string => {
-  if (typeof x === "string") return x;
-  const o = (x ?? {}) as Record<string, unknown>;
-  const email = asText(o.email ?? o.address ?? "");
-  const name = asText(o.name ?? "");
-  return email ? (name ? `${name} <${email}>` : email) : "";
-};
-const addrs = (v: unknown): string[] => (Array.isArray(v) ? v : v ? [v] : []).flatMap((x) => (typeof x === "string" ? x.split(",") : [addrText(x)])).map((x) => parseAddress(x).email).filter(Boolean);
-
-export function normalizeHeaders(h: unknown): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (Array.isArray(h)) {
-    for (const e of h) { const k = asText((e as any)?.name ?? (e as any)?.key); if (k) out[k.toLowerCase()] = asText((e as any)?.value); }
-  } else if (h && typeof h === "object") {
-    for (const [k, v] of Object.entries(h as Record<string, unknown>)) out[k.toLowerCase()] = asText(v);
-  }
-  return out;
-}
-
-export interface ReceivedEmail {
-  emailId: string; fromRaw: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; subject: string; messageId: string;
-  inReplyTo: string; references: string; listUnsubscribe: string; html: string; text: string; createdAt: string | null; authentication: unknown; headers: Record<string, string>;
-}
-export function normalizeReceivedEmail(full: any, data: any): ReceivedEmail {
-  const headers = normalizeHeaders(full?.headers);
-  const fromRaw = asText(headers["from"] || addrText(full?.from) || addrText(data?.from));
-  const to = addrs(full?.to ?? data?.to ?? headers["to"]);
-  const cc = addrs(full?.cc ?? data?.cc ?? headers["cc"]);
-  const bcc = addrs(full?.bcc ?? data?.bcc);
-  if (!isValidEmail(parseAddress(fromRaw).email) || !(to.length + cc.length + bcc.length)) {
-    const seen = Object.keys(full && typeof full === "object" ? full : {}).slice(0, 30).join(",");
-    throw new Error(`Unexpected received-email shape (missing sender or recipients). Fields seen: ${seen || "none"}`);
-  }
-  return {
-    emailId: asText(data?.email_id ?? data?.id ?? full?.id), fromRaw, to, cc, bcc,
-    replyTo: addrs(full?.reply_to ?? full?.replyTo ?? headers["reply-to"]),
-    subject: asText(full?.subject ?? data?.subject ?? headers["subject"]),
-    messageId: parseMessageIds(full?.message_id ?? full?.messageId ?? data?.message_id ?? headers["message-id"])[0] || "",
-    inReplyTo: parseMessageIds(headers["in-reply-to"])[0] || "",
-    references: headers["references"] || "",
-    listUnsubscribe: headers["list-unsubscribe"] || "",
-    html: asText(full?.html), text: asText(full?.text),
-    createdAt: asText(full?.created_at ?? full?.createdAt ?? data?.created_at) || null,
-    authentication: full?.authentication ?? null, headers,
-  };
-}
-export function normalizeAttachment(a: any) {
-  return {
-    id: asText(a?.id ?? a?.attachment_id), filename: safeFileName(a?.filename ?? a?.name), contentType: asText(a?.content_type ?? a?.contentType) || "application/octet-stream",
-    size: Number(a?.size ?? a?.size_bytes ?? 0) || 0, contentId: asText(a?.content_id ?? a?.contentId) || null,
-    inline: asText(a?.content_disposition ?? a?.contentDisposition) === "inline", url: asText(a?.download_url ?? a?.downloadUrl ?? a?.url),
-  };
-}
 
 export type Outcome = { result: "processed" | "ignored"; reason?: string };
 
@@ -542,7 +494,7 @@ export async function processInbound(d: WebhookDeps, apiKey: string, data: any):
 
   // Which inbox? Decided only from the recipients, per recipient, never from a global search or a default account.
   const matches: AccountRef[][] = [];
-  for (const r of routingRecipients(to, cc, bcc)) matches.push(await d.store.accountsForRecipient(r, inboundDomain));
+  for (const r of routingRecipients(to, cc, bcc)) matches.push(await d.store.accountsForRecipient(r, inboundDomain, resendAdapter.providerKey));
   const resolved = resolveInboundAccount(matches);
   if (resolved.status === "none") return { result: "ignored", reason: "no matching inbox" };
   if (resolved.status === "ambiguous") { console.error("resend-webhook: ambiguous inbox:", resolved.reason); return { result: "ignored", reason: `ambiguous inbox: ${resolved.reason}` }; }
@@ -585,7 +537,7 @@ export async function processInbound(d: WebhookDeps, apiKey: string, data: any):
 
   const participants = [{ email: from.email, name: from.name }, ...to.map((e) => ({ email: e, name: "" })), ...cc.map((e) => ({ email: e, name: "" }))];
   await d.store.ingestInbound({
-    organization_id: account.organization_id, account_id: account.id, conversation_id: picked.conversationId, normalized_subject: normalizedSubject,
+    organization_id: account.organization_id, account_id: account.id, provider: resendAdapter.providerKey, conversation_id: picked.conversationId, normalized_subject: normalizedSubject,
     provider_message_id: emailId, rfc_message_id: m.messageId, in_reply_to: m.inReplyTo, references_ids: m.references,
     from_email: from.email, from_name: from.name, to_emails: to, cc_emails: cc, bcc_emails: bcc, reply_to: m.replyTo.join(", "),
     subject: m.subject, body_text: bodyText, body_html: m.html, received_at: m.createdAt || new Date(d.now()).toISOString(),
@@ -613,23 +565,79 @@ export async function processDeliveryEvent(d: WebhookDeps, svixId: string, event
     type: bounceType || null,
     recipient: recipients.length === 1 ? recipients[0] : "",
   };
-  const out = await d.store.applyDeliveryEvent({ provider_message_id: emailId, status, event_type: eventType,
-    provider_event_id: svixId, occurred_at: event?.created_at || null, detail });
-  if (out.ambiguous) console.error("resend-webhook: provider message id matches several CRM messages; CRM row not updated");
-  // CRM Inbox and Intelligence own separate message rows, and either side can
-  // exist independently. Route the authenticated event to both idempotent stores.
-  const intel = await d.store.applyIntelDeliveryEvent({
-    provider_message_id: emailId, event_type: eventType, provider_event_id: svixId,
-    occurred_at: event?.created_at || null, recipient: recipients.length === 1 ? recipients[0] : "",
-    reason: detail.reason, bounce_type: bounceType,
-  });
-  if (intel.ambiguous) throw new Error("Intelligence provider message id is ambiguous");
+  const eventId = providerEventId(resendAdapter.providerKey, svixId);
+  const rawTags = event?.data?.tags;
+  const taggedMessageId = typeof rawTags?.kf_message_id === "string"
+    ? rawTags.kf_message_id
+    : Array.isArray(rawTags) ? String(rawTags.find((t: any) => t?.name === "kf_message_id")?.value || "") : "";
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  // General Email (CRM Inbox) side. A failure here is remembered, NOT thrown yet: the optional Intelligence sink below must still
+  // get its turn, so one system's outage never blocks the other. Both stores are idempotent, so the retry that a thrown error
+  // triggers is safe for the side that already succeeded.
+  let out: { found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean } = { found: false };
+  let emailError: unknown = null;
+  try {
+    let reconciled = false;
+    // Only accepted/terminal delivery lifecycle events prove that Resend accepted the message.
+    // Failed/rejected events do not bind a provider id to a successfully accepted CRM send.
+    if (taggedMessageId && uuid.test(taggedMessageId) && ["email.sent", "email.delivered", "email.delivery_delayed", "email.bounced", "email.complained"].includes(eventType)) {
+      const senderEmail = parseAddress(String(event?.data?.from || "")).email.toLowerCase();
+      const tagged = await d.store.reconcileTaggedDeliveryEvent({
+        message_id: taggedMessageId.toLowerCase(), provider_message_id: emailId, event_type: eventType,
+        provider_event_id: eventId, occurred_at: event?.created_at || null, detail,
+        sender_email: senderEmail, recipients, subject: String(event?.data?.subject || ""),
+      });
+      if (tagged.conflict) console.error("resend-webhook: tagged message did not match persisted sender/recipient/subject; refusing correlation");
+      reconciled = tagged.found;
+    }
+    out = reconciled ? { found: true, applied: true } : await d.store.applyDeliveryEvent({ provider_message_id: emailId, status, event_type: eventType,
+      provider_event_id: eventId, occurred_at: event?.created_at || null, detail });
+    if (out.ambiguous) console.error("resend-webhook: provider message id matches several CRM messages; CRM row not updated");
+  } catch (e) {
+    emailError = e;
+    console.error("resend-webhook: general Email delivery event failed:", safeMsg(e));
+  }
+  // Intelligence owns separate message rows and may exist without a CRM row (and the reverse). It is an optional sink plugged in by the
+  // endpoint wiring; when absent, general Email runs alone.
+  let intel: { found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean } = { found: false };
+  let intelError: unknown = null;
+  if (d.store.applyIntelDeliveryEvent) {
+    try {
+      intel = await d.store.applyIntelDeliveryEvent({
+        provider_message_id: emailId, event_type: eventType, provider_event_id: svixId,
+        occurred_at: event?.created_at || null, recipient: recipients.length === 1 ? recipients[0] : "",
+        reason: detail.reason, bounce_type: bounceType,
+      });
+      if (intel.ambiguous) throw new Error("Intelligence provider message id is ambiguous");
+    } catch (e) {
+      intelError = e;
+      console.error("resend-webhook: Intelligence delivery event failed:", safeMsg(e));
+    }
+  }
+  // Both sides have now been attempted. If either failed, fail the delivery (500 -> Resend retries); the side that succeeded is idempotent.
+  if (emailError || intelError) throw (emailError || intelError);
   if (out.found || intel.found) return { result: "processed" };
   if (out.ambiguous) return { result: "ignored", reason: "ambiguous provider message id" };
   // The signed payload was persisted by claimWebhook before processing. Do not
   // discard it based on event age: insert/update triggers replay it once the
   // matching CRM or Intelligence provider id is committed.
   return { result: "ignored", reason: "awaiting provider message persistence; queued for reconciliation" };
+}
+
+/** This endpoint is the Resend adapter's inbound transport (Svix signatures are Resend's scheme), so the adapter is fixed by the
+ *  endpoint, not by anything in the request. Same gate as sending: registry row enabled AND the legacy shared flag.
+ *  true = process; false = Resend is switched off on purpose (acknowledge so Resend stops retrying);
+ *  throws = database failure, missing registry row or missing adapter (NOT acknowledged: Resend retries instead of losing the event). */
+export async function webhookProviderAllowed(store: Pick<WebhookStore, "providerEnabled" | "getProviderRegistryRow">): Promise<boolean> {
+  const row = await store.getProviderRegistryRow(resendAdapter.providerKey);
+  if (!row) throw new Error("provider registry row is missing (apply the multi-provider phase 2 migrations first)");
+  try {
+    resolveAdapter(resendAdapter.providerKey, row);
+  } catch (e) {
+    if (e instanceof AdapterError && e.code === "provider_disabled") return false;
+    throw e;
+  }
+  return resendAdapter.legacyFlagKey ? await store.providerEnabled(resendAdapter.legacyFlagKey) : true;
 }
 
 export async function handleWebhook(req: Request, d: WebhookDeps): Promise<Response> {
@@ -651,7 +659,7 @@ export async function handleWebhook(req: Request, d: WebhookDeps): Promise<Respo
   const type = String(event?.type || "");
 
   try {
-    if (!(await d.store.providerEnabled())) return json({ ok: true, ignored: "provider disabled" });   // acknowledged on purpose so Resend stops retrying
+    if (!(await webhookProviderAllowed(d.store))) return json({ ok: true, ignored: "provider disabled" });   // acknowledged on purpose so Resend stops retrying
     const claim = await d.store.claimWebhook(id, type, event);
     if (claim.state === "done") return json({ ok: true, duplicate: true });
     if (claim.state === "busy") return json({ error: "Already being processed" }, 409);              // not 2xx: if the owner crashes, the sender's retry recovers the event

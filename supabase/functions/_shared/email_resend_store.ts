@@ -1,6 +1,7 @@
 // Supabase-backed stores for the Resend Edge Functions. Thin by design: every decision lives in email_resend_logic.ts.
 // Uses the SERVICE ROLE client, so callers must authenticate the person (email-send) or verify the signature (resend-webhook) first.
 import type { SendStore, WebhookStore, SubjectCandidate, AccountRef, ClaimResult } from "./email_resend_logic.ts";
+import type { RegistryRow } from "./email_adapter_registry.ts";
 import { baseAddress, safeFileName } from "./email_resend_logic.ts";
 
 const must = <T>(r: { data: T; error: { message: string } | null }, what: string): T => {
@@ -10,35 +11,73 @@ const must = <T>(r: { data: T; error: { message: string } | null }, what: string
 
 const b64ToBytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
+// Shared by both stores. Reads the provider's row from public.email_provider_registry (service role). Throws on database errors.
+async function readRegistryRow(service: any, providerKey: string): Promise<RegistryRow | null> {
+  const { data, error } = await service.from("email_provider_registry").select("provider_key,adapter_key,display_name,capabilities,enabled").eq("provider_key", providerKey).maybeSingle();
+  if (error) throw new Error(`provider registry: ${error.message}`);
+  return data || null;
+}
+
 export function makeSendStore(service: any): SendStore {
   return {
-    async providerEnabled() {
-      const { data, error } = await service.rpc("email_provider_enabled", { p_provider: "resend" });
+    async providerEnabled(legacyFlagKey) {
+      const { data, error } = await service.rpc("email_provider_enabled", { p_provider: legacyFlagKey });
       if (error) throw new Error(`provider flag: ${error.message}`);
       return data === true;
     },
+    getProviderRegistryRow: (providerKey) => readRegistryRow(service, providerKey),
     async getAccount(orgId, accountId) {
-      const { data, error } = await service.from("email_accounts").select("id,address,display_name,status").eq("organization_id", orgId).eq("id", accountId).maybeSingle();
+      // `provider` is read from the database row: it is what selects the adapter. The browser never supplies it.
+      const { data, error } = await service.from("email_accounts").select("id,organization_id,provider,address,display_name,status").eq("organization_id", orgId).eq("id", accountId).maybeSingle();
       if (error) throw new Error(`account lookup: ${error.message}`);
       return data || null;
     },
-    async getThreadParent(orgId, conversationId) {
-      const { data, error } = await service.from("email_messages").select("rfc_message_id,references_ids")
-        .eq("organization_id", orgId).eq("conversation_id", conversationId).neq("status", "draft").not("rfc_message_id", "is", null)
-        .order("received_at", { ascending: false, nullsFirst: false }).limit(1).maybeSingle();
+    async getLeadForUser(userId, leadId) {
+      // Leads are per user in this app (leads.user_id, the same rule email_link_lead applies). A lead that is missing and one that belongs to
+      // someone else are indistinguishable to the caller. Service role: the filter below IS the authorization, so it must stay on the query.
+      const { data, error } = await service.from("leads").select("id").eq("id", leadId).eq("user_id", userId).maybeSingle();
+      if (error) throw new Error(`lead lookup: ${error.message}`);
+      return data || null;
+    },
+    async getConversationLead(orgId, conversationId, accountId) {
+      const { data, error } = await service.from("email_conversations").select("lead_id")
+        .eq("id", conversationId).eq("organization_id", orgId).eq("account_id", accountId).maybeSingle();
+      if (error) throw new Error(`conversation CRM lookup: ${error.message}`);
+      return data || null;
+    },
+    async getThreadParent(orgId, conversationId, accountId) {
+      // A PostgREST order on received_at alone sorts outbound rows (received_at=NULL)
+      // behind every inbound row, even when the outbound reply is newer. The RPC orders
+      // by the actual message timestamp across both directions.
+      const { data, error } = await service.rpc("email_get_thread_parent", {
+        p_organization_id: orgId, p_conversation_id: conversationId, p_account_id: accountId,
+      });
       if (error) throw new Error(`thread parent: ${error.message}`);
       return data || null;
     },
-    async countOutboundSince(orgId, sinceIso) {
-      const { count, error } = await service.from("email_messages").select("id", { count: "exact", head: true })
+    async countOutboundSince(orgId, sinceIso, provider) {
+      let q = service.from("email_messages").select("id", { count: "exact", head: true })
         .eq("organization_id", orgId).eq("direction", "outbound").neq("status", "draft").gte("created_at", sinceIso);
+      if (provider) q = q.eq("provider", provider);
+      const { count, error } = await q;
       if (error) throw new Error(`count: ${error.message}`);
       return count || 0;
     },
     async createOutbound(p) {
       return must(await service.rpc("email_create_outbound", { p }), "create outbound");
     },
+    async recordCrmActivity(messageId) {
+      const out = must(await service.rpc("email_record_crm_activity", { p_message_id: messageId }), "record CRM email activity") as any;
+      if (out?.recorded !== true) throw new Error("CRM email activity was not durably recorded");
+      return { recorded: true, duplicate: out.duplicate === true };
+    },
     async markResult(messageId, patch) {
+      if (patch?.status === "sent" && typeof patch?.provider_message_id === "string") {
+        must(await service.rpc("email_mark_provider_accepted", {
+          p_message_id: messageId, p_provider_message_id: patch.provider_message_id, p_sent_at: patch.sent_at || null,
+        }), "mark provider accepted");
+        return;
+      }
       must(await service.from("email_messages").update(patch).eq("id", messageId), "update message");
     },
     async saveAttachments(orgId, messageId, files) {
@@ -55,12 +94,13 @@ export function makeSendStore(service: any): SendStore {
 export function makeWebhookStore(service: any): WebhookStore {
   const failOn = (e: { message: string } | null, what: string) => { if (e) throw new Error(`${what}: ${e.message}`); };
   return {
-    async providerEnabled() {
+    async providerEnabled(legacyFlagKey) {
       // A database failure must NOT look like "disabled": that would acknowledge (and lose) the event. It throws, the caller answers 500, Resend retries.
-      const { data, error } = await service.rpc("email_provider_enabled", { p_provider: "resend" });
+      const { data, error } = await service.rpc("email_provider_enabled", { p_provider: legacyFlagKey });
       failOn(error, "provider flag");
       return data === true;
     },
+    getProviderRegistryRow: (providerKey) => readRegistryRow(service, providerKey),
     async claimWebhook(svixId, type, payload) {
       const out = must(await service.rpc("email_webhook_claim", { p_svix_id: svixId, p_type: type, p_payload: payload }), "webhook claim") as any;
       switch (out?.state) {
@@ -73,18 +113,18 @@ export function makeWebhookStore(service: any): WebhookStore {
       const out = must(await service.rpc("email_webhook_finish", { p_svix_id: svixId, p_token: token, p_status: status, p_error: error }), "webhook finish") as any;
       return out?.ok === true;
     },
-    async accountsForRecipient(address, inboundDomain = ""): Promise<AccountRef[]> {
+    async accountsForRecipient(address, inboundDomain = "", providerKey): Promise<AccountRef[]> {
       const base = baseAddress(address);
       const [local, domain] = base.split("@");
       if (!local || !domain) return [];
       const cols = "id,organization_id,address";
       // 1. exact address match (never a domain-wide or default-account fallback)
-      const exact = await service.from("email_accounts").select(cols).eq("status", "active").eq("provider", "resend").eq("address", base);
+      const exact = await service.from("email_accounts").select(cols).eq("status", "active").eq("provider", providerKey).eq("address", base);
       failOn(exact.error, "account lookup");
       const rows: AccountRef[] = [...(exact.data || [])];
       // 2. only for the configured inbound domain: same local part. The database filter is wide (LIKE), the exact comparison below is what counts.
       if (inboundDomain && domain === inboundDomain) {
-        const like = await service.from("email_accounts").select(cols).eq("status", "active").eq("provider", "resend").like("address", `${local.replace(/[%_\\]/g, "")}@%`);
+        const like = await service.from("email_accounts").select(cols).eq("status", "active").eq("provider", providerKey).like("address", `${local.replace(/[%_\\]/g, "")}@%`);
         failOn(like.error, "account lookup");
         for (const r of like.data || []) if (String(r.address).split("@")[0] === local) rows.push(r);
       }
@@ -125,48 +165,20 @@ export function makeWebhookStore(service: any): WebhookStore {
     async ingestInbound(p) {
       return must(await service.rpc("email_ingest_inbound", { p }), "ingest inbound");
     },
+    async reconcileTaggedDeliveryEvent(a) {
+      const out = must(await service.rpc("email_reconcile_tagged_delivery_event", {
+        p_message_id: a.message_id, p_provider_message_id: a.provider_message_id, p_event_type: a.event_type,
+        p_provider_event_id: a.provider_event_id, p_occurred_at: a.occurred_at, p_detail: a.detail,
+        p_sender_email: a.sender_email, p_recipients: a.recipients, p_subject: a.subject,
+      }), "reconcile tagged accepted email") as any;
+      return { found: out?.found === true, conflict: out?.conflict === true, status: out?.status };
+    },
     async applyDeliveryEvent(a) {
       const out = must(await service.rpc("email_apply_delivery_event", {
         p_provider_message_id: a.provider_message_id, p_status: a.status, p_event_type: a.event_type,
         p_provider_event_id: a.provider_event_id, p_occurred_at: a.occurred_at, p_detail: a.detail,
       }), "apply event") as any;
       return { found: out?.found === true, ambiguous: out?.ambiguous === true, duplicate: out?.duplicate === true, applied: out?.applied === true };
-    },
-    async applyIntelDeliveryEvent(a) {
-      // Find exact Intelligence outbound messages by provider identity. Never guess
-      // an account when a provider message id is duplicated across accounts.
-      const query = await service.from("intel_messages")
-        .select("id,organization_id,provider_account_id,provider_key,provider_message_id,to_email")
-        .eq("direction", "outbound").eq("provider_key", "resend")
-        .eq("provider_message_id", a.provider_message_id);
-      failOn(query.error, "Intelligence provider message lookup");
-      const rows = (query.data || []).filter((r: any) => {
-        const addr = String(r.to_email || "").trim().toLowerCase();
-        return !a.recipient || addr === a.recipient;
-      });
-      const accounts = rows.filter((r: any) => r.provider_account_id && r.organization_id);
-      const distinct = accounts.filter((r: any, i: number) => accounts.findIndex((x: any) => x.organization_id === r.organization_id && x.provider_account_id === r.provider_account_id) === i);
-      if (distinct.length > 1) return { found: false, ambiguous: true };
-      if (!distinct.length) return { found: false };
-      const row = distinct[0];
-      const statusMap: Record<string, string> = {
-        "email.sent": "accepted", "email.delivered": "delivered", "email.delivery_delayed": "delayed",
-        "email.bounced": "bounced", "email.complained": "complained", "email.failed": "failed",
-        "email.suppressed": "failed", "email.rejected": "failed",
-      };
-      const status = a.event_type === "email.bounced" && /temporary|transient|soft/i.test(a.bounce_type || "")
-        ? "delayed" : statusMap[a.event_type];
-      if (!status) return { found: false };
-      const out = must(await service.rpc("intel_agent_apply_delivery_event", {
-        p_provider_key: "resend", p_provider_account_id: row.provider_account_id,
-        p_provider_message_id: a.provider_message_id, p_provider_event_id: a.provider_event_id,
-        p_event_type: a.event_type, p_status: status, p_occurred_at: a.occurred_at,
-        p_recipient: String(row.to_email || "").trim().toLowerCase(), p_reason: a.reason,
-      }), "apply Intelligence delivery event") as any;
-      if (out?.ok !== true || out?.found !== true || (out?.duplicate !== true && typeof out?.applied !== "boolean")) {
-        throw new Error(`Intelligence delivery event not durably accepted: ${String(out?.reason || "invalid RPC response")}`);
-      }
-      return { found: true, duplicate: out.duplicate === true, applied: out.applied === true };
     },
   };
 }

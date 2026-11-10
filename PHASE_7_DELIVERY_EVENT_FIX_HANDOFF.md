@@ -16,6 +16,8 @@ Fix the confirmed provider event acquisition/integration gap for Resend delivery
 
 ## Verification
 
+> **Historical snapshot:** This report records the test totals at the time of this specific Resend delivery-event integration handoff; these are historical snapshot counts, not the final aggregate Phase 7 suite totals.
+
 - JavaScript test suite: 826 tests passed.
 - Python worker suite: 474 tests passed.
 - Python compileall: passed.

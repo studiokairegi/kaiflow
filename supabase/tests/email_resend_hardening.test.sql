@@ -78,9 +78,12 @@ begin
   perform ti.ok(not (public.email_apply_delivery_event('re_never_seen', 'delivered', 'email.delivered', 'hev10', now(), '{}') ->> 'found')::boolean, 'an unknown id updates nothing');
   -- inbound rows and other providers are never touched, even with the same id
   insert into public.email_messages (organization_id, conversation_id, account_id, direction, provider, provider_message_id, status)
-  values (orgA, cA, accA, 'inbound', 'resend', 're_hard_2', 'received'), (orgA, cA, accA, 'outbound', 'gmail', 're_hard_3', 'sent');
+  values (orgA, cA, accA, 'inbound', 'resend', 're_hard_2', 'received');
+  -- multi-provider phase 2: a message can no longer claim a provider other than its account's, so the old 'gmail' row cannot exist at all
+  perform ti.throws(format($q$insert into public.email_messages (organization_id, conversation_id, account_id, direction, provider, provider_message_id, status) values (%L, %L, %L, 'outbound', 'gmail', 're_hard_3', 'sent')$q$, orgA, cA, accA),
+                    'must use the provider of its account', 'a message cannot carry a provider other than its account''s');
   perform ti.ok(not (public.email_apply_delivery_event('re_hard_2', 'delivered', 'email.delivered', 'hev11', now(), '{}') ->> 'found')::boolean, 'an inbound message is never updated by a delivery event');
-  perform ti.ok(not (public.email_apply_delivery_event('re_hard_3', 'delivered', 'email.delivered', 'hev12', now(), '{}') ->> 'found')::boolean, 'a non-Resend message is never updated');
+  perform ti.ok(not (public.email_apply_delivery_event('re_hard_3', 'delivered', 'email.delivered', 'hev12', now(), '{}') ->> 'found')::boolean, 'a message of another provider is never updated (none can exist under a Resend account)');
   -- the same provider id in two organizations is ambiguous: nothing is updated
   insert into public.email_messages (organization_id, conversation_id, account_id, direction, provider, provider_message_id, status)
   values (orgA, cA, accA, 'outbound', 'resend', 're_hard_dup', 'sent'), (orgB, cB, accB, 'outbound', 'resend', 're_hard_dup', 'sent');

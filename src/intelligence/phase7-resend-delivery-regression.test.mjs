@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { processDeliveryEvent, statusForEvent } from '../../supabase/functions/_shared/email_resend_logic.ts';
 
 const migration = readFileSync(new URL('../../supabase/migrations/20261203100000_intelligence_phase7_delivery_event_corrective.sql', import.meta.url), 'utf8');
-const storeSource = readFileSync(new URL('../../supabase/functions/_shared/email_resend_store.ts', import.meta.url), 'utf8');
+const storeSource = readFileSync(new URL('../../supabase/functions/_shared/intel_resend_delivery_sink.ts', import.meta.url), 'utf8');   // Intelligence-owned delivery sink
 
 function deps({ crm = { found: false }, intel = { found: false } } = {}) {
   const calls = { crm: [], intel: [] };

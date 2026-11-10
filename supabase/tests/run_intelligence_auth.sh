@@ -34,6 +34,8 @@ for m in 20261109100000_intelligence_core_tables 20261109110000_intelligence_crm
 done
 run "$root/supabase/migrations/20261110090000_email_resend_core.sql"; run "$root/supabase/migrations/20261110090000_email_resend_core.sql"   # Resend email: applied twice, idempotent
 run "$root/supabase/migrations/20261111090000_email_resend_hardening.sql"; run "$root/supabase/migrations/20261111090000_email_resend_hardening.sql"   # hardening: applied twice, idempotent
+run "$root/supabase/migrations/20261204090000_email_provider_registry.sql"; run "$root/supabase/migrations/20261204090000_email_provider_registry.sql"   # multi-provider phase 2: registry, applied twice, idempotent
+run "$root/supabase/migrations/20261204100000_email_provider_scoping.sql"; run "$root/supabase/migrations/20261204100000_email_provider_scoping.sql"   # multi-provider phase 2: scoping, applied twice, idempotent
 echo "migrations applied (authorization migration applied twice)"
 out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/intelligence_authorization.test.sql" 2>&1)"; code=$?
 echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
@@ -56,4 +58,23 @@ echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
 out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/email_resend_hardening.test.sql" 2>&1)"; code=$?
 echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
 [ $code -eq 0 ] || { echo "TEST FILE FAILED: email_resend_hardening.test.sql"; exit 1; }
+out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/email_provider_foundation.test.sql" 2>&1)"; code=$?
+echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
+[ $code -eq 0 ] || { echo "TEST FILE FAILED: email_provider_foundation.test.sql"; exit 1; }
 
+# Multi-provider Email Phases 4C-5 foundation: apply in dependency order, then run the CRM, Inbox and mailbox foundation SQL.
+for m in \
+  20261206100000_email_provider_idempotency \
+  20261208100000_email_crm_activity \
+  20261209100000_email_crm_conversation_attribution \
+  20261211100000_email_inbox_conversation_consistency \
+  20261212100000_email_inbox_phase4f_counter_repair \
+  20261213100000_email_accepted_send_reconciliation \
+  20261214100000_email_mailbox_phase5_foundation; do
+  run "$root/supabase/migrations/$m.sql"
+done
+for t in email_crm_activity email_phase4f_validation email_phase5_foundation; do
+  out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/$t.test.sql" 2>&1)"; code=$?
+  echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
+  [ $code -eq 0 ] || { echo "TEST FILE FAILED: $t.test.sql"; exit 1; }
+done

@@ -4,15 +4,15 @@
 // helpers), styles/ (email-specific CSS on top of chat.css).
 import React, { useEffect, useRef, useState } from "react";
 import { S, Banner, useBusy } from "../finance/ui.jsx";
-import { canAccessIntelligence } from "../intelligence/access.js";
+import { canAccessEmail } from "./access.js";
 import { useLoad } from "../intelligence/kit.jsx";
 import { usePolling } from "../chat/hooks.js";
 import { dayLabel } from "../chat/logic.js";
-import { IconBack, IconNewChat, IconSearch } from "../chat/icons.jsx";
+import { IconBack, IconClose, IconNewChat, IconSearch } from "../chat/icons.jsx";
 import "../chat/chat.css";
 import "./styles/inbox-chat.css";
 import { emailApi } from "./lib/api.js";
-import { FOLDERS, buildForward, participantLabel } from "./lib/logic.js";
+import { accountCanSend, accountConnectionLabel, accountListView, trustedProviderRows, FOLDERS, buildForward, participantLabel, providerForAccount } from "./lib/logic.js";
 import { initialsOf, when } from "./lib/helpers.js";
 import SetupAccount from "./components/SetupAccount.jsx";
 import ComposeDialog from "./components/ComposeDialog.jsx";
@@ -26,13 +26,15 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
   const [composer, setComposer] = useState(null);
+  const [showAddAccount, setShowAddAccount] = useState(false);
   const [activeMsg, setActiveMsg] = useState(null);
   const [tick, setTick] = useState(0);
   const scrollRef = useRef(null);
   const action = useBusy();
-  const allowed = canAccessIntelligence(access);
+  const allowed = canAccessEmail(access);
 
   const accounts = useLoad(() => (allowed ? emailApi.accounts(supabase) : Promise.resolve([])), [supabase, allowed, tick]);
+  const providers = useLoad(() => (allowed ? emailApi.providers(supabase) : Promise.resolve([])), [supabase, allowed, tick]);
   const list = useLoad(() => (allowed ? emailApi.list(supabase, folder, search) : Promise.resolve([])), [supabase, allowed, folder, search, tick]);
   const thread = useLoad(() => (allowed && selected ? emailApi.get(supabase, selected) : Promise.resolve(null)), [supabase, allowed, selected, tick]);
 
@@ -53,9 +55,14 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
   // Match the main Chat module: refresh mounted conversations in the background and on tab visibility.
   usePolling(poll, 20000, allowed, { hidden: true });
   if (!allowed) return <Banner tone="warn">Email is restricted.</Banner>;
-  const accts = accounts.data || [];
+  const accts = Array.isArray(accounts.data) ? accounts.data : [];
+  // A stale registry must never authorize actions after a failed refresh.
+  const providerRows = trustedProviderRows(providers.data, providers.error);
+  const sendProviderRows = accounts.error ? [] : providerRows;
   const own = accts.map((a) => a.address);
-  if (!accounts.loading && accts.length === 0) return <div style={S.page}><SetupAccount supabase={supabase} onDone={refresh} /></div>;
+  const accountView = accountListView(accounts);
+  if (accountView === "empty") return <div style={S.page}><SetupAccount supabase={supabase} providers={providerRows} providersLoading={providers.loading} providersError={providers.error} onRetry={() => providers.reload()} onDone={refresh} /></div>;
+  if (accountView === "error" && !accts.length) return <div style={S.page}><Banner tone="bad" action={<button type="button" className="chat-button" onClick={() => accounts.reload()}>Retry</button>}>Could not load your email accounts: {accounts.error}</Banner></div>;
 
   const t = thread.data;
   const convo = t?.conversation;
@@ -72,9 +79,14 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
           <div className="chat-sidebar-top">
             <div className="chat-topbar">
               <h2>Inbox</h2>
-              <button type="button" className="chat-icon-btn solid" onClick={() => setComposer({ title: "New message" })} aria-label="Compose" title="Compose"><IconNewChat /></button>
+              <div className="inbox-header-actions">
+                <button type="button" className="chat-button quiet inbox-add-account" disabled={providers.loading || Boolean(providers.error || accounts.error)} onClick={() => setShowAddAccount(true)}>Add account</button>
+                <button type="button" className="chat-icon-btn solid" onClick={() => setComposer({ title: "New message" })} aria-label="Compose" title="Compose" disabled={Boolean(accounts.error || providers.error || providers.loading || !accts.length)}><IconNewChat /></button>
+              </div>
             </div>
-            {own.length > 0 && <p className="chat-hint inbox-accounts" title={own.join(", ")}>{own.join(", ")}</p>}
+            {providers.error && <div className="inbox-load-error" role="alert"><span>Provider availability could not be refreshed. Sending and account setup are paused until provider status can be verified.</span><button type="button" className="chat-button quiet" onClick={() => providers.reload()}>Retry</button></div>}
+            {accounts.error && <div className="inbox-load-error" role="alert"><span>Could not refresh email accounts: {accounts.error}</span><button type="button" className="chat-button quiet" onClick={() => accounts.reload()}>Retry</button></div>}
+            {own.length > 0 && <div className="inbox-account-list" aria-label="Connected email accounts">{accts.map((a) => { const p = providerForAccount(a, providerRows); const usable = accountCanSend(a, providerRows); return <div className="inbox-account-row" key={a.id} title={`${p?.display_name || a.provider} · ${accountConnectionLabel(a, providerRows)}`}><span className="inbox-provider-mark">{p?.display_name || a.provider || "Email"}</span><span className="inbox-account-address">{a.address}</span><span className={`inbox-account-state${usable ? " is-ready" : " is-paused"}`}>{accountConnectionLabel(a, providerRows)}</span></div>; })}</div>}
             <form className="chat-search" onSubmit={(e) => { e.preventDefault(); setSearch(searchText.trim()); }}>
               <IconSearch size={17} />
               <input value={searchText} onChange={(e) => { setSearchText(e.target.value); if (!e.target.value.trim()) setSearch(""); }} placeholder="Search people, subjects and messages" aria-label="Search email" />
@@ -94,7 +106,7 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
               <span className="chat-avatar" aria-hidden="true">{initialsOf(participantLabel(convo, own))}</span>
               <div className="chat-header-copy">
                 <h2>{participantLabel({ ...convo, participants: t.participants || convo.participants }, own)}</h2>
-                <p>{convo.subject || "(no subject)"}</p>
+                <p>{convo.subject || "(no subject)"}</p><span className="inbox-sender-account">From {accts.find((a) => a.id === convo.account_id)?.address || "sender account"}</span>
               </div>
               <div className="inbox-thread-tools">
                 <button type="button" className="chat-button quiet" disabled={action.busy} onClick={() => action.run(async () => { await emailApi.archive(supabase, convo.id, convo.status !== "archived"); refresh(); })}>{convo.status === "archived" ? "Move to inbox" : "Archive"}</button>
@@ -129,19 +141,25 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
                 </div>
               </div>
             </div>
-            <InlineReply key={convo.id} supabase={supabase} convo={convo} messages={messages} participants={t.participants || convo.participants || []} own={own} onSent={refresh} />
+            <InlineReply key={convo.id} supabase={supabase} convo={convo} messages={messages} participants={t.participants || convo.participants || []} own={own} canSend={!accounts.error && !providers.error && accountCanSend(accts.find((a) => a.id === convo.account_id), providerRows)} onSent={refresh} />
           </>}
           {!selected && (
             <div className="chat-welcome">
               <span className="glyph" aria-hidden="true"><IconNewChat size={30} /></span>
               <h2>Your studio inbox</h2>
               <p>Pick a conversation to read it and reply, or start a new email.</p>
-              <button type="button" className="chat-button primary" onClick={() => setComposer({ title: "New message" })}><IconNewChat size={18} /> Compose</button>
+              <button type="button" className="chat-button primary" disabled={Boolean(accounts.error || providers.error || providers.loading || !accts.length)} onClick={() => setComposer({ title: "New message" })}><IconNewChat size={18} /> Compose</button>
             </div>
           )}
         </main>
 
-        {composer && <ComposeDialog supabase={supabase} accounts={accts} initial={composer} onClose={() => setComposer(null)} onSent={() => { setComposer(null); refresh(); }} />}
+        {composer && <ComposeDialog supabase={supabase} accounts={accts} providers={sendProviderRows} initial={composer} onClose={() => setComposer(null)} onSent={() => { setComposer(null); refresh(); }} />}
+        {showAddAccount && <div className="chat-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setShowAddAccount(false); }}>
+          <div className="chat-modal inbox-account-setup" role="dialog" aria-modal="true" aria-labelledby="inbox-account-setup-title">
+            <div className="chat-modal-head"><h2 id="inbox-account-setup-title">Add an email account</h2><button type="button" className="chat-icon-btn" onClick={() => setShowAddAccount(false)} aria-label="Close"><IconClose /></button></div>
+            <div className="chat-modal-body"><SetupAccount supabase={supabase} providers={providerRows} providersLoading={providers.loading} providersError={providers.error} onRetry={() => providers.reload()} onCancel={() => setShowAddAccount(false)} onDone={async () => { setShowAddAccount(false); refresh(); }} /></div>
+          </div>
+        </div>}
       </section>
     </div>
   );
