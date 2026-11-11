@@ -71,7 +71,7 @@ grant execute on function public.email_save_draft(uuid,uuid,uuid,text[],text[],t
 create or replace function public.email_save_draft(
   p_draft_id uuid, p_conversation_id uuid, p_account_id uuid,
   p_to text[], p_cc text[], p_bcc text[], p_subject text, p_body_text text, p_body_html text default ''
-) returns jsonb language sql security definer set search_path = pg_catalog, public as $$
+) returns jsonb language plpgsql security definer set search_path = pg_catalog, public as $$
 declare v_org uuid := public.email_require_access();
 begin
   if not exists (select 1 from public.email_accounts where id = p_account_id and organization_id = v_org) then
