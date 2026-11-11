@@ -198,7 +198,7 @@ function ProviderAccountsCard({ supabase, tick, onSaved }) {
         <Select value={smtp.tls_mode} onChange={(e) => setSmtp((v) => ({ ...v, tls_mode: e.target.value }))} options={[["starttls", "STARTTLS (587)"], ["ssl", "Implicit TLS (465)"]]} />
         <Btn kind="primary" disabled={working || !smtp.mailbox.includes("@") || !smtp.host || !smtp.username || !smtp.password || !["465", "587"].includes(smtp.port)} onClick={connect}>{working ? "Saving…" : "Save SMTP account"}</Btn></div>
     </div>}
-    <Banner tone="info">Use “Check health” to verify Gmail authorization without enabling sync or sending. Account connection does not authorize sending. The global emergency stop and existing human-approval rules remain authoritative. Each new account starts with sending OFF. Prospecting also requires explicit recorded consent for the exact recipient.</Banner>
+    <Banner tone="info">Use “Check health” to verify Gmail or Zoho authorization without enabling sync or sending. Account connection does not authorize sending. The global emergency stop and existing human-approval rules remain authoritative. Each new account starts with sending OFF. Prospecting also requires explicit recorded consent for the exact recipient.</Banner>
     {(catalog.data || []).filter((p) => ["gmail", "zoho", "smtp"].includes(p.provider_key)).map((p) => <div key={p.provider_key} style={{ ...S.row, marginTop: 8 }}>
       <Pill tone={p.sending_enabled ? "warn" : "muted"}>{p.display_name} global provider gate: {p.sending_enabled ? "ON" : "OFF"}</Pill>
       <Muted>Deployment-owner controlled. Organization admins can manage only their own mailbox accounts.</Muted>
@@ -221,10 +221,10 @@ function ProviderAccountsCard({ supabase, tick, onSaved }) {
       { key: "purpose", label: "Prospecting", render: (r) => { const purposes = r.allowed_message_purposes || ["business_correspondence"]; const allowed = purposes.includes("consented_prospecting"); return <span><Btn small disabled={!!busyId || !( ["gmail", "zoho", "smtp"].includes(r.provider_key))} onClick={() => confirmAction(`${allowed ? "Remove" : "Allow"} consented prospecting for ${r.mailbox}? Recipient-specific consent is still mandatory.`) && run(r.id, () => intelApi.updateProviderAccount(supabase, r.id, { allowed_message_purposes: allowed ? purposes.filter((x) => x !== "consented_prospecting") : [...purposes, "consented_prospecting"] }))}>{allowed ? "Allowed" : "Not allowed"}</Btn>{r.provider_key === "zoho" && <Muted>Manual approval required per message</Muted>}</span>; } },
       { key: "limits", label: "Caps / day · hour · min", render: (r) => `${r.daily_send_limit ?? "∞"} · ${r.hourly_send_limit ?? "∞"} · ${r.minute_send_limit ?? "∞"}` },
       { key: "actions", label: "Actions", render: (r) => <span style={S.row}>
-        {r.provider_key === "gmail" && <Btn small disabled={!!busyId || r.status !== "connected"} onClick={() => run(r.id, async () => {
+        {["gmail", "zoho"].includes(r.provider_key) && <Btn small disabled={!!busyId || r.status !== "connected"} onClick={() => run(r.id, async () => {
           try {
             const result = await intelApi.checkProviderHealth(supabase, r.id);
-            if (!result?.ok) throw new Error(result?.error || "Gmail health check did not pass.");
+            if (!result?.ok) throw new Error(result?.error || "Provider health check did not pass.");
           } finally {
             await accounts.reload();
           }

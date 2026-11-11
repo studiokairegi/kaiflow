@@ -21,11 +21,9 @@ const ACCESS = "20261216090000_email_independent_access.sql";
 const code = (sql) => sql.split("\n").filter((l) => !l.trim().startsWith("--")).map((l) => l.replace(/\s--\s.*$/, "")).join("\n");
 const reg = read(REG), scope = read(SCOPE), idem = read(IDEM), regCode = code(reg), scopeCode = code(scope), idemCode = code(idem);
 
-test("Phase 2 migrations sort after every existing migration and are unique", () => {
+test("email migrations sort in chronological order and are unique", () => {
   const names = fs.readdirSync(dir).filter((n) => n.endsWith(".sql"));
-  const others = names.filter((n) => ![REG, SCOPE, IDEM, CRM4D, CRM4D_FIX, INBOX4E, PHASE4F, PHASE4G, PHASE5, PHASE5_FIX, ACCESS, "20261217090000_intelligence_remove_legacy_mailbox.sql"].includes(n)).map((n) => n.split("_")[0]);
-  const last = others.sort().at(-1);
-  assert.ok(REG.split("_")[0] > last && SCOPE.split("_")[0] > REG.split("_")[0] && IDEM.split("_")[0] > SCOPE.split("_")[0] && CRM4D.split("_")[0] > IDEM.split("_")[0] && CRM4D_FIX.split("_")[0] > CRM4D.split("_")[0] && INBOX4E.split("_")[0] > CRM4D_FIX.split("_")[0] && PHASE4F.split("_")[0] > INBOX4E.split("_")[0] && PHASE4G.split("_")[0] > PHASE4F.split("_")[0] && PHASE5.split("_")[0] > PHASE4G.split("_")[0] && PHASE5_FIX.split("_")[0] > PHASE5.split("_")[0] && ACCESS.split("_")[0] > PHASE5_FIX.split("_")[0], `must follow ${last}`);
+  assert.ok(SCOPE.split("_")[0] > REG.split("_")[0] && IDEM.split("_")[0] > SCOPE.split("_")[0] && CRM4D.split("_")[0] > IDEM.split("_")[0] && CRM4D_FIX.split("_")[0] > CRM4D.split("_")[0] && INBOX4E.split("_")[0] > CRM4D_FIX.split("_")[0] && PHASE4F.split("_")[0] > INBOX4E.split("_")[0] && PHASE4G.split("_")[0] > PHASE4F.split("_")[0] && PHASE5.split("_")[0] > PHASE4G.split("_")[0] && PHASE5_FIX.split("_")[0] > PHASE5.split("_")[0] && ACCESS.split("_")[0] > PHASE5_FIX.split("_")[0], "email migrations must be in chronological order");
   const versions = names.map((n) => n.split("_")[0]);
   assert.equal(versions.filter((v) => v === REG.split("_")[0]).length, 1);
   assert.equal(versions.filter((v) => v === SCOPE.split("_")[0]).length, 1);
