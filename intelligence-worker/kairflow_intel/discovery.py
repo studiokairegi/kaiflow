@@ -167,6 +167,11 @@ def h_analyze_site(d, job):
                 if not _use(d, "site_crawler"):
                     raise PermanentError("site_crawler source is disabled, unconfirmed, over budget or circuit-open")
                 return d.fetcher.fetch(url)
+
+            def sitemaps(self, url):
+                if not _use(d, "site_crawler"):
+                    raise PermanentError("site_crawler source is disabled, unconfirmed, over budget or circuit-open")
+                return d.fetcher.sitemaps(url)
         try:
             out = siteanalysis.analyze(replace(d, fetcher=MeteredSiteFetcher()), ctx)
         except PermanentError as exc:

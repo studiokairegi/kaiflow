@@ -24,7 +24,7 @@ class SupabaseAgent:
         if r.status_code >= 500 or r.status_code == 429:
             raise TransientError(f"auth {r.status_code}")
         if r.status_code != 200:
-            raise RpcError("agent sign-in was refused", "auth", r.status_code)
+            raise RpcError(f"agent sign-in was refused: {r.text[:500]}", "auth", r.status_code)
         d = r.json()
         self._token, self._exp = d["access_token"], self.clock() + float(d.get("expires_in", 3600)) - 60
 

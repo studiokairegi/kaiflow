@@ -59,7 +59,7 @@ class _PinnedPoolManager(urllib3.PoolManager):
         # touching it before super().__init__ raises AttributeError. Override only
         # after the base manager has installed its version-specific defaults.
         super().__init__(dns_pin=dns_pin, **kwargs)
-        self.pool_classes_by_scheme = dict(self.pool_classes_by_scheme)
+        base_pools = getattr(self, 'pool_classes_by_scheme', getattr(urllib3.poolmanager, 'pool_classes_by_scheme', {})); self.pool_classes_by_scheme = dict(base_pools)
         self.pool_classes_by_scheme["http"] = _PinnedHTTPPool
         self.pool_classes_by_scheme["https"] = _PinnedHTTPSPool
         # dns_pin is a connection-pool constructor kwarg, not part of urllib3's
@@ -393,3 +393,4 @@ class MeteredFetcher:
         if not self._reserve():
             raise PermanentError("site_crawler source is disabled, unconfirmed, over budget or circuit-open")
         return self._fetcher.sitemaps(url)
+
