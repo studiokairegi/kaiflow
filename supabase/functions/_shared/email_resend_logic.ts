@@ -170,7 +170,7 @@ export function adapterErrorResponse(e: AdapterError): Response {
 // Phase 4B: one normalised answer shape for email-send. The browser can always branch on `code` (refusals) and `outcome` (results).
 // ---------------------------------------------------------------------------------------------------------------
 /** Why email-send refused or failed. A superset of the adapter codes; EVERY non-2xx answer after the CORS preflight carries one. */
-export type SendErrorCode = AdapterErrorCode | "unauthenticated" | "forbidden" | "method_not_allowed" | "request_too_large" | "invalid_request" | "account_not_found" | "lead_not_found" | "internal_error" | "database_unavailable" | "idempotency_conflict" | "crm_lead_conflict";
+export type SendErrorCode = AdapterErrorCode | "unauthenticated" | "forbidden" | "method_not_allowed" | "request_too_large" | "invalid_request" | "account_not_found" | "lead_not_found" | "internal_error" | "database_unavailable" | "idempotency_conflict" | "crm_lead_conflict" | "crm_recipient_mismatch";
 /** What happened to a message that reached the provider step. `unknown` = the provider may have accepted it: resend ONLY with the same idempotency key. */
 export type SendOutcomeKind = "accepted" | "duplicate" | "rejected" | "failed" | "unknown";
 export interface SendResponseV2 {

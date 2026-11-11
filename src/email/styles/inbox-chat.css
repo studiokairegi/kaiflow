@@ -54,3 +54,9 @@
   .inbox-thread-context { flex-wrap: wrap; }
 }
 @media (max-width: 480px) { .inbox-compose-two { grid-template-columns: 1fr; } .inbox-add-account { padding: 0 7px; } }
+
+/* Unified mailbox source filters: account and provider stay within the existing Inbox sidebar. */
+.inbox-filter-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin: 10px 0; }
+.inbox-filter-row .chat-field { min-width: 0; display: grid; gap: 5px; color: var(--chat-muted, #9ca3af); font-size: 12px; }
+.inbox-filter-row .chat-org-select { width: 100%; min-width: 0; }
+@media (max-width: 520px) { .inbox-filter-row { grid-template-columns: 1fr; } }

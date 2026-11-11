@@ -77,3 +77,11 @@ test('sync fails safely when lease renewal reports lease loss', async () => {
   assert.equal(fetched, false);
   assert.equal(store.state.failures.length, 1);
 });
+
+test('a failure while recording a sync failure still returns a failed result', async () => {
+  const store = makeStore({ async failSync() { throw new Error('database unavailable'); } });
+  const adapter = { providerKey: 'zoho', operations: ['sync'], async sync() { throw new Error('boom'); } };
+  const result = await synchronizeMailbox({ account, adapter, context, store });
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 'failed');
+});

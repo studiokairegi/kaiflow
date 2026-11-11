@@ -20,30 +20,36 @@ import ConversationList from "./components/ConversationList.jsx";
 import EmailMessage from "./components/EmailMessage.jsx";
 import InlineReply from "./components/InlineReply.jsx";
 
+const PAGE_SIZE = 50;
+const MAX_ROWS = 500;
+
 export default function InboxModule({ supabase, access, leads = [], onOpenLead, onUnreadChanged, composeRequest = null, onComposeHandled, onLeadEmailSent, openConversationRequest = null, onOpenConversationHandled, theme = "dark" }) {
   const [folder, setFolder] = useState("inbox");
   const [searchText, setSearchText] = useState("");
   const [search, setSearch] = useState("");
+  const [accountFilter, setAccountFilter] = useState("all");
+  const [providerFilter, setProviderFilter] = useState("all");
   const [selected, setSelected] = useState(null);
   const [composer, setComposer] = useState(null);
   const [composeNotice, setComposeNotice] = useState("");
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [activeMsg, setActiveMsg] = useState(null);
   const [tick, setTick] = useState(0);
+  const [limit, setLimit] = useState(PAGE_SIZE);
   const scrollRef = useRef(null);
   const action = useBusy();
   const allowed = canAccessEmail(access);
 
   const accounts = useLoad(() => (allowed ? emailApi.accounts(supabase) : Promise.resolve([])), [supabase, allowed, tick]);
   const providers = useLoad(() => (allowed ? emailApi.providers(supabase) : Promise.resolve([])), [supabase, allowed, tick]);
-  const list = useLoad(() => (allowed ? emailApi.list(supabase, folder, search) : Promise.resolve([])), [supabase, allowed, folder, search, tick]);
+  const list = useLoad(() => (allowed ? emailApi.list(supabase, folder, search, accountFilter === "all" ? null : accountFilter, providerFilter === "all" ? null : providerFilter, limit) : Promise.resolve([])), [supabase, allowed, folder, search, accountFilter, providerFilter, limit, tick]);
   const thread = useLoad(() => (allowed && selected ? emailApi.get(supabase, selected) : Promise.resolve(null)), [supabase, allowed, selected, tick]);
 
   // Opening a conversation marks it read (the database keeps the counts).
   useEffect(() => {
     const c = thread.data?.conversation;
     if (c && c.unread_count > 0) emailApi.markRead(supabase, c.id, true).then(() => { setTick((t) => t + 1); onUnreadChanged?.(); }).catch(() => {});
-  }, [thread.data?.conversation?.id]);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [thread.data?.conversation?.id, thread.data?.conversation?.unread_count]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // Like the main chat: land on the newest message when a conversation opens or a new message arrives.
   useEffect(() => {
@@ -112,15 +118,29 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
             {providers.error && <div className="inbox-load-error" role="alert"><span>Provider availability could not be refreshed. Sending and account setup are paused until provider status can be verified.</span><button type="button" className="chat-button quiet" onClick={() => providers.reload()}>Retry</button></div>}
             {accounts.error && <div className="inbox-load-error" role="alert"><span>Could not refresh email accounts: {accounts.error}</span><button type="button" className="chat-button quiet" onClick={() => accounts.reload()}>Retry</button></div>}
             {own.length > 0 && <div className="inbox-account-list" aria-label="Connected email accounts">{accts.map((a) => { const p = providerForAccount(a, providerRows); const usable = accountCanSend(a, providerRows); return <div className="inbox-account-row" key={a.id} title={`${p?.display_name || a.provider} · ${accountConnectionLabel(a, providerRows)}`}><span className="inbox-provider-mark">{p?.display_name || a.provider || "Email"}</span><span className="inbox-account-address">{a.address}</span><span className={`inbox-account-state${usable ? " is-ready" : " is-paused"}`}>{accountConnectionLabel(a, providerRows)}</span></div>; })}</div>}
-            <form className="chat-search" onSubmit={(e) => { e.preventDefault(); setSearch(searchText.trim()); }}>
+            <form className="chat-search" onSubmit={(e) => { e.preventDefault(); setLimit(PAGE_SIZE); setSearch(searchText.trim()); }}>
               <IconSearch size={17} />
-              <input value={searchText} onChange={(e) => { setSearchText(e.target.value); if (!e.target.value.trim()) setSearch(""); }} placeholder="Search people, subjects and messages" aria-label="Search email" />
+              <input value={searchText} onChange={(e) => { setSearchText(e.target.value); if (!e.target.value.trim()) { setSearch(""); setLimit(PAGE_SIZE); } }} placeholder="Search people, subjects and messages" aria-label="Search email" />
             </form>
+            <div className="inbox-filter-row" aria-label="Mailbox filters">
+              <label className="chat-field">Account
+                <select className="chat-org-select" value={accountFilter} onChange={(e) => { setAccountFilter(e.target.value); setLimit(PAGE_SIZE); setSelected(null); }}>
+                  <option value="all">All accounts</option>
+                  {accts.map((a) => <option key={a.id} value={a.id}>{a.address}</option>)}
+                </select>
+              </label>
+              <label className="chat-field">Provider
+                <select className="chat-org-select" value={providerFilter} onChange={(e) => { setProviderFilter(e.target.value); setLimit(PAGE_SIZE); setSelected(null); }}>
+                  <option value="all">All providers</option>
+                  {[...new Set(accts.map((a) => a.provider).filter(Boolean))].sort().map((key) => <option key={key} value={key}>{providerRows.find((p) => p.provider_key === key)?.display_name || key}</option>)}
+                </select>
+              </label>
+            </div>
             <div className="chat-tabs inbox-tabs" role="tablist" aria-label="Mail folders">
-              {FOLDERS.map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={folder === id} className={folder === id ? "active" : ""} onClick={() => { setFolder(id); setSelected(null); }}>{label}</button>)}
+              {FOLDERS.map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={folder === id} className={folder === id ? "active" : ""} onClick={() => { setFolder(id); setLimit(PAGE_SIZE); setSelected(null); }}>{label}</button>)}
             </div>
           </div>
-          <ConversationList rows={rows} loading={list.loading} search={search} selected={selected} own={own} error={!selected ? errorText : ""} onSelect={(id) => { setSelected(id); setActiveMsg(null); }} />
+          <ConversationList rows={rows} loading={list.loading} hasMore={rows.length >= limit && limit < MAX_ROWS} onLoadMore={() => setLimit((n) => Math.min(n + PAGE_SIZE, MAX_ROWS))} search={search} selected={selected} own={own} error={!selected ? errorText : ""} onSelect={(id) => { setSelected(id); setActiveMsg(null); }} />
         </aside>
 
         <main className="chat-main">

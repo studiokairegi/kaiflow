@@ -1,6 +1,6 @@
 // Provider-neutral mailbox synchronization coordinator (Phase 5).
 // Provider adapters fetch/normalize; this module owns ordering, idempotency, checkpoint safety and partial-failure semantics.
-import type { AdapterAccount, AdapterContext, AdapterSyncMessage, EmailAdapter } from "./email_adapter.ts";
+import type { AdapterAccount, AdapterContext, AdapterSyncMessage, AdapterSyncPage, EmailAdapter } from "./email_adapter.ts";
 import { AdapterError, CapabilityError } from "./email_adapter.ts";
 
 export type NormalizedMailboxMessage = AdapterSyncMessage;
@@ -103,7 +103,9 @@ export async function synchronizeMailbox(
   } catch (error) {
     const message = safeError(error);
     const retryDelayMs = Math.min(6 * 60 * 60_000, 60_000 * (2 ** Math.min(claim.consecutiveFailures ?? 0, 8)));
-    await store.failSync(account.id, claim.leaseToken, message, new Date(now() + retryDelayMs).toISOString());
+    // Recording the failure can itself fail (database unavailable). That must never turn a handled sync failure into a thrown error:
+    // the lease then simply expires and the next run retries.
+    try { await store.failSync(account.id, claim.leaseToken, message, new Date(now() + retryDelayMs).toISOString()); } catch { /* lease expiry is the fallback */ }
     return { ok: false, status: "failed", pages, messages_seen: seen, messages_inserted: inserted, messages_updated: updated, checkpoint_committed: pages > 0, has_more: true, error: message };
   } finally {
     clearInterval(heartbeat);

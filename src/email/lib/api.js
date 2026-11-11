@@ -17,7 +17,7 @@ export const emailApi = {
   accounts: (s) => call(s, "email_list_accounts"),
   providers: (s) => call(s, "email_provider_registry_list"),
   addAccount: (s, address, name, provider = "resend") => call(s, "email_upsert_account", { p_address: address, p_display_name: name || "", p_provider: provider }),
-  list: (s, folder, search) => call(s, "email_list_conversations", { p_folder: folder, p_search: search || null, p_limit: 50, p_offset: 0 }),
+  list: (s, folder, search, accountId = null, provider = null, limit = 50) => call(s, "email_list_conversations", { p_folder: folder, p_search: search || null, p_limit: Math.min(Math.max(Number(limit) || 50, 1), 500), p_offset: 0, p_account_id: accountId || null, p_provider: provider || null }),
   get: (s, id) => call(s, "email_get_conversation", { p_conversation_id: id }),
   markRead: (s, id, read) => call(s, "email_mark_read", { p_conversation_id: id, p_read: read }),
   archive: (s, id, archived) => call(s, "email_set_archived", { p_conversation_id: id, p_archived: archived }),

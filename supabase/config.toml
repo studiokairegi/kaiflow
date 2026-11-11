@@ -52,3 +52,6 @@ verify_jwt = false
 
 [functions.push]
 verify_jwt = false
+
+[functions.email-mailbox-sync]
+verify_jwt = false

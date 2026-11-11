@@ -282,7 +282,7 @@ class Inbox(unittest.TestCase):
             if name == "intel_agent_receive_sync_state": return {}
             if name == "intel_agent_record_inbound": return {"message_id": "m1", "duplicate": False}
             return None
-        mailops.sync_provider_accounts(rpc, Router(), set(), overlap_ms=0,
+        mailops.sync_provider_accounts(rpc, Router(), set(), overlap_ms=0, initial_lookback_ms=None,
                                        accounts=[{"id": "a", "provider_key": "gmail", "mailbox": "s@studio.test", "receive_enabled": True}])
         payload = next(p for name, p in calls if name == "intel_agent_record_inbound")
         self.assertEqual(payload["p_rfc_message_id"], "<reply@pixelmoon.com>")
@@ -324,7 +324,7 @@ class Inbox(unittest.TestCase):
             cfg=object(); supa=object()
             registry=Registry()
         rpc, router = Rpc(), Router()
-        result=mailops.sync_provider_accounts(rpc, router, set(), overlap_ms=0, accounts=accounts)
+        result=mailops.sync_provider_accounts(rpc, router, set(), overlap_ms=0, accounts=accounts, initial_lookback_ms=None)
         self.assertEqual(result, {"accounts": 2, "seen": 2, "new": 2})
         ids={x["p_zoho_message_id"] for x in rpc.inbound}
         self.assertEqual(ids, {"in:gmail:acct-a:same-local-id", "in:zoho:acct-b:same-local-id"})

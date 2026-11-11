@@ -132,7 +132,7 @@ export function makeWebhookStore(service: any): WebhookStore {
       const rows: AccountRef[] = [...(exact.data || [])];
       // 2. only for the configured inbound domain: same local part. The database filter is wide (LIKE), the exact comparison below is what counts.
       if (inboundDomain && domain === inboundDomain) {
-        const like = await service.from("email_accounts").select(cols).eq("status", "active").eq("provider", providerKey).like("address", `${local.replace(/[%_\\]/g, "")}@%`);
+        const like = await service.from("email_accounts").select(cols).eq("status", "active").eq("provider", providerKey).like("address", `${local.replace(/[%_\\]/g, "\\$&")}@%`);
         failOn(like.error, "account lookup");
         for (const r of like.data || []) if (String(r.address).split("@")[0] === local) rows.push(r);
       }

@@ -184,7 +184,7 @@ def _rfc_header(headers: dict, name: str) -> str:
     return ""
 
 
-def sync_provider_accounts(rpc, router, own_addresses: set[str], overlap_ms: int = 3_600_000, limit: int = 50, accounts=None) -> dict:
+def sync_provider_accounts(rpc, router, own_addresses: set[str], overlap_ms: int = 3_600_000, limit: int = 50, accounts=None, initial_lookback_ms: int | None = 30 * 86_400_000, now_ms=None) -> dict:
     """Synchronize every enabled Gmail/Zoho account with an account-scoped cursor.
 
     Each provider message gets a stable account-qualified database id. This prevents
@@ -195,59 +195,92 @@ def sync_provider_accounts(rpc, router, own_addresses: set[str], overlap_ms: int
     if not accounts:
         return {"accounts": 0, "seen": 0, "new": 0}
     totals = {"accounts": 0, "seen": 0, "new": 0}
+    # Every connected mailbox belongs to this studio. Mail from one of them arriving in another is internal,
+    # never a prospect reply, so all account addresses are "own" for every account's sync.
+    studio_mailboxes = {str(a.get("mailbox") or "").strip().lower() for a in accounts if a.get("mailbox")}
+    first_error: Exception | None = None
     for account in accounts:
         # A disabled or disconnected registry account is never polled.
         if account.get("receive_enabled") is False:
             continue
-        account_id = str(account["id"])
-        provider_key = str(account["provider_key"]).strip().lower()
-        if provider_key not in ("gmail", "zoho"):
+        # One broken account (revoked token, provider outage) must not stop the other accounts from syncing.
+        # Its cursor is untouched, so the next run retries it; the first error is re-raised after the loop
+        # so the job still reports the failure.
+        try:
+            seen, fresh = _sync_one_account(rpc, router, account, own_addresses | studio_mailboxes, overlap_ms, limit, initial_lookback_ms, now_ms)
+        except _SkipAccount:
             continue
-        provider = router.registry.create(provider_key, cfg=router.cfg, supa=router.supa, account_id=account_id)
-        cursor = rpc("intel_agent_receive_sync_state", {"p_account_id": account_id, "p_set": None}) or {}
-        last_time = int(cursor.get("last_time_ms", 0) or 0)
-        since = max(0, last_time - overlap_ms)
-        newest, seen, fresh = last_time, 0, 0
-        account_own = set(own_addresses)
-        mailbox = str(account.get("mailbox") or "").strip().lower()
-        if mailbox:
-            account_own.add(mailbox)
-        items = provider.iter_messages("inbox", page_size=limit)
-        for item in items:
-            msg_time = int(item.get("time_ms") or 0)
-            if msg_time and msg_time < since:
-                continue
-            sender = re.sub(r".*<([^>]+)>.*", r"\1", str(item.get("from") or "")).strip().lower()
-            if not sender or sender in account_own:
-                continue
-            seen += 1
-            body = provider.content_text(item["folder_id"], item["id"])
-            hdr = provider.rfc_headers(item["folder_id"], item["id"])
-            tok = TOKEN_RE.search(f"{item.get('subject', '')}\n{body}")
-            # Provider IDs are only unique inside one mailbox. Prefixing the id
-            # gives the existing database uniqueness/idempotency contract a
-            # globally stable key without requiring destructive schema changes.
-            stable_id = f"in:{provider_key}:{account_id}:{item['id']}"
-            result = rpc("intel_agent_record_inbound", {
-                "p_zoho_message_id": stable_id,
-                "p_rfc_message_id": _rfc_header(hdr, "Message-ID"),
-                "p_in_reply_to": _rfc_header(hdr, "In-Reply-To"),
-                "p_references": _rfc_header(hdr, "References"),
-                "p_from_email": sender, "p_subject": item.get("subject", ""),
-                "p_body_text": body, "p_received_at": _iso(msg_time),
-                "p_thread_id": str(item.get("thread_id") or ""),
-                "p_token": tok.group(0) if tok else None,
-            })
-            if not result.get("duplicate"):
-                fresh += 1
-                rpc("intel_agent_enqueue_job", {
-                    "p_kind": "classify", "p_payload": {"message_id": result["message_id"]},
-                    "p_idempotency_key": f"classify:{stable_id}", "p_run_after": None, "p_priority": 5,
-                })
-            newest = max(newest, msg_time)
-        # Advance only after every message and classification enqueue persisted.
-        rpc("intel_agent_receive_sync_state", {"p_account_id": account_id, "p_set": {"last_time_ms": newest}})
+        except Exception as exc:  # noqa: BLE001 - isolation boundary; re-raised below
+            first_error = first_error or exc
+            continue
         totals["accounts"] += 1
         totals["seen"] += seen
         totals["new"] += fresh
+    if first_error is not None:
+        raise first_error
     return totals
+
+
+class _SkipAccount(Exception):
+    pass
+
+
+def _sync_one_account(rpc, router, account: dict, own_addresses: set[str], overlap_ms: int, limit: int, initial_lookback_ms: int | None = None, now_ms=None) -> tuple[int, int]:
+    account_id = str(account["id"])
+    provider_key = str(account["provider_key"]).strip().lower()
+    if provider_key not in ("gmail", "zoho"):
+        raise _SkipAccount()
+    provider = router.registry.create(provider_key, cfg=router.cfg, supa=router.supa, account_id=account_id)
+    cursor = rpc("intel_agent_receive_sync_state", {"p_account_id": account_id, "p_set": None}) or {}
+    last_time = int(cursor.get("last_time_ms", 0) or 0)
+    since = max(0, last_time - overlap_ms)
+    if not last_time and initial_lookback_ms:
+        # A newly connected account has no cursor: read only the recent window, not the mailbox's whole history.
+        since = max(0, int(now_ms() if callable(now_ms) else time.time() * 1000) - initial_lookback_ms)
+    newest, seen, fresh = last_time, 0, 0
+    account_own = set(own_addresses)
+    mailbox = str(account.get("mailbox") or "").strip().lower()
+    if mailbox:
+        account_own.add(mailbox)
+    stale_run = 0
+    for item in provider.iter_messages("inbox", page_size=limit):
+        msg_time = int(item.get("time_ms") or 0)
+        if msg_time and msg_time < since:
+            # Providers list newest first. After a full page worth of consecutive messages older than the
+            # cursor window nothing newer can follow, so stop instead of walking the whole mailbox every run.
+            stale_run += 1
+            if stale_run >= limit:
+                break
+            continue
+        stale_run = 0
+        sender = re.sub(r".*<([^>]+)>.*", r"\1", str(item.get("from") or "")).strip().lower()
+        if not sender or sender in account_own:
+            continue
+        seen += 1
+        body = provider.content_text(item["folder_id"], item["id"])
+        hdr = provider.rfc_headers(item["folder_id"], item["id"])
+        tok = TOKEN_RE.search(f"{item.get('subject', '')}\n{body}")
+        # Provider IDs are only unique inside one mailbox. Prefixing the id
+        # gives the existing database uniqueness/idempotency contract a
+        # globally stable key without requiring destructive schema changes.
+        stable_id = f"in:{provider_key}:{account_id}:{item['id']}"
+        result = rpc("intel_agent_record_inbound", {
+            "p_zoho_message_id": stable_id,
+            "p_rfc_message_id": _rfc_header(hdr, "Message-ID"),
+            "p_in_reply_to": _rfc_header(hdr, "In-Reply-To"),
+            "p_references": _rfc_header(hdr, "References"),
+            "p_from_email": sender, "p_subject": item.get("subject", ""),
+            "p_body_text": body, "p_received_at": _iso(msg_time),
+            "p_thread_id": str(item.get("thread_id") or ""),
+            "p_token": tok.group(0) if tok else None,
+        })
+        if not result.get("duplicate"):
+            fresh += 1
+            rpc("intel_agent_enqueue_job", {
+                "p_kind": "classify", "p_payload": {"message_id": result["message_id"]},
+                "p_idempotency_key": f"classify:{stable_id}", "p_run_after": None, "p_priority": 5,
+            })
+        newest = max(newest, msg_time)
+    # Advance only after every message and classification enqueue persisted.
+    rpc("intel_agent_receive_sync_state", {"p_account_id": account_id, "p_set": {"last_time_ms": newest}})
+    return seen, fresh
