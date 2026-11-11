@@ -87,7 +87,7 @@ export function validateSendRequest(raw: any): { ok: true; value: SendRequest } 
   if (subject.length > LIMITS.maxSubject || /[\r\n]/.test(subject)) return { ok: false, error: "Subject is too long or has line breaks" };
   const text = String(raw.text ?? ""), html = String(raw.html ?? "");
   if (!text.trim() && !html.trim()) return { ok: false, error: "Write a message" };
-  if (text.length > LIMITS.maxBody || html.length > LIMITS.maxBody * 2) return { ok: false, error: "Message is too long" };
+  if (text.length > LIMITS.maxBody || html.length > 1_100_000) return { ok: false, error: "Message is too long" };
   const key = String(raw.idempotency_key ?? "");
   if (!/^[A-Za-z0-9_.:-]{8,128}$/.test(key)) return { ok: false, error: "Missing request key" };
   const reply_to = String(raw.reply_to ?? "").trim();
@@ -127,9 +127,9 @@ export interface SendStore {
   /** The provider's row in public.email_provider_registry, or null when there is none. Throws on database errors. */
   getProviderRegistryRow(providerKey: string): Promise<RegistryRow | null>;
   /** Scoped to the organization. `provider` is the value stored on the account row in the database. */
-  getAccount(orgId: string, accountId: string): Promise<{ id: string; organization_id: string; provider: string; address: string; display_name: string; status: string } | null>;
+  getAccount(orgId: string, accountId: string): Promise<{ id: string; organization_id: string; provider: string; address: string; display_name: string; status: string; connection_status?: string } | null>;
   /** Phase 4B. The lead, only when it exists AND is owned by `userId` (leads are per user; decision D1). Null otherwise: "missing" and "not yours" look the same. Throws on database errors. */
-  getLeadForUser(userId: string, leadId: string): Promise<{ id: string } | null>;
+  getLeadForUser(userId: string, leadId: string): Promise<{ id: string; email: string | null } | null>;
   /** Existing conversation CRM association, scoped to organization and sender account. */
   getConversationLead(orgId: string, conversationId: string, accountId: string): Promise<{ lead_id: string | null } | null>;
   /** Atomically writes the CRM timeline entry and its full email activity record. Safe to retry after provider acceptance. */
@@ -138,8 +138,10 @@ export interface SendStore {
   getThreadParent(orgId: string, conversationId: string, accountId: string): Promise<{ rfc_message_id: string | null; references_ids: string | null } | null>;
   /** Outbound messages created since `sinceIso`; when `provider` is given, only that provider's (its quota is its own). */
   countOutboundSince(orgId: string, sinceIso: string, provider?: string): Promise<number>;
-  createOutbound(p: Record<string, unknown>): Promise<{ duplicate: boolean; message_id: string; conversation_id: string; status: string; provider_message_id?: string | null }>;
+  createOutbound(p: Record<string, unknown>): Promise<{ duplicate: boolean; message_id: string; conversation_id: string; status: string; provider_message_id?: string | null; rate_limited?: "minute" | "day" }>;
   markResult(messageId: string, patch: Record<string, unknown>): Promise<void>;
+  /** Atomically transitions exactly one queued row to sending; false means another request already claimed it. */
+  claimOutbound?(messageId: string, replyTo: string): Promise<boolean>;
   saveAttachments(orgId: string, messageId: string, files: { filename: string; content_type: string; base64: string }[]): Promise<void>;
 }
 export interface SendDeps {
@@ -225,6 +227,11 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
     if (e instanceof AdapterError) { audit({ event: "send_refused", ...who, account_id: account.id, provider: String(account.provider || ""), code: e.code }); return adapterErrorResponse(e); }
     throw e;
   }
+  // OAuth accounts must be connected at the server boundary. UI gating is not authorization.
+  if (resolved.row.capabilities?.oauth === true && account.connection_status !== "connected") {
+    audit({ event: "send_refused", ...who, account_id: account.id, provider: resolved.adapter.providerKey, code: "account_not_connected" });
+    return adapterErrorResponse(new AdapterError("account_not_usable", "This sender account is not connected. Reconnect it or choose another sender.", { provider: resolved.adapter.providerKey }));
+  }
   const { adapter } = resolved;
   const ctx: AdapterContext = { env: deps.env, fetch: deps.fetch, now: deps.now, sleep: deps.sleep };
 
@@ -239,10 +246,13 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
   // 3b. Optional CRM lead: verify against the authenticated sender before anything is created or sent.
   // The lead association is persisted on the outbound message; CRM activity is written only after provider acceptance.
   let crm: SendResponseV2["crm"];
-  let crmLeadId = r.crm?.lead_id ?? null;
+  const explicitlyRequestedLeadId = r.crm?.lead_id ?? null;
+  let linkedConversationLeadId: string | null = null;
+  let crmLeadId = explicitlyRequestedLeadId;
   if (r.conversation_id) {
     const linked = await deps.store.getConversationLead(auth.organizationId, r.conversation_id, account.id);
     const linkedLeadId = linked?.lead_id ? String(linked.lead_id).toLowerCase() : null;
+    linkedConversationLeadId = linkedLeadId;
     if (linkedLeadId && crmLeadId && linkedLeadId !== crmLeadId) {
       audit({ event: "send_refused", ...who, account_id: account.id, provider: adapter.providerKey, code: "crm_lead_conflict" });
       return refuse(409, "crm_lead_conflict", "This conversation is already linked to a different CRM lead. Update the conversation link before sending.");
@@ -251,17 +261,26 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
   }
   if (crmLeadId) {
     const lead = await deps.store.getLeadForUser(auth.userId, crmLeadId);
-    if (!lead || String(lead.id).toLowerCase() !== crmLeadId) { audit({ event: "send_refused", ...who, account_id: account.id, provider: adapter.providerKey, code: "lead_not_found" }); return refuse(404, "lead_not_found", "Lead not found"); }
-    crm = { lead_id: crmLeadId, activity: "pending" };
+    if (!lead || String(lead.id).toLowerCase() !== crmLeadId) {
+      // A conversation can be shared across the studio while its CRM lead remains owned by
+      // one colleague. A colleague may reply to that shared thread, but cannot write activity
+      // to another user's lead. Explicit CRM compose/send requests still fail closed.
+      if (explicitlyRequestedLeadId && linkedConversationLeadId !== crmLeadId) {
+        audit({ event: "send_refused", ...who, account_id: account.id, provider: adapter.providerKey, code: "lead_not_found" });
+        return refuse(404, "lead_not_found", "Lead not found");
+      }
+      crmLeadId = null;
+    } else {
+      const leadAddresses = String(lead.email || "").split(/[,;\r\n]+/).map((value) => parseAddress(value).email.toLowerCase()).filter(Boolean);
+      if (explicitlyRequestedLeadId && (!leadAddresses.length || !r.to.some((address) => leadAddresses.includes(parseAddress(address).email.toLowerCase())))) {
+        audit({ event: "send_refused", ...who, account_id: account.id, provider: adapter.providerKey, code: "crm_recipient_mismatch" });
+        return refuse(409, "crm_recipient_mismatch", "The recipient does not match this CRM lead. Remove the CRM link or use the lead's email address.");
+      }
+      crm = { lead_id: crmLeadId, activity: "pending" };
+    }
   }
 
-  // 4. Limits. Per minute: all of the organization's mail (burst protection). Per day: this provider's own quota (free Resend plan = 100/day).
   const daily = Number(deps.env(adapter.dailyLimitEnv || "") || adapter.defaultDailyLimit || 100);
-  const dayAgo = new Date(deps.now() - 86_400_000).toISOString();
-  const minuteAgo = new Date(deps.now() - 60_000).toISOString();
-  if ((await deps.store.countOutboundSince(auth.organizationId, minuteAgo)) >= 20) return refuse(429, "rate_limited", "Slow down: too many emails in the last minute");
-  if ((await deps.store.countOutboundSince(auth.organizationId, dayAgo, adapter.providerKey)) >= daily) return refuse(429, "rate_limited", `Daily sending limit reached (${daily}). Try again later or upgrade the ${adapter.displayName} plan.`);
-
   const parent = r.conversation_id ? await deps.store.getThreadParent(auth.organizationId, r.conversation_id, account.id) : null;
   const thread = buildThreadHeaders(parent);
 
@@ -274,6 +293,7 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
       // Included in the database-side immutable idempotency fingerprint (including attachment bytes).
       attachments: r.attachments.map((a) => ({ filename: a.filename, content_type: a.content_type || "application/octet-stream", content_base64: a.content_base64 })),
       crm_lead_id: crm?.lead_id ?? null, crm_user_id: crm ? auth.userId : null,
+      rate_limit_minute: 20, rate_limit_daily: daily,
     });
   } catch (e) {
     if (/idempotency_key_conflict/i.test(safeMsg(e))) return refuse(409, "idempotency_conflict", "This request key was already used for a different sender or message. Create a new request key to send this message.");
@@ -282,6 +302,12 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
       return refuse(409, "crm_lead_conflict", "This conversation's CRM lead changed before the message was queued. Refresh the conversation and try again.");
     }
     throw e;
+  }
+  if (created.rate_limited) {
+    const message = created.rate_limited === "minute"
+      ? "Slow down: too many emails in the last minute"
+      : `Daily sending limit reached (${daily}). Try again later or upgrade the ${adapter.displayName} plan.`;
+    return refuse(429, "rate_limited", message);
   }
   // CRM recording is deliberately downstream of provider acceptance. A failed CRM write is
   // reported as pending; it must never turn an accepted email into a send retry. The recovery RPC
@@ -297,8 +323,14 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
     }
   };
 
+  // Replies to this message come back to a plus-address that names the conversation, unless the person chose their own reply-to.
+  const tokens = (deps.env("EMAIL_THREAD_TOKENS") || "on").toLowerCase() !== "off";
+  const inboundDomain = cleanInboundDomain(deps.env("EMAIL_INBOUND_DOMAIN"));
+  const replyTo = r.reply_to || (tokens ? withThreadToken(account.address, created.conversation_id, inboundDomain) : "");
+
+  let claimAlreadyAcquired = false;
   // Phase 4C: a repeated key is a lookup, never permission to call the provider again.
-  // Only provider-accepted states are successful duplicates. queued/sending are ambiguous/in-flight and must remain unknown.
+  // Provider-accepted states are successful duplicates. Sending remains ambiguous; queued is resumable only through the atomic claim.
   if (created.duplicate) {
     const prior = String(created.status || "").toLowerCase();
     const accepted = new Set(["sent", "delivered", "delivery_delayed", "bounced", "complained"]);
@@ -309,21 +341,27 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
     }
     if (prior === "rejected") return json({ ok: false, duplicate: true, outcome: "rejected", retry_with_same_key: false, code: "provider_rejected", message_id: created.message_id, conversation_id: created.conversation_id, status: prior, error: "The provider rejected this message. Edit it and try again." } satisfies SendResponseV2, 422);
     if (prior === "failed") return json({ ok: false, duplicate: true, outcome: "failed", retry_with_same_key: false, code: "provider_unavailable", message_id: created.message_id, conversation_id: created.conversation_id, status: prior, error: "The previous attempt failed. You can try again." } satisfies SendResponseV2, 502);
-    return json({ ok: false, duplicate: true, outcome: "unknown", status: "unknown", retry_with_same_key: true, code: "outcome_unknown", message_id: created.message_id, conversation_id: created.conversation_id, error: "This send is still unconfirmed. Check the Sent folder; do not create a new send." } satisfies SendResponseV2, 202);
+    if (prior === "queued" && deps.store.claimOutbound) {
+      // A previous request may have persisted the queue row but failed before claiming it.
+      // Claiming is an atomic queued -> sending transition; only its winner may contact the provider.
+      const claimed = await deps.store.claimOutbound(created.message_id, replyTo);
+      if (!claimed) return json({ ok: false, duplicate: true, outcome: "unknown", status: "unknown", retry_with_same_key: true, code: "outcome_unknown", message_id: created.message_id, conversation_id: created.conversation_id, error: "This send is already being claimed. Check Sent and retry with the same request key." } satisfies SendResponseV2, 202);
+      claimAlreadyAcquired = true;
+    } else {
+      return json({ ok: false, duplicate: true, outcome: "unknown", status: "unknown", retry_with_same_key: true, code: "outcome_unknown", message_id: created.message_id, conversation_id: created.conversation_id, error: "This send is still unconfirmed. Check the Sent folder; do not create a new send." } satisfies SendResponseV2, 202);
+    }
   }
 
-  // Replies to this message come back to a plus-address that names the conversation, unless the person chose their own reply-to.
-  const tokens = (deps.env("EMAIL_THREAD_TOKENS") || "on").toLowerCase() !== "off";
-  // EMAIL_INBOUND_DOMAIN: where replies should arrive (Resend receives there). Needed when another provider (Zoho) owns the sending domain's MX.
-  const inboundDomain = cleanInboundDomain(deps.env("EMAIL_INBOUND_DOMAIN"));
-  const replyTo = r.reply_to || (tokens ? withThreadToken(account.address, created.conversation_id, inboundDomain) : "");
   // Claim the queued row before contacting the provider. A transient database failure must never
   // strand a message silently or allow an untracked provider submission. Retry only this write.
-  let claimed = false;
+  let claimed = claimAlreadyAcquired;
   let claimError: unknown = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 3 && !claimed; attempt++) {
     try {
-      await deps.store.markResult(created.message_id, { status: "sending", reply_to: replyTo });
+      if (deps.store.claimOutbound) {
+        claimed = await deps.store.claimOutbound(created.message_id, replyTo);
+        if (!claimed) throw new Error("queued message was claimed by another request");
+      } else await deps.store.markResult(created.message_id, { status: "sending", reply_to: replyTo });
       claimed = true;
       break;
     } catch (e) {
@@ -350,7 +388,7 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
     console.error("email-send: adapter threw", adapter.providerKey, safeMsg(e));
     outcome = { ok: false as const, unknown: true, retryable: false, status: 0, message: "The email provider gave an unreadable answer", attempts: 0 };
   }
-  const out = outcome.ok ? { ok: true as const, id: outcome.providerMessageId, attempts: outcome.attempts } : outcome;
+  const out = outcome.ok ? { ok: true as const, id: outcome.providerMessageId, rfcMessageId: outcome.rfcMessageId, attempts: outcome.attempts } : outcome;
   audit({ event: "send_result", ...who, account_id: account.id, provider: adapter.providerKey, message_id: created.message_id, ...(out.ok ? { provider_message_id: out.id } : {}), status: out.ok ? "sent" : out.unknown ? "unknown" : "failed", attempts: out.attempts });
 
   if (out.ok) {
@@ -359,7 +397,8 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
     // Provider acceptance is final. Retry only the database write (never the provider call), bounded to three attempts.
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        await deps.store.markResult(created.message_id, { status: "sent", provider_message_id: out.id, sent_at: new Date(deps.now()).toISOString(), error: "" });
+        await deps.store.markResult(created.message_id, { status: "sent", provider_message_id: out.id, sent_at: new Date(deps.now()).toISOString(), error: "",
+          ...(typeof out.rfcMessageId === "string" ? { rfc_message_id: out.rfcMessageId } : {}) });
         persisted = true;
         break;
       } catch (e) {
@@ -484,6 +523,17 @@ export async function readCapped(res: Response, cap: number): Promise<Uint8Array
 
 export type Outcome = { result: "processed" | "ignored"; reason?: string };
 
+/** Persist only bounded headers used for RFC threading, unsubscribe handling and CRM automation filtering. */
+export function inboundStoredHeaders(headers: Record<string, string> | null | undefined): Record<string, string> {
+  const allow = ["in-reply-to", "references", "message-id", "list-unsubscribe", "auto-submitted", "precedence", "x-autoreply", "x-autorespond"];
+  const out: Record<string, string> = {};
+  for (const key of allow) {
+    const value = headers?.[key];
+    if (typeof value === "string" && value.trim()) out[key] = value.trim().slice(0, key === "references" ? 2000 : 500);
+  }
+  return out;
+}
+
 export async function processInbound(d: WebhookDeps, apiKey: string, data: any): Promise<Outcome> {
   const emailId = String(data?.email_id ?? data?.id ?? "");
   if (!emailId) return { result: "ignored", reason: "missing email id" };
@@ -541,7 +591,7 @@ export async function processInbound(d: WebhookDeps, apiKey: string, data: any):
     provider_message_id: emailId, rfc_message_id: m.messageId, in_reply_to: m.inReplyTo, references_ids: m.references,
     from_email: from.email, from_name: from.name, to_emails: to, cc_emails: cc, bcc_emails: bcc, reply_to: m.replyTo.join(", "),
     subject: m.subject, body_text: bodyText, body_html: m.html, received_at: m.createdAt || new Date(d.now()).toISOString(),
-    headers: { "in-reply-to": m.inReplyTo, references: m.references, "message-id": m.messageId, "list-unsubscribe": m.listUnsubscribe },
+    headers: inboundStoredHeaders(m.headers),
     auth_results: m.authentication, participants, attachments: files,
   });
   return { result: "processed" };
@@ -564,6 +614,7 @@ export async function processDeliveryEvent(d: WebhookDeps, svixId: string, event
     reason: String(event?.data?.bounce?.message || event?.data?.failed?.reason || event?.data?.suppressed?.message || event?.data?.reason || "").slice(0, 400),
     type: bounceType || null,
     recipient: recipients.length === 1 ? recipients[0] : "",
+    message_id: typeof event?.data?.message_id === "string" ? event.data.message_id : "",
   };
   const eventId = providerEventId(resendAdapter.providerKey, svixId);
   const rawTags = event?.data?.tags;

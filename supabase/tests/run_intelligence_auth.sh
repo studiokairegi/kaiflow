@@ -62,7 +62,8 @@ out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/email_provider_foundation.test
 echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
 [ $code -eq 0 ] || { echo "TEST FILE FAILED: email_provider_foundation.test.sql"; exit 1; }
 
-# Multi-provider Email Phases 4C-5 foundation: apply in dependency order, then run the CRM, Inbox and mailbox foundation SQL.
+# Multi-provider Email + CRM composer/inbox chain. Keep strict migration order so the
+# timeline and production-bugfix regression SQL exercise the same schema as deployment.
 for m in \
   20261206100000_email_provider_idempotency \
   20261208100000_email_crm_activity \
@@ -70,11 +71,30 @@ for m in \
   20261211100000_email_inbox_conversation_consistency \
   20261212100000_email_inbox_phase4f_counter_repair \
   20261213100000_email_accepted_send_reconciliation \
-  20261214100000_email_mailbox_phase5_foundation; do
+  20261214100000_email_mailbox_phase5_foundation \
+  20261215100000_email_mailbox_lease_and_provider_state \
+  20261216090000_email_independent_access \
+  20261220090000_email_crm_recovery_schedule \
+  20261220100000_email_provider_sender_safety \
+  20261221090000_email_crm_inbound_timeline \
+  20261222100000_email_composer_send_crm_fixes \
+  20261223100000_email_crm_timeline_reconciliation \
+  20261224100000_email_crm_confirmed_production_bugfixes \
+  20261225100000_email_crm_recovery_current_link; do
   run "$root/supabase/migrations/$m.sql"
 done
-for t in email_crm_activity email_phase4f_validation email_phase5_foundation; do
+for t in email_crm_activity email_phase4f_validation email_phase5_foundation email_composer_send_crm_fixes email_crm_inbound_timeline; do
   out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/$t.test.sql" 2>&1)"; code=$?
   echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
   [ $code -eq 0 ] || { echo "TEST FILE FAILED: $t.test.sql"; exit 1; }
 done
+
+# Structured CRM activity attribution and delayed recovery follow the current conversation lead link.
+out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/email_crm_activity_relink.test.sql" 2>&1)"; code=$?
+echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
+[ $code -eq 0 ] || { echo "TEST FILE FAILED: email_crm_activity_relink.test.sql"; exit 1; }
+
+# The latest sender-safety RPC must accept valid dotted-domain addresses.
+out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/email_sender_regex.test.sql" 2>&1)"; code=$?
+echo "$out" | grep -E "PASS|FAIL|SKIP|ERROR" | sed 's/^psql:[^ ]* //'
+[ $code -eq 0 ] || { echo "TEST FILE FAILED: email_sender_regex.test.sql"; exit 1; }

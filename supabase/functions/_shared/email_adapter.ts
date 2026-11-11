@@ -76,7 +76,7 @@ export interface AdapterSendInput {
 
 /** What a provider answers to `send`. `unknown` means the provider may have accepted the message: never resent automatically. */
 export type AdapterSendOutcome =
-  | { ok: true; providerMessageId: string; attempts: number }
+  | { ok: true; providerMessageId: string; rfcMessageId?: string; attempts: number }
   | { ok: false; unknown: boolean; retryable: boolean; status: number; message: string; attempts: number };
 
 /** Account as read from the DATABASE by the shared service. Never constructed from browser input. */

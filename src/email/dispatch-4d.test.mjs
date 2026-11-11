@@ -15,7 +15,7 @@ function harness({ crmFail = false, duplicate = false, priorStatus = "sent", lin
   const store = {
     providerEnabled: async () => true, getProviderRegistryRow: async () => REG,
     getAccount: async () => ({ id: ACC, organization_id: ORG, provider: "resend", address: "sender@example.com", display_name: "Sender", status: "active" }),
-    getLeadForUser: async (u, id) => u === "user-1" && id === LEAD ? { id } : null,
+    getLeadForUser: async (u, id) => u === "user-1" && id === LEAD ? { id, email: "client@example.com" } : null,
     getConversationLead: async () => linkedLead ? { lead_id: linkedLead } : null,
     getThreadParent: async () => null, countOutboundSince: async () => 0,
     createOutbound: async (p) => { calls.create.push(p); if (duplicate) return { duplicate: true, message_id: "message-1", conversation_id: "conversation-1", status: priorStatus }; rows.push(p); return { duplicate: false, message_id: "message-1", conversation_id: "conversation-1", status: "queued" }; },
@@ -103,4 +103,17 @@ test("4D composer/API contract forwards an explicit CRM lead claim to the server
   const composer = fs.readFileSync(new URL("./components/ComposeDialog.jsx", import.meta.url), "utf8");
   assert.match(api, /crm: m\.crmLeadId \? \{ lead_id: m\.crmLeadId \} : null/);
   assert.match(composer, /crmLeadId: initial\.crmLeadId \|\| null/);
+});
+
+test("4D corrective: a colleague can reply to a lead-linked shared thread without recording against the owner's CRM lead", async () => {
+  const h = harness({ linkedLead: LEAD });
+  h.deps.store.getLeadForUser = async () => null; // lead is owned by a different studio user
+  const res = await handleSend(req({ conversation_id: "aaaaaaaa-1111-2222-3333-444444444444", crm: null }), h.deps);
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(body.outcome, "accepted");
+  assert.equal(body.crm, undefined);
+  assert.equal(h.calls.create[0].crm_lead_id, null);
+  assert.equal(h.calls.provider, 1);
+  assert.deepEqual(h.calls.record, []);
 });

@@ -5,6 +5,7 @@ import { shouldRotateSendKey } from "./lib/helpers.js";
 test("4C composer key policy: only confirmed provider rejection/failure rotates the logical send key", () => {
   assert.equal(shouldRotateSendKey({ outcome: "rejected", retry_with_same_key: false }), true);
   assert.equal(shouldRotateSendKey({ outcome: "failed", retry_with_same_key: false }), true);
+  assert.equal(shouldRotateSendKey({ code: "idempotency_conflict" }), true, "fingerprint conflicts require a fresh logical request key");
   for (const e of [
     { outcome: "unknown", retry_with_same_key: true },
     { outcome: "accepted" },

@@ -39,6 +39,7 @@ import { allowedWorkspaceKeys, friendlyInviteError, readFunctionError } from "./
 import "./studio/invite.css";
 import { canAccessIntelligence, loadIntelligenceAccess } from "./intelligence/access.js";
 import { canAccessEmail, loadEmailAccess } from "./email/access.js";
+import { leadComposeTarget, mergeEmailTimeline, sortEmailTimelineForDisplay, EMAIL_TIMELINE_TYPES } from "./email/lib/logic.js";
 import AiGeneratedBadge, { isAiGeneratedLead } from "./intelligence/AiGeneratedBadge.jsx";
 
 // Used only as a guaranteed-empty UUID filter when a studio has no mapped
@@ -2337,6 +2338,7 @@ function emptyLead(stage = "pool", channel = "") {
 function leadFromRow(row) {
   return {
     id: row.id,
+    ownerUserId: row.user_id || null, // email-send only accepts a CRM lead owned by the sender (see leadComposeTarget)
     companyName: row.company_name,
     contactPerson: row.contact_person,
     email: row.email,
@@ -2923,7 +2925,10 @@ export default function ShotTracker() {
   const [dragOverStage, setDragOverStage] = useState(null);
   const [leadChannelFilter, setLeadChannelFilter] = useState("all");
   const [leadSearch, setLeadSearch] = useState("");
+  const [openConversationRequest, setOpenConversationRequest] = useState(null); // lead timeline "Open email" -> Inbox conversation
+  const [composeRequest, setComposeRequest] = useState(null); // CRM lead -> Inbox composer hand-off (see leadComposeTarget)
   const [crmTab, setCrmTab] = useState("pipeline"); // "pipeline" | "contacts" | "portfolio" | "intelligence" (CRM Intelligence lives inside the CRM module, only for the authorized admin)
+  useEffect(() => { if (view !== "projects" || workspace !== "leads" || crmTab !== "inbox") setComposeRequest(null); }, [view, workspace, crmTab]); // never replay a CRM compose request after leaving Inbox
   const [leadStatusFilter, setLeadStatusFilter] = useState("all");
   const [leadPriorityFilter, setLeadPriorityFilter] = useState("all");
   const [leadFollowupFilter, setLeadFollowupFilter] = useState("all");
@@ -5524,12 +5529,47 @@ export default function ShotTracker() {
     setEditingCard(card);
   };
 
-  const handleLeadClick = (lead) => {
+  // Read-only: the server-side activity_log of one lead (email entries are appended there by the database).
+  const loadLeadServerTimeline = async (leadId) => {
+    const { data: row, error } = await supabase.from("leads").select("activity_log").eq("id", leadId).maybeSingle();
+    if (error) throw error;
+    return Array.isArray(row?.activity_log) ? row.activity_log : [];
+  };
+  // "Open email" on a timeline entry: resolve its conversation (org-checked in the database), then show it in the Inbox.
+  const openLeadEmail = async (entry) => {
+    try {
+      const { data: conversationId, error } = await supabase.rpc("email_message_conversation", { p_message_id: entry.emailMessageId });
+      if (error || !conversationId) throw error || new Error("not found");
+      setEditingLead(null);
+      setOpenConversationRequest({ id: conversationId });
+      setCrmTab("inbox");
+    } catch {
+      setLeadError("Could not open that email in the Inbox.");
+    }
+  };
+
+  // Emails sent from the Inbox are written to leads.activity_log by the server, so the loaded copy can be stale. Pull any
+  // new email_sent entries for one lead into app state and return the up-to-date lead. Best effort: on any failure the lead is returned as it was.
+  const refreshLeadTimeline = async (lead) => {
+    if (!lead?.id) return lead;
+    try {
+      const { data: row, error } = await supabase.from("leads").select("id, activity_log").eq("id", lead.id).maybeSingle();
+      if (error || !row) return lead;
+      const current = dataRef.current?.leads?.find((l) => l.id === lead.id) || lead;
+      const merged = mergeEmailTimeline(current.activityLog, row.activity_log);
+      if (merged === current.activityLog || merged.length === (current.activityLog || []).length) return current;
+      const next = { ...current, activityLog: merged };
+      setData((prev) => ({ ...prev, leads: prev.leads.map((l) => (l.id === lead.id ? next : l)) }));
+      return next;
+    } catch { return lead; }
+  };
+
+  const handleLeadClick = async (lead) => {
     if (suppressClickRef.current) {
       suppressClickRef.current = false;
       return;
     }
-    setEditingLead(lead);
+    setEditingLead(await refreshLeadTimeline(lead));
   };
 
   const openProject = (id) => {
@@ -6513,6 +6553,22 @@ export default function ShotTracker() {
                                 <span style={styles.cardTag}>{lead.outcomeReason}</span>
                               )}
                             </div>
+                            {canAccessEmail(emailAccess) && (() => {
+                              const target = leadComposeTarget(lead, userId);
+                              if (!target) return null;
+                              return (
+                                <button
+                                  type="button"
+                                  style={styles.cardCompose}
+                                  title={`Compose an email to ${target.to}`}
+                                  aria-label={`Compose email to ${target.label}`}
+                                  onPointerDown={(e) => e.stopPropagation()}
+                                  onClick={(e) => { e.stopPropagation(); setComposeRequest({ ...target, nonce: Date.now() }); setCrmTab("inbox"); }}
+                                >
+                                  Compose
+                                </button>
+                              );
+                            })()}
                           </div>
                         );
                       })}
@@ -6558,7 +6614,7 @@ export default function ShotTracker() {
         </>
       )}
 
-      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessEmail(emailAccess) && <InboxModule access={emailAccess} supabase={supabase} leads={leads} onUnreadChanged={emailInbox.refresh} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
+      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessEmail(emailAccess) && <InboxModule access={emailAccess} supabase={supabase} leads={leads} composeRequest={composeRequest} onComposeHandled={() => setComposeRequest(null)} openConversationRequest={openConversationRequest} onOpenConversationHandled={() => setOpenConversationRequest(null)} onUnreadChanged={emailInbox.refresh} onLeadEmailSent={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) refreshLeadTimeline(l); }} onOpenLead={async (leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { const fresh = await refreshLeadTimeline(l); setCrmTab("pipeline"); setEditingLead(fresh); } }} />}
       {view === "projects" && workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
           </div>
         </div>
@@ -6930,6 +6986,8 @@ export default function ShotTracker() {
           autoNoResponse={settings.autoNoResponse !== false}
           saveError={leadError}
           liveStage={leads.find((l) => l.id === editingLead.id)?.stage}
+          loadServerTimeline={canAccessEmail(emailAccess) ? loadLeadServerTimeline : undefined}
+          onOpenEmail={canAccessEmail(emailAccess) ? openLeadEmail : undefined}
         />
       )}
 
@@ -11193,6 +11251,8 @@ function LeadEditor({
   autoNoResponse = true,
   saveError = "",
   liveStage = undefined,
+  loadServerTimeline = undefined,
+  onOpenEmail = undefined,
 }) {
   const [form, setForm] = useState(() => ({ ...lead, emails: normalizeEmails(lead.emails, followupSchedule.length) }));
   const [isEditing, setIsEditing] = useState(isNew);
@@ -11207,6 +11267,19 @@ function LeadEditor({
   const [quickFollowupDate, setQuickFollowupDate] = useState(() => todayInZone());
   const [confirmingDuplicate, setConfirmingDuplicate] = useState(false);
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+
+  // Emails are written to the lead's timeline by the database (sent and received). While the lead is open, re-read it every 30 s so a reply
+  // that arrives now appears without closing the card. Read-only; the merged entries are display-only and never copied into `form`.
+  const [serverLog, setServerLog] = useState([]);
+  useEffect(() => {
+    if (isNew || !lead.id || !loadServerTimeline) return undefined;
+    let alive = true;
+    const pull = async () => { try { const log = await loadServerTimeline(lead.id); if (alive) setServerLog(log); } catch { /* keep what is shown */ } };
+    pull();
+    const timer = setInterval(pull, 30000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [lead.id, isNew]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const timelineEntries = sortEmailTimelineForDisplay(mergeEmailTimeline(form.activityLog, serverLog));
 
   // The lead was dragged to another column while this editor was open: follow it, unless the person
   // already chose a different stage here, so saving never puts the old stage back.
@@ -11443,15 +11516,19 @@ function LeadEditor({
 
             <div style={styles.fieldDivider}>Activity</div>
             <div style={styles.timeline}>
-              {(form.activityLog || []).length === 0 && (
+              {timelineEntries.length === 0 && (
                 <p style={styles.fieldHint}>No activity recorded yet.</p>
               )}
-              {[...(form.activityLog || [])]
+              {[...timelineEntries]
                 .reverse()
                 .map((entry, i) => (
                   <div key={i} style={styles.timelineItem}>
                     <span style={styles.timelineDate}>{formatShortDate(entry.ts)}</span>
+                    {EMAIL_TIMELINE_TYPES.includes(entry.type) && entry.emailMessageId && <span style={styles.cardTag} title="From the KairFlow Inbox">{entry.type === "email_received" ? "Reply" : "Email"}</span>}
                     <span>{entry.note}</span>
+                    {onOpenEmail && EMAIL_TIMELINE_TYPES.includes(entry.type) && entry.emailMessageId && (
+                      <button type="button" style={styles.cardCompose} onClick={() => onOpenEmail(entry)}>Open email</button>
+                    )}
                   </div>
                 ))}
             </div>
@@ -16083,6 +16160,18 @@ const styles = {
     gap: 6,
     flexWrap: "wrap",
     marginTop: 2,
+  },
+  cardCompose: {
+    alignSelf: "flex-start",
+    fontSize: 11,
+    fontFamily: "'Inter', sans-serif",
+    fontWeight: 600,
+    color: tealLight,
+    background: "transparent",
+    border: `1px solid ${border}`,
+    borderRadius: 8,
+    padding: "3px 10px",
+    cursor: "pointer",
   },
   cardTag: {
     fontSize: 10.5,

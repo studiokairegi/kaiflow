@@ -109,10 +109,19 @@ class DecisionD1A(unittest.TestCase):
                                          ([tk.OUT1, tk.entry("inbound", "Sounds good, tell me more about your reel.", "2026-10-06")], "2026-10-06",
                                           "Thank you for your reply about the reel, we are glad Pixel Moon is interested.")):
             with self.subTest(last=last):
+                def compose_takeover(payload):
+                    if payload["message_kind"] == "reply":
+                        inbound_ids = [e["id"] for e in payload["verified_evidence"] if e["fact_type"] == "actual_incoming_message"]
+                        return {"subject": "Re: 2D animation for Pixel Moon",
+                                "body": "Hello Hana Sato,\n\nHere are details of our reel and portfolio: https://kairegi.com/reel.",
+                                "evidence_ids": inbound_ids + ["e0"]}
+                    return COMPOSE
                 answers = {"analysis": {"summary": "They are interested." if paragraph else "No reply yet.", "intent": "interested" if paragraph else "no_response", "open_questions": [], "language": "en"},
-                           "paragraph": {"paragraph": paragraph or "Following our note about character animation for Pixel Moon, I wanted to check whether the timing suits your team."}}
+                           "compose": compose_takeover}
                 g, o = G(answers), O(answers)
-                out, rpc = run_takeover(tk.ctx(entries, last_contact=last), router(g, o, "A"))
+                takeover_ctx = tk.ctx(entries, last_contact=last)
+                takeover_ctx["evidence"] = EV
+                out, rpc = run_takeover(takeover_ctx, router(g, o, "A"))
                 self.assertIn(out["next_action"], ("follow_up", "reply"))
                 self.assertEqual(len(g.sent), 0)
                 [log] = ai_logs(rpc.calls)
@@ -205,9 +214,11 @@ class DecisionD1C(unittest.TestCase):
 
     def test_takeover_goes_to_gemini_first_and_falls_back_per_call(self):
         answers = {"analysis": {"summary": "No reply yet.", "intent": "no_response", "open_questions": [], "language": "en"},
-                   "paragraph": {"paragraph": "Following our note about character animation for Pixel Moon, I wanted to check whether the timing suits your team."}}
+                   "compose": COMPOSE}
         g, o = G(answers), O(answers)
-        out, rpc = run_takeover(tk.ctx([tk.OUT1]), router(g, o, "C"))
+        takeover_ctx = tk.ctx([tk.OUT1])
+        takeover_ctx["evidence"] = EV
+        out, rpc = run_takeover(takeover_ctx, router(g, o, "C"))
         self.assertEqual(out["next_action"], "follow_up")
         self.assertEqual([s["site"] for s in g.sent], ["drafting.takeover_analysis", "drafting.takeover_followup"])
         self.assertEqual(len(o.sent), 0)
@@ -217,7 +228,9 @@ class DecisionD1C(unittest.TestCase):
         self.assertEqual((log["ai"]["provider"], log["analysis_ai"]["provider"], log["source"]), ("gemini", "gemini", "takeover"))
         # Gemini down: both takeover calls fall back to Ollama, one attempt each
         g2, o2 = G(answers, exc=GeminiTransient("x", K_SERVER)), O(answers)
-        out, rpc = run_takeover(tk.ctx([tk.OUT1]), router(g2, o2, "C"))
+        takeover_ctx = tk.ctx([tk.OUT1])
+        takeover_ctx["evidence"] = EV
+        out, rpc = run_takeover(takeover_ctx, router(g2, o2, "C"))
         self.assertEqual(out["next_action"], "follow_up")
         self.assertEqual(len(o2.sent), 2)
         self.assertEqual(ai_logs(rpc.calls)[0]["ai"]["provider"], "ollama")
@@ -266,13 +279,13 @@ class Japanese(unittest.TestCase):
 
 
 class Provenance(unittest.TestCase):
-    def test_template_drafts_carry_no_provenance(self):
+    def test_missing_evidence_does_not_create_a_template_draft_or_provenance(self):
         a = {"analysis": {"summary": "No reply yet.", "intent": "no_response", "open_questions": [], "language": "en"},
-             "paragraph": {"paragraph": "Visit https://evil.example/pay and send $500 for Pixel Moon character animation today."}}
+             "compose": COMPOSE}
         out, rpc = run_takeover(tk.ctx([tk.OUT1]), router(G(a), O(a), "C"))
-        self.assertEqual(out["next_action"], "follow_up")
+        self.assertEqual(out["next_action"], "needs_human")
         self.assertEqual(ai_logs(rpc.calls), [])
-        self.assertIn("follow up briefly", rpc.named("intel_agent_upsert_draft")[0]["p_body"])
+        self.assertEqual(rpc.named("intel_agent_upsert_draft"), [])
 
     def test_provenance_log_holds_no_draft_text_page_text_or_secret(self):
         g, o = G({"compose": COMPOSE}), O({"compose": COMPOSE})

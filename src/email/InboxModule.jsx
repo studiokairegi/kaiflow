@@ -12,7 +12,7 @@ import { IconBack, IconClose, IconNewChat, IconSearch } from "../chat/icons.jsx"
 import "../chat/chat.css";
 import "./styles/inbox-chat.css";
 import { emailApi } from "./lib/api.js";
-import { accountCanSend, accountConnectionLabel, accountListView, trustedProviderRows, FOLDERS, buildForward, participantLabel, providerForAccount } from "./lib/logic.js";
+import { accountCanSend, accountConnectionLabel, accountListView, trustedProviderRows, FOLDERS, buildForward, participantLabel, providerForAccount, leadComposeReadiness } from "./lib/logic.js";
 import { initialsOf, when } from "./lib/helpers.js";
 import SetupAccount from "./components/SetupAccount.jsx";
 import ComposeDialog from "./components/ComposeDialog.jsx";
@@ -20,12 +20,13 @@ import ConversationList from "./components/ConversationList.jsx";
 import EmailMessage from "./components/EmailMessage.jsx";
 import InlineReply from "./components/InlineReply.jsx";
 
-export default function InboxModule({ supabase, access, leads = [], onOpenLead, onUnreadChanged, theme = "dark" }) {
+export default function InboxModule({ supabase, access, leads = [], onOpenLead, onUnreadChanged, composeRequest = null, onComposeHandled, onLeadEmailSent, openConversationRequest = null, onOpenConversationHandled, theme = "dark" }) {
   const [folder, setFolder] = useState("inbox");
   const [searchText, setSearchText] = useState("");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
   const [composer, setComposer] = useState(null);
+  const [composeNotice, setComposeNotice] = useState("");
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [activeMsg, setActiveMsg] = useState(null);
   const [tick, setTick] = useState(0);
@@ -54,6 +55,29 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
   const refresh = () => { poll(); onUnreadChanged?.(); };   // after something the user did: also update the badge in the app
   // Match the main Chat module: refresh mounted conversations in the background and on tab visibility.
   usePolling(poll, 20000, allowed, { hidden: true });
+  // CRM timeline "Open email" hand-off: show that conversation (the database re-checks access when it loads).
+  useEffect(() => {
+    if (!openConversationRequest || !allowed) return;
+    setSelected(openConversationRequest.id);
+    onOpenConversationHandled?.();
+  }, [openConversationRequest, allowed]);   // eslint-disable-line react-hooks/exhaustive-deps
+  // CRM "Compose" hand-off: open the normal composer once the sender accounts are known, with the recipient and the CRM lead id filled in.
+  // If accounts or providers cannot be verified the request is dropped (the setup/error screens explain why) and never opens a send path.
+  useEffect(() => {
+    if (!composeRequest || !allowed) return;
+    // Do not consume while loading or when either registry failed; stale data must not authorize a send.
+    const readiness = leadComposeReadiness({ accounts, providers });
+    if (readiness === "waiting" || readiness === "error") return;
+    if (readiness === "ready") {
+      setComposeNotice("");
+      setSelected(null);
+      setComposer({ title: `Email ${composeRequest.label || composeRequest.to}`, to: composeRequest.to, crmLeadId: composeRequest.leadId, crmLeadLabel: composeRequest.label || "" });
+      onComposeHandled?.();
+    } else {
+      setComposeNotice("No connected sender can send right now. Connect or reauthorize an email account, then try Compose again.");
+      onComposeHandled?.();
+    }
+  }, [composeRequest, allowed, accounts.loading, accounts.data, accounts.error, providers.loading, providers.data, providers.error]);   // eslint-disable-line react-hooks/exhaustive-deps
   if (!allowed) return <Banner tone="warn">Email is restricted.</Banner>;
   const accts = Array.isArray(accounts.data) ? accounts.data : [];
   // A stale registry must never authorize actions after a failed refresh.
@@ -69,12 +93,13 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
   const messages = t?.messages || [];
   const errorText = list.error || thread.error || action.error;
   const forward = (m) => setComposer({ title: "Forward", ...buildForward(m, when(m.received_at || m.sent_at)), accountId: convo.account_id });
-  const editDraft = (m) => setComposer({ title: "Draft", draftId: m.id, conversationId: m.conversation_id, accountId: m.account_id, to: (m.to_emails || []).join(", "), cc: (m.cc_emails || []).join(", "), bcc: (m.bcc_emails || []).join(", "), subject: m.subject, body: m.body_text });
+  const editDraft = (m) => setComposer({ title: "Draft", draftId: m.id, conversationId: m.conversation_id, accountId: m.account_id, to: (m.to_emails || []).join(", "), cc: (m.cc_emails || []).join(", "), bcc: (m.bcc_emails || []).join(", "), subject: m.subject, body: m.body_text, crmLeadId: m.crm_lead_id || null, crmLeadLabel: leads?.find((lead) => lead.id === m.crm_lead_id)?.companyName?.trim() || leads?.find((lead) => lead.id === m.crm_lead_id)?.contactPerson?.trim() || "" });
   const rows = list.data || [];
 
   return (
     <div className="inbox-page-wrap">
       <section className={`chat-root chat-theme-${theme} chat-page inbox-page${selected ? " has-active-conversation" : ""}`} aria-label="Inbox">
+        {composeNotice && <Banner tone="warn">{composeNotice}</Banner>}
         <aside className="chat-sidebar">
           <div className="chat-sidebar-top">
             <div className="chat-topbar">
@@ -153,7 +178,7 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
           )}
         </main>
 
-        {composer && <ComposeDialog supabase={supabase} accounts={accts} providers={sendProviderRows} initial={composer} onClose={() => setComposer(null)} onSent={() => { setComposer(null); refresh(); }} />}
+        {composer && <ComposeDialog key={composer.draftId || composer.conversationId || composer.title || "new"} supabase={supabase} accounts={accts} providers={sendProviderRows} initial={composer} onClose={() => setComposer(null)} onCopyToNew={(draft) => setComposer({ title: "New message", ...draft })} onSent={() => { const leadId = composer?.crmLeadId; setComposer(null); refresh(); if (leadId) onLeadEmailSent?.(leadId); }} />}
         {showAddAccount && <div className="chat-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setShowAddAccount(false); }}>
           <div className="chat-modal inbox-account-setup" role="dialog" aria-modal="true" aria-labelledby="inbox-account-setup-title">
             <div className="chat-modal-head"><h2 id="inbox-account-setup-title">Add an email account</h2><button type="button" className="chat-icon-btn" onClick={() => setShowAddAccount(false)} aria-label="Close"><IconClose /></button></div>

@@ -185,7 +185,7 @@ test("phase 3: the shared store no longer hardcodes the provider; it takes it fr
   const stripped = store.replace(/\.eq\("provider_key", "resend"\)/g, "").replace(/p_provider_key: "resend"/g, "");
   assert.equal(/"resend"/.test(stripped), false, "no hardcoded Resend provider in the shared store outside the Intelligence routing");
   assert.match(store, /\.eq\("provider", providerKey\)\.eq\("address", base\)/);
-  assert.match(store, /select\("id,organization_id,provider,address,display_name,status"\)/);   // phase 4B added organization_id; provider is still read from the row
+  assert.match(store, /select\("id,organization_id,provider,address,display_name,status,connection_status"\)/);   // phase 4B added organization_id; provider is still read from the row
   assert.match(store, /email_provider_enabled", \{ p_provider: legacyFlagKey \}/);
   assert.match(store, /from\("email_provider_registry"\)/);
   assert.match(store, /service\.rpc\("email_ingest_inbound", \{ p \}\)/);
@@ -281,4 +281,28 @@ test("Phase 5 follow-up: leases renew only for the live connected account and pr
   assert.match(sql, /provider_is_deleted/);
   assert.match(sql, /revoke all on function public\.email_reconcile_synced_message_state/);
   assert.match(sql, /grant execute on function public\.email_reconcile_synced_message_state.*to service_role/);
+});
+
+const SENDER_SAFETY = "20261220100000_email_provider_sender_safety.sql";
+test("sender safety migration excludes connection diagnostics and requires send capability", () => {
+  const sql = read(SENDER_SAFETY);
+  assert.match(sql, /to_jsonb\(a\) - 'last_connection_error'/);
+  assert.match(sql, /capabilities ->> 'send' = 'true'/);
+  assert.match(sql, /pg_advisory_xact_lock\(hashtextextended\(v_org::text, 0\)\)/);
+});
+test("OAuth send boundary checks the database connection state", () => {
+  const logic = fs.readFileSync(new URL("../../supabase/functions/_shared/email_resend_logic.ts", import.meta.url), "utf8");
+  const store = fs.readFileSync(new URL("../../supabase/functions/_shared/email_resend_store.ts", import.meta.url), "utf8");
+  assert.match(store, /select\("id,organization_id,provider,address,display_name,status,connection_status"\)/);
+  assert.match(logic, /resolved\.row\.capabilities\?\.oauth === true && account\.connection_status !== "connected"/);
+});
+test("CRM compose handoff uses fail-closed readiness and consumes unavailable requests with an explanation", () => {
+  const inbox = fs.readFileSync(new URL("./InboxModule.jsx", import.meta.url), "utf8");
+  const logic = fs.readFileSync(new URL("./lib/logic.js", import.meta.url), "utf8");
+  assert.match(inbox, /leadComposeReadiness\(\{ accounts, providers \}\)/);
+  assert.match(inbox, /readiness === "waiting" \|\| readiness === "error"/);
+  assert.match(inbox, /No connected sender can send right now/);
+  assert.match(logic, /return "waiting"/);
+  assert.match(logic, /return "error"/);
+  assert.match(logic, /return accountRows\.some\(\(account\) => accountCanSend\(account, providerRows\)\) \? "ready" : "unavailable"/);
 });

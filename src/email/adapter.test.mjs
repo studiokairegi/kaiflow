@@ -126,7 +126,7 @@ function harness(over = {}) {
     getConversationLead: async () => null,
     recordCrmActivity: async () => ({ recorded: true, duplicate: false }),
     countOutboundSince: async (org, since, provider) => { log.counts.push({ minute: Date.parse(since) > NOW - 120_000, provider }); return Date.parse(since) > NOW - 120_000 ? (over.perMinute ?? 0) : (over.perDay ?? 0); },
-    createOutbound: async (p) => { const d = rows.find((r) => r.idempotency_key === p.idempotency_key); if (d) return { duplicate: true, message_id: "M1", conversation_id: CONV, status: "sent" }; rows.push(p); log.created.push(p); return { duplicate: false, message_id: "M1", conversation_id: p.conversation_id || CONV, status: "queued" }; },
+    createOutbound: async (p) => { const d = rows.find((r) => r.idempotency_key === p.idempotency_key); if (d) return { duplicate: true, message_id: "M1", conversation_id: CONV, status: "sent" }; if ((over.perMinute ?? 0) >= p.rate_limit_minute) return { duplicate: false, rate_limited: "minute" }; if ((over.perDay ?? 0) >= p.rate_limit_daily) return { duplicate: false, rate_limited: "day" }; rows.push(p); log.created.push(p); return { duplicate: false, message_id: "M1", conversation_id: p.conversation_id || CONV, status: "queued" }; },
     markResult: async (_id, patch) => { log.marks.push(patch); },
     saveAttachments: async (...a) => { log.attachments.push(a); },
   };
@@ -146,8 +146,9 @@ test("send: the Resend adapter is used through the contract and the wire behavio
   const res = await handleSend(post(goodReq({ conversation_id: CONV })), deps);
   assert.equal(res.status, 200);
   assert.equal((await res.json()).status, "sent");
-  assert.equal(log.fetches.length, 1);
+  assert.equal(log.fetches.length, 2);
   assert.equal(log.fetches[0].url, "https://api.resend.com/emails");
+  assert.match(log.fetches[1].url, /^https:\/\/api\.resend\.com\/emails\//);
   assert.equal(log.fetches[0].init.headers.Authorization, "Bearer re_secret_key");
   assert.equal(log.fetches[0].init.headers["Idempotency-Key"], "kf-idem-12345678");
   const sent = JSON.parse(log.fetches[0].init.body);
@@ -161,7 +162,7 @@ test("send: a provider name in the request body is never read. The account row d
   const a = harness();
   const r1 = await handleSend(post({ ...goodReq(), provider: "gmail", adapter: "gmail", adapter_key: "gmail" }), a.deps);
   assert.equal(r1.status, 200);
-  assert.equal(a.log.fetches.length, 1);                                                                // still Resend
+  assert.equal(a.log.fetches.length, 2);                                                                // send + provider Message-ID lookup
   const fm = makeFakeAdapter();
   const b = harness({ adapters: { fakemail: fm.adapter }, rows: { resend: RESEND_ROW, fakemail: FAKE_ROW } });
   const r2 = await handleSend(post({ ...goodReq({ account_id: ACC2 }), provider: "resend" }), b.deps);
@@ -196,9 +197,12 @@ test("send: adding a provider needs no change to shared logic. A second adapter 
 test("send: the daily quota is per provider, the per-minute burst limit covers all of the organization's mail", async () => {
   const { deps, log } = harness();
   await handleSend(post(goodReq()), deps);
-  const minute = log.counts.find((c) => c.minute), day = log.counts.find((c) => !c.minute);
-  assert.equal(minute.provider, undefined);
-  assert.equal(day.provider, "resend");
+  assert.equal(log.created[0].rate_limit_minute, 20);
+  assert.equal(log.created[0].rate_limit_daily, 100);
+  const fm = makeFakeAdapter();
+  const limited = harness({ adapters: { fakemail: fm.adapter }, rows: { resend: RESEND_ROW, fakemail: FAKE_ROW }, perDay: 5 });
+  const limitedResponse = await handleSend(post(goodReq({ account_id: ACC2 })), limited.deps);
+  assert.equal(limitedResponse.status, 429);
 });
 
 test("send: unusable providers are refused before anything is stored or sent, with normalised codes", async () => {
@@ -222,7 +226,7 @@ test("send: unusable providers are refused before anything is stored or sent, wi
   // KF-02: the shared flag (written by Intelligence's admin switch) must NOT switch general Email off; only the Email registry row does.
   const flagOff = harness({ flag: false });
   const fo = await handleSend(post(goodReq()), flagOff.deps);
-  assert.equal(fo.status, 200); assert.equal(flagOff.log.flagAsked, undefined); assert.equal(flagOff.log.fetches.length, 1);
+  assert.equal(fo.status, 200); assert.equal(flagOff.log.flagAsked, undefined); assert.equal(flagOff.log.fetches.length, 2);
   const missingProvider = harness();
   missingProvider.deps.store.getAccount = async () => ({ id: ACC, organization_id: ORG, address: "j@x.com", display_name: "", status: "active" });   // a row with no provider must never default to Resend
   const mp = await handleSend(post(goodReq()), missingProvider.deps);
@@ -284,7 +288,7 @@ test("resend adapter: refuses without a key (nothing is sent), reports unknown o
   assert.equal(resendAdapter.configurationProblem((k) => ({ RESEND_API_KEY: "k" })[k]), null);
   const seq = [json({ message: "slow" }, 429), json({ message: "boom" }, 503), json({ id: "re_9" })];
   const seen = [];
-  const ok = await resendAdapter.send(ctx({ RESEND_API_KEY: "k" }, async (u, i) => { seen.push(i.headers["Idempotency-Key"]); return seq.shift(); }), {}, input);
+  const ok = await resendAdapter.send(ctx({ RESEND_API_KEY: "k" }, async (u, i) => { if (i.method === "POST") seen.push(i.headers["Idempotency-Key"]); return seq.shift(); }), {}, input);
   assert.deepEqual(ok, { ok: true, providerMessageId: "re_9", attempts: 3 });
   assert.deepEqual(seen, ["kf-key-12345678", "kf-key-12345678", "kf-key-12345678"]);
   // Provider webhook metadata carries only the persisted internal message UUID, never browser input.
@@ -376,4 +380,23 @@ test("structure: the browser-facing email-send entry point passes no provider an
   const src = read("email-send/index.ts");
   assert.equal(/provider/i.test(noComments(src)), false);
   assert.match(src, /makeSendStore\(service\)/);
+});
+
+test("Resend send retrieves and returns its provider-generated RFC Message-ID without trying to set Message-ID itself", async () => {
+  const calls = [];
+  const sequence = [json({ id: "re_123" }), json({ id: "re_123", message_id: "<resend-generated@example.com>" })];
+  const context = { env: (k) => k === "RESEND_API_KEY" ? "k" : undefined, fetch: async (url, init) => {
+    calls.push({ url, init });
+    return sequence.shift();
+  }, now: () => NOW, sleep: noSleep };
+  const sendInput = {
+    fromEmail: "sender@example.com", fromName: "Sender", to: ["recipient@example.com"], cc: [], bcc: [],
+    subject: "Thread test", text: "Hello", html: "", replyTo: "", thread: null, attachments: [],
+    idempotencyKey: "key-12345678", correlationId: "12345678-1234-4123-8123-123456789012",
+  };
+  const result = await resendAdapter.send(context, {}, sendInput);
+  assert.deepEqual(result, { ok: true, providerMessageId: "re_123", rfcMessageId: "<resend-generated@example.com>", attempts: 1 });
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal("Message-ID" in (JSON.parse(calls[0].init.body).headers || {}), false);
+  assert.equal(calls[1].init.method || "GET", "GET");
 });

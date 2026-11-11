@@ -51,18 +51,18 @@ function harness(over = {}) {
     providerEnabled: async () => over.flag ?? true,
     getProviderRegistryRow: async (k) => (over.rows ? over.rows[k] ?? null : k === "resend" ? RESEND_ROW : null),
     getAccount: async (org, id) => (over.ignoreOrg ? accounts[id] ?? null : org === ORG ? accounts[id] ?? null : null),
-    getLeadForUser: async (userId, leadId) => { log.leadAsks.push([userId, leadId]); return over.lead === undefined ? (userId === "U1" && leadId === LEAD ? { id: LEAD } : null) : over.lead; },
+    getLeadForUser: async (userId, leadId) => { log.leadAsks.push([userId, leadId]); return over.lead === undefined ? (userId === "U1" && leadId === LEAD ? { id: LEAD, email: "ada@client.com" } : null) : over.lead; },
     getConversationLead: async () => null,
     recordCrmActivity: async (messageId) => { log.crmActivities.push(messageId); if (over.crmFail) throw new Error("CRM database unavailable"); return { recorded: true, duplicate: !!over.crmDuplicate }; },
     getThreadParent: async () => null,
     countOutboundSince: async (_o, since) => { log.counts.push(since); return Date.parse(since) > NOW - 120_000 ? (over.perMinute ?? 0) : (over.perDay ?? 0); },
-    createOutbound: async (p) => { const d = rows.find((r) => r.idempotency_key === p.idempotency_key); if (d || over.duplicateStatus) { const prior = d || {}; return { duplicate: true, message_id: prior.message_id || "M1", conversation_id: prior.conversation_id || CONV, status: over.duplicateStatus || prior.status || "queued", provider_message_id: prior.provider_message_id || null }; } rows.push({ ...p, message_id: "M1", status: "queued" }); log.created.push(p); return { duplicate: false, message_id: "M1", conversation_id: p.conversation_id || CONV, status: "queued" }; },
+    createOutbound: async (p) => { const d = rows.find((r) => r.idempotency_key === p.idempotency_key); if (d || over.duplicateStatus) { const prior = d || {}; return { duplicate: true, message_id: prior.message_id || "M1", conversation_id: prior.conversation_id || CONV, status: over.duplicateStatus || prior.status || "queued", provider_message_id: prior.provider_message_id || null }; } if ((over.perMinute ?? 0) >= p.rate_limit_minute) return { duplicate: false, rate_limited: "minute" }; if ((over.perDay ?? 0) >= p.rate_limit_daily) return { duplicate: false, rate_limited: "day" }; rows.push({ ...p, message_id: "M1", status: "queued" }); log.created.push(p); return { duplicate: false, message_id: "M1", conversation_id: p.conversation_id || CONV, status: "queued" }; },
     markResult: async (_id, patch) => { const row = rows.find((r) => r.message_id === _id); if (row) Object.assign(row, patch); if (patch.status === "sent") { log.sentWrites = (log.sentWrites || 0) + 1; if (over.markFailCount > (log.sentFailures || 0) || (over.markFails && !over.markFailCount)) { log.sentFailures = (log.sentFailures || 0) + 1; throw new Error("db down"); } } log.marks.push(patch); },
     saveAttachments: async () => {},
   };
   const deps = {
     env: (k) => ({ RESEND_API_KEY: "re_secret_key", ...(over.env || {}) })[k],
-    fetch: over.fetch || (async (url, init) => { log.fetches.push({ url, init }); return json({ id: "re_sent_1" }); }),
+    fetch: over.fetch || (async (url, init) => { if (init.method === "POST") log.fetches.push({ url, init }); return json({ id: "re_sent_1" }); }),
     now: () => NOW, sleep: noSleep, store, audit: (e) => log.audit.push(e), adapters: over.adapters,
     authenticate: async (req) => {
       const t = req.headers.get("authorization");
@@ -315,7 +315,7 @@ test("4B store: the sender row carries its organization, and leads are looked up
   assert.equal(acc.organization_id, ORG);
   assert.equal(await store.getAccount(ORG, ACC2), null, "another organization's account is invisible");
   assert.ok(svc.calls.some((c) => c[0] === "email_accounts" && c[1] === "select" && /organization_id/.test(c[2])));
-  assert.deepEqual(await store.getLeadForUser("U1", LEAD), { id: LEAD });
+  assert.deepEqual(await store.getLeadForUser("U1", LEAD), { id: LEAD, email: undefined });
   assert.equal(await store.getLeadForUser("U1", LEAD_OTHER), null, "someone else's lead is invisible");
   assert.equal(await store.getLeadForUser("U9", LEAD), null);
   assert.deepEqual(await store.getConversationLead(ORG, CONV, ACC), { lead_id: LEAD });

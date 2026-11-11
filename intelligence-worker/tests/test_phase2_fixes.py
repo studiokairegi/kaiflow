@@ -76,7 +76,8 @@ class ClassifyOrdering(unittest.TestCase):
                 raise RpcError("network blip")
             return {"intel_agent_settings": ST, "intel_agent_kb": KB, "intel_agent_unprocessed_inbound": [inbound],
                     "intel_agent_context": {"prospect": PROSPECT, "evidence": EVIDENCE, "messages": []},
-                    "intel_agent_recent_outbound": []}.get(name, {})
+                    "intel_agent_recent_outbound": [],
+                    "intel_agent_upsert_draft": {"ok": True, "message_id": "d-1", "state": "pending_approval"}}.get(name, {})
         class LLM:
             def generate_json(self, instr, payload, schema, fast=False, **k):
                 if "Labels:" in instr:

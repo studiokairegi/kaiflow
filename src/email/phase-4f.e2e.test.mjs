@@ -28,7 +28,9 @@ function fakeAdapter({ outcome = { ok: true, providerMessageId: "fake-accepted-1
   };
 }
 
-function makeSystem({ resendResponse = () => json({ id: "resend-accepted-1" }), crmFails = 0, fakeOutcome } = {}) {
+function makeSystem({ resendResponse = (_url, init) => init.method === "POST"
+  ? json({ id: "resend-accepted-1" })
+  : json({ id: "resend-accepted-1", message_id: "<provider-generated@example.test>" }), crmFails = 0, fakeOutcome } = {}) {
   const rows = new Map();
   const activities = new Set();
   const calls = { resend: [], crm: [], inbound: [], delivery: [] };
@@ -42,7 +44,7 @@ function makeSystem({ resendResponse = () => json({ id: "resend-accepted-1" }), 
     providerEnabled: async () => true,
     getProviderRegistryRow: async (key) => key === "resend" ? RESEND_ROW : key === "fakemail" ? FAKE_ROW : null,
     getAccount: async (org, id) => org === ORG ? accounts[id] ?? null : null,
-    getLeadForUser: async (user, id) => user === "user-1" && id === LEAD ? { id } : null,
+    getLeadForUser: async (user, id) => user === "user-1" && id === LEAD ? { id, email: "recipient@example.test" } : null,
     getConversationLead: async () => ({ lead_id: LEAD }),
     getThreadParent: async () => ({ rfc_message_id: "<previous@example.test>", references_ids: "<first@example.test>" }),
     countOutboundSince: async () => 0,
@@ -73,6 +75,7 @@ function makeSystem({ resendResponse = () => json({ id: "resend-accepted-1" }), 
       if (row.provider !== "resend" || a.sender_email !== "studio@example.test" || a.subject !== row.subject || !a.recipients.some((x) => expected.includes(x))) return { found: false, conflict: true };
       if (row.provider_message_id && row.provider_message_id !== a.provider_message_id) return { found: false, conflict: true };
       row.provider_message_id = a.provider_message_id;
+      if (a.detail?.message_id) row.rfc_message_id = a.detail.message_id;
       row.status = ({ "email.sent": "sent", "email.delivered": "delivered", "email.delivery_delayed": "delivery_delayed", "email.bounced": "bounced", "email.complained": "complained" })[a.event_type] || row.status;
       if (row.crm_lead_id) await store.recordCrmActivity(row.message_id);
       return { found: true, status: row.status };
@@ -88,7 +91,7 @@ function makeSystem({ resendResponse = () => json({ id: "resend-accepted-1" }), 
   };
   const deps = {
     env: (k) => ({ RESEND_API_KEY: "re_test_controlled", EMAIL_THREAD_TOKENS: "off" })[k],
-    fetch: async (url, init) => { calls.resend.push({ url, init }); return resendResponse(url, init); },
+    fetch: async (url, init) => { if (init.method === "POST") calls.resend.push({ url, init }); return resendResponse(url, init); },
     now: () => Date.UTC(2026, 10, 10, 12), sleep: async () => {}, store,
     adapters: { resend: resendAdapter, fakemail: fake.adapter },
     authenticate: async (req) => req.headers.get("authorization") === "Bearer controlled"
@@ -104,6 +107,19 @@ function sendRequest({ account = ACC_RESEND, key = "phase4f-key-0001", lead = LE
     body: JSON.stringify({ account_id: account, to: ["recipient@example.test"], cc: [], bcc: [], subject: "Controlled Phase 4F", text: "Test body", html: "", reply_to: "", conversation_id: conversation, draft_id: null, idempotency_key: key, attachments: [], crm: lead ? { lead_id: lead } : null }),
   });
 }
+
+test("4F CRM integrity: an explicit lead link is refused when To no longer includes the lead email", async () => {
+  const s = makeSystem();
+  const response = await handleSend(sendRequest({ key: "phase4f-mismatch-01" }), {
+    ...s.deps,
+    store: { ...s.store, getLeadForUser: async (user, id) => user === "user-1" && id === LEAD ? { id, email: "different@example.test" } : null },
+  });
+  const body = await response.json();
+  assert.equal(response.status, 409);
+  assert.equal(body.code, "crm_recipient_mismatch");
+  assert.equal(s.calls.resend.length, 0, "mismatched lead associations are rejected before provider submission");
+  assert.equal(s.rows.size, 0, "no outbound row is created");
+});
 
 test("4F E2E: accepted CRM send records one activity; replay is lookup-only and does not submit twice", async () => {
   const s = makeSystem();
@@ -175,11 +191,12 @@ test("4F recovery: signed Resend webhook tag repairs accepted send after every p
 
   const recovered = await processDeliveryEvent({ store: s.store, now: s.deps.now }, "svix-accepted-recovery", {
     type: "email.sent", created_at: "2026-11-10T12:00:01.000Z",
-    data: { email_id: "resend-accepted-1", from: "Studio <studio@example.test>", to: ["recipient@example.test"], subject: "Controlled Phase 4F", tags: { kf_message_id: row.message_id } },
+    data: { email_id: "resend-accepted-1", message_id: "<provider-generated@example.test>", from: "Studio <studio@example.test>", to: ["recipient@example.test"], subject: "Controlled Phase 4F", tags: { kf_message_id: row.message_id } },
   });
   assert.equal(recovered.result, "processed");
   assert.equal(row.status, "sent");
   assert.equal(row.provider_message_id, "resend-accepted-1");
+  assert.equal(row.rfc_message_id, "<provider-generated@example.test>");
   assert.equal(s.activities.size, 1, "CRM activity is recovered from the already-accepted email");
   assert.equal(s.calls.resend.length, 1, "webhook reconciliation never resubmits the email");
 });

@@ -84,3 +84,13 @@ A follow-up corrective pass addressed the actionable findings from the independe
 Corrective verification: **30 Japanese-specific tests passed; 303 Python worker tests passed; 750 JavaScript tests passed; Python compilation passed.** The production build remains unverified because Vite is not installed in this environment. Actual local Ollama generation and native Japanese business-language review remain required acceptance gates.
 
 See `PHASE_3_CORRECTIVE_HANDOFF.md` for the finding-by-finding resolution and exact limitations. Phase 4 remains unstarted.
+
+## 12. Evidence-gate corrective review — 11 November 2026
+
+A review against the authoritative `docs/PHASE_ROADMAP.txt` found that the initial Japanese composer still returned a deterministic, non-personalized approved-facts introduction when no verified recipient-specific evidence existed. This contradicted the Phase 2/3 rule that insufficient research must trigger research or manual review, never a generic fallback.
+
+The fallback has been removed. All Japanese message kinds now fail closed without recipient-specific evidence. The worker logs `draft_review_required`, flags the prospect and does not persist a generic draft. The Chat-to-draft end-to-end test now asserts this behaviour.
+
+Verification on the 11 November working copy: **747 Python worker tests passed; 967 JavaScript tests passed; Python compilation passed.** `npm run build` remains unverified because Vite is not installed in this environment. Native Japanese business-language review and live representative draft evaluation remain required before production-quality acceptance.
+
+See `docs/PHASE_3_2026-11-11_HANDOFF.md` for the changed-file list, exact scope, test results, remaining acceptance gates and safety non-actions. Phase 4 remains unstarted.

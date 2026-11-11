@@ -42,20 +42,48 @@ def writer_for(body, subject="青空アニメーション様の制作実績に�
 
 
 
-class JapaneseInitialDraftFallback(unittest.TestCase):
-    def test_missing_recipient_evidence_uses_honest_approved_studio_intro(self):
+class JapaneseInsufficientEvidence(unittest.TestCase):
+    def test_missing_recipient_evidence_requires_research_or_manual_review(self):
         called = []
-        result = drafting.compose_japanese(
-            PROSPECT, [], KB, SETTINGS,
-            llm=lambda *args: called.append(args),
-            kind="initial",
-        )
-        self.assertFalse(result["model_written"])
-        self.assertIn("Studio Kairegiは2Dアニメーション制作を行うスタジオです。", result["body"])
-        self.assertIn("レイアウト、原画、動画、仕上げ", result["body"])
-        self.assertIn("青空アニメーション", result["subject"])
-        self.assertNotIn("多くのアニメーション作品", result["body"])
+        with self.assertRaisesRegex(PermanentError, "research or manual review"):
+            drafting.compose_japanese(
+                PROSPECT, [], KB, SETTINGS,
+                llm=lambda *args: called.append(args),
+                kind="initial",
+            )
         self.assertEqual(called, [])
+
+    def test_insufficient_evidence_fails_closed_for_every_message_kind(self):
+        for kind in ("followup", "reply", "reengagement"):
+            with self.subTest(kind=kind):
+                with self.assertRaisesRegex(PermanentError, "research or manual review"):
+                    drafting.compose_japanese(
+                        PROSPECT, [], KB, SETTINGS, lambda *_: self.fail("model must not run without recipient evidence"),
+                        kind=kind,
+                    )
+
+    def test_initial_job_flags_manual_review_without_persisting_a_generic_draft(self):
+        from .helpers import CFG
+        calls = []
+        prospect = {**PROSPECT, "status": "lead_linked", "contact_email": "contact@aozora.example"}
+        kb_rows = [dict(key=k, body=v["body"]) for k, v in KB.items()]
+        def rpc(name, params=None):
+            params = params or {}
+            calls.append((name, params))
+            return {
+                "intel_agent_context": {"prospect": prospect, "evidence": [], "messages": [], "lead": {}},
+                "intel_agent_settings": {**SETTINGS, "autonomy": "shadow"},
+                "intel_agent_kb": kb_rows,
+            }.get(name, {})
+        result = jobs.h_draft(
+            jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=None,
+                      llm=lambda *_: self.fail("model must not run without recipient evidence")),
+            {"payload": {"prospect_id": "jp-1", "kind": "initial"}},
+        )
+        self.assertEqual(result, {"skipped": "manual_review_required"})
+        self.assertIn("draft_review_required", [p.get("p_action") for n, p in calls if n == "intel_agent_log"])
+        self.assertIn("intel_agent_flag_prospect", [n for n, _ in calls])
+        self.assertNotIn("intel_agent_upsert_draft", [n for n, _ in calls])
 
     def test_unsupported_japanese_volume_claim_is_rejected(self):
         body = ("ご担当者様\n\n突然のご連絡失礼いたします。"
@@ -421,12 +449,10 @@ class JapaneseComposer(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertTrue(drafting._is_consequential_japanese_inbound({"body": message}))
 
-    def test_missing_research_uses_non_personalized_approved_intro(self):
-        result = drafting.compose_japanese(PROSPECT, [], KB, SETTINGS,
-            writer_for("佐藤花子様\\n\\nご連絡ありがとうございます。"), kind="initial")
-        self.assertFalse(result["model_written"])
-        self.assertEqual(result["evidence_ids"], [])
-        self.assertIn("Studio Kairegiは2Dアニメーション制作を行うスタジオです。", result["body"])
+    def test_missing_research_fails_closed_instead_of_using_approved_intro(self):
+        with self.assertRaisesRegex(PermanentError, "research or manual review"):
+            drafting.compose_japanese(PROSPECT, [], KB, SETTINGS,
+                writer_for("佐藤花子様\n\nご連絡ありがとうございます。"), kind="initial")
 
     def test_japanese_duplicate_and_name_swap_detection(self):
         a = "佐藤花子様\n\n貴社が公開されたテレビアニメの制作実績を拝見しました。原画と動画の制作協力に対応しています。"
@@ -540,6 +566,36 @@ class JapaneseReplyRouting(unittest.TestCase):
         self.assertLess([name for name, _ in calls].index("intel_agent_upsert_draft"),
                         [name for name, _ in calls].index("intel_agent_classify_inbound"))
         self.assertEqual(result["classified"], 1)
+
+
+class JapaneseReplyPersistenceFailure(unittest.TestCase):
+    def test_failed_draft_save_leaves_inbound_pending_for_retry(self):
+        from kairflow_intel.errors import TransientError
+        inbound = {"id": "in-jp-2", "prospect_id": "jp-1", "from_email": "contact@aozora.example",
+                   "subject": "Re: 制作協力について", "body_text": "ポートフォリオのリンクをお送りいただけますか。興味があります。"}
+        context = {"prospect": {**PROSPECT, "status": "contacted", "contact_email": "contact@aozora.example"},
+                   "evidence": EVIDENCE, "messages": [], "lead": {}}
+        calls = []
+        def rpc(name, params=None):
+            calls.append(name)
+            if name == "intel_agent_settings": return SETTINGS
+            if name == "intel_agent_kb": return KB_ROWS
+            if name == "intel_agent_unprocessed_inbound": return [inbound]
+            if name == "intel_agent_context": return context
+            if name == "intel_agent_recent_outbound": return []
+            if name == "intel_agent_upsert_draft": return {"ok": False}
+            return {}
+        class LLM:
+            def generate_json(self, instruction, payload, schema, **kwargs):
+                if instruction.startswith("次の日本語メール"):
+                    return {"label": "portfolio_request", "confidence": 0.95, "summary": "ポートフォリオを希望"}
+                return {"subject": "Re: 制作協力について",
+                        "body": "佐藤花子様\n\nご返信ありがとうございます。ポートフォリオのリンクをお送りします。",
+                        "evidence_ids": ["in-jp-2", "ev-jp-1"]}
+        deps = jobs.Deps(cfg=SimpleNamespace(worker_id="t"), rpc=rpc, fetcher=None, zoho=None, llm=LLM())
+        with self.assertRaises(TransientError):
+            jobs.h_classify(deps, {"payload": {"message_id": "in-jp-2"}})
+        self.assertNotIn("intel_agent_classify_inbound", calls)
 
 
 if __name__ == "__main__":

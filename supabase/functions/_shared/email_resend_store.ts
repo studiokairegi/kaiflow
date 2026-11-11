@@ -28,14 +28,14 @@ export function makeSendStore(service: any): SendStore {
     getProviderRegistryRow: (providerKey) => readRegistryRow(service, providerKey),
     async getAccount(orgId, accountId) {
       // `provider` is read from the database row: it is what selects the adapter. The browser never supplies it.
-      const { data, error } = await service.from("email_accounts").select("id,organization_id,provider,address,display_name,status").eq("organization_id", orgId).eq("id", accountId).maybeSingle();
+      const { data, error } = await service.from("email_accounts").select("id,organization_id,provider,address,display_name,status,connection_status").eq("organization_id", orgId).eq("id", accountId).maybeSingle();
       if (error) throw new Error(`account lookup: ${error.message}`);
       return data || null;
     },
     async getLeadForUser(userId, leadId) {
       // Leads are per user in this app (leads.user_id, the same rule email_link_lead applies). A lead that is missing and one that belongs to
       // someone else are indistinguishable to the caller. Service role: the filter below IS the authorization, so it must stay on the query.
-      const { data, error } = await service.from("leads").select("id").eq("id", leadId).eq("user_id", userId).maybeSingle();
+      const { data, error } = await service.from("leads").select("id,email").eq("id", leadId).eq("user_id", userId).maybeSingle();
       if (error) throw new Error(`lead lookup: ${error.message}`);
       return data || null;
     },
@@ -71,11 +71,19 @@ export function makeSendStore(service: any): SendStore {
       if (out?.recorded !== true) throw new Error("CRM email activity was not durably recorded");
       return { recorded: true, duplicate: out.duplicate === true };
     },
+    async claimOutbound(messageId, replyTo) {
+      const { data, error } = await service.rpc("email_claim_outbound", { p_message_id: messageId, p_reply_to: replyTo || null });
+      if (error) throw new Error(`claim outbound: ${error.message}`);
+      return data === true;
+    },
     async markResult(messageId, patch) {
       if (patch?.status === "sent" && typeof patch?.provider_message_id === "string") {
         must(await service.rpc("email_mark_provider_accepted", {
           p_message_id: messageId, p_provider_message_id: patch.provider_message_id, p_sent_at: patch.sent_at || null,
         }), "mark provider accepted");
+        if (typeof patch.rfc_message_id === "string") {
+          must(await service.from("email_messages").update({ rfc_message_id: patch.rfc_message_id }).eq("id", messageId), "save RFC Message-ID");
+        }
         return;
       }
       must(await service.from("email_messages").update(patch).eq("id", messageId), "update message");
@@ -166,7 +174,7 @@ export function makeWebhookStore(service: any): WebhookStore {
       return must(await service.rpc("email_ingest_inbound", { p }), "ingest inbound");
     },
     async reconcileTaggedDeliveryEvent(a) {
-      const out = must(await service.rpc("email_reconcile_tagged_delivery_event", {
+      const out = must(await service.rpc("email_reconcile_tagged_delivery_event_with_rfc", {
         p_message_id: a.message_id, p_provider_message_id: a.provider_message_id, p_event_type: a.event_type,
         p_provider_event_id: a.provider_event_id, p_occurred_at: a.occurred_at, p_detail: a.detail,
         p_sender_email: a.sender_email, p_recipients: a.recipients, p_subject: a.subject,

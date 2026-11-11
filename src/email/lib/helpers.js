@@ -7,7 +7,7 @@ export const initialsOf = (text) => {
   return t.replace(/<.*>/, "").split(/[\s@._,-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
 };
 
-/** Rotate only after the server has confirmed a terminal provider rejection/failure.
+/** Rotate after a confirmed terminal provider result or an explicit fingerprint conflict.
  * Network errors, pre-send refusals and ambiguous outcomes retain the logical send key. */
 export const shouldRotateSendKey = (error) =>
-  Boolean(error && ["rejected", "failed"].includes(error.outcome) && error.retry_with_same_key === false);
+  Boolean(error && (error.code === "idempotency_conflict" || (["rejected", "failed"].includes(error.outcome) && error.retry_with_same_key === false)));

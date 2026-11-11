@@ -35,27 +35,12 @@ ANALYSIS_SCHEMA = {
         "language": {"type": "string", "enum": ["en", "ja", "other"]},
     },
 }
-PARAGRAPH_SCHEMA = {"type": "object", "required": ["paragraph"], "properties": {"paragraph": {"type": "string", "maxLength": 700}}}
-
 ANALYSIS_INSTRUCTION = (
     "Read this email conversation between a small animation studio (US) and a lead (THEM). In at most three sentences say where it stands. "
     "intent: interested = they want to talk or see more; asked_question = they asked something; negotiating = price, terms, contract, deadline, "
     "availability or a meeting; declined = they said no; out_of_office = automatic reply; no_response = we wrote last and they never answered; "
     "unclear = none of these. open_questions = questions THEY asked that are still unanswered (at most five, short). language = the language of the emails."
 )
-FOLLOWUP_INSTRUCTION = (
-    "Write the middle paragraph of a short, polite follow-up email from the studio (US) to THEM that continues the conversation below. "
-    "Two or three sentences, at most 400 characters. Mention one concrete thing that was actually said. No greeting, no sign-off, no links, no prices, "
-    "no claims about calls, meetings or people we know, and no facts about the studio."
-)
-REPLY_INSTRUCTION = (
-    "Write the middle paragraph of a short, warm reply from the studio (US) to THEM. Thank them and respond only to what THEY wrote last. "
-    "Two to four sentences, at most 500 characters. Do not answer detailed questions, do not promise dates, prices or availability, no greeting, "
-    "no sign-off, no links. The only facts you may state about the studio are these: {about}"
-)
-STOP_WORDS = {"studio", "game", "games", "animation", "looking", "would", "about", "while", "which", "there", "their", "thank", "thanks", "email", "please", "hello", "great", "again"}
-
-
 # ---- dates -----------------------------------------------------------------------------------------------------------------
 def to_date(value) -> date | None:
     try:
@@ -136,23 +121,6 @@ def render(transcript: list[dict], limit: int = 9000) -> str:
         text.append(p)
         total += len(p) + 2
     return "\n\n".join(reversed(text))
-
-
-def _grounded(paragraph: str, source: str) -> bool:
-    words = {w for w in re.findall(r"[a-z]{5,}", source.lower()) if w not in STOP_WORDS}
-    mine = {w for w in re.findall(r"[a-z]{5,}", paragraph.lower()) if w not in STOP_WORDS}
-    return bool(words & mine)
-
-
-def valid_paragraph(text: str, source: str, kb: dict) -> str | None:
-    s = re.sub(r"[ \t]+", " ", str(text or "")).strip()
-    if not (30 <= len(s) <= 600) or "\n\n" in s or "@" in s:
-        return None
-    if policy.URL.search(s) or policy.PRICE_IN_DRAFT.search(s) or policy.FALSE_CLAIMS.search(s):
-        return None
-    if not _grounded(s, source):
-        return None
-    return s
 
 
 # ---- the decision ----------------------------------------------------------------------------------------------------------
@@ -251,75 +219,65 @@ def _latest_inbound(thread: list[dict]) -> dict | None:
     return None
 
 
-def _draft_japanese_takeover(d, p: dict, evidence: list[dict], kb: dict, st: dict, thread: list[dict], kind: str, feedback: str | None = None) -> dict:
+def _draft_takeover(d, p: dict, evidence: list[dict], kb: dict, st: dict,
+                    thread: list[dict], kind: str, language: str,
+                    feedback: str | None = None) -> dict:
+    """Use the same evidence-grounded composer for CRM-takeover and discovered prospects."""
     history = _thread_for_composer(thread)
     inbound = _latest_inbound(thread) if kind == "reply" else None
     last_out = next((t for t in reversed(thread) if t.get("who") == "us"), None)
+    composer = drafting.compose_japanese if language == "ja" else drafting.compose_english
+    prospect = {**p, "language": language}
     rec: list = []
-    return composed(d.llm, "drafting.takeover", rec, lambda llm: drafting.compose_japanese(
-        p, evidence or [], kb, st, llm=llm,
+    site = "drafting.takeover" if language == "ja" else (
+        "drafting.takeover_followup" if kind == "followup" else "drafting.takeover_reply")
+    return composed(d.llm, site, rec, lambda llm: composer(
+        prospect, evidence or [], kb, st, llm=llm,
         kind=kind, inbound=inbound, history=history,
-        sent_on=(last_out or {}).get("at"), parent_subject=_subject_for(thread, p, reply=(kind == "reply")), feedback=feedback))
+        sent_on=(last_out or {}).get("at"),
+        parent_subject=_subject_for(thread, p, reply=(kind == "reply")),
+        feedback=feedback))
 
 
-def _vet_japanese_takeover(d, p: dict, kb: dict, st: dict, mail: dict, regenerate) -> dict:
-    """Same similarity gate as normal outreach: compare a model-written draft with mail already written for anyone
-    (names masked), regenerate once with the reason, then hand the lead to a person. Raises PermanentError on failure."""
+def _draft_japanese_takeover(d, p: dict, evidence: list[dict], kb: dict, st: dict,
+                             thread: list[dict], kind: str, feedback: str | None = None) -> dict:
+    """Compatibility-named wrapper retained for language-routing tests."""
+    return _draft_takeover(d, p, evidence, kb, st, thread, kind, "ja", feedback)
+
+
+def _draft_english_takeover(d, p: dict, evidence: list[dict], kb: dict, st: dict,
+                            thread: list[dict], kind: str, feedback: str | None = None) -> dict:
+    return _draft_takeover(d, p, evidence, kb, st, thread, kind, "en", feedback)
+
+
+def _vet_takeover(d, p: dict, kb: dict, st: dict, mail: dict, regenerate,
+                  *, japanese: bool = False) -> dict:
+    """Check CRM-takeover drafts against organization-wide history; regenerate once, then require a person."""
     if not mail.get("model_written"):
         return mail
-    from . import jobs     # late import: jobs does not import takeover, but keep the module graph acyclic
-    footer = policy.compliance_footer(st, opt_out_text=kb.get("policy.opt_out.ja", {}).get("body", "").strip())
+    from . import jobs
+    localized = kb.get("policy.opt_out.ja", {}).get("body", "").strip() if japanese else None
+    footer = policy.compliance_footer(st, opt_out_text=localized)
     history = d.rpc("intel_agent_recent_outbound", {"p_limit": 500})
-    prior = [jobs._prior_row(m) for m in (history if isinstance(history, list) else []) if isinstance(m, dict) and m.get("state") not in ("discarded", "failed")]
+    prior = [jobs._prior_row(m) for m in (history if isinstance(history, list) else [])
+             if isinstance(m, dict) and m.get("state") not in ("discarded", "failed")]
     for attempt in (0, 1):
-        unique = drafting.uniqueness_check(mail, prior, threshold=drafting.SIMILARITY_THRESHOLD, footer=footer, names=jobs._recipient_names(p))
+        unique = drafting.uniqueness_check(
+            mail, prior, threshold=drafting.SIMILARITY_THRESHOLD,
+            footer=footer, names=jobs._recipient_names(p))
         if unique["ok"]:
             return mail
         if attempt == 0:
-            mail = regenerate(f"it was too similar ({unique['similarity']:.2f}, {unique['reason']}) to mail already written for other recipients. "
-                              "Build the opening and collaboration angle from this recipient's own evidence.")
+            mail = regenerate(
+                f"it was too similar ({unique['similarity']:.2f}, {unique['reason']}) "
+                "to mail already written for other recipients. Build the opening and "
+                "collaboration angle from this recipient's own verified evidence.")
     raise PermanentError("the draft is too similar to earlier outreach")
 
 
-def draft_followup(d, p: dict, kb: dict, st: dict, thread: list[dict], convo: str) -> dict:
-    last_out = next((t for t in reversed(thread) if t["who"] == "us"), None)
-    sent_on = (last_out or {}).get("at") or "recently"
-    subject = _subject_for(thread, p, reply=False)
-    if not drafting.is_japanese_animation_prospect(p):
-        try:
-            data, ai = call_json(d.llm, "drafting.takeover_followup", FOLLOWUP_INSTRUCTION, convo, PARAGRAPH_SCHEMA)
-            para = data["paragraph"]
-        except TransientError:
-            raise
-        except Exception:
-            para = ""
-        para = valid_paragraph(para, convo, kb)
-        if para:
-            body = "\n\n".join([drafting.greeting(p), para, kb["portfolio.main"]["body"].strip()]) + "\n" + policy.compliance_footer(st)
-            subj = (subject if subject and re.match(r"(?i)^re:", subject) else f"Re: {subject}") if subject else drafting.SUBJECT[p["type"]].format(name=p["name"])
-            return {"subject": subj[:120], "body": body, "model_written": True, "ai": {**ai, "model_calls": 1}}
-    mail = drafting.build_followup(p, kb, st, sent_on, subject)
-    return {**mail, "model_written": False}
-
-
-def draft_reply(d, p: dict, kb: dict, st: dict, thread: list[dict], convo: str, hits: set[str]) -> dict | None:
-    subject = _subject_for(thread, p, reply=True)
-    if not drafting.is_japanese_animation_prospect(p) and kb.get("studio.about") and kb.get("portfolio.main"):
-        try:
-            data, ai = call_json(d.llm, "drafting.takeover_reply", REPLY_INSTRUCTION.format(about=kb["studio.about"]["body"].strip()[:600]), convo, PARAGRAPH_SCHEMA)
-            para = data["paragraph"]
-        except TransientError:
-            raise
-        except Exception:
-            para = ""
-        para = valid_paragraph(para, convo, kb)
-        if para:
-            body = "\n\n".join([drafting.greeting(p), para, kb["portfolio.main"]["body"].strip(),
-                                f"I will follow up personally on anything specific.\n\n{st.get('sender_name', '').strip()}"]) + "\n"
-            return {"subject": subject[:120], "body": body, "model_written": True, "ai": {**ai, "model_calls": 1}}
-    label = "portfolio_request" if "portfolio" in hits else "positive"
-    mail = drafting.build_auto_reply(label, p, kb, st, subject or "")
-    return {**mail, "model_written": False} if mail else None
+def _vet_japanese_takeover(d, p: dict, kb: dict, st: dict, mail: dict, regenerate) -> dict:
+    """Compatibility wrapper for the Japanese takeover vetting path."""
+    return _vet_takeover(d, p, kb, st, mail, regenerate, japanese=True)
 
 
 # ---- the job ---------------------------------------------------------------------------------------------------------------
@@ -422,29 +380,22 @@ def _run(d, job, ctx, p, lead, history, hid, base, manual) -> dict:
         _save(d, pid, res, notify=res["reason"])
         return {"next_action": "needs_human"}
 
-    if use_japanese:
-        try:
-            mail = _draft_japanese_takeover(d, p, ctx.get("evidence") or [], kb, st, thread, kind)
-            mail = _vet_japanese_takeover(d, p, kb, st, mail, lambda fb: _draft_japanese_takeover(
-                d, p, ctx.get("evidence") or [], kb, st, thread, kind, feedback=fb))
-        except (PermanentError, TransientError) as exc:
-            if isinstance(exc, TransientError):
-                raise
-            res.update({"next_action": "needs_human", "reason": f"Japanese individualized drafting requires review: {exc}"})
-            _save(d, pid, res, notify=res["reason"])
-            return {"next_action": "needs_human"}
-        email_kind = "followup" if kind == "followup" else "reply"
-    elif kind == "followup":
-        mail = draft_followup(d, {**p, "language": "en"}, kb, st, thread, convo)   # English chosen above: never fall back to the Japanese templates
-        email_kind = "followup"
-    else:
-        hits = policy.scan_inbound(turns[-1]["subject"], turns[-1]["body"])["hits"]
-        mail = draft_reply(d, {**p, "language": "en"}, kb, st, thread, convo, hits)
-        email_kind = "reply"
-        if mail is None:
-            res.update({"next_action": "needs_human", "reason": "A safe reply could not be written automatically. A person should answer."})
-            _save(d, pid, res, notify=res["reason"])
-            return {"next_action": "needs_human"}
+    language = "ja" if use_japanese else "en"
+    composer = _draft_japanese_takeover if use_japanese else _draft_english_takeover
+    try:
+        mail = composer(d, p, ctx.get("evidence") or [], kb, st, thread, kind)
+        mail = _vet_takeover(
+            d, p, kb, st, mail,
+            lambda fb: composer(d, p, ctx.get("evidence") or [], kb, st, thread, kind, feedback=fb),
+            japanese=use_japanese)
+    except TransientError:
+        raise
+    except PermanentError as exc:
+        res.update({"next_action": "needs_human",
+                    "reason": f"{language.upper()} individualized drafting requires review: {exc}"})
+        _save(d, pid, res, notify=res["reason"])
+        return {"next_action": "needs_human"}
+    email_kind = "followup" if kind == "followup" else "reply"
 
     localized = kb.get("policy.opt_out.ja", {}).get("body", "").strip() if use_japanese else None
     bad = policy.validate_outbound(mail["subject"], mail["body"], st, drafting.approved_urls(kb), email_kind, p.get("domain", ""), opt_out_text=localized)

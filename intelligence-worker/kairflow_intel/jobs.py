@@ -524,6 +524,9 @@ def h_classify(d: Deps, job):
                                                          "p_idempotency_key": f"reply:{m['id']}", "p_to_email": m["from_email"], "p_auto_ok": not reply.get("model_written"),   # model-written replies are always human-approved
                                                          "p_in_reply_to": m.get("rfc_message_id") or None,
                                                          "p_references": " ".join(x for x in [(m.get("references_ids") or "").strip(), m.get("rfc_message_id") or ""] if x)[-3900:] or None})
+                if not (out or {}).get("ok"):
+                    # Leave the inbound message pending so the whole job retries; classifying it now would drop it from the queue with no draft.
+                    raise TransientError("reply draft was not persisted: " + str((out or {}).get("error") or "unknown")[:200])
                 if out.get("ok"):
                     _store_evidence_trace(d, out.get("message_id"), reply)
                     _log_draft_ai(d, out.get("message_id"), m["prospect_id"], "reply", reply, inbound_message_id=m.get("id"))

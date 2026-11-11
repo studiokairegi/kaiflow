@@ -24,7 +24,7 @@ export const emailApi = {
   linkLead: (s, id, leadId) => call(s, "email_link_lead", { p_conversation_id: id, p_lead_id: leadId || null }),
   unreadTotal: (s) => call(s, "email_unread_total"),
   providerFlags: (s) => call(s, "email_provider_flags_get"),
-  saveDraft: (s, d) => call(s, "email_save_draft", { p_draft_id: d.draftId || null, p_conversation_id: d.conversationId || null, p_account_id: d.accountId, p_to: d.to, p_cc: d.cc, p_bcc: d.bcc, p_subject: d.subject, p_body_text: d.text, p_body_html: d.html || "" }),
+  saveDraft: (s, d) => call(s, "email_save_draft", { p_draft_id: d.draftId || null, p_conversation_id: d.conversationId || null, p_account_id: d.accountId, p_to: d.to, p_cc: d.cc, p_bcc: d.bcc, p_subject: d.subject, p_body_text: d.text, p_body_html: d.html || "", p_crm_lead_id: d.crmLeadId || null }),
   deleteDraft: (s, id) => call(s, "email_delete_draft", { p_draft_id: id }),
   async send(s, m) {
     const attachments = [];

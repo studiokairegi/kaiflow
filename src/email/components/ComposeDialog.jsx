@@ -3,16 +3,18 @@ import { useBusy } from "../../finance/ui.jsx";
 import { confirmAction } from "../../intelligence/kit.jsx";
 import { IconClose } from "../../chat/icons.jsx";
 import { emailApi } from "../lib/api.js";
-import { accountCanSend, accountConnectionLabel, attachmentProblem, composeProblem, parseRecipients, providerForAccount, textToHtml } from "../lib/logic.js";
+import { accountCanSend, accountConnectionLabel, attachmentProblem, composeProblem, parseRecipients, providerForAccount, textToHtml, crmLeadRecipientMatches } from "../lib/logic.js";
 import { newKey, shouldRotateSendKey } from "../lib/helpers.js";
 
 // Dialog for brand-new emails, forwards and saved drafts: the only place To and Subject are typed.
-export default function ComposeDialog({ supabase, accounts, providers = [], initial, onClose, onSent }) {
-  const [f, setF] = useState({ accountId: initial.accountId || accounts[0]?.id || "", to: initial.to || "", cc: initial.cc || "", bcc: initial.bcc || "", subject: initial.subject || "", body: initial.body || "" });
+export default function ComposeDialog({ supabase, accounts, providers = [], initial, onClose, onSent, onCopyToNew }) {
+  const defaultAccount = accounts.find((a) => accountCanSend(a, providers)) || accounts[0];
+  const [f, setF] = useState({ accountId: initial.accountId || defaultAccount?.id || "", to: initial.to || "", cc: initial.cc || "", bcc: initial.bcc || "", subject: initial.subject || "", body: initial.body || "" });
   const [files, setFiles] = useState([]);
   const [showCc, setShowCc] = useState(Boolean(initial.cc || initial.bcc));
   const [draftId, setDraftId] = useState(initial.draftId || null);
   const [conversationId, setConversationId] = useState(initial.conversationId || null);
+  const [sendUnlinked, setSendUnlinked] = useState(false);
   const key = useRef(newKey());
   const sendState = useBusy();
   const draftState = useBusy();
@@ -22,17 +24,22 @@ export default function ComposeDialog({ supabase, accounts, providers = [], init
   const accountProblem = selectedAccount && !accountCanSend(selectedAccount, providers)
     ? `${selectedProvider?.display_name || "This provider"} account is not currently available for sending (${accountConnectionLabel(selectedAccount, providers)}).`
     : "";
-  const problem = accountProblem || composeProblem(f) || attachmentProblem(files);
+  const crmRecipientMatches = !initial.crmLeadId || crmLeadRecipientMatches(initial.to || "", f.to);
+  const crmLeadLinkId = initial.crmLeadId && (crmRecipientMatches || !sendUnlinked) ? initial.crmLeadId : null;
+  const crmLinkProblem = initial.crmLeadId && !crmRecipientMatches && !sendUnlinked
+    ? "The To address no longer includes this CRM lead's email. Keep the lead link by restoring its address, or choose to send without linking this email to the lead."
+    : "";
+  const problem = accountProblem || composeProblem(f) || attachmentProblem(files) || crmLinkProblem;
   const lists = () => ({ to: parseRecipients(f.to).valid, cc: parseRecipients(f.cc).valid, bcc: parseRecipients(f.bcc).valid });
 
   const saveDraft = () => draftState.run(async () => {
-    const r = await emailApi.saveDraft(supabase, { draftId, conversationId, accountId: f.accountId, ...lists(), subject: f.subject, text: f.body, html: "" });
+    const r = await emailApi.saveDraft(supabase, { draftId, conversationId, accountId: f.accountId, ...lists(), subject: f.subject, text: f.body, html: "", crmLeadId: crmLeadLinkId });
     setDraftId(r.draft_id); setConversationId(r.conversation_id);
   });
   const send = () => sendState.run(async () => {
     if (problem) throw new Error(problem);
     try {
-      const result = await emailApi.send(supabase, { accountId: f.accountId, ...lists(), subject: f.subject.trim(), text: f.body, html: textToHtml(f.body), conversationId, draftId, key: key.current, files, crmLeadId: initial.crmLeadId || null });
+      const result = await emailApi.send(supabase, { accountId: f.accountId, ...lists(), subject: f.subject.trim(), text: f.body, html: textToHtml(f.body), conversationId, draftId, key: key.current, files, crmLeadId: crmLeadLinkId });
       if (result?.warning === "crm_activity_pending") {
         const e = new Error("Email sent successfully, but its CRM activity is still pending. Retry Send to repair the CRM entry; the same request key prevents another email from being submitted.");
         e.outcome = result.outcome || "accepted";
@@ -73,12 +80,23 @@ export default function ComposeDialog({ supabase, accounts, providers = [], init
             </select>
             {selectedAccount && <span className="chat-hint">{selectedProvider?.display_name || selectedAccount.provider} · {accountConnectionLabel(selectedAccount, providers)}</span>}
           </label>
+          {Boolean(draftId || conversationId) && !accountCanSend(selectedAccount, providers) && (
+            <button type="button" className="chat-link-btn" onClick={() => onCopyToNew?.({ to: f.to, cc: f.cc, bcc: f.bcc, subject: f.subject, body: f.body, crmLeadId: initial.crmLeadId || null, crmLeadLabel: initial.crmLeadLabel || "" })}>
+              Copy to a new message with another sender
+            </button>
+          )}
+          {initial.crmLeadId && (crmRecipientMatches
+            ? <p className="chat-hint" data-testid="compose-crm-lead">Linked to CRM lead{initial.crmLeadLabel ? `: ${initial.crmLeadLabel}` : ""}. The sent email will be recorded on its timeline.</p>
+            : <div className="chat-alert error" role="alert" data-testid="compose-crm-recipient-warning">
+                <span>{crmLinkProblem}</span>
+                <label><input type="checkbox" checked={sendUnlinked} onChange={(e) => setSendUnlinked(e.target.checked)} /> Send without linking to {initial.crmLeadLabel || "this CRM lead"}</label>
+              </div>)}
           <label className="chat-field">To<input value={f.to} onChange={set("to")} placeholder="name@example.com, separate several with commas" autoFocus={!initial.to} /></label>
           {showCc ? <div className="inbox-compose-two">
             <label className="chat-field">Cc<input value={f.cc} onChange={set("cc")} /></label>
             <label className="chat-field">Bcc<input value={f.bcc} onChange={set("bcc")} /></label>
           </div> : <div><button type="button" className="chat-link-btn" onClick={() => setShowCc(true)}>Add Cc / Bcc</button></div>}
-          <label className="chat-field">Subject<input value={f.subject} onChange={set("subject")} /></label>
+          <label className="chat-field">Subject<input value={f.subject} onChange={set("subject")} autoFocus={Boolean(initial.to)} /></label>
           <label className="chat-field">Message<textarea rows={8} value={f.body} onChange={set("body")} /></label>
           <label className="chat-field">Attachments<input type="file" multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} /><span className="chat-hint">Up to 10 files, 10 MB in total.</span></label>
           {problem && <p className="chat-hint">{problem}</p>}

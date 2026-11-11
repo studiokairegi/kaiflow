@@ -110,6 +110,8 @@ def run_chat(model):
 
 def run_takeover_followup(model):
     c = tk.ctx([tk.OUT1], last_contact="2026-10-05")
+    from .test_logic import EV
+    c["evidence"] = EV
     return run_takeover(c, model)
 
 

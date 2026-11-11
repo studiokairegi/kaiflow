@@ -254,6 +254,17 @@ export const resendAdapter: EmailAdapter = {
       thread: i.thread, replyTo: i.replyTo, correlationId: i.correlationId,
     });
     const out = await sendViaResend(ctx.fetch, apiKey, payload, i.idempotencyKey, { sleep: ctx.sleep });
-    return out.ok ? { ok: true, providerMessageId: out.id, attempts: out.attempts } : out;
+    if (!out.ok) return out;
+    // Resend generates the RFC Message-ID. Since July 2026 it is available from GET /emails/:id.
+    // Failure to retrieve it must not turn an accepted send into a failed/unknown send; the signed
+    // email.* webhook also carries message_id and can repair the row asynchronously.
+    let rfcMessageId: string | undefined;
+    try {
+      const full = await resendGet({ fetch: ctx.fetch, sleep: ctx.sleep }, apiKey, `/emails/${encodeURIComponent(out.id)}`);
+      if (typeof full?.message_id === "string" && /^<[^<>\r\n]+>$/.test(full.message_id)) rfcMessageId = full.message_id;
+    } catch {
+      // Provider acceptance is final; leave RFC threading metadata for webhook reconciliation.
+    }
+    return { ok: true, providerMessageId: out.id, ...(rfcMessageId ? { rfcMessageId } : {}), attempts: out.attempts };
   },
 };

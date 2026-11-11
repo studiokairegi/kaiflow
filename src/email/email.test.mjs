@@ -5,10 +5,10 @@ import {
   parseAddress, normalizeSubject, buildThreadHeaders, withThreadToken, extractThreadToken, baseAddress, threadToken, parseMessageIds, pickConversation,
   verifySvixSignature, cleanInboundDomain, resolveInboundAccount, routingRecipients, safeSegment, readCapped, validateSendRequest, buildResendPayload, sendViaResend, handleSend, handleWebhook, statusForEvent, htmlToText, safeFileName,
 } from "../../supabase/functions/_shared/email_resend_logic.ts";
-import { normalizeReceivedEmail, normalizeAttachment, normalizeHeaders } from "../../supabase/functions/_shared/email_resend_logic.ts";
+import { normalizeReceivedEmail, normalizeAttachment, normalizeHeaders, inboundStoredHeaders } from "../../supabase/functions/_shared/email_resend_logic.ts";
 import { providerPausedResponse } from "../../supabase/functions/_shared/provider_guard.ts";
 import { makeSendStore, makeWebhookStore } from "../../supabase/functions/_shared/email_resend_store.ts";
-import { parseRecipients, replyRecipients, inlineReply, buildForward, composeProblem, participantLabel, activeMailProviders, normalizeSubject as uiNorm, attachmentProblem, statusLabel, newArrivals } from "./lib/logic.js";
+import { parseRecipients, replyRecipients, inlineReply, buildForward, composeProblem, participantLabel, activeMailProviders, normalizeSubject as uiNorm, attachmentProblem, statusLabel, newArrivals, textToHtml } from "./lib/logic.js";
 import { shouldRotateSendKey } from "./lib/helpers.js";
 
 const ORG = "20000000-0000-0000-0000-00000000000a";
@@ -135,6 +135,7 @@ test("send requests are validated", () => {
 test("Resend payload carries sender, threading, reply-to, cc/bcc and attachments, and never a hardcoded address", () => {
   const req = validateSendRequest(goodReq({ cc: ["c@x.com"], bcc: ["b@x.com"], html: "<p>Hi</p>", attachments: [{ filename: "a.txt", content_base64: "aGk=" }] })).value;
   const p = buildResendPayload({ fromEmail: "john@studiokairegi.com", fromName: 'Studio "Kairegi"', req, thread: { in_reply_to: "<p@x>", references: "<p@x>" }, replyTo: "john+kabc@studiokairegi.com" });
+  assert.deepEqual(p.headers, { "In-Reply-To": "<p@x>", References: "<p@x>" });
   assert.equal(p.from, "Studio Kairegi <john@studiokairegi.com>");
   assert.deepEqual(p.headers, { "In-Reply-To": "<p@x>", References: "<p@x>" });
   assert.equal(p.reply_to, "john+kabc@studiokairegi.com");
@@ -193,6 +194,8 @@ function sendHarness(over = {}) {
     createOutbound: async (p) => {
       const dup = rows.find((r) => r.idempotency_key === p.idempotency_key);
       if (dup) return { duplicate: true, message_id: "M1", conversation_id: CONV, status: "sent" };
+      if ((over.perMinute ?? 0) >= p.rate_limit_minute) return { duplicate: false, rate_limited: "minute" };
+      if ((over.perDay ?? 0) >= p.rate_limit_daily) return { duplicate: false, rate_limited: "day" };
       rows.push(p); log.created.push(p);
       return { duplicate: false, message_id: "M1", conversation_id: p.conversation_id || CONV, status: "queued" };
     },
@@ -201,7 +204,12 @@ function sendHarness(over = {}) {
   };
   const deps = {
     env: (k) => ({ RESEND_API_KEY: "re_secret_key", ...(over.env || {}) })[k],
-    fetch: over.fetch || (async (url, init) => { log.fetches.push({ url, init }); return json({ id: "re_sent_1" }); }),
+    fetch: over.fetch || (async (url, init) => {
+      log.fetches.push({ url, init });
+      return String(url).includes("/emails/re_sent_1")
+        ? json({ id: "re_sent_1", message_id: "<provider-generated@studiokairegi.com>" })
+        : json({ id: "re_sent_1" });
+    }),
     now: () => NOW, sleep: noSleep, store,
     authenticate: async (req) => (req.headers.get("authorization") === "Bearer good" ? { ok: true, userId: "U1", organizationId: ORG } : { ok: false, status: over.denyStatus ?? 401, error: "Not authenticated" }),
   };
@@ -216,11 +224,15 @@ test("email-send: success stores the Resend id, threads the reply and sends a pl
   const body = await res.json();
   assert.equal(body.status, "sent");
   const sent = JSON.parse(log.fetches[0].init.body);
-  assert.deepEqual(sent.headers, { "In-Reply-To": "<inbound@client.com>", References: "<first@client.com> <inbound@client.com>" });
+  assert.deepEqual(sent.headers, {
+    "In-Reply-To": "<inbound@client.com>",
+    References: "<first@client.com> <inbound@client.com>",
+  });
   assert.equal(sent.reply_to, `john+k${threadToken(CONV)}@studiokairegi.com`);
   assert.equal(sent.from, "Studio Kairegi <john@studiokairegi.com>");
-  assert.deepEqual(log.marks.map((m) => m.status), ["sending", "sent"]);
-  assert.equal(log.marks[1].provider_message_id, "re_sent_1");
+  assert.deepEqual(log.marks.filter((m) => m.status).map((m) => m.status), ["sending", "sent"]);
+  assert.equal(log.marks.at(-1).provider_message_id, "re_sent_1");
+  assert.equal(log.marks.at(-1).rfc_message_id, "<provider-generated@studiokairegi.com>");
   assert.equal(log.created[0].in_reply_to, "<inbound@client.com>");
 });
 
@@ -282,7 +294,7 @@ test("email-send: double submit with the same key sends once", async () => {
   const r2 = await handleSend(post(goodReq()), deps);
   assert.equal((await r1.json()).status, "sent");
   assert.equal((await r2.json()).duplicate, true);
-  assert.equal(log.fetches.length, 1);
+  assert.equal(log.fetches.length, 2);
 });
 
 test("email-send: refuses callers, missing config, disabled provider, unknown sender and limits", async () => {
@@ -721,11 +733,11 @@ test("store: thread lookups are scoped to the organization AND the account", asy
 });
 
 test("webhook store: tagged accepted-send reconciliation passes signed provider evidence to the database", async () => {
-  const svc = fakeService({}, { rpc: { email_reconcile_tagged_delivery_event: (args) => ({ data: { found: true, status: "sent" }, error: null }) } });
+  const svc = fakeService({}, { rpc: { email_reconcile_tagged_delivery_event_with_rfc: (args) => ({ data: { found: true, status: "sent" }, error: null }) } });
   const store = makeWebhookStore(svc);
   const input = { message_id: "50000000-0000-4000-8000-000000000001", provider_message_id: "re_accepted_1", event_type: "email.sent", provider_event_id: "svix-1", occurred_at: "2026-11-10T12:00:00Z", detail: {}, sender_email: "sender@example.test", recipients: ["to@example.test"], subject: "Subject" };
   assert.deepEqual(await store.reconcileTaggedDeliveryEvent(input), { found: true, conflict: false, status: "sent" });
-  assert.deepEqual(svc.calls.find((c) => c[1] === "email_reconcile_tagged_delivery_event"), ["rpc", "email_reconcile_tagged_delivery_event", {
+  assert.deepEqual(svc.calls.find((c) => c[1] === "email_reconcile_tagged_delivery_event_with_rfc"), ["rpc", "email_reconcile_tagged_delivery_event_with_rfc", {
     p_message_id: input.message_id, p_provider_message_id: input.provider_message_id, p_event_type: input.event_type,
     p_provider_event_id: input.provider_event_id, p_occurred_at: input.occurred_at, p_detail: input.detail,
     p_sender_email: input.sender_email, p_recipients: input.recipients, p_subject: input.subject,
@@ -1010,7 +1022,7 @@ test("email-send: a database failure is a safe 500, and a sent mail whose status
   assert.equal(out.status, 200);
   const body = await out.json();
   assert.equal(body.status, "sent"); assert.equal(body.warning, "sent_status_not_saved");
-  assert.equal(s.log.fetches.length, 1);
+  assert.equal(s.log.fetches.length, 2);
 });
 
 // ---------------------------------------------------------------- migration contents (static; the SQL itself is exercised by supabase/tests/email_resend_hardening.test.sql)
@@ -1096,4 +1108,41 @@ test("webhook: Intelligence-only delivery event is accepted when CRM has no matc
   assert.equal(h.log.events.length, 1);
   assert.equal(h.log.intelEvents.length, 1);
   assert.equal(h.log.webhooks.get("intel_only_event").status, "processed");
+});
+
+
+test("composer HTML escaping does not waste six characters on quotes or reject valid 200k text", () => {
+  const source = '"'.repeat(100_000) + '&'.repeat(100_000);
+  const html = textToHtml(source);
+  assert.equal(html.includes('&quot;'), false);
+  assert.ok(html.length < 1_100_000, `HTML expansion ${html.length} must fit the server's 1.1 MB cap`);
+  assert.match(html, /&amp;/);
+});
+
+test("queued idempotent retry can atomically claim an unsubmitted row after the original claim failed", async () => {
+  const h = sendHarness();
+  let claimCount = 0;
+  h.deps.store.createOutbound = async () => ({ duplicate: true, message_id: "M1", conversation_id: CONV, status: "queued" });
+  h.deps.store.claimOutbound = async () => { claimCount++; return true; };
+  const res = await handleSend(post(goodReq()), h.deps);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).outcome, "accepted");
+  assert.equal(claimCount, 1);
+  assert.equal(h.log.fetches.length, 2);
+});
+
+
+test("inbound persistence keeps bounded CRM auto-reply headers but excludes unrelated headers", () => {
+  const stored = inboundStoredHeaders({
+    "in-reply-to": "<parent@example.com>", references: "<parent@example.com>", "message-id": "<reply@example.com>",
+    "list-unsubscribe": "<mailto:unsubscribe@example.com>", "auto-submitted": "auto-replied", precedence: "bulk",
+    "x-autoreply": "yes", "x-autorespond": "true", "x-private-token": "must-not-persist",
+  });
+  assert.deepEqual(Object.keys(stored).sort(), ["auto-submitted", "in-reply-to", "list-unsubscribe", "message-id", "precedence", "references", "x-autoreply", "x-autorespond"].sort());
+  assert.equal(stored["auto-submitted"], "auto-replied");
+  assert.equal(stored.precedence, "bulk");
+  assert.equal(stored["x-autoreply"], "yes");
+  assert.equal(stored["x-autorespond"], "true");
+  assert.equal(stored["x-private-token"], undefined);
+  assert.equal(inboundStoredHeaders({ "auto-submitted": "x".repeat(900) })["auto-submitted"].length, 500);
 });

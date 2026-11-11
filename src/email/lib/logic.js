@@ -17,6 +17,58 @@ export function parseRecipients(text) {
   return { valid, invalid };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** CRM -> composer hand-off. Returns { leadId, to, label } for a lead that may be emailed from the CRM, otherwise null (no Compose button).
+ *  A lead needs a saved (UUID) id and at least one valid email address, belongs to the signed-in user, and is not archived. Only the first valid address is used. */
+export function leadComposeTarget(lead, userId) {
+  if (!lead || lead.archivedAt || !UUID_RE.test(String(lead.id || ""))) return null;
+  // A lead explicitly owned by another user must not offer Compose. Some legacy/new rows
+  // have no owner metadata yet; preserve their existing eligibility and let the server
+  // enforce ownership before sending.
+  if (lead.ownerUserId && lead.ownerUserId !== userId) return null;
+  const { valid } = parseRecipients(lead.email);
+  if (!valid.length) return null;
+  return { leadId: String(lead.id).toLowerCase(), to: valid[0], label: String(lead.companyName || "").trim() || String(lead.contactPerson || "").trim() || valid[0] };
+}
+
+/** Resolve CRM compose hand-off readiness without consuming a request while registries are still loading or errored. */
+export function leadComposeReadiness({ accounts, providers } = {}) {
+  if (!accounts || !providers || accounts.loading || providers.loading) return "waiting";
+  if (accounts.error || providers.error) return "error";
+  const accountRows = Array.isArray(accounts.data) ? accounts.data : [];
+  const providerRows = Array.isArray(providers.data) ? providers.data : [];
+  return accountRows.some((account) => accountCanSend(account, providerRows)) ? "ready" : "unavailable";
+}
+
+export function crmLeadRecipientMatches(leadAddress, recipientValue) {
+  const expected = parseRecipients(leadAddress).valid[0]?.toLowerCase();
+  return Boolean(expected && parseRecipients(recipientValue).valid.some((address) => address.toLowerCase() === expected));
+}
+
+export const EMAIL_TIMELINE_TYPES = Object.freeze(["email_sent", "email_received"]);
+/** Lead timeline: merge server email entries without reordering existing user-authored activity.
+ *  Display ordering is handled once by sortEmailTimelineForDisplay(), not during background refresh. */
+export function mergeEmailTimeline(localLog, serverLog) {
+  const local = Array.isArray(localLog) ? localLog : [];
+  const seen = new Set(local.filter((e) => e && e.emailMessageId).map((e) => String(e.emailMessageId)));
+  const add = [];
+  for (const e of Array.isArray(serverLog) ? serverLog : []) {
+    if (!e || !EMAIL_TIMELINE_TYPES.includes(e.type) || !e.emailMessageId || seen.has(String(e.emailMessageId))) continue;
+    seen.add(String(e.emailMessageId)); add.push(e);
+  }
+  if (!add.length) return local;
+  return [...local, ...add];
+}
+
+/** Stable chronological order for presentation only. Untimestamped/invalid entries retain
+ *  their relative order and appear after dated entries rather than jumping to the beginning. */
+export function sortEmailTimelineForDisplay(log) {
+  return (Array.isArray(log) ? log : []).map((entry, index) => {
+    const parsed = Date.parse(entry?.ts);
+    return { entry, index, time: Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY };
+  }).sort((a, b) => a.time - b.time || a.index - b.index).map(({ entry }) => entry);
+}
+
 export const normalizeSubject = (s) => {
   let out = String(s || "").trim();
   const re = /^\s*(re|fwd?|aw|sv|vs|rv|antw)(\[\d+\])?\s*:\s*/i;
@@ -86,7 +138,7 @@ export const fmtSize = (bytes) => {
   return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 };
 
-const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 /** Plain text typed in the composer -> simple HTML (escaped, line breaks kept). */
 export const textToHtml = (text) => `<div style="white-space:pre-wrap;font-family:inherit">${escapeHtml(text)}</div>`;
 

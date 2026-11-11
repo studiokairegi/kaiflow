@@ -708,26 +708,10 @@ def compose_japanese(prospect: dict, evidence: list[dict], kb: dict, settings: d
     if not all(approved.values()):
         raise PermanentError("approved Japanese studio/service/portfolio facts are incomplete")
     if not factual:
-        # No verified recipient-specific material: use a modest, deterministic
-        # introduction based only on approved Studio Kairegi facts. Never fake
-        # personalization just to satisfy a model-generation requirement.
-        if kind != "initial":
-            raise PermanentError("insufficient verified prospect research for individualized Japanese draft; manual review required")
-        subject = SUBJECT_JA.format(name=str(prospect.get("name") or "")).replace("アニメーション制作協力", "2Dアニメーション制作のご案内")[:120]
-        contact = str(prospect.get("contact_name") or "").strip()
-        salutation = (contact + ("" if contact.endswith(("様", "先生")) else "様")) if contact else (str(prospect.get("name") or "") + " ご担当者様")
-        body = (
-            salutation + "\n\n"
-            "突然のご連絡失礼いたします。Studio Kairegiと申します。\n\n"
-            + approved[keys[0]] + "\n\n" + approved[keys[1]] + "\n\n" + approved[keys[2]]
-            + "\n\n今後、アニメーション制作において外部スタジオとの協業をご検討の際には、"
-              "弊スタジオの対応内容をご紹介できればと存じます。"
-              "現時点でご予定がない場合は、どうぞご放念ください。"
-            + "\n\n" + policy.compliance_footer(settings, opt_out_text=kb["policy.opt_out.ja"]["body"].strip())
-        )
-        return {"subject": subject, "body": body, "model_written": False,
-                "evidence_ids": [], "evidence_trace": [],
-                "personalization": {"kind": kind, "language": "ja", "evidence_ids": [], "grounding_overlap": 0.0}}
+        # Phase 3 inherits Phase 2's evidence gate: approved Studio Kairegi
+        # facts cannot substitute for recipient-specific research. Do not let a
+        # fixed introductory message enter the send-ready draft workflow.
+        raise PermanentError("insufficient verified prospect research for individualized Japanese draft; research or manual review required")
     instructions = {
         "initial": "初回の営業メールを作成してください。相手の実際の制作実績・活動に基づく個別の切り口にしてください。",
         "followup": "実際に送信済みの前回メールと会話履歴を踏まえ、同じ売り込みを繰り返さず、自然で簡潔なフォローアップを作成してください。",

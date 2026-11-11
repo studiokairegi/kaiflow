@@ -84,7 +84,7 @@ class ChatAllowlist(unittest.TestCase):
         self.assertEqual(out, {"ok": True, "message_id": "existing-55", "created": False, "state": "sent"})
         self.assertEqual(rpc.calls, ["intel_agent_context"])
 
-    def test_request_to_persisted_japanese_initial_draft_end_to_end(self):
+    def test_japanese_initial_draft_without_recipient_evidence_requires_review(self):
         from .test_phase3_japanese import KB_ROWS, SETTINGS
         prospect = {"id": U, "name": "Andraft", "type": "animation_studio_support",
                     "status": "lead_linked", "language": "en", "country": "Japan",
@@ -106,27 +106,23 @@ class ChatAllowlist(unittest.TestCase):
                 if name == "intel_agent_settings": return {**SETTINGS, "autonomy": "autonomous", "kill_switch": False}
                 if name == "intel_agent_kb": return KB_ROWS
                 if name == "intel_agent_log": return {"ok": True}
+                if name == "intel_agent_flag_prospect": return {"ok": True}
+                if name == "intel_agent_chat_reply":
+                    self.replies.append(p); return {"ok": True}
                 if name == "intel_agent_upsert_draft":
                     persisted.update(p)
                     return {"ok": True, "message_id": "persisted-message-42", "created": True, "state": "pending_approval"}
-                if name == "intel_agent_chat_reply":
-                    self.replies.append(p); return {"ok": True}
                 raise AssertionError(name)
         class LocalLLM(FakeLLM):
             def generate_json(self, *args, **kwargs):
-                raise AssertionError("No recipient evidence: deterministic approved-facts fallback should not call model")
+                raise AssertionError("No recipient evidence: Japanese drafting must stop for research or manual review")
         rpc = E2ERpc()
         out = chat.handle(deps(rpc, LocalLLM([])), {"thread_id": "thread-1", "message_id": 77})
-        self.assertTrue(out["draft_saved"])
-        self.assertEqual(out["message_id"], "persisted-message-42")
-        self.assertEqual(persisted["p_prospect_id"], U)
-        self.assertEqual(persisted["p_kind"], "initial")
-        self.assertEqual(persisted["p_idempotency_key"], f"draft:{U}:initial")
-        self.assertFalse(persisted["p_auto_ok"])
-        self.assertTrue(persisted["p_force_review"])
-        self.assertIn("Studio Kairegiは2Dアニメーション制作を行うスタジオです。", persisted["p_body"])
-        self.assertNotIn("多くのアニメーション作品", persisted["p_body"])
-        self.assertIn("not been sent", rpc.replies[0]["p_text"])
+        self.assertFalse(out.get("draft_saved", False))
+        self.assertEqual(out["draft_error"], "manual_review_required")
+        self.assertEqual(persisted, {})
+        self.assertIn("intel_agent_flag_prospect", [n for n, _ in rpc.calls])
+        self.assertIn("No email was sent", rpc.replies[0]["p_text"])
         self.assertFalse(any(n == "intel_agent_enqueue_job" or n == "send" for n, _ in rpc.calls))
 
     def test_explicit_email_draft_does_not_guess_missing_or_ambiguous_prospect(self):
