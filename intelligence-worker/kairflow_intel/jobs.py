@@ -15,7 +15,19 @@ from .ai_call import call_json, composed
 from .errors import PermanentError, RpcError, TransientError
 from .safety import MeteredFetcher
 
-DEFER = {"daily_cap", "followup_cap", "campaign_cap", "followup_not_due", "campaign_paused", "kill_switch", "needs_reconcile", "send_spacing", "send_window_deferred", "provider_account_quota"}
+# These outcomes settle the queue item without attempting another provider send.
+# In particular, "unknown" means the provider may have accepted the email; the
+# message remains in its unknown state for the periodic reconciliation job.
+DEFER = {
+    "daily_cap", "followup_cap", "campaign_cap", "followup_not_due", "campaign_paused",
+    "kill_switch", "needs_reconcile", "send_spacing", "send_window_deferred",
+    "provider_account_quota", "unknown",
+}
+TERMINAL_SEND_FAILURE = {
+    "not_found", "not_outbound", "already_sent", "suppressed", "prospect_rejected", "prospect_closed",
+    "prospect_suppressed", "prospect_replied", "no_crm_lead", "already_contacted", "max_followups",
+    "auto_reply_limit", "not_approved", "reply_parent_missing", "threading_rejected",
+}
 
 
 @dataclass
@@ -384,6 +396,13 @@ def h_send(d: Deps, job):
     if r.get("reason") in ("send_spacing", "provider_account_quota"):
         delay = max(5, min(int(r.get("retry_after", 60)), 86_400))
         _enq(d, "send", {"message_id": message_id}, f"send-slot:{message_id}:{int(d.clock() // 60)}", delay=delay)
+    # A provider outcome of "unknown" is deliberately deferred: the provider may
+    # already have accepted the email, so retrying could duplicate it. The message
+    # remains unknown for the periodic reconcile job; this queue item must not retry.
+    # Definitive terminal denials are dead-lettered, while retryable failures use
+    # the normal job failure path.
+    if r.get("sent") is False and r.get("reason") not in DEFER:
+        return {**r, "job_failure": True, "terminal_failure": r.get("reason") in TERMINAL_SEND_FAILURE}
     return r
 
 def h_sync_mail(d: Deps, job):
@@ -522,8 +541,9 @@ def h_chat(d: Deps, job):
 
 
 def h_reconcile(d: Deps, job):
-    if _mail_paused(d):
-        return {"skipped": "mail provider paused"}
+    # Reconciliation is read-only and must run even when the legacy/default
+    # adapter is disabled. mailops.reconcile resolves each message through
+    # the provider router, so unknown sends can still be checked safely.
     try:
         return mailops.reconcile(d.rpc, d.zoho)
     except PermanentError as exc:
@@ -676,6 +696,24 @@ class Worker:
                 return
             if isinstance(result, dict) and result.get("reason") in DEFER:
                 result = {**result, "deferred": True}
+            if isinstance(result, dict) and result.get("job_failure"):
+                if result.get("terminal_failure"):
+                    outcome = d.rpc("intel_agent_fail_job_permanent", {
+                        "p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
+                        "p_error": f"permanent: {result.get('reason', 'terminal send denial')}"[:1000]
+                    })
+                else:
+                    outcome = d.rpc("intel_agent_fail_job", {
+                        "p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
+                        "p_error": f"send: {result.get('reason', 'send failed')}"[:1000],
+                        "p_retry_seconds": 86400
+                    })
+                if outcome not in ("dead", "queued"):
+                    self._last_job_error = "send job failure could not be recorded"
+                    return
+                self._last_job_completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(d.clock()))
+                self._last_job_error = None
+                return
             completed = d.rpc("intel_agent_complete_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
                 "p_result": result if isinstance(result, dict) else {"value": result}})
             if completed is not True:

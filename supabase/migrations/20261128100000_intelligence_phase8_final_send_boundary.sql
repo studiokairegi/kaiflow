@@ -16,22 +16,14 @@ declare
   v_new_key bigint;
 begin
   if tg_op <> 'INSERT' then
-    if tg_table_name = 'intel_suppressions' then
-      v_old_key := hashtextextended(old.organization_id::text || ':suppression:' || old.kind || ':' || old.value, 0);
-    elsif tg_table_name = 'intel_contact_permissions' then
-      v_old_key := hashtextextended(old.organization_id::text || ':permission:' || old.purpose || ':' || old.email, 0);
-    else
-      raise exception 'unsupported table for _intel_phase8_lock_policy_key: %', tg_table_name;
-    end if;
+    v_old_key := hashtextextended(old.organization_id::text ||
+      case when tg_table_name = 'intel_suppressions' then ':suppression:' || old.kind || ':' || old.value
+           else ':permission:' || old.purpose || ':' || old.email end, 0);
   end if;
   if tg_op <> 'DELETE' then
-    if tg_table_name = 'intel_suppressions' then
-      v_new_key := hashtextextended(new.organization_id::text || ':suppression:' || new.kind || ':' || new.value, 0);
-    elsif tg_table_name = 'intel_contact_permissions' then
-      v_new_key := hashtextextended(new.organization_id::text || ':permission:' || new.purpose || ':' || new.email, 0);
-    else
-      raise exception 'unsupported table for _intel_phase8_lock_policy_key: %', tg_table_name;
-    end if;
+    v_new_key := hashtextextended(new.organization_id::text ||
+      case when tg_table_name = 'intel_suppressions' then ':suppression:' || new.kind || ':' || new.value
+           else ':permission:' || new.purpose || ':' || new.email end, 0);
   end if;
   if v_old_key is not null and v_new_key is not null then
     if v_old_key <= v_new_key then

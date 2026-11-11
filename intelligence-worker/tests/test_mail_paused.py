@@ -25,7 +25,9 @@ class MailPausedTests(unittest.TestCase):
     def test_handlers_skip_without_touching_a_mailbox(self):
         d = _D()
         self.assertEqual(jobs.h_sync_mail(d, {"payload": {}}), {"skipped": "mail provider paused"})
-        self.assertEqual(jobs.h_reconcile(d, {"payload": {}}), {"skipped": "mail provider paused"})
+        with patch("kairflow_intel.jobs.mailops.reconcile", return_value={"confirmed": 0, "absent": 0, "left": 1}) as reconcile:
+            self.assertEqual(jobs.h_reconcile(d, {"payload": {}}), {"confirmed": 0, "absent": 0, "left": 1})
+            reconcile.assert_called_once_with(d.rpc, d.zoho)
         self.assertEqual(jobs.h_send(d, {"payload": {"message_id": "m"}})["reason"], "mail_provider_paused")
         self.assertEqual(d.calls, ["intel_agent_receive_accounts"])  # only the read-only account inventory probe
 

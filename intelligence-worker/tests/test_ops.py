@@ -356,6 +356,42 @@ class WorkerLoop(unittest.TestCase):
         finally: jobs.HANDLERS["send"] = ORIGINAL_SEND
         return next(p for n, p in calls if n == "intel_agent_fail_job")
 
+    def test_unknown_provider_outcome_settles_send_job_without_retry_or_dead_letter(self):
+        # The provider may have accepted the email before the timeout. Keep the
+        # message unknown for reconcile(); never requeue or mark the send job dead.
+        rpc_calls = []
+        state = FakeRpc()
+        state.add("uncertain")
+        provider = FakeZoho()
+        provider.raise_on_send = TransientError("provider timeout")
+
+        def rpc(name, params=None):
+            params = params or {}
+            rpc_calls.append((name, params))
+            if name == "intel_agent_settings":
+                return {"kill_switch": False}
+            if name == "intel_agent_send_window_status":
+                return {"allowed": True, "reason": "inside_send_window"}
+            if name == "intel_agent_complete_job":
+                return True
+            return state(name, params)
+
+        d = jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=provider, llm=None,
+                      sleep=lambda _seconds: None, clock=lambda: 1_800_000_000.0)
+        worker = jobs.Worker(d, lease_thread=False)
+        worker.run_job({"id": "uncertain-job", "kind": "send", "attempts": 1,
+                        "payload": {"message_id": "uncertain"}})
+
+        self.assertEqual(state.msgs["uncertain"]["state"], "unknown")
+        self.assertEqual(provider.sent, [])
+        names = [name for name, _ in rpc_calls]
+        self.assertIn("intel_agent_complete_job", names)
+        self.assertNotIn("intel_agent_fail_job", names)
+        self.assertNotIn("intel_agent_fail_job_permanent", names)
+        completion = next(params for name, params in rpc_calls if name == "intel_agent_complete_job")
+        self.assertEqual(completion["p_result"]["reason"], "unknown")
+        self.assertTrue(completion["p_result"]["deferred"])
+
     def test_error_mapping(self):
         self.assertEqual(self.run_with(TransientError("x"))["p_retry_seconds"], 120)        # exponential backoff
         self.assertEqual(self.run_with(PermanentError("x"))["p_retry_seconds"], 86400)
