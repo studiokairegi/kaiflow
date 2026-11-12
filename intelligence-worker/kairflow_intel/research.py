@@ -6,12 +6,12 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from . import contactability, scoring, signals
+from . import contactability, indie_evidence, scoring, signals
 from .errors import PermanentError, TransientError
 from .ai_call import call_json
 from .ollama import validate
@@ -45,6 +45,52 @@ def entity_llm(llm, site: str):
 
 def _h(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:40]
+
+
+def _iso_date(value) -> date | None:
+    """Parse a stored ISO date without treating malformed values as evidence."""
+    try:
+        raw = str(value or "").strip()
+        return date.fromisoformat(raw[:10]) if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _visual_review_pending(evidence_rows: list[dict], new_candidates: list[dict]) -> int:
+    """Count unique persisted visual assets that still lack a human review record.
+
+    Candidate rows are unverified visual_asset_candidate evidence. A human review
+    resolves a candidate only when a verified admin-review visual evidence row
+    explicitly records that exact media URL.
+    """
+    import re
+    candidates: dict[str, tuple[str, str]] = {}
+    reviewed: set[str] = set()
+    candidate_re = re.compile(r"Unverified\s+[^:]+\s+candidate:\s*(https?://\S+)", re.I)
+    reviewed_re = re.compile(r"reviewed media:\s*(https?://\S+)", re.I)
+    for row in evidence_rows or []:
+        if not isinstance(row, dict):
+            continue
+        fact = str(row.get("fact_type") or "")
+        snippet = str(row.get("snippet") or "")
+        if fact == "visual_asset_candidate" and not row.get("verified"):
+            match = candidate_re.search(snippet)
+            if match:
+                asset = match.group(1).rstrip("|,;.)]")
+                candidates[asset.casefold()] = (asset, str(row.get("url") or ""))
+        elif row.get("verified") and str(row.get("source") or "") == "admin_review" and fact in {
+            "anime_visual_screenshot", "anime_visual_artwork", "anime_visual_trailer", "anime_character_art"
+        }:
+            match = reviewed_re.search(snippet)
+            if match:
+                reviewed.add(match.group(1).rstrip("|,;.)]").casefold())
+    for row in new_candidates or []:
+        snippet = str(row.get("snippet") or "")
+        match = candidate_re.search(snippet)
+        if match:
+            asset = match.group(1).rstrip("|,;.)]")
+            candidates[asset.casefold()] = (asset, str(row.get("url") or ""))
+    return sum(1 for asset in candidates if asset not in reviewed)
 
 
 def candidate_pages(home_url: str, html: str, limit: int = PAGE_LIMIT) -> list[str]:
@@ -110,8 +156,8 @@ def _evidence_writer(rpc, p: dict, run_id: str | None):
     """Ordinary research writes through intel_agent_add_evidence (unchanged). A reevaluation writes through the run-scoped function, which
     also refreshes fetched_at on a sentence that was already stored, so the row counts as collected in this run."""
     if run_id is None:
-        return lambda url, fact, snippet, h: rpc("intel_agent_add_evidence", {"p_prospect_id": p["id"], "p_source": "web", "p_url": url, "p_fact_type": fact, "p_snippet": snippet, "p_content_hash": h, "p_verified": True})
-    return lambda url, fact, snippet, h: rpc("intel_agent_reeval_add_evidence", {"p_run_id": run_id, "p_prospect_id": p["id"], "p_source": "web", "p_url": url, "p_fact_type": fact, "p_snippet": snippet, "p_content_hash": h, "p_verified": True})
+        return lambda url, fact, snippet, h, verified=True: rpc("intel_agent_add_evidence", {"p_prospect_id": p["id"], "p_source": "web", "p_url": url, "p_fact_type": fact, "p_snippet": snippet, "p_content_hash": h, "p_verified": bool(verified)})
+    return lambda url, fact, snippet, h, verified=True: rpc("intel_agent_reeval_add_evidence", {"p_run_id": run_id, "p_prospect_id": p["id"], "p_source": "web", "p_url": url, "p_fact_type": fact, "p_snippet": snippet, "p_content_hash": h, "p_verified": bool(verified)})
 
 
 def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict:
@@ -121,9 +167,22 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
     if run_id is not None and (p.get("type") != "animation_studio_support" or p.get("origin") != "discovered"):
         raise PermanentError("a reevaluation only researches discovered animation_studio_support prospects")
     add_evidence = _evidence_writer(rpc, p, run_id)
-    site = p["website"] if p["website"].startswith("http") else (f"https://{p['website']}" if p["website"] else "")
-    if not site:
-        raise PermanentError("prospect has no website to research")
+    website = str(p.get("website") or "").strip()
+    project_source = ""
+    if p.get("type") == "indie_game_developer":
+        verified_source = ((p.get("facts") or {}).get("verified") or {})
+        project_source = str(p.get("project_source_url") or verified_source.get("project_url") or verified_source.get("game_url") or "").strip()
+        steam_appid = str(verified_source.get("steam_appid") or "").strip()
+        if not project_source and steam_appid.isdigit():
+            project_source = f"https://store.steampowered.com/app/{steam_appid}/"
+    raw_site = website or project_source
+    site = raw_site if raw_site.startswith(("http://", "https://")) else (f"https://{raw_site}" if raw_site else "")
+    parsed_site = urlparse(site) if site else None
+    research_host = (parsed_site.hostname or "").casefold().removeprefix("www.") if parsed_site else ""
+    if p.get("type") == "indie_game_developer" and parsed_site and (research_host == "kickstarter.com" or research_host.endswith(".kickstarter.com")):
+        raise PermanentError("Kickstarter is manual-only and must never be fetched; add a separate official developer website")
+    if not parsed_site or parsed_site.scheme not in {"http", "https"} or not parsed_site.hostname or "." not in parsed_site.hostname:
+        raise PermanentError("prospect has no valid official website or project/store page to research")
     final, html = fetcher.fetch(site)
     pages = [(final, html)]
     for u in candidate_pages(final, html, PAGE_LIMIT):
@@ -142,6 +201,23 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
             if all(_h(old_sent) != _h(sent) for old_sent, _ in bucket):
                 bucket.append((sent, url))
                 if len(bucket) > 8: bucket.pop()
+    indie_events: list[dict] = []
+    indie_visual_candidates: list[dict] = []
+    indie_identity_mentions: list[dict] = []
+    if p["type"] == "indie_game_developer":
+        verified_before = ((p.get("facts") or {}).get("verified") or {})
+        project_title = str(p.get("project_title") or verified_before.get("project_title") or verified_before.get("game") or "")
+        developer_name = str(p.get("name") or verified_before.get("developer_name") or "")
+        indie_events = indie_evidence.extract_dated_events(pages)
+        indie_visual_candidates = indie_evidence.extract_visual_candidates(pages)
+        indie_identity_mentions = indie_evidence.extract_identity_mentions(pages, developer_name, project_title)
+        for event in indie_events:
+            add_evidence(event["url"], event["fact_type"], event["snippet"], _h(event["fact_type"] + event["date"] + event["snippet"]))
+        # Visual references are intentionally UNVERIFIED until an administrator inspects the actual asset.
+        for candidate in indie_visual_candidates:
+            add_evidence(candidate["url"], candidate["fact_type"], candidate["snippet"], _h(candidate["snippet"]), verified=False)
+        for mention in indie_identity_mentions:
+            add_evidence(mention["url"], mention["fact_type"], mention["snippet"], _h(mention["fact_type"] + mention["snippet"]))
     emails = [dict(e, url=u) for u, h in pages for e in extract_emails(h)]
     preset = (p.get("contact_email") or "")
     contact = choose_contact(emails, p["domain"], preset if p["type"] == "indie_game_developer" else "")
@@ -178,7 +254,58 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
     src = next((e["url"] for e in emails if contact and e["email"] == contact["email"]), "") if website_verified else ""
     if website_verified:
         add_evidence(src, "contact_email", contact["email"], _h(contact["email"]))
-    verified = {"signals": sorted(found), "language": language, "contact_role": role or "", "pages_read": len(pages), "ai_extraction": ai_extraction}
+    # Preserve explicitly documented contact-affiliation and verification facts
+    # across a website refresh; ordinary extraction must not erase human evidence.
+    preserve_keys = [
+        "contact_verification", "contact_email", "contact_source_url",
+        "contact_verification_method", "contact_verified_at", "contact_verified_by",
+    ]
+    if p["type"] == "indie_game_developer":
+        preserve_keys.extend([
+            "employee_affiliation_evidence", "employee_affiliation_snippet", "employee_affiliation_source_url",
+            "personal_email_affiliation_evidence", "personal_email_affiliation_source_url", "delivery_evidence",
+            "bounced", "complained", "complaint", "unsubscribed", "do_not_contact", "suppressed",
+            "project_title", "project_source_url", "project_url", "game_url", "steam_appid", "coming_soon", "team_size", "developer_team_size",
+            "indie_status_verified", "independent_developer_verified", "solo_developer_verified", "small_team_verified",
+            "project_announcement_date", "announcement_date", "project_campaign_date", "campaign_date",
+            "project_expected_release_date", "expected_release_date", "project_actual_release_date", "actual_release_date",
+            "project_latest_activity_date", "latest_activity_date", "project_marketing_milestones", "marketing_milestones",
+            "creator_name", "developer_name", "developer_identity_status", "developer_attribution_source",
+            "developer_identity_source_url", "developer_identity_evidence_ids", "developer_identity_verified_at", "developer_identity_verified_by",
+            "developer_identity_verification_method", "kickstarter_creator_role", "kickstarter_creator_role_verified",
+            "discovery_method", "source", "source_key", "source_url", "project_id",
+            "admin_notes", "qualification_evidence_status", "permission_confirmed_by_admin",
+            "permission_reference", "permission_recorded_at",
+        ])
+    verified = {k: prior_verified[k] for k in preserve_keys if k in prior_verified}
+    verified.update({"signals": sorted(found), "language": language, "contact_role": role or "", "pages_read": len(pages), "ai_extraction": ai_extraction})
+    if p["type"] == "indie_game_developer":
+        activity_dates = [e["date"] for e in indie_events if e["fact_type"] == "development_update"]
+        prior_activity_dates = [
+            p.get("project_latest_activity_date"), verified.get("project_latest_activity_date"),
+            verified.get("latest_activity_date"),
+        ]
+        parsed_activity = [d for d in (_iso_date(v) for v in [*prior_activity_dates, *activity_dates]) if d]
+        if parsed_activity:
+            verified["project_latest_activity_date"] = max(parsed_activity).isoformat()
+        announcement_dates = [e["date"] for e in indie_events if e["fact_type"] == "project_announcement"]
+        prior_announcement_dates = [p.get("project_announcement_date"), verified.get("project_announcement_date"), verified.get("announcement_date")]
+        parsed_announcements = [d for d in (_iso_date(v) for v in [*prior_announcement_dates, *announcement_dates]) if d]
+        if parsed_announcements:
+            verified["project_announcement_date"] = min(parsed_announcements).isoformat()
+        milestones = list(verified.get("project_marketing_milestones") or [])
+        for event in indie_events:
+            if event["fact_type"] == "marketing_opportunity":
+                item = {"date": event["date"], "source_url": event["url"], "kind": "marketing_opportunity", "verified": True}
+                if item not in milestones:
+                    milestones.append(item)
+        if milestones:
+            verified["project_marketing_milestones"] = milestones[-30:]
+        verified["visual_review_pending_count"] = _visual_review_pending(ctx.get("evidence") or [], indie_visual_candidates)
+        verified["identity_evidence_candidate_count"] = len(indie_identity_mentions)
+        # Discovery/research evidence does not silently verify Kickstarter creator attribution.
+        if verified.get("source_key") == "kickstarter_manual":
+            verified["developer_identity_status"] = verified.get("developer_identity_status") or "admin_attributed_unverified"
     if contact and contact.get("how") == "store" and p["type"] == "indie_game_developer":
         src = p.get("contact_source_url") or ""
         verified.update({"contact_verification": "store_listing", "contact_email": contact["email"], "contact_source_url": src})
@@ -190,15 +317,51 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
         verified.update({"contact_verification": "unknown_legacy", "contact_email": existing})
     elif run_id is not None:       # a reevaluation must not inherit an older run's "website_extracted": nothing was re-verified now
         verified.update({"contact_verification": "not_verified_this_run", "contact_email": ""})
+    suppression_facts = {"suppressed": False, "bounced": False, "complained": False, "suppression_reason": ""}
+    if p.get("type") == "indie_game_developer":
+        # Repeat the worker preflight at the assessment boundary. This protects
+        # direct callers and future job paths that do not use h_research().
+        try:
+            result = rpc("intel_agent_indie_suppression_facts", {
+                "p_email": verified.get("contact_email") or existing,
+                "p_domain": p.get("domain") or "",
+            })
+        except Exception as exc:
+            raise TransientError("indie suppression lookup failed during research contact assessment") from exc
+        if not isinstance(result, dict) or not all(k in result for k in ("suppressed", "bounced", "complained")):
+            raise TransientError("indie suppression lookup returned an incomplete result during research contact assessment")
+        truthy = lambda value: value is True or str(value).strip().casefold() in {"true", "1", "yes"}
+        suppression_facts = {**result, **{
+            "suppressed": truthy(result.get("suppressed")),
+            "bounced": truthy(result.get("bounced")),
+            "complained": truthy(result.get("complained")),
+        }}
+    local_unsubscribe = any(
+        p.get("status") == "suppressed" or scoring._is_true(verified.get(k))
+        for k in ("suppressed", "unsubscribed", "do_not_contact", "bounced", "complained", "complaint")
+    )
+    suppressed_for_assessment = bool(suppression_facts.get("suppressed") or local_unsubscribe)
+    suppression_reason = str(suppression_facts.get("suppression_reason") or "")
+    if local_unsubscribe and not suppression_reason:
+        suppression_reason = "prospect is opted out, suppressed, bounced or complained"
     contact_assessment = contactability.assess(
         email=verified.get("contact_email") or existing,
         official_domain=p.get("domain") or "",
-        source_url=verified.get("contact_source_url") or p.get("contact_source_url") or "",
+        source_url=verified.get("contact_source_url") or p.get("contact_source_url") or
+            ((verified.get("personal_email_affiliation_source_url") or verified.get("employee_affiliation_source_url") or "") if p.get("type") == "indie_game_developer" else ""),
         verification=verified.get("contact_verification") or "",
         verified_email=verified.get("contact_email") or "",
-        employee_affiliation=bool(verified.get("employee_affiliation_evidence")),
+        employee_affiliation=bool(verified.get("employee_affiliation_evidence") or
+            (p.get("type") == "indie_game_developer" and verified.get("personal_email_affiliation_evidence"))),
         delivery_evidence=verified.get("delivery_evidence") or "",
-        bounced=bool(verified.get("bounced")), complained=bool(verified.get("complained")),
+        bounced=bool(verified.get("bounced") or suppression_facts.get("bounced")),
+        complained=bool(verified.get("complained") or verified.get("complaint") or suppression_facts.get("complained")),
+        suppressed=suppressed_for_assessment,
+        suppression_reason=suppression_reason,
+        affiliation_evidence=verified.get("personal_email_affiliation_evidence") or verified.get("employee_affiliation_snippet") or "",
+        affiliation_source_url=verified.get("personal_email_affiliation_source_url") or verified.get("employee_affiliation_source_url") or "",
+        contact_name=p.get("contact_name") or name or "",
+        allow_personal_email=p.get("type") == "indie_game_developer",
         contact_form_only=not bool(verified.get("contact_email")) and any(
             bool(BeautifulSoup(h, "lxml").find("form")) and re.search(r"contact|inquiry|お問い合わせ", url, re.I)
             for url, h in pages),
@@ -208,10 +371,12 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
         # By id, never through the canonical-key upsert: after a website recovery that upsert would derive a different key and create a duplicate prospect.
         rpc("intel_agent_reeval_record_research", {"p_run_id": run_id, "p_prospect_id": p["id"], "p_verified": verified, "p_contact_name": name or "",
                                                    "p_contact_email": contact["email"] if contact and not existing else "", "p_contact_source_url": (src if website_verified else "")})
-        return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "contactability": contact_assessment, "pages": len(pages), "text_chars": len(text)}
-    rpc("intel_agent_upsert_prospect", {"p_type": p["type"], "p_name": p["name"], "p_website": p["website"], "p_contact_name": name or "", "p_contact_email": contact["email"] if contact and not existing else "",
+        return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "contactability": contact_assessment, "pages": len(pages), "text_chars": len(text),
+                "dated_events": len(indie_events), "visual_review_pending": len(indie_visual_candidates), "identity_evidence_candidates": len(indie_identity_mentions)}
+    rpc("intel_agent_upsert_prospect", {"p_type": p["type"], "p_name": p["name"], "p_website": p.get("website") or "", "p_contact_name": name or "", "p_contact_email": contact["email"] if contact and not existing else "",
                                         "p_contact_source_url": (src if website_verified else ""), "p_country": "", "p_language": language, "p_verified": verified})
-    return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "contactability": contact_assessment, "pages": len(pages), "text_chars": len(text)}
+    return {"signals": sum(map(len, found.values())), "contact": bool(contact), "contact_verified": website_verified or manually_verified, "contactability": contact_assessment, "pages": len(pages), "text_chars": len(text),
+            "dated_events": len(indie_events), "visual_review_pending": len(indie_visual_candidates), "identity_evidence_candidates": len(indie_identity_mentions)}
 
 
 def prior_studio_model(p: dict) -> str | None:
@@ -317,25 +482,79 @@ def qualify(rpc, ctx: dict, criteria: dict, *, reeval: ReevalScope | None = None
         return _qualify_studio(rpc, ctx, criteria, reeval)
     if reeval is not None:
         raise PermanentError("a reevaluation never applies to indie_game_developer prospects")
-    sigs = {e["fact_type"]: e["snippet"] for e in ctx["evidence"] if e["verified"]}
+    evidence = [e for e in ctx.get("evidence", []) if e.get("verified") and e.get("snippet")]
+    sigs: dict[str, list[str]] = {}
+    for e in evidence:  # retain every verified snippet; do not collapse repeated fact types
+        sigs.setdefault(str(e.get("fact_type") or ""), []).append(str(e.get("snippet") or ""))
     verified = (p.get("facts") or {}).get("verified", {})
-    meta = {"recent_activity": bool(verified.get("recent_activity", False)), "coming_soon": verified.get("coming_soon", False),
-            "price_present": verified.get("price_present", False), "language": verified.get("language") or p.get("language")}
-    contact = {"email": p.get("contact_email") or "", "name": p.get("contact_name") or "", "role": verified.get("contact_role", "")} if p.get("contact_email") else None
-    fn = scoring.score_indie
-    res = fn(sigs, meta, contact, qualify_min=int(criteria.get("qualify_min", 70)), review_min=int(criteria.get("review_min", 50)))
-    indie_email = p.get("contact_email") or ""
+    meta = {
+        **verified,
+        "developer_name": p.get("name") or "",
+        "prospect_name": p.get("name") or "",
+        "developer_website": p.get("website") or "",
+        "project_title": p.get("project_title") or verified.get("project_title") or verified.get("game") or "",
+        "project_url": p.get("project_source_url") or verified.get("project_url") or verified.get("game_url") or "",
+        "official_project_urls": [e.get("url") for e in evidence if e.get("url") and str(e.get("fact_type") or "").casefold() in {"game_store_page", "steam_project", "itch_project", "kickstarter_project"}], 
+        "project_announcement_date": p.get("project_announcement_date") or verified.get("project_announcement_date") or verified.get("announcement_date"),
+        "project_campaign_date": p.get("project_campaign_date") or verified.get("project_campaign_date") or verified.get("campaign_date"),
+        "project_expected_release_date": p.get("project_expected_release_date") or verified.get("project_expected_release_date") or verified.get("expected_release_date"),
+        "project_actual_release_date": p.get("project_actual_release_date") or verified.get("project_actual_release_date") or verified.get("actual_release_date"),
+        "project_latest_activity_date": p.get("project_latest_activity_date") or verified.get("project_latest_activity_date") or verified.get("latest_activity_date"),
+        "project_marketing_milestones": p.get("project_marketing_milestones") or verified.get("marketing_milestones") or [],
+        "language": verified.get("language") or p.get("language"),
+    }
+    indie_email = (p.get("contact_email") or "").strip().lower()
     try:
-        suppression = rpc("intel_agent_contactability_facts", {"p_email": indie_email, "p_domain": p.get("domain") or ""}) or {}
+        suppression = rpc("intel_agent_indie_suppression_facts", {"p_email": indie_email, "p_domain": p.get("domain") or ""})
+        if not isinstance(suppression, dict) or not all(k in suppression for k in ("suppressed", "bounced", "complained")):
+            raise RuntimeError("suppression lookup returned no complete structured result")
     except Exception:
         suppression = {"lookup_unavailable": True}
-    res.contactability = contactability.assess(email=indie_email, official_domain=p.get("domain") or "",
-        source_url=verified.get("contact_source_url") or p.get("contact_source_url") or "",
+    if p.get("status") == "suppressed" or any(scoring._is_true(verified.get(k)) for k in ("suppressed", "unsubscribed", "do_not_contact", "bounced", "complained", "complaint")):
+        known_reason = ("unsubscribe" if scoring._is_true(verified.get("unsubscribed")) else "do not contact" if scoring._is_true(verified.get("do_not_contact"))
+                        else "bounce" if scoring._is_true(verified.get("bounced")) else "complaint" if scoring._is_true(verified.get("complained") or verified.get("complaint"))
+                        else "prospect is already marked suppressed")
+        suppression = {"suppressed": bool(p.get("status") == "suppressed" or any(scoring._is_true(verified.get(k)) for k in ("suppressed", "unsubscribed", "do_not_contact"))),
+                       "bounced": scoring._is_true(verified.get("bounced")),
+                       "complained": scoring._is_true(verified.get("complained") or verified.get("complaint")), "suppression_reason": known_reason}
+    assessment = contactability.assess(
+        email=indie_email, official_domain=p.get("domain") or "",
+        source_url=verified.get("contact_source_url") or p.get("contact_source_url") or
+            (verified.get("personal_email_affiliation_source_url") or verified.get("employee_affiliation_source_url") or ""),
         verification=verified.get("contact_verification") or "", verified_email=verified.get("contact_email") or "",
-        employee_affiliation=bool(verified.get("employee_affiliation_evidence")), delivery_evidence=verified.get("delivery_evidence") or "",
-        bounced=bool(verified.get("bounced") or suppression.get("bounced")), complained=bool(verified.get("complained") or suppression.get("complained")))
-    if suppression.get("lookup_unavailable"):
-        res.contactability = {"status": "needs_review", "reason": "suppression status could not be verified", "evidence": {}}
-    rpc("intel_agent_set_score", {"p_prospect_id": p["id"], "p_score": res.score, "p_breakdown": res.breakdown, "p_decision": res.decision, "p_reason": res.reason,
-                                  "p_estimates": {"decision_basis": "deterministic rubric over verified evidence", "contactability": res.contactability}})
+        employee_affiliation=bool(verified.get("employee_affiliation_evidence") or verified.get("personal_email_affiliation_evidence")),
+        delivery_evidence=verified.get("delivery_evidence") or "",
+        bounced=scoring._is_true(verified.get("bounced") or suppression.get("bounced")),
+        complained=scoring._is_true(verified.get("complained") or verified.get("complaint") or suppression.get("complained")),
+        suppressed=any(scoring._is_true(v) for v in (suppression.get("suppressed"), verified.get("unsubscribed"), verified.get("do_not_contact"), verified.get("suppressed"))),
+        suppression_reason=suppression.get("suppression_reason") or ("unsubscribe" if scoring._is_true(verified.get("unsubscribed")) else "do not contact" if scoring._is_true(verified.get("do_not_contact")) else ""),
+        affiliation_evidence=verified.get("personal_email_affiliation_evidence") or verified.get("employee_affiliation_snippet") or "",
+        affiliation_source_url=verified.get("personal_email_affiliation_source_url") or verified.get("employee_affiliation_source_url") or "",
+        contact_name=p.get("contact_name") or "",
+        allow_personal_email=p.get("type") == "indie_game_developer",
+    )
+    if suppression.get("lookup_unavailable") and assessment.get("status") != "rejected":
+        assessment = {"status": "needs_review", "reason": "suppression status could not be verified", "evidence": assessment.get("evidence", {})}
+    elif suppression.get("suppressed"):
+        assessment = {"status": "rejected", "reason": suppression.get("suppression_reason") or "email or domain is suppressed", "evidence": assessment.get("evidence", {})}
+    res = scoring.score_indie(sigs, meta, {"email": indie_email} if indie_email else None,
+                              evidence_rows=evidence, contactability_result=assessment,
+                              suppression=suppression)
+    res.contactability = assessment
+    qualification = {
+        "model": scoring.INDIE_MODEL,
+        "score": res.score,
+        "decision": res.decision,
+        "thresholds": {"qualified": scoring.INDIE_QUALIFY_MIN, "review": scoring.INDIE_REVIEW_MIN},
+        "mandatory_gates": res.mandatory_gates,
+        "failed_gates": [k for k, v in res.mandatory_gates.items() if not v.get("passed")],
+        "evidence_ids": [str(e.get("id")) for e in evidence if e.get("id")],
+        "evidence_count": len(evidence),
+        "contactability": assessment,
+    }
+    rpc("intel_agent_set_score", {"p_prospect_id": p["id"], "p_score": res.score, "p_breakdown": res.breakdown,
+                                  "p_decision": res.decision, "p_reason": res.reason,
+                                  "p_estimates": {"decision_basis": "deterministic project-first rubric over verified evidence",
+                                                  "scoring_model": scoring.INDIE_MODEL, "qualification_v2": qualification,
+                                                  "contactability": assessment, "suppression": suppression}})
     return res

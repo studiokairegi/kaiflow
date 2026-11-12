@@ -111,3 +111,10 @@ test("profile form round-trips, de-duplicates and refuses an empty profile", () 
   assert.deepEqual(profileToForm({ description: "x", terms_en: ["a"], terms_ja: ["b"], exclude: ["c"], approved: true }), { description: "x", termsEn: "a", termsJa: "b", exclude: "c", approved: true });
   assert.equal(proposedTerms({}), null); assert.deepEqual(proposedTerms({ proposed_en: ["a"], proposed_ja: [], proposed_exclude: ["z"] }), { termsEn: "a", termsJa: "", exclude: "z" });
 });
+
+
+test("indie V2 campaign thresholds cannot be weakened by saved campaign settings", () => {
+  const p = criteriaPatch({ keywords: "JRPG", seedUrls: "", qualifyMin: 20, reviewMin: 10, prospectType: "indie_game_developer" });
+  assert.equal(p.qualify_min, 75);
+  assert.equal(p.review_min, 55);
+});

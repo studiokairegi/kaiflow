@@ -23,6 +23,10 @@ export const intelApi = {
   enqueue: (s, kind, payload) => call(s, "intel_admin_enqueue_job", { p_kind: kind, p_payload: payload || {} }),
   requeueJob: (s, id) => call(s, "intel_admin_requeue_job", { p_job_id: id }),
   markProspectForReview: (s, id) => call(s, "intel_admin_mark_prospect_review", { p_prospect_id: id }),
+  addIndieEvidence: (s, a) => call(s, "intel_admin_add_indie_evidence", { p_prospect_id: a.prospectId, p_fact_type: a.factType, p_source_url: a.sourceUrl, p_snippet: a.snippet, p_event_date: a.eventDate || null, p_media_url: a.mediaUrl || "" }),
+  addIndieContactEvidence: (s, a) => call(s, "intel_admin_add_indie_contact_evidence", { p_prospect_id: a.prospectId, p_source_url: a.sourceUrl, p_snippet: a.snippet }),
+  verifyIndieIdentity: (s, a) => call(s, "intel_admin_verify_indie_identity", { p_prospect_id: a.prospectId, p_developer_name: a.developerName, p_developer_evidence_id: a.developerEvidenceId, p_project_evidence_id: a.projectEvidenceId, p_creator_role: a.creatorRole || "unknown" }),
+  verifyIndieContact: (s, a) => call(s, "intel_admin_verify_indie_contact", { p_prospect_id: a.prospectId, p_email: a.email, p_evidence_id: a.evidenceId }),
   reviewProspect: (s, id, action, leadId) => call(s, "intel_admin_review_prospect", { p_prospect_id: id, p_action: action, p_lead_id: leadId || null }),
   reviewMessage: (s, id, action, subject, body) => call(s, "intel_admin_review_message", { p_message_id: id, p_action: action, p_subject: subject ?? null, p_body: body ?? null }),
   resolveUnknown: (s, id, outcome) => call(s, "intel_admin_resolve_unknown", { p_message_id: id, p_outcome: outcome }),
@@ -50,6 +54,7 @@ export const intelApi = {
   setProfile: (s, type, p) => call(s, "intel_admin_set_profile", { p_type: type, p_description: p.description, p_terms_en: p.termsEn, p_terms_ja: p.termsJa, p_exclude: p.exclude }),
   approveProfile: (s, type, approved) => call(s, "intel_admin_approve_profile", { p_type: type, p_approved: approved }),
   addManualPost: (s, type, url, text) => call(s, "intel_admin_add_manual_post", { p_type: type, p_url: url || "", p_text: text || "" }),
+  addKickstarterProject: (s, project) => call(s, "intel_admin_add_kickstarter_project", { p_url: project.url, p_title: project.title, p_creator: project.creator, p_developer: project.developer || "", p_website: project.website || "", p_notes: project.notes || "", p_permission_reference: project.permissionReference || "", p_permission_confirmed: project.permissionConfirmed === true }),
   discoveryStats: (s) => call(s, "intel_admin_discovery_stats"),
   reevalStart: (s, a) => call(s, "intel_admin_reeval_start", {
     p_name: a.name, p_limit: a.limit ?? null, p_dry_run: a.dryRun ?? true,
@@ -72,9 +77,10 @@ export const intelApi = {
   chatNewThread: (s, title) => call(s, "intel_admin_chat_new_thread", { p_title: title || "New chat" }),
   chatSend: (s, threadId, text, clientKey) => call(s, "intel_admin_chat_send", { p_thread_id: threadId, p_text: text, p_client_key: clientKey }),
   chatThreads: (s) => read(s.from("intel_chat_threads").select("id,title,updated_at").order("updated_at", { ascending: false }).limit(30)),
-  chatMessages: (s, threadId) => read(s.from("intel_chat_messages").select("id,role,content,status,tool_name,reply_to,created_at").eq("thread_id", threadId).order("id").limit(300)),
+  // Newest rows, shown oldest-first: ascending + limit would return the OLDEST rows and freeze long threads.
+  chatMessages: async (s, threadId) => (await read(s.from("intel_chat_messages").select("id,role,content,status,tool_name,reply_to,created_at").eq("thread_id", threadId).order("id", { ascending: false }).limit(300))).reverse(),
 
-  chatActions: (s, threadId) => read(s.from("intel_chat_actions").select("id,message_id,tool,summary,status,result,created_at,expires_at").eq("thread_id", threadId).order("created_at").limit(100)),
+  chatActions: async (s, threadId) => (await read(s.from("intel_chat_actions").select("id,message_id,tool,summary,status,result,created_at,expires_at").eq("thread_id", threadId).order("created_at", { ascending: false }).limit(100))).reverse(),
   chatConfirm: (s, actionId) => call(s, "intel_admin_chat_confirm", { p_action_id: actionId }),
   chatCancel: (s, actionId) => call(s, "intel_admin_chat_cancel", { p_action_id: actionId }),
 

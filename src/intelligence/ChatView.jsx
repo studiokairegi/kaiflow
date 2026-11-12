@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { S, T, Btn, Banner, Pill, useBusy } from "../finance/ui.jsx";
 import { intelApi } from "./api.js";
-import { CHAT_SUGGESTIONS, actionStatus, awaitingAnswer, chatTurns, groupActions, hasPendingActions, isActionLive, newClientKey, workerState } from "./logic.js";
+import { CHAT_SUGGESTIONS, actionStatus, answerOverdue, awaitingAnswer, chatTurns, groupActions, hasPendingActions, isActionLive, newClientKey, workerState } from "./logic.js";
 import { Muted, Section, TextArea, useLoad } from "./kit.jsx";
 
 export default function ChatView({ supabase, tick, workerSeconds, onChanged }) {
@@ -16,7 +16,8 @@ export default function ChatView({ supabase, tick, workerSeconds, onChanged }) {
   const acts = useLoad(() => (threadId ? intelApi.chatActions(supabase, threadId) : Promise.resolve([])), [supabase, threadId, tick, fast]);
   const byRequest = groupActions(acts.data);
   const list = msgs.data || [];
-  const waiting = awaitingAnswer(list) || false;
+  const overdue = answerOverdue(list);
+  const waiting = (awaitingAnswer(list) && !overdue) || false;      // stop polling and spinning when the worker never answers
   const decide = (action, confirm) => run(async () => {
     const r = confirm ? await intelApi.chatConfirm(supabase, action.id) : await intelApi.chatCancel(supabase, action.id);
     if (confirm && r && r.ok === false) throw new Error(r.error || (r.status === "expired" ? "That request expired. Ask again." : "It could not be completed."));
@@ -84,6 +85,7 @@ export default function ChatView({ supabase, tick, workerSeconds, onChanged }) {
             </div>
           ))}
           {waiting && <Muted>Working on it…</Muted>}
+          {overdue && <Banner tone="warn">There is still no answer to your last message. The worker may be offline or the request failed. Check the worker status above, then send it again.</Banner>}
           <div ref={end} />
         </div>
         <div style={S.row}>

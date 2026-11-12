@@ -61,7 +61,8 @@ function Shell({ supabase, target, onOpenLead }) {
   const ov = useLoad(() => intelApi.overview(supabase), [supabase, tick]);
   const mail = useLoad(() => intelApi.mailStatus(supabase), [supabase, tick]);
   const mailStatus = mail.error ? { ...(mail.data || {}), status: "check_failed", last_error: mail.error } : mail.data;
-  const refresh = async () => { await ov.reload(); await mail.reload(); setTick((t) => t + 1); };
+  // One refresh path: bumping `tick` re-runs both loads (and every tab that reads `tick`) exactly once.
+  const refresh = async () => { setTick((t) => t + 1); };
 
   if (ov.loading) return <Muted>Loading…</Muted>;
   if (ov.error && !ov.data) return <Banner tone="bad">{ov.error}</Banner>;

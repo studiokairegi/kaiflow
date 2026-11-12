@@ -49,7 +49,7 @@ PROPOSALS: dict[str, tuple[str, dict[str, str]]] = {
     "set_campaign_cap": ("PREPARE a new daily introduction limit for a campaign (type, daily_cap 0 to 30).", {"type": "type", "daily_cap": "int:0:30"}),
     "enable_sending": ("PREPARE turning email sending ON.", {}),
     "set_autonomy": ("PREPARE the autonomy level: shadow, assisted or autonomous.", {"autonomy": "enum:shadow|assisted|autonomous"}),
-    "update_limits": ("PREPARE changed limits: daily_initial_cap (0-30), followup_business_days (1-30), max_followups (0-3).", {"daily_initial_cap": "int:0:30", "followup_business_days": "int:1:30", "max_followups": "int:0:3"}),
+    "update_limits": ("PREPARE changed limits: daily_initial_cap (0-30), followup_business_days (1-30), max_followups (0-4).", {"daily_initial_cap": "int:0:30", "followup_business_days": "int:1:30", "max_followups": "int:0:4"}),
     "add_suppression": ("PREPARE never contacting an email address or a domain again (value, reason).", {"value": "text:200", "reason": "text:200"}),
     "review_prospect": ("PREPARE approving or rejecting a discovered prospect (prospect_id, action approve or reject).", {"prospect_id": "uuid", "action": "enum:approve|reject"}),
 }
@@ -88,7 +88,7 @@ def clean_args(tool: str, args) -> dict:
             lo, hi = (int(x) for x in kind.split(":")[1:])
             try:
                 out[k] = max(lo, min(hi, int(float(v))))
-            except ValueError:
+            except (ValueError, OverflowError):                  # "nan", "1e999", "inf": drop the value like any other bad one
                 pass
         elif kind.startswith("uuids:") and isinstance(v, list):
             out[k] = [x for x in v if isinstance(x, str) and UUID.match(x)][: int(kind.split(":")[1])]
@@ -194,6 +194,12 @@ def _render(tool: str, r: dict) -> str:
         return f"Paused {r.get('paused_campaigns', 0)} campaign(s)."
     if tool == "emergency_stop":
         return "All outgoing email is stopped. You can turn it back on from the Overview tab."
+    if tool in PROPOSALS:                                            # prepared only: never say "Done."
+        return "I prepared that change, but nothing has happened yet. It is waiting for your Confirm on the card in this chat."
+    if tool == "prospect_detail":
+        p = r.get("prospect") or {}
+        return (f"{p['name']} is {p['status']}" + (f", score {p['score']}" if p.get("score") is not None else "") +
+                f". {r.get('evidence_count', 0)} piece(s) of evidence on file.")
     if tool in ("start_discovery", "research_prospect", "prepare_followups", "prepare_introductions", "adopt_crm_leads"):
         return r.get("note") or "Done. See the Agent Activity Logs for progress."
     return "Done."
@@ -228,11 +234,24 @@ _DRAFT_REQUEST = re.compile(
     r"(?:メール|営業メール|初回連絡).{0,30}(?:作成|下書き|ドラフト))", re.I | re.S)
 _DRAFT_TARGET = re.compile(r"\b(?:to|for)\s+[\"“]?([A-Za-z0-9][A-Za-z0-9 .&'’_-]{0,58})", re.I)
 _NEGATED_DRAFT_REQUEST = re.compile(
-    r"\b(?:do\s+not|don't|dont|never|please\s+don't)\s+(?:draft|write|compose|prepare)\b", re.I)
+    r"\b(?:do\s+not|don['’]?t|never|please\s+don['’]?t)\s+(?:draft|write|compose|prepare)\b", re.I)
+# A request that starts like a question or a look-up ("Show me the draft email for X") is not an order to create a draft.
+_LOOKUP_LEAD = re.compile(r"^\W*(?:show|display|view|open|find|list|read|check|where|what|which|how|why|is|are|does|did|has|have)\b", re.I)
+_CLAUSE_SPLIT = re.compile(r"[;\n。]|[.!?](?:\s|$)|,?\s+but\s+", re.I)
+_ROLE_TARGET = re.compile(r"^(?:my|our|your|his|her|their|the|a|an|this|that|some|any)\b", re.I)   # "my accountant": a person, not a prospect name
+
+
+def _draft_clause(request: str) -> str | None:
+    """The first clause that really orders a draft: it matches the draft pattern, is not negated, and is not a look-up.
+    Negation applies to its own clause only, so "Don't write to Pixel Moon, but draft an email for Andraft" still drafts for Andraft."""
+    for clause in _CLAUSE_SPLIT.split(request or ""):
+        if clause and _DRAFT_REQUEST.search(clause) and not _NEGATED_DRAFT_REQUEST.search(clause) and not _LOOKUP_LEAD.search(clause):
+            return clause
+    return None
 
 
 def _is_explicit_draft_request(request: str) -> bool:
-    return bool(_DRAFT_REQUEST.search(request) and not _NEGATED_DRAFT_REQUEST.search(request))
+    return _draft_clause(request) is not None
 
 
 def _company_key(value: str) -> str:
@@ -253,9 +272,17 @@ def _draft_target(request: str) -> str:
     if not match:
         return ""
     value = match.group(1)
-    value = re.split(r"\s+(?:on behalf of|for|in|with|and)\b|[,.;:!?。\n]", value, maxsplit=1, flags=re.I)[0]
+    # "and" is NOT a stop word ("Black and White Studio"); _draft_candidates() tries shorter prefixes when a name is followed by more words.
+    value = re.split(r"\s+(?:on behalf of|for|in|with|about|regarding|regards|re|concerning|from|that|which|offering|introducing|asking|saying|mentioning|"
+                     r"because|so|using|as|at|by|to|including)\b|[,.;:!?。\n]", value, maxsplit=1, flags=re.I)[0]
     value = re.sub(r"\b(?:on behalf of|Studio Kairegi)\b.*$", "", value, flags=re.I).strip()
     return value[:60].strip()
+
+
+def _draft_candidates(target: str) -> list[str]:
+    """Possible prospect names inside the captured text, longest first: "Black and White Studio" then "Black and White", ..."""
+    words = target.split()
+    return [" ".join(words[:i]) for i in range(len(words), 0, -1)] or ([target] if target else [])
 
 
 _RESOLVABLE = ("prospect_detail", "research_prospect", "review_prospect")
@@ -313,22 +340,34 @@ def _resolve_prospect(d, thread: str, mid: int, args: dict, request: str, used: 
 
 def _handle_explicit_draft(d, thread: str, mid: int, request: str, used: list[str]):
     """Deterministic draft path: resolve one exact prospect, compose and persist before confirming."""
-    target = _draft_target(request)
+    clause = _draft_clause(request) or request
+    target = _draft_target(clause) or _draft_target(request)
     if not target:
-        _reply(d, thread, mid, "I can prepare and save the email, but I couldn't identify the recipient. Please specify the exact prospect name (for example, 'to Andraft').", "error")
-        return {"replied": True, "draft_error": "recipient_not_specified"}
-    args = clean_args("list_prospects", {"query": target, "limit": 25})
-    prospects = d.rpc("intel_agent_chat_tool", {"p_thread_id": thread, "p_message_id": mid, "p_tool": "list_prospects", "p_args": args})
-    used.append("list_prospects")
-    if not isinstance(prospects, dict) or prospects.get("ok") is False:
-        reason = (prospects or {}).get("reason", "prospect_lookup_failed")
-        _reply(d, thread, mid, f"I couldn't resolve {target!r} safely, so no email draft was created ({reason}).", "error")
-        return {"replied": True, "draft_error": reason}
-    matches = [p for p in prospects.get("prospects", []) if _company_key(p.get("name")) == _company_key(target)]
+        return None                                                      # no recipient named: ordinary writing help, let the model answer
+    cands = _draft_candidates(target)
+    matches: list[dict] = []
+    for query in dict.fromkeys([target, cands[-1]]):                     # full text first, then just the first word (2 calls at most)
+        args = clean_args("list_prospects", {"query": query, "limit": 25})
+        prospects = d.rpc("intel_agent_chat_tool", {"p_thread_id": thread, "p_message_id": mid, "p_tool": "list_prospects", "p_args": args})
+        used.append("list_prospects")
+        if not isinstance(prospects, dict) or prospects.get("ok") is False:
+            reason = (prospects or {}).get("reason", "prospect_lookup_failed") if isinstance(prospects, dict) or prospects is None else "prospect_lookup_failed"
+            _reply(d, thread, mid, f"I couldn't resolve {target!r} safely, so no email draft was created ({reason}).", "error")
+            return {"replied": True, "draft_error": reason}
+        for cand in cands:                                               # longest candidate that names a prospect wins
+            matches = [p for p in prospects.get("prospects", []) if _company_key(p.get("name")) == _company_key(cand)]
+            if matches:
+                break
+        if matches:
+            break
+    if not matches and _ROLE_TARGET.match(target):
+        return None                                                      # "write an email to my accountant": ordinary writing help, let the model answer
+    if not matches:
+        _reply(d, thread, mid, f"I couldn't identify exactly one prospect matching {target!r} (prospect_not_found). No draft was created. Please use the exact prospect name shown in Prospects.", "error")
+        return {"replied": True, "draft_error": "prospect_not_found"}
     if len(matches) != 1:
-        reason = "prospect_not_found" if not matches else "ambiguous_prospect"
-        _reply(d, thread, mid, f"I couldn't identify exactly one prospect matching {target!r} ({reason}). No draft was created. Please use the exact prospect name shown in Prospects.", "error")
-        return {"replied": True, "draft_error": reason}
+        _reply(d, thread, mid, f"More than one prospect matches {target!r} (ambiguous_prospect). No draft was created. Please use the exact prospect name shown in Prospects.", "error")
+        return {"replied": True, "draft_error": "ambiguous_prospect"}
     prospect = matches[0]
     if prospect.get("status") != "lead_linked":
         _reply(d, thread, mid, f"{prospect['name']} is currently {prospect.get('status')}, not lead_linked. The initial-outreach workflow requires a linked lead; no draft was created.", "error")
@@ -361,6 +400,23 @@ def _handle_explicit_draft(d, thread: str, mid: int, request: str, used: list[st
 
 
 def handle(d, payload: dict) -> dict:
+    """Run one chat job. A failure that will not be retried must still leave an answer, or the UI waits forever."""
+    try:
+        return _handle(d, payload)
+    except (TransientError, RpcError):
+        raise                                                            # the job runner retries these
+    except Exception as exc:
+        thread, mid = payload.get("thread_id"), payload.get("message_id")
+        if thread and isinstance(mid, int):
+            try:
+                _reply(d, thread, mid, "I could not finish that request because of an internal error. Nothing was changed. Please try again; "
+                                       f"if it keeps happening, see the Agent Activity Logs ({type(exc).__name__}).", "error")
+            except Exception:
+                pass
+        raise
+
+
+def _handle(d, payload: dict) -> dict:
     thread, mid = payload.get("thread_id"), payload.get("message_id")
     if not thread or not isinstance(mid, int):
         raise PermanentError("chat job needs thread_id and message_id")
@@ -382,7 +438,10 @@ def handle(d, payload: dict) -> dict:
     # Explicit email drafting is a state-changing operation. Do not leave it to
     # free-form chat generation: resolve the prospect and persist through h_draft.
     if _is_explicit_draft_request(request):
-        return _handle_explicit_draft(d, thread, mid, request, used)
+        done = _handle_explicit_draft(d, thread, mid, request, used)
+        if done is not None:
+            return done
+        used.clear()                                                     # nothing was drafted; continue as an ordinary chat request
 
     def run_tool(tool, args):
         nonlocal last_tool

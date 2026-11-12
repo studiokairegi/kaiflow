@@ -61,10 +61,52 @@ export function attentionItems(o) {
   const out = [];
   if (o.unknown_sends > 0) out.push({ tone: "bad", text: `${o.unknown_sends} email(s) have unverified delivery. Nothing will be resent until you resolve them (Outreach).` });
   if (o.dead_jobs > 0) out.push({ tone: "bad", text: `${o.dead_jobs} job(s) failed permanently (Agent Activity Logs).` });
+  if (o.expired_leases > 0) out.push({ tone: "warn", text: `${o.expired_leases} worker job lease(s) expired. A job may have stalled; the worker should recover it (Agent Activity Logs).` });
+  if (o.failed_jobs > 0) out.push({ tone: "warn", text: `${o.failed_jobs} job(s) failed and are waiting to be retried (Agent Activity Logs).` });
   if (o.pending_approval > 0) out.push({ tone: "warn", text: `${o.pending_approval} message(s) are waiting for your approval.` });
   const needs = o.prospects_by_status?.needs_review || 0;
   if (needs > 0) out.push({ tone: "warn", text: `${needs} prospect(s) need a decision (possible duplicate or no verified email).` });
   return out;
+}
+
+/**
+ * Sending status for the Overview banner. The kill switch is only ONE gate: when it is off, sending can still be
+ * blocked by mail connectivity, the worker, or the daily limits. `ready` is true only when the dashboard can see
+ * no blocker; it never claims a delivery guarantee.
+ */
+export function sendingReadiness(o, mail) {
+  if (!o || !o.configured) return { state: "unknown", tone: "muted", text: "", reasons: [] };
+  if (o.kill_switch) return { state: "stopped", tone: "warn", text: "Outgoing email is OFF. The agent can research and draft, but nothing is sent.", reasons: [] };
+  const reasons = [];
+  if (!mail) reasons.push("mail status is still loading");
+  else if (mail.status === "check_failed" || mail.status === "error") reasons.push("the mail status check failed");
+  else if (mail.status !== "connected") reasons.push("no mail account is connected");
+  else if (Array.isArray(mail.accounts) && mail.accounts.length > 0 && !mail.accounts.some((a) => a.status === "connected")) reasons.push("no provider account is connected");
+  const seen = o.worker_last_seen_seconds;
+  if (seen === null || seen === undefined) reasons.push("the worker has never connected");
+  else if (seen > 900) reasons.push("the worker is offline");
+  const num = (v) => (Number.isFinite(Number(v)) && v !== null && v !== undefined && v !== "" ? Number(v) : null);
+  const [is, ic, fs, fc] = [num(o.initial_sent_today), num(o.initial_cap), num(o.followup_sent_today), num(o.followup_cap)];
+  if (is !== null && ic !== null && fs !== null && fc !== null && is >= ic && fs >= fc) reasons.push("today's introduction and follow-up limits are both reached");
+  if (reasons.length) return { state: "blocked", tone: "warn", text: `Outgoing email is switched ON, but sending is not ready: ${reasons.join("; ")}.`, reasons };
+  const approval = o.autonomy === "shadow" ? " Every email still waits for your approval." : "";
+  return { state: "ready", tone: "ok", text: `Outgoing email is ON and no sending blockers are showing.${approval}`, reasons };
+}
+
+export const DISCOVERY_TYPES = Object.freeze(["indie_game_developer", "animation_studio_support"]);
+
+/**
+ * Queue discovery for each campaign type independently so one failure cannot hide the other's result, and report
+ * exactly what happened. Callers retry only `failed` types, so a retry never re-queues one that already queued.
+ */
+export async function queueDiscovery(enqueue, types = DISCOVERY_TYPES) {
+  const queued = [];
+  const failed = [];
+  for (const type of types) {
+    try { await enqueue("discover", { type }); queued.push(type); }
+    catch (e) { failed.push({ type, error: e?.message || "request failed" }); }
+  }
+  return { queued, failed };
 }
 
 /** Group messages into conversations keyed by prospect, newest activity first. */
@@ -107,11 +149,12 @@ export const joinLines = (arr) => (Array.isArray(arr) ? arr.join("\n") : "");
 
 /** Campaign form -> criteria patch (the database merges it into the stored criteria). */
 export function criteriaPatch({ keywords, seedUrls, qualifyMin, reviewMin, prospectType }) {
-  // Studio-v2 has immutable Phase 1 decision bands. Keep the campaign payload aligned
-  // with the worker's server-side enforcement even if stale/custom values are loaded.
+  // Both V2 scoring models have server-enforced bands; campaign settings cannot
+  // weaken the qualification floor for either campaign.
   const isStudio = prospectType === "animation_studio_support";
-  const q = isStudio ? 70 : Math.max(0, Math.min(100, Math.round(Number(qualifyMin))));
-  const r = isStudio ? 50 : Math.max(0, Math.min(q, Math.round(Number(reviewMin))));
+  const isIndie = prospectType === "indie_game_developer";
+  const q = isStudio ? 70 : isIndie ? 75 : Math.max(0, Math.min(100, Math.round(Number(qualifyMin))));
+  const r = isStudio ? 50 : isIndie ? 55 : Math.max(0, Math.min(q, Math.round(Number(reviewMin))));
   if (!Number.isFinite(q) || !Number.isFinite(r)) throw new Error("Scores must be numbers between 0 and 100.");
   return { keywords: splitLines(keywords).map((k) => k.toLowerCase()), seed_urls: splitLines(seedUrls), qualify_min: q, review_min: r };
 }
@@ -212,6 +255,15 @@ export function awaitingAnswer(messages) {
   if (!users.length) return false;
   const last = users[users.length - 1];
   return !(messages || []).some((m) => m.role === "assistant" && m.reply_to === last.id);
+}
+/** How long the chat keeps showing "Working on it…" (and polling) before it tells the person the assistant has not answered. */
+export const ANSWER_TIMEOUT_MS = 5 * 60 * 1000;
+/** True when the newest user message is still unanswered AND is older than the timeout. */
+export function answerOverdue(messages, now = Date.now()) {
+  if (!awaitingAnswer(messages)) return false;
+  const users = (messages || []).filter((m) => m.role === "user");
+  const at = Date.parse(users[users.length - 1].created_at);
+  return Number.isFinite(at) && now - at > ANSWER_TIMEOUT_MS;
 }
 export const newClientKey = () => `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 export const countAiGeneratedLeads = (leads) => (leads || []).filter(isAiGeneratedLead).length;

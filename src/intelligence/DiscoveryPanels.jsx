@@ -74,3 +74,31 @@ export function DiscoveryStats({ supabase, tick }) {
     </Section>
   );
 }
+
+
+/** Manual-only Kickstarter intake. The platform is not crawled or fetched. */
+export function ManualKickstarterProject({ supabase, onChanged }) {
+  const [f, setF] = useState({ url: "", title: "", creator: "", developer: "", website: "", notes: "", permissionReference: "", permissionConfirmed: false });
+  const [done, setDone] = useState("");
+  const { busy, error, run } = useBusy();
+  const set = (key) => (e) => setF((old) => ({ ...old, [key]: e.target.value }));
+  return (
+    <Section title="Add a Kickstarter project" hint="Kickstarter's current Terms prohibit automated crawling/spidering and require prior written permission for commercial reuse of site content. This intake stores only the project URL and metadata you enter; it never fetches Kickstarter pages or creator profiles.">
+      <p style={{ fontSize: 13, margin: "0 0 8px" }}><a href="https://www.kickstarter.com/discover/categories/game" target="_blank" rel="noopener noreferrer">Open Kickstarter Games discovery</a></p>
+      {error && <Banner tone="bad">{error}</Banner>}
+      {done && <Banner tone="ok">{done}</Banner>}
+      <Field label="Kickstarter project URL"><Input value={f.url} onChange={set("url")} placeholder="https://www.kickstarter.com/projects/creator/project" /></Field>
+      <div style={S.grid(220)}>
+        <Field label="Project title"><Input value={f.title} onChange={set("title")} /></Field>
+        <Field label="Kickstarter creator name"><Input value={f.creator} onChange={set("creator")} /></Field>
+        <Field label="Developer / studio (if known)"><Input value={f.developer} onChange={set("developer")} placeholder="Leave blank if unknown" /></Field>
+        <Field label="Developer's official website (optional)"><Input value={f.website} onChange={set("website")} placeholder="https://studio.example" /></Field>
+      </div>
+      <Field label="Your notes (optional)"><TextArea rows={3} value={f.notes} onChange={set("notes")} placeholder="Why this project may be relevant; do not paste copyrighted page text." /></Field>
+      <Field label="Internal reference for prior written permission"><Input value={f.permissionReference} onChange={set("permissionReference")} placeholder="e.g. contract ID or permission email reference" /></Field>
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, lineHeight: 1.5 }}><input type="checkbox" checked={f.permissionConfirmed} onChange={(e) => setF((old) => ({ ...old, permissionConfirmed: e.target.checked }))} /> I confirm that prior written permission covers this commercial use of the project information entered here.</label>
+      <div><Btn kind="primary" disabled={busy || !f.url.trim() || !f.title.trim() || !f.creator.trim() || !f.permissionReference.trim() || !f.permissionConfirmed} onClick={() => run(async () => { await intelApi.addKickstarterProject(supabase, f); setF({ url: "", title: "", creator: "", developer: "", website: "", notes: "", permissionReference: "", permissionConfirmed: false }); setDone("Submitted to the persistent project queue. Creator/developer attribution remains unverified until independently checked."); await onChanged(); })}>Add project</Btn></div>
+      <Muted>Written permission is required; this confirmation and reference are an administrator attestation, not confirmation from Kickstarter. Project attribution remains unverified. Automated research runs only against the separate developer website you provide, never the Kickstarter URL.</Muted>
+    </Section>
+  );
+}

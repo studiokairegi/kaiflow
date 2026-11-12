@@ -44,7 +44,11 @@ def indie():
 
 def run(model, prospect=None, run_id=None, site="research.entity"):
     calls = []
-    def rpc(name, args): calls.append((name, args)); return {}
+    def rpc(name, args):
+        calls.append((name, args))
+        if name == "intel_agent_indie_suppression_facts":
+            return {"suppressed": False, "bounced": False, "complained": False, "suppression_reason": ""}
+        return {}
     out = research.research(rpc, Fetch(), research.entity_llm(model, site), {"prospect": prospect or studio()}, run_id=run_id)
     return out, calls
 

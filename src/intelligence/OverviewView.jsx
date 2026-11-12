@@ -1,30 +1,37 @@
-import React from "react";
+import React, { useState } from "react";
 import { S, T, Btn, Pill, Banner, useBusy } from "../finance/ui.jsx";
 import { intelApi } from "./api.js";
-import { AUTONOMY, attentionItems, workerState, mailStatusLabel } from "./logic.js";
+import { AUTONOMY, attentionItems, workerState, mailStatusLabel, sendingReadiness, queueDiscovery, DISCOVERY_TYPES } from "./logic.js";
 import { Kpi, Section, Muted, confirmAction } from "./kit.jsx";
 
 export default function OverviewView({ o, mail, supabase, onChanged, setTab, onNeedsDecision }) {
   const { busy, error, run } = useBusy();
   const w = workerState(o.worker_last_seen_seconds);
   const items = attentionItems(o);
+  const sending = sendingReadiness(o, mail);
+  const [retryTypes, setRetryTypes] = useState(null);   // campaign types whose discovery request failed last time
+  const [discoveryNote, setDiscoveryNote] = useState(null);
   const toggle = () => {
     const turningOn = !o.kill_switch;
     const msg = turningOn ? "Stop ALL outgoing email now? Research and CRM records are kept." : "Enable outgoing email? Messages that you approved (or the autonomy policy allows) will start sending.";
     if (!confirmAction(msg)) return;
     run(async () => { await intelApi.setKillSwitch(supabase, turningOn); await onChanged(); });
   };
+  const typeLabel = (t) => (t === "indie_game_developer" ? "Indie Game Developers" : "Animation Studio Support");
   const discover = () => run(async () => {
-    await intelApi.enqueue(supabase, "discover", { type: "indie_game_developer" });
-    await intelApi.enqueue(supabase, "discover", { type: "animation_studio_support" });
+    const targets = retryTypes?.length ? retryTypes : DISCOVERY_TYPES;
+    const { queued, failed } = await queueDiscovery((k, p) => intelApi.enqueue(supabase, k, p), targets);
+    setRetryTypes(failed.length ? failed.map((f) => f.type) : null);
+    if (!failed.length) setDiscoveryNote({ tone: "ok", text: `Discovery queued for: ${queued.map(typeLabel).join(", ")}.` });
+    else setDiscoveryNote({ tone: "warn", text: `${queued.length ? `Discovery queued for: ${queued.map(typeLabel).join(", ")}. ` : ""}Could not queue: ${failed.map((f) => `${typeLabel(f.type)} (${f.error})`).join("; ")}. Use "Retry failed" to queue only the ones that failed.` });
     await onChanged();
   });
   const st = o.prospects_by_status || {};
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {error && <Banner tone="bad">{error}</Banner>}
-      <Banner tone={o.kill_switch ? "warn" : "ok"} action={<Btn kind={o.kill_switch ? "primary" : "danger"} disabled={busy} onClick={toggle}>{o.kill_switch ? "Enable sending" : "Emergency stop"}</Btn>}>
-        {o.kill_switch ? "Outgoing email is OFF. The agent can research and draft, but nothing is sent." : "Outgoing email is ON."}
+      <Banner tone={sending.tone} action={<Btn kind={o.kill_switch ? "primary" : "danger"} disabled={busy} onClick={toggle}>{o.kill_switch ? "Enable sending" : "Emergency stop"}</Btn>}>
+        {sending.text}
       </Banner>
       <div style={S.row}>
         <Pill tone={w.tone}>{w.label}</Pill>
@@ -62,7 +69,8 @@ export default function OverviewView({ o, mail, supabase, onChanged, setTab, onN
           </div>
         </Section>
         <Section title="Run now" hint="Queues a discovery run for each active campaign. The worker picks it up.">
-          <Btn disabled={busy} onClick={discover}>Run discovery</Btn>
+          {discoveryNote && <Banner tone={discoveryNote.tone}>{discoveryNote.text}</Banner>}
+          <Btn disabled={busy} onClick={discover}>{retryTypes?.length ? "Retry failed" : "Run discovery"}</Btn>
           <Muted>Queued and running jobs: {o.queued_jobs}</Muted>
         </Section>
       </div>

@@ -23,6 +23,13 @@ UNSUBSCRIBE = re.compile(
 NON_EMAIL_UNSUBSCRIBE_CONTEXT = re.compile(r"(?:アカウント|権限|利用制限|アクセス制限).{0,12}解除|解除.{0,12}(?:アカウント|権限|利用制限|アクセス制限)", I)
 COMPLAINT = re.compile(r"\bspam\b|report (you|this)|unsolicited|\bgdpr\b|\bccpa\b|how did you (get|find) my|remove my data|delete my data|legal action|harass|迷惑メール|苦情|クレーム|返金|不誠実|個人情報を削除|法的措置", I)
 CLASS_PATTERNS = {
+    "not_now": re.compile(r"\b(?:not right now|not at the moment|maybe later|check back (?:in|after)|not this quarter|perhaps next (?:quarter|year)|not at this time)\b|今は難しい|現時点では難しい|現時点では.{0,12}(?:検討しておりません|予定はありません|考えておりません)|また時期が来たら|今は予定がない", I),
+    "not_interested": re.compile(r"\b(?:not interested|no thank(?:s)?|not a fit|please do not pursue|we are not interested)\b|興味はありません|関心はありません|今回は見送ります", I),
+    "already_has_trailer": re.compile(r"\b(?:already have (?:a )?(?:trailer|teaser)|trailer is already done|we have a trailer|no current need for (?:a )?trailer|already covered)\b|トレーラーは既に|PVは既に|映像は足りています", I),
+    "wrong_person": re.compile(r"\b(?:wrong person|not the right person|i am not responsible for|not my area|please contact .* instead)\b|担当ではありません|担当者ではない|別の担当", I),
+    "referral": re.compile(r"\b(?:you should contact|please reach out to|speak with|contact .* instead|forward this to)\b|担当者を紹介|担当に転送|こちらにご連絡ください", I),
+    "tell_me_more": re.compile(r"\b(?:tell me more|could you share more|send more details|more information please|interested to learn more)\b|詳しく教えて|詳細を教えて|もう少し情報", I),
+
     "pricing": re.compile(r"\b(price|prices|pricing|quote|quotation|rates?|costs?|budget|how much|fees?|estimate|per (second|minute|frame))\b|[$€£¥]\s?\d|\d\s?(usd|eur|jpy|gbp)\b|料金|価格|単価|見積|費用|予算|報酬", I),
     "negotiation": re.compile(r"discount|negotiat|counter ?offer|lower (the )?price|payment terms?|\bnet ?\d{2}\b|deposit|upfront|invoice|revenue share|royalt|値引|値下げ|条件交渉|支払条件|報酬条件|単価交渉|請求書?|お支払い|支払い", I),
     "contract": re.compile(r"\bcontract\b|agreement|\bnda\b|non-?disclosure|terms and conditions|\blegal\b|契約|秘密保持|合意書|契約書|利用条件|保証|確約", I),
@@ -52,11 +59,12 @@ CLASS_PATTERNS = {
         r"|会議.{0,8}(?:を)?(?:設定|調整|開催|実施).{0,8}(?:できます(?:でしょうか|か)|お願い)|(?:設定|調整|開催).{0,8}会議.{0,8}(?:できます(?:でしょうか|か)|お願い)", I),
     "portfolio": re.compile(r"portfolio|showreel|reel|samples?|previous work|examples? of|work samples|ポートフォリオ|実績", I),
     "interest": re.compile(r"interested|sounds (good|great|interesting)|love to|tell me more|more (info|information|details)|we('| a)?re looking|we need|yes[,.! ]|please send|ぜひ|興味", I),
-    "decline": re.compile(r"not interested|no thank|no, thanks|not (looking|needed|required)|we (already|don'?t)|pass on this|not at this time|not a fit|(?<!で)結構です|間に合って|"
+    # Narrow fallback decline detection. Context-sensitive phrases such as
+    # "not at this time", "not looking", and "we don't" are handled as
+    # not_now / already_has_trailer / ambiguous rather than a generic rejection.
+    "decline": re.compile(r"\b(?:not interested|no thank(?:s)?|no, thanks|not a fit|pass on this|please decline)\b|(?<!で)結構です|間に合って|"
         r"今回は.{0,12}(?:見送らせて|辞退させて|遠慮させて)|"
-        r"(?:現時点|現在|今のところ).{0,12}(?:検討しておりません|予定はありません|考えておりません)|"
-        r"今回は(?:対応|参加|依頼).{0,8}(?:いたしかねます|できかねます|難しいです)|"
-        r"(?:必要ありません|予定しておりません|考えていません)", I),
+        r"今回は(?:対応|参加|依頼).{0,8}(?:いたしかねます|できかねます|難しいです)", I),
 }
 OOO = re.compile(r"out of (the )?office|automatic reply|auto[- ]?reply|autoreply|on (annual )?leave|away from (my )?(email|desk)|will (be )?(back|return) on|自動返信|不在", I)
 BOUNCE_FROM = re.compile(r"^(mailer-daemon|postmaster|mail delivery subsystem)@", I)
@@ -79,6 +87,7 @@ FALSE_CLAIMS_JA = re.compile(
 # Only a first email can be wrong to refer back to an earlier exchange; follow-ups legitimately do.
 PRIOR_CONTACT_JA_INITIAL = re.compile(r"先日|先般|過日|このあいだ|この間|先ほど|いつもお世話|お世話になっ|ご返信ありがとう|前回")
 FALSE_CLAIMS = re.compile(r"\b(we (have )?(played|watched|reviewed|tested|read|studied)|as we discussed|following up on our (call|conversation|meeting)|you('| a)?re (already )?(a )?(client|customer)|referred by|(mutual|common) (friend|connection)|i saw you at|we met)\b", I)
+UNSOLICITED_PORTFOLIO = re.compile(r"\b(?:portfolio|showreel|reel|work samples|samples of our work|examples of our work)\b|ポートフォリオ|弊社の制作実績|当社の制作実績|弊社のリール|サンプルリール", I)
 
 ESCALATE_CLASSES = {"pricing", "negotiation", "contract", "deadline", "availability", "complaint", "ambiguous", "meeting_request", "project_opportunity", "negotiation"}
 
@@ -157,7 +166,7 @@ def scan_inbound(subject: str, body: str) -> dict:
 
 
 def hard_class(hits: set[str]) -> str | None:
-    for c in ("unsubscribe", "complaint", "contract", "negotiation", "pricing", "deadline", "meeting", "availability", "ambiguous"):
+    for c in ("unsubscribe", "complaint", "contract", "negotiation", "pricing", "deadline", "meeting", "availability", "not_interested", "not_now", "already_has_trailer", "wrong_person", "referral", "tell_me_more", "ambiguous"):
         if c in hits:
             return c
     return None
@@ -177,7 +186,15 @@ def validate_outbound(subject: str, body: str, settings: dict, allowed_urls: set
         v.append("bad subject")
     if len(body) > MAX_BODY_CHARS:
         v.append("too long")
-    if kind in ("initial", "followup"):
+    # Cold outbound copy (including long-gap re-engagement) must avoid the
+    # em dash in both subject and body. Keep this at the final policy boundary.
+    if kind in ("initial", "followup", "reengagement") and ("—" in subject or "—" in body):
+        v.append("em dashes are not permitted in cold outreach")
+    if kind in ("initial", "followup", "reengagement"):
+        if URL.search(body):
+            v.append("cold outreach must not contain portfolio or studio website links")
+        if UNSOLICITED_PORTFOLIO.search(body):
+            v.append("portfolio material may be shared only after an explicit request")
         required_opt_out = (opt_out_text if opt_out_text is not None else settings.get("opt_out_text", "")).strip()
         if not required_opt_out or required_opt_out.lower() not in body.lower():
             v.append("missing opt-out sentence")

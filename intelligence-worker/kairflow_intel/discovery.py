@@ -3,6 +3,7 @@ success or failure back so a broken source stops itself instead of hammering a s
 from __future__ import annotations
 
 import time
+import re
 from dataclasses import replace
 
 from .ai_call import call_json
@@ -278,6 +279,8 @@ def h_manual_post(d, job):
     item = d.rpc("intel_agent_item", {"p_item_id": job["payload"]["item_id"]})
     if not item:
         raise PermanentError("post not found")
+    if item.get("source_key") == "kickstarter_manual":
+        return h_manual_kickstarter_project(d, job, item=item)
     ai: dict = {}                                    # filled when the model is actually asked (not for posts the deterministic check settles)
 
     def llm(text):
@@ -302,3 +305,83 @@ def h_profile_terms(d, job):
         terms, ai, starter = base, None, True        # model unavailable: the built-in starter terms (still need your approval)
     d.rpc("intel_agent_propose_terms", {"p_type": ptype, "p_terms_en": terms["terms_en"], "p_terms_ja": terms["terms_ja"], "p_exclude": terms["exclude"]})
     return {"proposed": True, "ai": ai} if ai else {"proposed": True, **({"starter_terms": True} if starter else {})}
+
+
+def h_manual_kickstarter_project(d, job, item=None):
+    """Ingest an administrator-submitted Kickstarter URL and metadata without fetching Kickstarter."""
+    from urllib.parse import urlparse, urlunparse
+    from .protected_accounts import match_protected
+
+    item = item or d.rpc("intel_agent_item", {"p_item_id": job["payload"]["item_id"]})
+    if not item:
+        raise PermanentError("Kickstarter project submission not found")
+    if d.rpc("intel_agent_kickstarter_intake_allowed", {}) is not True:
+        return {"result": "blocked_source_excluded"}
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    raw_url = str(item.get("url") or "").strip()
+    parsed = urlparse(raw_url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or host not in {"kickstarter.com", "www.kickstarter.com"} or not re.fullmatch(r"/projects/[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,160}/?", parsed.path or "") or parsed.query or parsed.fragment:
+        raise PermanentError("invalid Kickstarter project URL; use https://www.kickstarter.com/projects/creator/project-slug")
+    project_url = urlunparse(("https", "www.kickstarter.com", parsed.path.rstrip("/") + "/", "", "", ""))
+    title = str(meta.get("project_title") or item.get("title") or "").strip()[:200]
+    creator = str(meta.get("creator_name") or "").strip()[:160]
+    developer = str(meta.get("developer_name") or "").strip()[:160]
+    website = str(meta.get("developer_website") or "").strip()[:300]
+    notes = str(meta.get("admin_notes") or "").strip()[:600]
+    permission_reference = str(meta.get("permission_reference") or "").strip()[:200]
+    if meta.get("permission_confirmed_by_admin") is not True or not permission_reference:
+        raise PermanentError("prior written permission for commercial use is required")
+    if not title or not creator:
+        raise PermanentError("project title and creator name are required")
+    if website:
+        wp = urlparse(website if "://" in website else "https://" + website)
+        website_host = (wp.hostname or "").lower()
+        if (wp.scheme not in {"http", "https"} or not website_host or "." not in website_host
+                or website_host == "kickstarter.com" or website_host.endswith(".kickstarter.com")
+                or entity.is_social_or_platform(website)):
+            raise PermanentError("developer website must be a separate official http(s) URL")
+        website = wp.geturl()[:300]
+    prospect_name = developer or creator
+    if match_protected(prospect_name, title):
+        d.rpc("intel_agent_record_item", {"p_source": "kickstarter_manual", "p_type": "game_project", "p_url": project_url,
+            "p_title": title, "p_snippet": "", "p_language": "", "p_prospect_id": None,
+            "p_meta": {**meta, "intake_status": "blocked_protected_entity", "project_url": project_url}})
+        return {"result": "blocked_protected_entity"}
+    discovered_at = item.get("first_seen") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    verified = {
+        "source": "kickstarter_manual", "source_key": "kickstarter_manual", "source_url": project_url,
+        "project_url": project_url, "project_source_url": project_url, "project_title": title,
+        "project_id": "kickstarter:" + "/".join(project_url.rstrip("/").split("/")[-2:]),
+        "creator_name": creator, "developer_name": prospect_name,
+        "developer_identity_status": "admin_attributed_unverified",
+        "developer_attribution_source": "administrator_submitted_metadata",
+        "kickstarter_creator_role": "unverified", "discovery_method": "administrator_manual_url_import",
+        "discovered_at": discovered_at, "admin_notes": notes,
+        "qualification_evidence_status": "not_assessed",
+        "permission_confirmed_by_admin": True, "permission_reference": permission_reference,
+        "permission_recorded_at": meta.get("permission_recorded_at") or discovered_at,
+    }
+    # This database RPC performs the source-exclusion check, prospect upsert, and
+    # source-item recording in one transaction while holding a shared lock on the
+    # Kickstarter source row. An administrator exclusion therefore cannot race
+    # between the worker check and the durable import.
+    result = d.rpc("intel_agent_kickstarter_commit_import", {
+        "p_item_id": job["payload"]["item_id"], "p_name": prospect_name,
+        "p_website": website, "p_verified": verified, "p_title": title, "p_notes": notes,
+    })
+    if not isinstance(result, dict) or result.get("blocked"):
+        return {"result": "blocked_source_excluded" if isinstance(result, dict) else "blocked_source_unavailable"}
+    pid = result["prospect_id"]
+    research_queued = False
+    if not result.get("suppressed"):
+        if website:
+            import hashlib
+            website_key = hashlib.sha1(website.lower().encode()).hexdigest()[:12]
+            _enq(d, "research", {"prospect_id": pid}, f"research:{pid}:kickstarter_manual:{website_key}")
+            research_queued = True
+        elif result.get("created"):
+            d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid,
+                "p_reason": "Kickstarter is stored as a manually supplied reference only; add the developer's official website before automated research"})
+    return {"result": "project_imported", "prospect_id": pid, "created": bool(result.get("created")),
+            "research_queued": research_queued}

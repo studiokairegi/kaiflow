@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 
 const baseMigration = readFileSync(new URL("../../supabase/migrations/20261119090000_intelligence_phase2_global_send_pacing.sql", import.meta.url), "utf8");
 const enforcementMigration = readFileSync(new URL("../../supabase/migrations/20261120090000_intelligence_phase2_send_slot_enforcement.sql", import.meta.url), "utf8");
+const finalBoundaryMigration = readFileSync(new URL("../../supabase/migrations/20261128100000_intelligence_phase8_final_send_boundary.sql", import.meta.url), "utf8");
 const migration = `${baseMigration}\n${enforcementMigration}`;
 const worker = readFileSync(new URL("../../intelligence-worker/kairflow_intel/mailops.py", import.meta.url), "utf8");
 const jobs = readFileSync(new URL("../../intelligence-worker/kairflow_intel/jobs.py", import.meta.url), "utf8");
@@ -61,4 +62,19 @@ test("mark_sending enforces current slot ownership and an unexpired slot in the 
   const acquire = enforcementMigration.split("create or replace function public.intel_agent_acquire_send_slot")[1].split("create or replace function public.intel_agent_mark_sending")[0];
   assert.match(acquire, /send_slot_until > clock_timestamp\(\)/);
   assert.match(acquire, /send_slot_until = clock_timestamp\(\) \+ make_interval/);
+});
+
+
+test("effective final send boundary releases a reservation when its slot expired or was replaced", () => {
+  // The Phase 8 migration is later than the Phase 2 slot migration and is the
+  // effective definition of intel_agent_mark_sending after the full migration chain.
+  const fn = finalBoundaryMigration.split("create or replace function public.intel_agent_mark_sending")[1]
+    .split("revoke all on function public.intel_agent_mark_sending")[0];
+  const ownershipGate = fn.split("-- The send slot must still belong to this exact message and be unexpired.")[1];
+  assert.ok(ownershipGate, "effective final boundary contains the slot ownership gate");
+  assert.match(ownershipGate, /s\.send_slot_message_id is distinct from m\.id[\s\S]*?s\.send_slot_until is null[\s\S]*?s\.send_slot_until <= v_now/);
+  assert.match(ownershipGate, /update public\.intel_messages set state = 'approved', send_day = null, reserved_at = null,[\s\S]*?error = 'send slot expired or ownership changed before provider submission'/);
+  // Never clear the replacement message's slot: release only if this message still owns it.
+  assert.match(ownershipGate, /update public\.intel_settings set send_slot_message_id = null, send_slot_until = null[\s\S]*?where organization_id = v_org and send_slot_message_id = m\.id/);
+  assert.match(ownershipGate, /return false;[\s\S]*?update public\.intel_messages set state = 'sending'/);
 });

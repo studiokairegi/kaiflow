@@ -637,12 +637,16 @@ class JapaneseDeepRegression(unittest.TestCase):
         self.assertEqual(current["class"], "unsubscribe")
 
     def test_japanese_declines_are_deterministic_and_neutral_future_openness_is_not(self):
-        for message in ("今回は見送らせていただきます。", "今回は辞退させていただきます。", "現時点では検討しておりません。"):
+        for message in ("今回は見送らせていただきます。", "今回は辞退させていただきます。"):
             with self.subTest(message=message):
                 result = classify.classify({"subject": "Re: ご案内", "body_text": message}, set(),
                     lambda *_: {"label": "positive", "confidence": 0.99})
-                self.assertEqual(result["class"], "rejection")
+                self.assertEqual(result["class"], "not_interested")
                 self.assertFalse(result["auto_ok"])
+        not_now = classify.classify({"subject": "Re: ご案内", "body_text": "現時点では検討しておりません。"}, set(),
+            lambda *_: {"label": "positive", "confidence": 0.99})
+        self.assertEqual(not_now["class"], "not_now")
+        self.assertFalse(not_now["auto_ok"])
         neutral = policy.scan_inbound("", "また機会があればお願いします。")["hits"]
         self.assertNotIn("decline", neutral)
 

@@ -8,9 +8,3 @@ paystack-live.env.txt
 __pycache__/
 *.py[cod]
 *$py.class
-
-intelligence-worker/*.bak
-intelligence-worker/wmic
-intelligence-worker/worker.log
-*.patch
-*.production-backup.ts

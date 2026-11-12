@@ -8,8 +8,8 @@ DEFAULT_TERMS = {
         "exclude": ["school", "course", "tutorial", "スクール", "専門学校", "講座"],
     },
     "indie_game_developer": {
-        "terms_en": ["2d indie game", "anime style game", "hand-drawn game", "visual novel", "game trailer animation"],
-        "terms_ja": ["同人ゲーム", "インディーゲーム 2D", "ビジュアルノベル"],
+        "terms_en": ["anime game", "anime-inspired game", "2d RPG", "JRPG", "pixel art RPG", "action RPG", "indie adventure", "story-driven game", "visual novel", "upcoming PC game"],
+        "terms_ja": ["同人ゲーム", "インディーゲーム", "2D RPG", "アニメ調ゲーム", "ビジュアルノベル", "ドット絵 RPG"],
         "exclude": ["asset pack", "tutorial"],
     },
 }

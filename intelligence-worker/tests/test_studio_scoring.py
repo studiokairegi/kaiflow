@@ -227,9 +227,9 @@ class LegacyPreservation(unittest.TestCase):
             jobs._enq = orig
         self.assertEqual(enq, []); self.assertIn("held", out)
 
-    def test_indie_path_untouched(self):
+    def test_indie_path_uses_project_first_model(self):
         r = Rec(); res = research.qualify(r, ctx(ptype="indie_game_developer", score=75, breakdown=[{"criterion": "active_development"}]), {})
-        self.assertEqual(len(r.named("intel_agent_set_score")), 1); self.assertFalse(res.held); self.assertEqual(res.model, "")
+        self.assertEqual(len(r.named("intel_agent_set_score")), 1); self.assertFalse(res.held); self.assertEqual(res.model, scoring.INDIE_MODEL)
 
 
 class ResearchCorrections(unittest.TestCase):

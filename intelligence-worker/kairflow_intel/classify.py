@@ -2,15 +2,15 @@
 The model can only choose among the allowed labels, and it can never downgrade a hard rule."""
 from __future__ import annotations
 
-from . import policy
+from . import policy, indie_outreach
 from .errors import InvalidModelOutput, TransientError
 
-LABELS = ["positive", "meeting_request", "pricing", "negotiation", "portfolio_request", "project_opportunity", "rejection", "unsubscribe", "ambiguous", "complaint", "other"]
+LABELS = ["positive", "meeting_request", "pricing", "negotiation", "portfolio_request", "project_opportunity", "rejection", "unsubscribe", "ambiguous", "complaint", "other", "not_now", "not_interested", "already_has_trailer", "wrong_person", "referral", "tell_me_more"]
 SCHEMA = {"type": "object", "required": ["label", "confidence", "summary"], "properties": {
     "label": {"type": "string", "enum": LABELS},
     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     "summary": {"type": "string", "maxLength": 240}}}
-AUTO_REPLY_OK = {"positive", "portfolio_request"}      # simple, approved-content replies only
+AUTO_REPLY_OK = {"positive", "portfolio_request", "tell_me_more"}      # simple, approved-content replies only
 MIN_CONFIDENCE = 0.7
 
 
@@ -34,9 +34,10 @@ def classify(msg: dict, own_addresses: set[str], llm=None) -> dict:
     if hard == "complaint":
         return _r("complaint", 1.0, True, "Complaint or privacy request: needs you")
     if hard:
-        return _r({"contract": "negotiation", "meeting": "meeting_request"}.get(hard, hard), 0.95, True, f"Mentions {hard}: needs you")
+        mapped = {"contract": "negotiation", "meeting": "meeting_request", "not_interested": "not_interested", "not_now": "not_now", "already_has_trailer": "already_has_trailer", "wrong_person": "wrong_person", "referral": "referral", "tell_me_more": "tell_me_more"}.get(hard, hard)
+        return _r(mapped, 0.95, mapped != "tell_me_more", f"Mentions {mapped}: needs you")
     if "decline" in hits and not hits & {"interest", "portfolio", "meeting"}:
-        return _r("rejection", 0.9, False, "Declined")
+        return _r("not_interested", 0.9, True, "Declined; sequence stopped without permanent suppression")
     label, conf, summary = None, 0.0, ""
     if llm:
         try:
@@ -55,11 +56,16 @@ def classify(msg: dict, own_addresses: set[str], llm=None) -> dict:
         else: label, conf = "ambiguous", 0.0
     if conf < MIN_CONFIDENCE:
         label = "ambiguous"
+    # Legacy/model `rejection` is not a compliance unsubscribe. Normalize it to
+    # the reversible, sequence-stopping outcome so it cannot create DNC records.
+    if label == "rejection":
+        label = "not_interested"
     if label in ("rejection",) and ("interest" in hits or "portfolio" in hits):
         label = "ambiguous"            # the words disagree with the model: a person decides
-    esc = label in policy.ESCALATE_CLASSES
+    esc = label in policy.ESCALATE_CLASSES or label in {"not_now", "not_interested", "already_has_trailer", "wrong_person", "referral"}
     return _r(label, conf, esc, summary or label.replace("_", " ").capitalize())
 
 
 def _r(c, conf, esc, summary, related=None):
-    return {"class": c, "confidence": conf, "escalate": esc, "summary": summary, "related_email": related, "auto_ok": c in AUTO_REPLY_OK and not esc}
+    return {"class": c, "confidence": conf, "escalate": esc, "summary": summary, "related_email": related,
+            "action": indie_outreach.OUTCOME_ACTIONS.get(c, "human_review"), "auto_ok": c in AUTO_REPLY_OK and not esc}

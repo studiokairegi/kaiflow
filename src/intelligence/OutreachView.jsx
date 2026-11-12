@@ -4,6 +4,17 @@ import { intelApi } from "./api.js";
 import { CLASS_LABEL, conversations, findTargetProspect, fmtWhen, stateInfo } from "./logic.js";
 import { Input, Muted, Section, TextArea, useLoad, confirmAction } from "./kit.jsx";
 
+const REPLY_OUTCOMES = {
+  not_now: ["Not now", "Pause and review whether a later contact is welcome."],
+  not_interested: ["Not interested", "Stops this sequence; it is not automatically an unsubscribe or permanent DNC."],
+  already_has_trailer: ["Already has a trailer", "Stops this sequence and flags future need for human review."],
+  wrong_person: ["Wrong person", "Human review is needed to correct the contact."],
+  referral: ["Referral", "Review the suggested contact before any outreach."],
+  tell_me_more: ["Tell me more", "A reply may be drafted, but it remains pending your approval."],
+  unsubscribe: ["Unsubscribe", "Suppression takes priority and blocks further contact."],
+  complaint: ["Complaint", "Suppression takes priority and blocks further contact."],
+};
+
 function ReviewModal({ m, supabase, onClose, onDone }) {
   const [subject, setSubject] = useState(m.subject);
   const [body, setBody] = useState(m.body_text);
@@ -32,6 +43,10 @@ function Thread({ conv, supabase, onChanged }) {
   const [subject, setSubject] = useState(last ? (/^re:/i.test(last.subject) ? last.subject : `Re: ${last.subject}`) : "");
   const [body, setBody] = useState("");
   const p = conv.prospect;
+  const replyBlocked = Boolean(
+    p && (['closed', 'suppressed'].includes(p.status) ||
+      conv.messages.some((m) => m.direction === 'inbound' && ['unsubscribe', 'complaint'].includes(m.classification)))
+  );
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {error && <Banner tone="bad">{error}</Banner>}
@@ -42,10 +57,12 @@ function Thread({ conv, supabase, onChanged }) {
             <Pill tone={m.direction === "inbound" ? "ok" : "info"}>{m.direction === "inbound" ? "They wrote" : m.kind === "reply" ? "Reply" : m.kind === "followup" ? "Follow-up" : "Introduction"}</Pill>
             <Pill tone={stateInfo(m.state).tone}>{stateInfo(m.state).label}</Pill>
             {m.classification && <Pill tone={m.escalated ? "warn" : "muted"}>{CLASS_LABEL[m.classification] || m.classification}{m.escalated ? ", needs you" : ""}</Pill>}
+          {REPLY_OUTCOMES[m.classification] && <Pill tone={["unsubscribe", "complaint"].includes(m.classification) ? "bad" : "warn"}>{REPLY_OUTCOMES[m.classification][0]}</Pill>}
             {m.auto_sent && m.direction === "outbound" && <Pill tone="muted">automatic</Pill>}
             <span style={{ color: T.faint, fontSize: 12 }}>{fmtWhen(m.sent_at || m.received_at || m.created_at)}</span>
           </div>
           <div style={{ fontWeight: 600 }}>{m.subject}</div>
+          {REPLY_OUTCOMES[m.classification] && m.direction === "inbound" && <Banner tone={["unsubscribe", "complaint"].includes(m.classification) ? "bad" : "warn"}>{REPLY_OUTCOMES[m.classification][1]}</Banner>}
           <div style={{ whiteSpace: "pre-wrap", fontSize: 13.5, lineHeight: 1.55 }}>{m.body_text}</div>
           {m.error && <span style={{ color: T.bad, fontSize: 12.5 }}>{m.error}</span>}
           {m.state === "unknown" && <div style={S.row}>
@@ -54,10 +71,13 @@ function Thread({ conv, supabase, onChanged }) {
           {m.state === "failed" && m.direction === "outbound" && <Btn small disabled={busy} onClick={() => run(async () => { await intelApi.reviewMessage(supabase, m.id, "retry"); await onChanged(); })}>Retry</Btn>}
         </div>
       ))}
-      {conv.inbound && p && (
+      {conv.inbound && p && replyBlocked && (
+        <Banner tone="bad">Reply composer unavailable: this prospect or recipient is closed or suppressed. Do not contact them unless an administrator has resolved the contactability record.</Banner>
+      )}
+      {conv.inbound && p && !replyBlocked && (
         <div style={S.card}>
           <h3 style={S.h3}>Reply yourself</h3>
-          <Muted>Sent from your connected mailbox as soon as sending is on. Pricing, scheduling and commitments are always yours to answer.</Muted>
+          <Muted>Creates a draft for your approval. It is not sent automatically. Pricing, scheduling and commitments are always yours to answer.</Muted>
           <Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Subject" />
           <TextArea rows={7} value={body} onChange={(e) => setBody(e.target.value)} placeholder="Write your reply" />
           <div><Btn kind="primary" disabled={busy || !body.trim()} onClick={() => run(async () => { await intelApi.composeReply(supabase, p.id, subject, body); setBody(""); await onChanged(); })}>Queue reply</Btn></div>

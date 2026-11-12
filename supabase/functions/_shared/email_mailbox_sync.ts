@@ -106,6 +106,12 @@ export async function synchronizeMailbox(
         }
         if (pageIds.has(message.provider_message_id)) continue;
         pageIds.add(message.provider_message_id);
+        // Re-check eligibility immediately before each durable write. A page-level
+        // check alone leaves a window where an account disabled midway through a
+        // multi-message page can continue ingesting the rest of that page.
+        if (leaseLost || !await store.renewSync(account.id, claim.leaseToken, LEASE_SECONDS)) {
+          throw new AdapterError("account_not_usable", "Mailbox synchronization lease was lost; retry is required", { provider: adapter.providerKey, operation: "sync" });
+        }
         const result = await store.persistMessage(account, message);
         if (leaseLost) throw new AdapterError("account_not_usable", "Mailbox synchronization lease was lost; retry is required", { provider: adapter.providerKey, operation: "sync" });
         seen++;

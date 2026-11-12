@@ -278,3 +278,22 @@ test('genuine lease loss between fetch and save on an eligible account is a fail
   assert.deepEqual(store.state.persisted, []);
   assert.equal(store.state.failures.length, 1);
 });
+
+test('account disabled mid-page stops further message persistence without recording a failure', async () => {
+  let renewals = 0;
+  const store = ineligibleStore({ async renewSync() {
+    renewals++;
+    // Before fetch, after fetch, before message 1; disabled before message 2.
+    return renewals < 4;
+  } });
+  const adapter = okAdapter(async () => ({
+    messages: [message('first'), message('second'), message('third')],
+    next_checkpoint: { cursor: 'after-page' }, has_more: false, complete: true,
+  }));
+  const result = await synchronizeMailbox({ account, adapter, context, store });
+  assert.equal(result.status, 'skipped');
+  assert.equal(result.skip_reason, 'account_ineligible');
+  assert.deepEqual(store.state.persisted, ['first'], 'no later message may be persisted after eligibility is withdrawn');
+  assert.deepEqual(store.state.commits, [], 'the incomplete page must not advance its checkpoint');
+  assert.equal(store.state.failures.length, 0, 'disabling an account is not a provider failure');
+});

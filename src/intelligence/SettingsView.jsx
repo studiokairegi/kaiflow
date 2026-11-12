@@ -116,7 +116,8 @@ function SafetyCard({ s, supabase, onSaved }) {
         <Field label="Introductions per day (max 30)"><Input type="number" min="0" max="30" value={f.daily_initial_cap} onChange={set("daily_initial_cap")} /></Field>
         <Field label="Follow-ups per day"><Input type="number" min="0" max="100" value={f.daily_followup_cap} onChange={set("daily_followup_cap")} /></Field>
         <Field label="Follow-up after (business days)"><Input type="number" min="1" max="60" value={f.followup_business_days} onChange={set("followup_business_days")} /></Field>
-        <Field label="Follow-ups per prospect (0-3)"><Input type="number" min="0" max="3" value={f.max_followups} onChange={set("max_followups")} /></Field>
+        <Field label="Follow-ups per prospect (0-4; Indie uses 4 stages)"><Input type="number" min="0" max="4" value={f.max_followups} onChange={set("max_followups")} /></Field>
+        <p style={{ ...S.sub, gridColumn: "1 / -1" }}>For Indie Game Developers, the four stages are Day 5 and Day 10 business-day follow-ups, then Month 3 and Month 6 re-engagement. Re-engagement requires a new verified, dated project update or marketing milestone. Set this to 4 to enable all four stages; 0 disables them. Other campaigns remain capped at three follow-ups.</p>
         <Field label="Automatic replies per conversation"><Input type="number" min="0" max="5" value={f.max_auto_replies_per_thread} onChange={set("max_auto_replies_per_thread")} /></Field>
         <Field label="Studio time zone" hint="Defines the day for limits"><Input value={f.timezone} onChange={set("timezone")} /></Field>
         <Field label="Send from (hour, 0-23)" hint="Local studio time"><Input type="number" min="0" max="23" value={f.send_start_hour} onChange={set("send_start_hour")} /></Field>

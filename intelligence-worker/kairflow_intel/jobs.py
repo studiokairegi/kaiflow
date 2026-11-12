@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import random
 import re
+import hashlib
+import json
 import threading
 import time
 import traceback
@@ -14,6 +16,7 @@ from . import classify as cls, discovery, drafting, mailops, policy, research, s
 from .ai_call import call_json, composed
 from .errors import PermanentError, RpcError, TransientError
 from .safety import MeteredFetcher
+from .protected_accounts import match_protected
 
 # These outcomes settle the queue item without attempting another provider send.
 # In particular, "unknown" means the provider may have accepted the email; the
@@ -55,16 +58,19 @@ def _kb(d):  # approved entries only; the database never returns the rest
 def h_discover(d: Deps, job):
     pl = job["payload"]
     t = pl["type"]
-    manual = bool(pl.get("manual"))                      # asked for from Agent Chat: finds and researches only, never sends
-    limit = max(1, min(int(pl["limit"]), 25)) if pl.get("limit") else None
+    manual = bool(pl.get("manual"))
+    limit = max(1, min(int(pl["limit"]), 25)) if pl.get("limit") else 25
     st = d.rpc("intel_agent_settings", {})
     camp = next((c for c in st["campaigns"] if c["type"] == t), None)
     if not camp or (camp["status"] != "active" and not manual):
         return {"skipped": "campaign paused"}
-    # All h_discover paths, including admin-seeded studio URLs and indie
-    # Steam/itch adapters, must pass the organization-scoped source registry.
     registry = d.rpc("intel_agent_sources", {}) or {}
-    enabled_sources = set(registry.keys())
+    source_status = (d.rpc("intel_agent_source_status", {}) or {}) if t == "indie_game_developer" else {}
+    if source_status:
+        enabled_sources = {key for key, info in source_status.items()
+            if isinstance(info, dict) and info.get("enabled") is True and info.get("tos_status") == "confirmed"}
+    else:
+        enabled_sources = set(registry.keys())
     reserve_source = lambda key: int(d.rpc("intel_agent_source_use", {"p_key": key, "p_n": 1}) or 0) == 1
     report_source = lambda key, ok, err="": d.rpc("intel_agent_source_report", {"p_key": key, "p_ok": ok, "p_error": str(err)[:250]})
     configured = camp.get("criteria")
@@ -79,25 +85,70 @@ def h_discover(d: Deps, job):
             return {"skipped": "indie discovery requires valid explicitly configured sources and non-empty keywords"}
         if not any(key in enabled_sources for key in requested):
             return {"skipped": "no requested indie source is registry-authorized"}
+        batch = sources.discover_batch(d.fetcher, t, configured, cursor=pl.get("cursor"),
+            enabled_sources=enabled_sources, reserve_source=reserve_source, report_source=report_source,
+            source_status=source_status, limit=limit)
+        candidates = batch["candidates"]
+        next_cursor = batch.get("next_cursor") or {}
+        continuation_delay = int(batch.get("defer_seconds") or 30)
     else:
         seed_urls = configured.get("seed_urls")
         if seed_urls is not None and (not isinstance(seed_urls, list) or any(not isinstance(u, str) or not u.strip() for u in seed_urls)):
             return {"skipped": "seed_urls must be a list of non-empty strings"}
         if seed_urls and "site_crawler" not in enabled_sources:
             return {"skipped": "site_crawler source is not registry-authorized"}
+        candidates = sources.discover(d.fetcher, t, configured, enabled_sources=enabled_sources, reserve_source=reserve_source, report_source=report_source)
+        next_cursor = {}
+
     new = 0
-    for c in sources.discover(d.fetcher, t, configured, enabled_sources=enabled_sources, reserve_source=reserve_source, report_source=report_source):
-        if limit is not None and new >= limit:
-            break
-        meta = c.get("meta") or {}
+    recorded = 0
+    for c in candidates[:limit]:
+        meta = dict(c.get("meta") or {})
+        if t == "indie_game_developer":
+            project_title = meta.get("project_title") or meta.get("game") or meta.get("title") or ""
+            # Publisher is deliberately not a protected-account identity signal. A protected
+            # developer or protected game is excluded; an unrelated developer with a protected
+            # third-party publisher is not.
+            protected = match_protected(c.get("name", ""), project_title, *(meta.get("developer_names") or []))
+            if protected:
+                continue
+            project_url = meta.get("project_url") or meta.get("project_source_url") or meta.get("source_url") or ""
+            if not project_url:
+                continue
+            meta.setdefault("project_title", project_title)
+            meta.setdefault("project_url", project_url)
+            meta.setdefault("project_source_url", project_url)
+            meta.setdefault("developer_name", c.get("name", ""))
+            meta.setdefault("discovered_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(d.clock())))
+            meta.setdefault("source", meta.get("source_key") or "unknown")
+            meta.setdefault("source_key", meta.get("source") or "unknown")
         raw_language = meta.get("language")
         language = raw_language if raw_language in ("en", "ja") else "other"
-        r = d.rpc("intel_agent_upsert_prospect", {"p_type": t, "p_name": c["name"], "p_website": c["website"], "p_contact_name": "", "p_contact_email": c.get("contact_email", ""),
+        r = d.rpc("intel_agent_upsert_prospect", {"p_type": t, "p_name": c["name"], "p_website": c.get("website") or "", "p_contact_name": "", "p_contact_email": c.get("contact_email", ""),
                                                   "p_contact_source_url": c.get("contact_source_url", ""), "p_country": c.get("country", ""), "p_language": language, "p_verified": meta})
+        if t == "indie_game_developer":
+            source_key = str(meta.get("source_key") or meta.get("source") or "steam")[:40]
+            source_url = str(meta.get("source_url") or meta.get("project_url") or "")[:500]
+            item = d.rpc("intel_agent_record_item", {"p_source": source_key, "p_type": "game_project", "p_url": source_url,
+                "p_title": str(meta.get("project_title") or "")[:300], "p_snippet": str(meta.get("short") or meta.get("description") or "")[:600],
+                "p_language": language, "p_prospect_id": r["prospect_id"], "p_meta": meta})
+            recorded += 1
         if r["created"] and not r.get("suppressed"):
             new += 1
-            _enq(d, "research", {"prospect_id": r["prospect_id"]}, f"research:{r['prospect_id']}")
-    return {"new": new, "manual": manual}
+        if t == "indie_game_developer" and not r.get("suppressed"):
+            # A newly observed platform URL can enrich an existing project too. Queue
+            # one research refresh per stable source/website/fact signature, not per poll.
+            refresh_facts = {k: v for k, v in meta.items() if k not in {"discovered_at", "last_discovered_at", "cursor"}}
+            signature = hashlib.sha1(json.dumps({"website": c.get("website") or "", "source_url": source_url,
+                "facts": refresh_facts}, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()[:16]
+            _enq(d, "research", {"prospect_id": r["prospect_id"]}, f"research:{r['prospect_id']}:refresh:{signature}")
+    if t == "indie_game_developer" and next_cursor:
+        cursor_key = hashlib.sha1(json.dumps(next_cursor, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+        schedule_bucket = int(d.clock() // max(60, continuation_delay))
+        _enq(d, "discover", {"type": t, "limit": limit, "manual": manual, "cursor": next_cursor},
+             f"discover:{t}:cursor:{cursor_key}:{continuation_delay}:{schedule_bucket}", delay=continuation_delay)
+    return {"new": new, "discovered": len(candidates), "recorded": recorded, "manual": manual,
+            "next_cursor": next_cursor if t == "indie_game_developer" else None}
 
 
 def h_research(d: Deps, job):
@@ -105,9 +156,34 @@ def h_research(d: Deps, job):
     ctx = d.rpc("intel_agent_context", {"p_prospect_id": pid})
     if not ctx or ctx["prospect"]["status"] not in ("discovered", "researched"):
         return {"skipped": "not researchable"}
-    if not ctx["prospect"].get("website"):
-        d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "official website not found; add it or reject"})
-        return {"skipped": "no website"}
+    p = ctx["prospect"]
+    if p.get("type") == "indie_game_developer":
+        verified = (p.get("facts") or {}).get("verified") or {}
+        protected = match_protected(p.get("name", ""), p.get("project_title") or verified.get("project_title") or verified.get("game", ""))
+        if protected:
+            d.rpc("intel_agent_mark_indie_blocked", {"p_prospect_id": pid, "p_status": "rejected", "p_reason": f"Protected account: {protected}"})
+            return {"skipped": "protected account"}
+        truthy = lambda value: value is True or str(value).strip().casefold() in {"true", "1", "yes"}
+        if p.get("status") == "suppressed" or any(truthy(verified.get(k)) for k in ("bounced", "complained", "complaint", "unsubscribed", "do_not_contact", "suppressed")):
+            d.rpc("intel_agent_mark_indie_blocked", {"p_prospect_id": pid, "p_status": "suppressed", "p_reason": "Existing suppression or protected-contact flag"})
+            return {"skipped": "suppressed contact"}
+        suppression = d.rpc("intel_agent_indie_suppression_facts", {
+            "p_email": p.get("contact_email") or verified.get("contact_email") or "",
+            "p_domain": p.get("domain") or "",
+        })
+        if not isinstance(suppression, dict) or not all(k in suppression for k in ("suppressed", "bounced", "complained")):
+            raise TransientError("indie suppression lookup returned no complete result; research held")
+        if any(truthy(suppression.get(k)) for k in ("suppressed", "bounced", "complained")):
+            d.rpc("intel_agent_mark_indie_blocked", {"p_prospect_id": pid, "p_status": "suppressed", "p_reason": str(suppression.get("suppression_reason") or "Existing email/domain suppression conflict")})
+            return {"skipped": "suppressed contact"}
+    if not p.get("website"):
+        verified = (p.get("facts") or {}).get("verified") or {}
+        has_project_source = bool(p.get("project_source_url") or verified.get("project_url") or verified.get("game_url")
+                                  or str(verified.get("steam_appid") or "").isdigit())
+        if p.get("type") != "indie_game_developer" or not has_project_source:
+            reason = "official website not found; add it or reject" if p.get("type") != "indie_game_developer" else "official project/store page not found; add a project URL or reject"
+            d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": reason})
+            return {"skipped": "no website or project source"}
     llm = research.entity_llm(d.llm, "research.entity")
     registry = d.rpc("intel_agent_sources", {}) or {}
     if "site_crawler" not in registry:
@@ -121,6 +197,8 @@ def h_research(d: Deps, job):
 def h_qualify(d: Deps, job):
     pid = job["payload"]["prospect_id"]
     ctx = d.rpc("intel_agent_context", {"p_prospect_id": pid})
+    if ctx and ctx.get("prospect", {}).get("type") == "indie_game_developer":
+        ctx = d.rpc("intel_agent_indie_context", {"p_prospect_id": pid})
     camp = next((c for c in d.rpc("intel_agent_settings", {})["campaigns"] if c["type"] == ctx["prospect"]["type"]), {"criteria": {}})
     res = research.qualify(d.rpc, ctx, camp["criteria"])
     if res.decision == "qualified" and res.contactability.get("status") == "pass" and not res.held:       # suitability and contactability are independent gates
@@ -223,6 +301,50 @@ def _log_classify_ai(d: Deps, message_id, ai: dict | None) -> None:
         pass
 
 
+def _indie_reengagement_evidence_is_new(prospect: dict, evidence: list[dict], initial_sent: str) -> bool:
+    """Only re-engage Indie projects when verified, dated project evidence post-dates the original intro."""
+    if prospect.get("type") != "indie_game_developer":
+        return True
+    from datetime import date
+    facts = prospect.get("facts") if isinstance(prospect.get("facts"), dict) else {}
+    verified = facts.get("verified") if isinstance(facts.get("verified"), dict) else {}
+    meta = prospect.get("meta") if isinstance(prospect.get("meta"), dict) and prospect.get("meta") else verified
+    try:
+        anchor = date.fromisoformat(str(initial_sent)[:10])
+    except (TypeError, ValueError):
+        return False
+    allowed = {"development_update", "devlog", "development_log", "developer_progress_update", "project_update",
+               "demo_update", "playtest_update", "build_update", "patch_update", "marketing_opportunity",
+               "dlc_announcement", "major_update_announcement", "relaunch_announcement", "console_release_announcement"}
+    has_verified_fact = any(e.get("verified") and str(e.get("fact_type") or "").lower() in allowed and e.get("snippet") and e.get("url") for e in (evidence or []))
+    if not has_verified_fact:
+        return False
+    latest = meta.get("project_latest_activity_date") or meta.get("latest_activity_date")
+    try:
+        if latest and date.fromisoformat(str(latest)[:10]) > anchor:
+            return True
+    except (TypeError, ValueError):
+        pass
+    for item in (meta.get("project_marketing_milestones") or meta.get("marketing_milestones") or []):
+        if not isinstance(item, dict) or item.get("verified") is not True:
+            continue
+        try:
+            if date.fromisoformat(str(item.get("date") or "")[:10]) > anchor:
+                return True
+        except (TypeError, ValueError):
+            continue
+    # Evidence may have been independently verified by an administrator and carry an event date in its row.
+    for e in evidence or []:
+        if not (e.get("verified") and str(e.get("fact_type") or "").lower() in allowed and e.get("url")):
+            continue
+        try:
+            if date.fromisoformat(str(e.get("event_date") or e.get("date") or "")[:10]) > anchor:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def h_draft(d: Deps, job):
     pid, kind = job["payload"]["prospect_id"], job["payload"].get("kind", "initial")
     force_review = bool((job.get("payload") or {}).get("force_review", False))
@@ -231,12 +353,24 @@ def h_draft(d: Deps, job):
     compose = None   # set for English model-written drafts; lets the vetting step regenerate once
     ctx = d.rpc("intel_agent_context", {"p_prospect_id": pid})
     p = ctx["prospect"]
+    if kind == "initial" and p.get("type") == "indie_game_developer":
+        facts = p.get("facts") if isinstance(p.get("facts"), dict) else {}
+        verified = facts.get("verified") if isinstance(facts.get("verified"), dict) else {}
+        project_title = p.get("project_title") or verified.get("project_title") or verified.get("game")
+        project_source = p.get("project_source_url") or verified.get("project_source_url") or verified.get("project_url") or verified.get("game_url")
+        if project_source and not project_title:
+            d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": "Initial outreach blocked: project source exists but the exact verified game title is missing."})
+            return {"skipped": "verified_project_title_missing"}
     if kind == "initial":
         existing = next((m for m in reversed(ctx.get("messages") or [])
                          if m.get("direction") == "outbound" and m.get("idempotency_key") == f"draft:{pid}:initial"), None)
         if existing:
             return {"ok": True, "message_id": existing["id"], "created": False, "state": existing.get("state")}
     st, kb = d.rpc("intel_agent_settings", {}), _kb(d)
+    if kind in ("followup", "reengagement") and p.get("type") == "indie_game_developer":
+        campaign = next((c for c in (st.get("campaigns") or []) if c.get("type") == p.get("type")), None)
+        if not campaign or campaign.get("status") != "active":
+            return {"skipped": "campaign paused"}
     if not p.get("contact_email"):
         return {"skipped": "no verified contact email"}
     # Fail early on unsafe approved KB copy. This is independent of prospect
@@ -283,6 +417,12 @@ def h_draft(d: Deps, job):
         msgs = ctx["messages"]
         prev = [m for m in msgs if m.get("kind") == "followup" and m.get("state") not in ("discarded", "failed")]
         initial = next((m for m in msgs if m["kind"] == "initial" and m["state"] == "sent"), None)
+        if kind == "reengagement" and (not initial or not _indie_reengagement_evidence_is_new(p, ctx.get("evidence") or [], str(initial.get("sent_at") or initial.get("created_at") or ""))):
+            reason = "Re-engagement held: no verified, dated project update or marketing milestone newer than the original introduction. Clear this review reason after new evidence is verified to retry."
+            d.rpc("intel_agent_log", {"p_action": "reengagement_held", "p_entity_type": "prospect", "p_entity_id": pid,
+                "p_detail": {"reason": reason}})
+            d.rpc("intel_agent_flag_prospect", {"p_prospect_id": pid, "p_reason": reason})
+            return {"skipped": "no_new_verified_project_evidence_for_reengagement"}
         step = drafting.next_step(p, ctx.get("lead"), len(prev))
         # The persisted message schema intentionally remains initial/followup/reply.
         # Re-engagement is a distinct composition mode occupying the final allowed
@@ -461,6 +601,12 @@ def h_classify(d: Deps, job):
         ai_prov = dict(last_ai[0]) if last_ai else None              # None when a deterministic rule decided or the model failed
         def save_class(m=m, r=r, ai_prov=ai_prov):
             d.rpc("intel_agent_classify_inbound", {"p_message_id": m["id"], "p_class": r["class"], "p_confidence": r["confidence"], "p_escalate": r["escalate"], "p_summary": r["summary"], "p_related_email": r["related_email"]})
+            if m.get("prospect_id") and r.get("action"):
+                try:
+                    d.rpc("intel_agent_log", {"p_action": "reply_outcome_action", "p_entity_type": "message", "p_entity_id": str(m["id"]),
+                        "p_detail": {"outcome": r["class"], "action": r["action"], "confidence": r["confidence"]}})
+                except RpcError:
+                    pass
             _log_classify_ai(d, m["id"], ai_prov)
         # The classification is saved only after the reply draft is stored (or composition definitively fails), so a
         # model outage or a failed database call leaves the message pending and the whole job retries.
@@ -554,6 +700,8 @@ def h_reconcile(d: Deps, job):
 
 
 def h_followup_scan(d: Deps, job):
+    # The candidate RPC filters by each prospect's campaign status. h_draft and
+    # scheduled takeover independently re-check status before writing a draft.
     n = 0
     for c in d.rpc("intel_agent_followup_candidates", {"p_limit": 20}) or []:
         day = int(d.clock() // 86400)
@@ -650,7 +798,14 @@ class Worker:
         _enq(d, "retention", {}, f"retention:{today}")
         for c in st["campaigns"]:
             if c["status"] == "active":
-                _enq(d, "discover", {"type": c["type"]}, f"discover:{c['type']}:{today}")
+                if c["type"] == "indie_game_developer":
+                    # Do not restart the first keyword while a paginated cursor is queued/running.
+                    # The continuation job survives the source's daily budget reset.
+                    pending_cursor = bool(d.rpc("intel_agent_discovery_has_pending", {"p_type": c["type"]}))
+                    if not pending_cursor:
+                        _enq(d, "discover", {"type": c["type"]}, f"discover:{c['type']}:{today}")
+                else:
+                    _enq(d, "discover", {"type": c["type"]}, f"discover:{c['type']}:{today}")
                 if c["type"] == "animation_studio_support":     # autonomous discovery: weekly seed, daily news, 6-hourly feeds, monthly archive check
                     wk, mo = time.strftime("%G-W%V", time.gmtime(now)), time.strftime("%Y-%m", time.gmtime(now))
                     _enq(d, "seed_sources", {"type": c["type"]}, f"seed:{wk}")

@@ -290,7 +290,7 @@ class ClassificationOutage(unittest.TestCase):
 
     def test_an_outage_leaves_the_message_pending_and_the_job_retries(self):
         def down(_): raise TransientError("ollama down")
-        out, saved_ids = run_batch(down, [msg(1, "Sounds interesting, tell me more.")])
+        out, saved_ids = run_batch(down, [msg(1, "We received your note and will review it.")])
         self.assertIsInstance(out, TransientError); self.assertEqual(saved_ids, [])
 
     def test_messages_before_the_outage_stay_saved_and_none_after_it_is_guessed(self):
@@ -299,11 +299,11 @@ class ClassificationOutage(unittest.TestCase):
             seen.append(untrusted)
             if len(seen) == 2: raise TransientError("ollama down")
             return self.OK
-        out, saved_ids = run_batch(flaky, [msg(1, "Sounds interesting."), msg(2, "Please tell me more."), msg(3, "Happy to chat.")])
+        out, saved_ids = run_batch(flaky, [msg(1, "Sounds interesting."), msg(2, "We will review this internally."), msg(3, "Happy to chat.")])
         self.assertIsInstance(out, TransientError); self.assertEqual(saved_ids, ["in1"]); self.assertEqual(len(seen), 2)
 
     def test_after_recovery_the_same_message_is_classified_by_the_model(self):
-        out, saved_ids = run_batch(lambda _: self.OK, [msg(1, "Sounds interesting, tell me more.")])
+        out, saved_ids = run_batch(lambda _: self.OK, [msg(1, "We received your note and will review it.")])
         self.assertEqual((out, saved_ids), ({"classified": 1}, ["in1"]))
 
     def test_a_badly_shaped_answer_never_blocks_the_messages_behind_it(self):

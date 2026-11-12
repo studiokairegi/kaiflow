@@ -1,0 +1,744 @@
+diff --git a/docs/GMAIL_SETUP.md b/docs/GMAIL_SETUP.md
+index 778b1fb..5ba1faf 100644
+--- a/docs/GMAIL_SETUP.md
++++ b/docs/GMAIL_SETUP.md
+@@ -17,19 +17,19 @@ It is the one free option that can send, read replies and set `In-Reply-To`/`Ref
+ 3. **OAuth consent screen**: user type **External**; app name, support email; add your Gmail address as a test user for now.
+ 4. **Scopes**: add exactly `.../auth/gmail.send` and `.../auth/gmail.readonly`. Nothing else.
+ 5. **Credentials > Create credentials > OAuth client ID > Web application**. Authorized redirect URI:
+-   `https://<your-project-ref>.supabase.co/functions/v1/intel-gmail-callback`
++   `https://<your-project-ref>.supabase.co/functions/v1/intel-provider-callback`
+ 6. Copy the client ID and secret.
+ 7. **Publish the consent screen to "In production".** While it is in *Testing*, Google expires refresh tokens after 7 days and the connection will break weekly. For one personal account you do not need Google's verification; Google shows an "unverified app" warning once at connect time (Advanced > continue). Confirm both points on your own consent screen: Google's rules change.
+ 
+ ## 2. Supabase secrets and functions (run by you, staging first)
+ ```
+ supabase secrets set GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... \
+-  GOOGLE_REDIRECT_URI=https://<ref>.supabase.co/functions/v1/intel-gmail-callback \
++  GOOGLE_REDIRECT_URI=https://<ref>.supabase.co/functions/v1/intel-provider-callback \
+   APP_URL=https://<your KairFlow URL> INTEL_TOKEN_ENCRYPTION_KEY=<same secret the Zoho functions use, 32 random bytes base64>
+ supabase db push        # applies 20261109150000_intelligence_gmail_provider.sql (after the earlier Intelligence migrations)
+-supabase functions deploy intel-gmail-connect
+-supabase functions deploy intel-gmail-token
+-supabase functions deploy intel-gmail-callback --no-verify-jwt     # Google's redirect carries no session; trust comes from the single-use state
++supabase functions deploy intel-provider-connect
++supabase functions deploy intel-provider-token
++supabase functions deploy intel-provider-callback --no-verify-jwt     # Google's redirect carries no session; trust comes from the single-use state
+ ```
+ The refresh token is encrypted with `INTEL_TOKEN_ENCRYPTION_KEY` and never leaves the server: the worker only receives short-lived access tokens, and only the registered agent account can ask for one.
+ 
+diff --git a/docs/INTELLIGENCE_SETUP.md b/docs/INTELLIGENCE_SETUP.md
+index 2a658e5..0a0bcab 100644
+--- a/docs/INTELLIGENCE_SETUP.md
++++ b/docs/INTELLIGENCE_SETUP.md
+@@ -27,7 +27,7 @@ The migration directory is the source of truth for the complete sequence; preser
+ 
+ ## C. App code
+ This repository already contains everything: the Intelligence files, the wiring in `src/App.jsx` and `src/notifications/logic.js`, the worker in
+-`intelligence-worker/`, and the Edge Functions in `supabase/functions/intel-zoho-*`. No patches to apply. Verify:
++`intelligence-worker/`, and the Edge Functions in `supabase/functions/intel-provider-*`. No patches to apply. Verify:
+ ```
+ npm ci
+ npm test                 # 831 tests passed in the source-patch verification
+@@ -40,11 +40,11 @@ For Gmail follow `docs/GMAIL_SETUP.md` and skip the rest of this section; set `K
+ 1. Check your Zoho plan allows API access (Zoho says availability depends on plan and permissions). If it does not, stop here: Intelligence still
+    researches and drafts, and you can send manually.
+ 2. In Zoho's API console (use your data center's console) create a **Server-based** client. Redirect URI =
+-   `https://<project>.supabase.co/functions/v1/intel-zoho-callback`.
++   `https://<project>.supabase.co/functions/v1/intel-provider-callback`.
+ 3. Supabase Edge Function secrets (names only): `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REDIRECT_URI`, `INTEL_TOKEN_ENCRYPTION_KEY`
+    (new random 32-byte key, base64; do not reuse the Drive key), `APP_URL`.
+-4. Deploy: `supabase functions deploy intel-zoho-connect`, `supabase functions deploy intel-zoho-token`,
+-   `supabase functions deploy intel-zoho-callback --no-verify-jwt`.
++4. Deploy: `supabase functions deploy intel-provider-connect`, `supabase functions deploy intel-provider-token`,
++   `supabase functions deploy intel-provider-callback --no-verify-jwt`.
+ 5. In the app: Intelligence > Settings > Connect Zoho Mail.
+ 6. Add DNS records for your sending domain if not already present (SPF, DKIM, DMARC) before sending anything.
+ 
+@@ -92,7 +92,7 @@ Environment variables are listed in `intelligence-worker/.env.example`; Supabase
+ 3. [ ] SQL tests pass on a disposable PG16, `npm test`, `npm run build`, worker tests all pass.
+ 4. [ ] Apply migrations B in order to a **staging** Supabase project first; click through every Intelligence tab as the admin Master User, as a Master User who is not admin (must see nothing), and as an ordinary member (must see nothing).
+ 5. [ ] Run `intel_admin_bootstrap`, register the agent account (a separate Supabase user, not an admin), leave sending **OFF** and autonomy at **shadow**.
+-6. [ ] Deploy the Edge Functions for your provider (`intel-gmail-*` or `intel-zoho-*`); set secrets.
++6. [ ] Deploy the Edge Functions for your provider (`intel-provider-*`); set secrets.
+ 7. [ ] Existing Leads tab: review the counts. Bring in a handful, check the drafts read well. Sending stays off.
+ 8. [ ] Mailbox: read-only `selftest gmail` or `selftest zoho` (see `GMAIL_SETUP.md` / `ZOHO_COMPATIBILITY.md`). Decide separately about one test send to your own address.
+ 9. [ ] Only then consider enabling sending: warm-up and the 30/day cap apply; keep approvals on.
+diff --git a/docs/PHASE_2_7_ZOHO_MULTI_ACCOUNT.md b/docs/PHASE_2_7_ZOHO_MULTI_ACCOUNT.md
+index d5482fd..a5caaa4 100644
+--- a/docs/PHASE_2_7_ZOHO_MULTI_ACCOUNT.md
++++ b/docs/PHASE_2_7_ZOHO_MULTI_ACCOUNT.md
+@@ -15,7 +15,7 @@
+ 
+ - Newly connected Zoho accounts start with `is_enabled=false` and `send_enabled=false`; the provider-wide `sending_enabled` gate remains false in this migration.
+ - Zoho's only permitted purpose in the manifest is `business_correspondence`; no consented-prospecting purpose is granted by this adapter.
+-- The old `intel-zoho-*` singleton functions remain for backwards compatibility. The new dynamic worker uses the `intel-provider-*` account-scoped path when configured with `KAIRFLOW_MAIL_PROVIDER=zoho` and `KAIRFLOW_MAIL_ACCOUNT_ID=<account uuid>`.
++- The old `intel-zoho-*` singleton functions have been removed. The new dynamic worker uses the `intel-provider-*` account-scoped path when configured with `KAIRFLOW_MAIL_PROVIDER=zoho` and `KAIRFLOW_MAIL_ACCOUNT_ID=<account uuid>`.
+ - Zoho REST API response shapes and OAuth grants have not been exercised against a live Zoho tenant. The existing Zoho REST client documentation continues to mark live API compatibility as unverified. Verify the chosen data center and required plan/API access before activating any mailbox.
+ - No automatic fallback between mailboxes is introduced. Message/account assignment remains durable through the Phase 2.5 dispatch layer.
+ 
+diff --git a/docs/ZOHO_COMPATIBILITY.md b/docs/ZOHO_COMPATIBILITY.md
+index 237349f..11a98ea 100644
+--- a/docs/ZOHO_COMPATIBILITY.md
++++ b/docs/ZOHO_COMPATIBILITY.md
+@@ -40,7 +40,7 @@ In order of least change:
+ 3. A different provider only with your explicit decision. Intelligence does **not** silently substitute one. The mail layer is isolated in `zoho.py`/`mailops.py`, so a replacement is a contained change.
+ 
+ ## Test sequence (you run it; nothing here sends email)
+-1. Create the OAuth client in the Zoho API Console (Server-based, Offline), set the redirect URI to the `intel-zoho-callback` function URL, store `ZOHO_CLIENT_ID`/`ZOHO_CLIENT_SECRET` as Supabase function secrets.
++1. Create the OAuth client in the Zoho API Console (Server-based, Offline), set the redirect URI to the `intel-provider-callback` function URL, store `ZOHO_CLIENT_ID`/`ZOHO_CLIENT_SECRET` as Supabase function secrets.
+ 2. In KairFlow > Intelligence > Settings, press **Connect Zoho** (this is the step that starts OAuth; it only happens when you press it).
+ 3. `python -m kairflow_intel selftest zoho` must print `zoho folders readable: OK`.
+ 4. Only after that, and only if you decide to, send a single test message from the Outreach tab to an address you own, with sending turned on for that one message.
+diff --git a/intelligence-worker/kairflow_intel/jobs.py b/intelligence-worker/kairflow_intel/jobs.py
+index 613dc4d..fe5b5c4 100644
+--- a/intelligence-worker/kairflow_intel/jobs.py
++++ b/intelligence-worker/kairflow_intel/jobs.py
+@@ -391,10 +391,9 @@ def h_sync_mail(d: Deps, job):
+     if provider_key == "resend":
+         return {"skipped": "Resend is a separate transactional integration, not an Intelligence mailbox adapter"}
+     try:
+-        # The account registry is authoritative after multi-account dispatch. It
+-        # must be checked before the legacy fallback's `disabled` flag: with the
+-        # safe `KAIRFLOW_MAIL_PROVIDER=none` default, registered Gmail/Zoho accounts
+-        # still need to receive replies through their account-scoped adapters.
++        # The account registry is authoritative. It is checked before the default
++        # adapter's `disabled` flag: with the safe `KAIRFLOW_MAIL_PROVIDER=none` default,
++        # registered Gmail/Zoho accounts still receive replies through their account-scoped adapters.
+         accounts = d.rpc("intel_agent_receive_accounts", {}) or []
+         if accounts:
+             st = d.rpc("intel_agent_settings", {})
+@@ -404,10 +403,7 @@ def h_sync_mail(d: Deps, job):
+             return {"skipped": "SMTP is send-only; connect Gmail or Zoho Mail to synchronize inbound replies"}
+         if _mail_paused(d):
+             return {"skipped": "mail provider paused"}
+-        st = d.rpc("intel_agent_settings", {})
+-        own = {st["sender_email"].lower()} if st.get("sender_email") else set()
+-        # Legacy single-mailbox bridge for installations with no registry accounts.
+-        return mailops.sync_inbox(d.rpc, d.zoho, own)
++        return {"skipped": "no provider accounts connected"}
+     except PermanentError as exc:
+         return {"skipped": str(exc)}
+ 
+diff --git a/intelligence-worker/kairflow_intel/mailops.py b/intelligence-worker/kairflow_intel/mailops.py
+index 82c2360..772e644 100644
+--- a/intelligence-worker/kairflow_intel/mailops.py
++++ b/intelligence-worker/kairflow_intel/mailops.py
+@@ -184,34 +184,6 @@ def _rfc_header(headers: dict, name: str) -> str:
+     return ""
+ 
+ 
+-def sync_inbox(rpc, zoho, own_addresses: set[str], overlap_ms: int = 3_600_000, limit: int = 50) -> dict:
+-    """Pull new inbox messages. Overlap + database idempotency make repeated or interrupted syncs harmless."""
+-    cursor = rpc("intel_agent_sync_state", {"p_set": None}) or {}
+-    since = int(cursor.get("last_time_ms", 0)) - overlap_ms
+-    newest, seen, fresh = int(cursor.get("last_time_ms", 0)), 0, 0
+-    items = zoho.iter_messages("inbox", page_size=limit) if hasattr(zoho, "iter_messages") else iter(zoho.list_messages("inbox", limit=limit))
+-    for item in items:
+-        if item["time_ms"] and item["time_ms"] < since:
+-            continue
+-        sender = re.sub(r".*<([^>]+)>.*", r"\1", item["from"]).strip().lower()
+-        if sender in own_addresses:
+-            continue
+-        seen += 1
+-        body = zoho.content_text(item["folder_id"], item["id"])
+-        hdr = zoho.rfc_headers(item["folder_id"], item["id"])
+-        tok = TOKEN_RE.search(f"{item['subject']}\n{body}")
+-        r = rpc("intel_agent_record_inbound", {
+-            "p_zoho_message_id": item["id"], "p_rfc_message_id": _rfc_header(hdr, "Message-ID"), "p_in_reply_to": _rfc_header(hdr, "In-Reply-To"),
+-            "p_references": _rfc_header(hdr, "References"), "p_from_email": sender, "p_subject": item["subject"], "p_body_text": body,
+-            "p_received_at": _iso(item["time_ms"]), "p_thread_id": item["thread_id"], "p_token": tok.group(0) if tok else None})
+-        if not r.get("duplicate"):
+-            fresh += 1
+-            rpc("intel_agent_enqueue_job", {"p_kind": "classify", "p_payload": {"message_id": r["message_id"]}, "p_idempotency_key": f"classify:{item['id']}", "p_run_after": None, "p_priority": 5})
+-        newest = max(newest, item["time_ms"] or 0)
+-    rpc("intel_agent_sync_state", {"p_set": {"last_time_ms": newest}})
+-    return {"seen": seen, "new": fresh}
+-
+-
+ def sync_provider_accounts(rpc, router, own_addresses: set[str], overlap_ms: int = 3_600_000, limit: int = 50, accounts=None) -> dict:
+     """Synchronize every enabled Gmail/Zoho account with an account-scoped cursor.
+ 
+@@ -224,8 +196,7 @@ def sync_provider_accounts(rpc, router, own_addresses: set[str], overlap_ms: int
+         return {"accounts": 0, "seen": 0, "new": 0}
+     totals = {"accounts": 0, "seen": 0, "new": 0}
+     for account in accounts:
+-        # An existing but disabled/disconnected registry account must suppress
+-        # the legacy-singleton fallback; never bypass its receive enablement.
++        # A disabled or disconnected registry account is never polled.
+         if account.get("receive_enabled") is False:
+             continue
+         account_id = str(account["id"])
+diff --git a/intelligence-worker/kairflow_intel/providers/gmail.py b/intelligence-worker/kairflow_intel/providers/gmail.py
+index e816ac4..ce96e6c 100644
+--- a/intelligence-worker/kairflow_intel/providers/gmail.py
++++ b/intelligence-worker/kairflow_intel/providers/gmail.py
+@@ -7,8 +7,7 @@ from ..provider_tokens import ProviderAccountTokenProvider
+ def create_gmail_adapter(*, cfg, supa, account_id: str | None = None, session=None):
+     """Create the same Gmail adapter for any connected account.
+ 
+-    account_id selects a row in intel_provider_accounts. The legacy token route
+-    remains available during the migration window when no account id is set.
++    account_id selects a row in intel_provider_accounts and is required.
+     """
+     if not account_id:
+         raise ValueError("KAIRFLOW_MAIL_ACCOUNT_ID is required for account-scoped Gmail adapter use")
+diff --git a/intelligence-worker/kairflow_intel/zoho.py b/intelligence-worker/kairflow_intel/zoho.py
+index b9e6986..28f8d88 100644
+--- a/intelligence-worker/kairflow_intel/zoho.py
++++ b/intelligence-worker/kairflow_intel/zoho.py
+@@ -4,7 +4,6 @@ after connecting, and fix any response-shape difference in THIS file only. Every
+ from __future__ import annotations
+ 
+ import re
+-import time
+ 
+ import requests
+ 
+@@ -16,31 +15,6 @@ class ZohoRejected(MailRejected):
+     """Zoho definitively refused the request (4xx). The message was NOT sent."""
+ 
+ 
+-class EdgeTokenProvider:
+-    """Short-lived Zoho access tokens come from the intel-zoho-token Edge Function, which holds the refresh token.
+-    The worker authenticates to it with the agent's own JWT; Zoho secrets never reach this machine."""
+-
+-    def __init__(self, cfg, supa, session: requests.Session | None = None, clock=time.time, function: str = "intel-zoho-token"):
+-        self.cfg, self.supa, self.s, self.clock, self.function = cfg, supa, session or requests.Session(), clock, function
+-        self._tok = None
+-
+-    def get(self, force: bool = False) -> dict:
+-        if self._tok and not force and self.clock() < self._tok["exp"]:
+-            return self._tok
+-        try:
+-            r = self.s.post(f"{self.cfg.supabase_url}/functions/v1/{self.function}", json={}, timeout=20,
+-                            headers={"apikey": self.cfg.supabase_anon_key, "Authorization": f"Bearer {self.supa.token()}"})
+-        except requests.RequestException as exc:
+-            raise TransientError(f"token function unreachable: {exc}") from exc
+-        if r.status_code >= 500 or r.status_code == 429:
+-            raise TransientError(f"token function {r.status_code}")
+-        if r.status_code != 200:
+-            raise PermanentError(f"Zoho is not connected or the agent is not allowed to use it ({r.status_code})")
+-        d = r.json()
+-        self._tok = {"access_token": d["access_token"], "base": d["api_base"].rstrip("/"), "account_id": str(d["account_id"]), "mailbox": str(d.get("mailbox") or ""), "exp": self.clock() + int(d.get("expires_in", 3000)) - 120}
+-        return self._tok
+-
+-
+ class ZohoClient:
+     provider = "zoho"
+ 
+diff --git a/intelligence-worker/tests/test_ops.py b/intelligence-worker/tests/test_ops.py
+index 66fe3fd..cf988a2 100644
+--- a/intelligence-worker/tests/test_ops.py
++++ b/intelligence-worker/tests/test_ops.py
+@@ -264,43 +264,31 @@ class Sending(unittest.TestCase):
+ 
+ 
+ class Inbox(unittest.TestCase):
+-    def test_sync_paginates_backlog_before_advancing_cursor(self):
+-        r, z = FakeRpc(), FakeZoho()
+-        base = 1_700_000_100_000
+-        z.inbox = [{"id": f"old{i}", "folder_id": "f", "subject": "reply", "from": f"u{i}@example.com",
+-                    "to": "", "time_ms": base - i * 1000, "thread_id": ""} for i in range(125)]
+-        z.iter_messages = lambda folder, page_size: (item for item in z.inbox)
+-        got = mailops.sync_inbox(r, z, set(), overlap_ms=0, limit=50)
+-        self.assertEqual(got["new"], 125)
+-        self.assertEqual(len(r.inbound), 125)
+-        self.assertEqual(r.cursor["last_time_ms"], base)
+-
+-    def test_inbound_rfc_headers_are_case_insensitive_across_providers(self):
+-        r, z = FakeRpc(), FakeZoho()
+-        z.inbox = [{"id": "lowercase", "folder_id": "f", "subject": "Re: hi", "from": "rina@pixelmoon.com",
+-                    "to": "studio@test", "time_ms": 1_700_000_100_000, "thread_id": "t"}]
+-        z.iter_messages = lambda folder, page_size: iter(z.inbox)
+-        z.rfc_headers = lambda *_: {"message-id": "<reply@pixelmoon.com>", "in-reply-to": "<outbound@studio.test>",
+-                                    "references": "<older@studio.test> <outbound@studio.test>"}
+-        mailops.sync_inbox(r, z, set(), overlap_ms=0)
+-        payload = next(p for name, p in r.calls if name == "intel_agent_record_inbound")
++    def test_inbound_rfc_headers_are_case_insensitive_for_account_sync(self):
++        class Provider(FakeZoho):
++            def iter_messages(self, folder, page_size=50):
++                return iter([{"id": "lowercase", "folder_id": "f", "subject": "Re: hi", "from": "rina@pixelmoon.com",
++                              "to": "studio@test", "time_ms": 1_700_000_100_000, "thread_id": "t"}])
++            def content_text(self, folder_id, message_id): return "reply"
++            def rfc_headers(self, *_): return {"message-id": "<reply@pixelmoon.com>", "in-reply-to": "<outbound@studio.test>",
++                                               "references": "<older@studio.test> <outbound@studio.test>"}
++        class Registry:
++            def create(self, key, **ctx): return Provider()
++        class Router:
++            cfg = object(); supa = object(); registry = Registry()
++        calls = []
++        def rpc(name, params=None):
++            calls.append((name, params or {}))
++            if name == "intel_agent_receive_sync_state": return {}
++            if name == "intel_agent_record_inbound": return {"message_id": "m1", "duplicate": False}
++            return None
++        mailops.sync_provider_accounts(rpc, Router(), set(), overlap_ms=0,
++                                       accounts=[{"id": "a", "provider_key": "gmail", "mailbox": "s@studio.test", "receive_enabled": True}])
++        payload = next(p for name, p in calls if name == "intel_agent_record_inbound")
+         self.assertEqual(payload["p_rfc_message_id"], "<reply@pixelmoon.com>")
+         self.assertEqual(payload["p_in_reply_to"], "<outbound@studio.test>")
+         self.assertEqual(payload["p_references"], "<older@studio.test> <outbound@studio.test>")
+ 
+-    def test_cursor_does_not_advance_when_persisting_page_fails(self):
+-        class BrokenRpc(FakeRpc):
+-            def __call__(self, name, p=None):
+-                if name == "intel_agent_record_inbound":
+-                    raise RuntimeError("db unavailable")
+-                return super().__call__(name, p)
+-        r, z = BrokenRpc(), FakeZoho()
+-        z.inbox = [{"id": "one", "folder_id": "f", "subject": "reply", "from": "u@example.com",
+-                    "to": "", "time_ms": 1_700_000_100_000, "thread_id": ""}]
+-        with self.assertRaises(RuntimeError):
+-            mailops.sync_inbox(r, z, set(), overlap_ms=0)
+-        self.assertEqual(r.cursor.get("last_time_ms", 0), 0)
+-
+     def test_multi_account_sync_uses_account_scoped_cursors_and_ids(self):
+         class Provider(FakeZoho):
+             def __init__(self, account):
+@@ -354,18 +342,6 @@ class Inbox(unittest.TestCase):
+         ])
+         self.assertEqual(result, {"accounts": 0, "seen": 0, "new": 0})
+ 
+-    def test_sync_is_idempotent_and_skips_own_mail(self):
+-        r, z = FakeRpc(), FakeZoho()
+-        z.inbox = [{"id": "i1", "folder_id": "f", "subject": "Re: hi", "from": "Rina <rina@pixelmoon.com>", "to": "", "time_ms": 1_700_000_100_000, "thread_id": ""},
+-                   {"id": "i2", "folder_id": "f", "subject": "x", "from": "alex@studio.test", "to": "", "time_ms": 1_700_000_200_000, "thread_id": ""}]
+-        first = mailops.sync_inbox(r, z, {"alex@studio.test"}); second = mailops.sync_inbox(r, z, {"alex@studio.test"})
+-        self.assertEqual((first["new"], second["new"]), (1, 0))
+-        self.assertEqual(len(r.inbound), 1); self.assertEqual(len([k for k in r.jobs if k.startswith("classify:")]), 1)
+-        rec = next(p for n, p in r.calls if n == "intel_agent_record_inbound")
+-        self.assertEqual((rec["p_from_email"], rec["p_token"]), ("rina@pixelmoon.com", "kf" + "a" * 32))
+-        self.assertEqual(r.cursor["last_time_ms"], 1_700_000_100_000)
+-
+-
+ class WorkerLoop(unittest.TestCase):
+     def mk(self):
+         calls = []
+diff --git a/src/email/email.test.mjs b/src/email/email.test.mjs
+index 9eb90ad..4557ceb 100644
+--- a/src/email/email.test.mjs
++++ b/src/email/email.test.mjs
+@@ -507,10 +507,9 @@ test("Gmail and Zoho are refused with 410 unless their flag is on; unreadable fl
+   assert.equal((await providerPausedResponse({ rpc: async () => { throw new Error("down"); } }, "zoho")).status, 410);
+ });
+ 
+-test("every Gmail and Zoho Edge Function checks the pause flag first, and none was deleted", () => {
+-  for (const [prov, name] of [["gmail", "connect"], ["gmail", "callback"], ["gmail", "token"], ["zoho", "connect"], ["zoho", "callback"], ["zoho", "token"]]) {
+-    const src = fs.readFileSync(new URL(`../../supabase/functions/intel-${prov}-${name}/index.ts`, import.meta.url), "utf8");
+-    assert.match(src, new RegExp(`providerPausedResponse\\(pauseGuard, "${prov}"\\)\\) \\?\\? handle`), `${prov}-${name} must be guarded`);
++test("legacy singleton Gmail/Zoho Edge Functions are gone; shared constants and worker adapters remain", () => {
++  for (const prov of ["gmail", "zoho"]) for (const name of ["connect", "callback", "token"]) {
++    assert.ok(!fs.existsSync(new URL(`../../supabase/functions/intel-${prov}-${name}`, import.meta.url)), `intel-${prov}-${name} must stay removed`);
+   }
+   for (const f of ["intel_gmail_logic.ts", "intel_zoho_logic.ts"]) assert.ok(fs.existsSync(new URL(`../../supabase/functions/_shared/${f}`, import.meta.url)), `${f} must be kept`);
+   for (const f of ["gmail.py", "zoho.py"]) assert.ok(fs.existsSync(new URL(`../../intelligence-worker/kairflow_intel/${f}`, import.meta.url)), `${f} must be kept`);
+diff --git a/src/email/provider-foundation.test.mjs b/src/email/provider-foundation.test.mjs
+index 2625142..3130b1b 100644
+--- a/src/email/provider-foundation.test.mjs
++++ b/src/email/provider-foundation.test.mjs
+@@ -23,7 +23,7 @@ const reg = read(REG), scope = read(SCOPE), idem = read(IDEM), regCode = code(re
+ 
+ test("Phase 2 migrations sort after every existing migration and are unique", () => {
+   const names = fs.readdirSync(dir).filter((n) => n.endsWith(".sql"));
+-  const others = names.filter((n) => ![REG, SCOPE, IDEM, CRM4D, CRM4D_FIX, INBOX4E, PHASE4F, PHASE4G, PHASE5, PHASE5_FIX, ACCESS].includes(n)).map((n) => n.split("_")[0]);
++  const others = names.filter((n) => ![REG, SCOPE, IDEM, CRM4D, CRM4D_FIX, INBOX4E, PHASE4F, PHASE4G, PHASE5, PHASE5_FIX, ACCESS, "20261217090000_intelligence_remove_legacy_mailbox.sql"].includes(n)).map((n) => n.split("_")[0]);
+   const last = others.sort().at(-1);
+   assert.ok(REG.split("_")[0] > last && SCOPE.split("_")[0] > REG.split("_")[0] && IDEM.split("_")[0] > SCOPE.split("_")[0] && CRM4D.split("_")[0] > IDEM.split("_")[0] && CRM4D_FIX.split("_")[0] > CRM4D.split("_")[0] && INBOX4E.split("_")[0] > CRM4D_FIX.split("_")[0] && PHASE4F.split("_")[0] > INBOX4E.split("_")[0] && PHASE4G.split("_")[0] > PHASE4F.split("_")[0] && PHASE5.split("_")[0] > PHASE4G.split("_")[0] && PHASE5_FIX.split("_")[0] > PHASE5.split("_")[0] && ACCESS.split("_")[0] > PHASE5_FIX.split("_")[0], `must follow ${last}`);
+   const versions = names.map((n) => n.split("_")[0]);
+diff --git a/src/intelligence/gmail-provider.test.mjs b/src/intelligence/gmail-provider.test.mjs
+index cb3ab23..e8f4afd 100644
+--- a/src/intelligence/gmail-provider.test.mjs
++++ b/src/intelligence/gmail-provider.test.mjs
+@@ -5,12 +5,11 @@ import { MAIL_PROVIDERS, OAUTH_RESULTS, mailProviderName, mailStatusLabel, oauth
+ 
+ const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
+ const sql = read("../../supabase/migrations/20261109150000_intelligence_gmail_provider.sql");
+-const gmailEdge = read("../../supabase/functions/_shared/intel_gmail_logic.ts");
+-const zohoEdge = read("../../supabase/functions/_shared/intel_zoho_logic.ts");
++const providerOauth = read("../../supabase/functions/_shared/intel_provider_oauth.ts");
+ const worker = read("../../intelligence-worker/kairflow_intel/gmail.py");
+ 
+ test("every result flag the Edge functions can redirect with has a message for the person", () => {
+-  for (const src of [gmailEdge, zohoEdge]) {
++  for (const src of [providerOauth]) {
+     const flags = [...src.matchAll(/back\("(\w+)"\)/g)].map((m) => m[1]);
+     assert.ok(flags.length >= 4);
+     for (const f of flags) assert.ok(OAUTH_RESULTS[f], `no message for ?intelligence=${f}`);
+@@ -43,13 +42,6 @@ test("the kill switch still refuses to enable sending without a connected mailbo
+   assert.match(f, /intel_mail_account/); assert.match(f, /connected/); assert.match(f, /agent_user_id/);
+ });
+ 
+-test("Gmail edge: least-privilege scopes, no secrets in redirects, agent-only token endpoint, provider checked", () => {
+-  assert.ok(!/refresh_token_enc[^\n]*back\(/.test(gmailEdge));
+-  assert.match(gmailEdge, /s\.agent_user_id !== uid/); assert.match(gmailEdge, /acct\.provider !== "gmail"/); assert.match(gmailEdge, /st\.provider !== "gmail"/);
+-  assert.match(gmailEdge, /intel_is_authorized_user/); assert.match(gmailEdge, /requireIntelligenceAdmin/);
+-  assert.match(gmailEdge, /\.is\("used_at", null\)/, "state is claimed atomically");
+-});
+-
+ test("worker Gmail client never sends from a different address, never retries a send, and refuses header injection", () => {
+   assert.match(worker, /from_addr\.strip\(\)\.lower\(\) != mailbox/);
+   assert.match(worker, /header injection/);
+@@ -58,13 +50,6 @@ test("worker Gmail client never sends from a different address, never retries a
+   assert.match(worker, /429 or r\.status_code >= 500/);
+ });
+ 
+-test("each function wrapper points at the matching logic module", () => {
+-  for (const fn of ["connect", "callback", "token"]) {
+-    const src = read(`../../supabase/functions/intel-gmail-${fn}/index.ts`);
+-    assert.match(src, /intel_gmail_logic\.ts/); assert.ok(!/zoho/i.test(src.replace(/Zoho's/g, "")), `${fn} wrapper mentions Zoho`);
+-  }
+-});
+-
+ test("mail status distinguishes a provider check failure from a disconnected mailbox", () => {
+   assert.equal(mailStatusLabel({ status: "check_failed", provider: "zoho" }), "Zoho Mail status check failed");
+   assert.equal(mailStatusLabel({ status: "disconnected", provider: "zoho" }), "Mail not connected");
+@@ -79,7 +64,6 @@ test("dynamic provider account status does not imply a single configured mailbox
+ });
+ 
+ test("OAuth success messaging no longer tells operators to select a global worker provider", () => {
+-  assert.match(OAUTH_RESULTS.gmail_connected.text, /durable account assignment/);
+-  assert.match(OAUTH_RESULTS.zoho_connected.text, /durable account assignment/);
+-  assert.doesNotMatch(OAUTH_RESULTS.gmail_connected.text + OAUTH_RESULTS.zoho_connected.text, /KAIRFLOW_MAIL_PROVIDER/);
++  assert.match(OAUTH_RESULTS.provider_connected.text, /durable account assignment/);
++  assert.doesNotMatch(OAUTH_RESULTS.provider_connected.text, /KAIRFLOW_MAIL_PROVIDER/);
+ });
+diff --git a/src/intelligence/logic.js b/src/intelligence/logic.js
+index aedcf73..011176d 100644
+--- a/src/intelligence/logic.js
++++ b/src/intelligence/logic.js
+@@ -216,7 +216,7 @@ export function awaitingAnswer(messages) {
+ export const newClientKey = () => `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+ export const countAiGeneratedLeads = (leads) => (leads || []).filter(isAiGeneratedLead).length;
+ 
+-// ---- Mail provider (Gmail or Zoho) ---------------------------------------------------------------------------------------
++// ---- Mail provider labels (Gmail, Zoho Mail, SMTP) ---------------------------------------------------------------------------------------
+ export const MAIL_PROVIDERS = Object.freeze({ gmail: "Gmail", zoho: "Zoho Mail" });
+ export const mailProviderName = (mail) => MAIL_PROVIDERS[mail?.provider] || MAIL_PROVIDERS.zoho;
+ /** "Gmail connected (studio@gmail.com)" / "Mail not connected". */
+@@ -233,16 +233,15 @@ export const mailStatusLabel = (mail) => {
+   if (mail.status === "error" || mail.status === "check_failed") return `${mailProviderName(mail)} status check failed`;
+   return `${mailProviderName(mail)}: ${String(mail.status).replace(/[_-]+/g, " ")}`;
+ };
+-/** What the person sees after Google/Zoho send them back to KairFlow (?intelligence=<flag>). Unknown flags show nothing. */
++/** What the person sees after a provider sends them back to KairFlow (?intelligence=<flag>). Unknown flags show nothing. */
+ export const OAUTH_RESULTS = Object.freeze({
+-  gmail_connected: { tone: "ok", text: "Gmail is connected. Refresh provider accounts in Settings; outbound messages use their durable account assignment." },
+-  gmail_cancelled: { tone: "warn", text: "Gmail connection cancelled. Nothing was saved." },
+-  gmail_scope: { tone: "bad", text: "Gmail needs both permissions (send and read replies). Connect again and leave both ticked. Nothing was saved." },
+-  gmail_denied: { tone: "bad", text: "Only an administrator who is also an active Master User can connect Gmail. Nothing was saved." },
+-  gmail_error: { tone: "bad", text: "Gmail could not be connected. Nothing was saved. Check the Google app settings and try again." },
+-  zoho_connected: { tone: "ok", text: "Zoho Mail is connected. Refresh provider accounts in Settings; outbound messages use their durable account assignment." },
+-  zoho_denied: { tone: "bad", text: "Only an administrator who is also an active Master User can connect Zoho Mail. Nothing was saved." },
+-  zoho_error: { tone: "bad", text: "Zoho Mail could not be connected. Nothing was saved." },
++  provider_connected: { tone: "ok", text: "Mail account connected. Refresh provider accounts in Settings; outbound messages use their durable account assignment." },
++  provider_cancelled: { tone: "warn", text: "Connection cancelled. Nothing was saved." },
++  provider_denied: { tone: "bad", text: "Only an administrator who is also an active Master User can connect a mail account. Nothing was saved." },
++  provider_disabled: { tone: "bad", text: "That provider is not enabled. Nothing was saved." },
++  provider_adapter_missing: { tone: "bad", text: "That provider is not installed on the worker. Nothing was saved." },
++  provider_save_error: { tone: "bad", text: "The account could not be saved. Nothing was saved. Try again." },
++  provider_error: { tone: "bad", text: "The account could not be connected. Nothing was saved. Check the provider app settings and try again." },
+ });
+ export const oauthResult = (flag) => OAUTH_RESULTS[flag] || null;
+ 
+diff --git a/src/intelligence/phase11-security-contract.test.mjs b/src/intelligence/phase11-security-contract.test.mjs
+index 864efaf..6a3ba30 100644
+--- a/src/intelligence/phase11-security-contract.test.mjs
++++ b/src/intelligence/phase11-security-contract.test.mjs
+@@ -20,7 +20,7 @@ test("JWT bypass is explicit only for capability, webhook and one-time OAuth end
+   const expected = [
+     "google-drive-connect", "google-drive-callback", "patreon-connect", "patreon-callback",
+     "patreon-webhook", "paystack-checkout", "paystack-webhook", "resend-webhook",
+-    "intel-resend-webhook", "intel-gmail-callback", "intel-zoho-callback",
++    "intel-resend-webhook",
+     "intel-provider-callback", "studio-invite-accept", "freelancer-drive-upload",
+     "client-final-download", "portfolio-view", "portfolio-media", "portal-chat", "push",
+   ];
+diff --git a/supabase/config.toml b/supabase/config.toml
+index 22a558b..e10213b 100644
+--- a/supabase/config.toml
++++ b/supabase/config.toml
+@@ -29,12 +29,6 @@ verify_jwt = false
+ [functions.intel-resend-webhook]
+ verify_jwt = false
+ 
+-[functions.intel-gmail-callback]
+-verify_jwt = false
+-
+-[functions.intel-zoho-callback]
+-verify_jwt = false
+-
+ [functions.intel-provider-callback]
+ verify_jwt = false
+ 
+diff --git a/supabase/functions/_shared/intel_gmail_logic.ts b/supabase/functions/_shared/intel_gmail_logic.ts
+index 654842f..4116c64 100644
+--- a/supabase/functions/_shared/intel_gmail_logic.ts
++++ b/supabase/functions/_shared/intel_gmail_logic.ts
+@@ -1,11 +1,6 @@
+-// Gmail connection for KairFlow Intelligence (free alternative to Zoho Mail). Same shape as intel_zoho_logic.ts: every decision is
+-// pure and injectable so it can be unit tested; the three index.ts files only wire real dependencies.
+-// NOT exercised against a live Google account. Google specifics (hosts, scopes, response fields) follow Google's public OAuth/Gmail docs.
+-import { corsHeaders } from "./cors.ts";
+-import { requireIntelligenceAdmin } from "./intel_auth.ts";
+-import type { Deps } from "./intel_zoho_logic.ts";
++// Gmail constants shared by the account-scoped provider OAuth flow (intel_provider_oauth.ts).
++// Google specifics (hosts, scopes) follow Google's public OAuth/Gmail docs.
+ 
+-export type { Deps };
+ // Least privilege that still lets the agent send and read replies. gmail.readonly is a "restricted" scope: for ONE personal account an
+ // unverified app is allowed (publish the consent screen to "In production" so refresh tokens do not expire after 7 days).
+ export const GMAIL_SCOPE_LIST = ["https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.readonly"];
+@@ -13,116 +8,9 @@ export const GMAIL_SCOPES = GMAIL_SCOPE_LIST.join(" ");
+ export const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
+ export const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+ export const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
+-const STATE_TTL_MS = 10 * 60 * 1000;
+-
+-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+-
+-export function buildAuthUrl(clientId: string, redirectUri: string, state: string): string {
+-  const u = new URL(GOOGLE_AUTH_URL);
+-  u.searchParams.set("client_id", clientId);
+-  u.searchParams.set("redirect_uri", redirectUri);
+-  u.searchParams.set("response_type", "code");
+-  u.searchParams.set("scope", GMAIL_SCOPES);
+-  u.searchParams.set("access_type", "offline");
+-  u.searchParams.set("prompt", "consent");               // makes Google return a refresh token every time
+-  u.searchParams.set("include_granted_scopes", "false"); // never widen to scopes granted to other apps
+-  u.searchParams.set("state", state);
+-  return u.toString();
+-}
+ 
+ /** True only when Google confirms BOTH scopes were granted (people can untick one on the consent screen). */
+ export const hasAllScopes = (granted: unknown): boolean => {
+   const set = new Set(String(granted || "").split(/\s+/).filter(Boolean));
+   return GMAIL_SCOPE_LIST.every((s) => set.has(s));
+ };
+-
+-/** POST, signed-in administrator only (admin AND active Master User). Returns {url} for the browser to open. */
+-export async function handleConnect(req: Request, deps: Deps): Promise<Response> {
+-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+-  const auth = await requireIntelligenceAdmin(req, { createClient: deps.createClient, url: deps.env("SUPABASE_URL"), anonKey: deps.env("SUPABASE_ANON_KEY") });
+-  if (!auth.ok) return json({ error: auth.error }, auth.status);
+-  const clientId = deps.env("GOOGLE_CLIENT_ID"), redirectUri = deps.env("GOOGLE_REDIRECT_URI");
+-  if (!clientId || !redirectUri) return json({ error: "Gmail is not configured on the server" }, 500);
+-  const jwt = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+-  const user = deps.createClient(deps.env("SUPABASE_URL")!, deps.env("SUPABASE_ANON_KEY")!, { global: { headers: { Authorization: `Bearer ${jwt}` } }, auth: { persistSession: false } });
+-  const { data: org, error } = await user.rpc("intel_admin_org");
+-  if (error || !org) return json({ error: "KairFlow Intelligence is restricted." }, 403);
+-  const { data: row, error: insErr } = await deps.service.from("intel_oauth_states")
+-    .insert({ organization_id: org, user_id: auth.userId, data_center: "google", provider: "gmail" }).select("state").single();
+-  if (insErr || !row) return json({ error: "Could not start the connection" }, 500);
+-  return json({ url: buildAuthUrl(clientId, redirectUri, row.state) });
+-}
+-
+-/** GET from Google's redirect. Trust comes ONLY from the single-use Gmail state row created by handleConnect. */
+-export async function handleCallback(req: Request, deps: Deps): Promise<Response> {
+-  const app = deps.env("APP_URL") || "/";
+-  const back = (flag: string) => Response.redirect(`${app}${app.includes("?") ? "&" : "?"}intelligence=${flag}`, 302);
+-  try {
+-    const url = new URL(req.url);
+-    if (url.searchParams.get("error")) return back("gmail_cancelled");
+-    const code = url.searchParams.get("code"), state = url.searchParams.get("state") || "";
+-    if (!code || !/^[0-9a-f-]{36}$/i.test(state)) return new Response("Missing or invalid code or state", { status: 400 });
+-
+-    const { data: st } = await deps.service.from("intel_oauth_states").select("organization_id,user_id,data_center,provider,created_at,used_at").eq("state", state).maybeSingle();
+-    if (!st || st.provider !== "gmail" || st.used_at || deps.now() - new Date(st.created_at).getTime() > STATE_TTL_MS) {
+-      return new Response("This connection attempt has expired or was already used. Go back to Intelligence settings and try again.", { status: 401 });
+-    }
+-    const { data: claimed } = await deps.service.from("intel_oauth_states").update({ used_at: new Date(deps.now()).toISOString() }).eq("state", state).is("used_at", null).select("state").maybeSingle();
+-    if (!claimed) return new Response("This connection attempt was already used.", { status: 401 });
+-
+-    // The person who started it must STILL be authorized, or nothing is stored.
+-    const { data: ok } = await deps.service.rpc("intel_is_authorized_user", { p_user_id: st.user_id, p_organization_id: st.organization_id });
+-    if (ok !== true) return back("gmail_denied");
+-
+-    const form = new URLSearchParams({ grant_type: "authorization_code", code, client_id: deps.env("GOOGLE_CLIENT_ID")!, client_secret: deps.env("GOOGLE_CLIENT_SECRET")!, redirect_uri: deps.env("GOOGLE_REDIRECT_URI")! });
+-    const tr = await deps.fetch(GOOGLE_TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
+-    const tok = await tr.json().catch(() => ({}));
+-    if (!tr.ok || !tok.refresh_token || !tok.access_token) return back("gmail_error");
+-    if (!hasAllScopes(tok.scope)) return back("gmail_scope");     // nothing is stored unless send AND read were both allowed
+-
+-    const pr = await deps.fetch(`${GMAIL_API_BASE}/users/me/profile`, { headers: { Authorization: `Bearer ${tok.access_token}`, Accept: "application/json" } });
+-    const profile = await pr.json().catch(() => ({}));
+-    if (!pr.ok || !profile?.emailAddress) return back("gmail_error");
+-
+-    await deps.service.from("intel_mail_account").upsert({
+-      organization_id: st.organization_id, provider: "gmail", data_center: "google", account_id: "me", mailbox: String(profile.emailAddress).toLowerCase(),
+-      scope: GMAIL_SCOPES, refresh_token_enc: await deps.encrypt(tok.refresh_token), status: "connected", last_error: "", connected_at: new Date(deps.now()).toISOString(),
+-    });
+-    return back("gmail_connected");
+-  } catch {
+-    return back("gmail_error");   // never echo internals (or tokens) to the browser
+-  }
+-}
+-
+-/** POST. Callable ONLY by the registered agent identity. Returns a short-lived access token; the refresh token never leaves the server. */
+-export async function handleToken(req: Request, deps: Deps): Promise<Response> {
+-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+-  const m = /^Bearer\s+(\S+)$/i.exec(req.headers.get("Authorization") || "");
+-  if (!m) return json({ error: "Not authenticated" }, 401);
+-  const anon = deps.createClient(deps.env("SUPABASE_URL")!, deps.env("SUPABASE_ANON_KEY")!, { auth: { persistSession: false } });
+-  const { data: u, error } = await anon.auth.getUser(m[1]);
+-  const uid = u?.user?.id;
+-  if (error || !uid) return json({ error: "Not authenticated" }, 401);
+-
+-  const { data: s } = await deps.service.from("intel_settings").select("organization_id,agent_user_id,kill_switch").eq("agent_user_id", uid).maybeSingle();
+-  if (!s || s.agent_user_id !== uid) return json({ error: "Not allowed" }, 403);     // admins and everyone else are refused here too
+-  const { data: acct } = await deps.service.from("intel_mail_account").select("provider,mailbox,refresh_token_enc,status").eq("organization_id", s.organization_id).maybeSingle();
+-  if (!acct || acct.provider !== "gmail") return json({ error: "Gmail is not the connected mailbox" }, 409);
+-  if (acct.status === "disconnected" || !acct.refresh_token_enc) return json({ error: "Gmail is not connected" }, 409);
+-
+-  let refresh: string;
+-  try { refresh = await deps.decrypt(acct.refresh_token_enc); } catch { return json({ error: "Stored connection is unreadable; reconnect Gmail" }, 409); }
+-  const form = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: deps.env("GOOGLE_CLIENT_ID")!, client_secret: deps.env("GOOGLE_CLIENT_SECRET")! });
+-  const tr = await deps.fetch(GOOGLE_TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
+-  const tok = await tr.json().catch(() => ({}));
+-  if (!tr.ok || !tok.access_token) {
+-    const revoked = tr.status === 400 && tok?.error === "invalid_grant";
+-    const bad = tr.status >= 400 && tr.status < 500;
+-    const why = revoked
+-      ? "Google revoked the Gmail connection (password changed, access removed, unused for 6 months, or the Google app is still in Testing mode where tokens last 7 days). Reconnect Gmail."
+-      : "Google refused the stored connection; reconnect Gmail.";
+-    await deps.service.from("intel_mail_account").update(bad ? { status: "error", last_error: why } : { last_error: "Google was temporarily unreachable." }).eq("organization_id", s.organization_id);
+-    return json({ error: "Gmail token refresh failed" }, bad ? 409 : 503);
+-  }
+-  return json({ access_token: tok.access_token, expires_in: Number(tok.expires_in || 3600), api_base: GMAIL_API_BASE, account_id: "me", mailbox: acct.mailbox });
+-}
+diff --git a/supabase/functions/_shared/intel_zoho_logic.ts b/supabase/functions/_shared/intel_zoho_logic.ts
+index ae5f9a6..ed45951 100644
+--- a/supabase/functions/_shared/intel_zoho_logic.ts
++++ b/supabase/functions/_shared/intel_zoho_logic.ts
+@@ -1,129 +1,10 @@
+-// Zoho Mail connection for KairFlow Intelligence. All decisions live here (pure, injectable) so they can be unit tested;
+-// the three index.ts files only wire real dependencies. Zoho details (hosts, scopes, response fields) follow Zoho's public
+-// REST API documentation and have NOT been exercised against a live account: confirm them on first connect.
+-import { corsHeaders } from "./cors.ts";
+-import { requireIntelligenceAdmin } from "./intel_auth.ts";
++// Zoho Mail constants shared by the account-scoped provider OAuth flow (intel_provider_oauth.ts).
++// Zoho details (hosts, scopes) follow Zoho's public REST API documentation.
+ 
+ export const ZOHO_DATA_CENTERS = ["com", "eu", "in", "com.au", "jp", "ca", "sa", "com.cn"];
+ // Minimum scopes: list folders/accounts, read mail, send mail. Nothing else (no delete, no settings, no contacts).
+ export const ZOHO_SCOPES = "ZohoMail.accounts.READ,ZohoMail.folders.READ,ZohoMail.messages.READ,ZohoMail.messages.CREATE";
+-const STATE_TTL_MS = 10 * 60 * 1000;
+ 
+ export const accountsHost = (dc: string) => `https://accounts.zoho.${dc}`;
+ export const apiBase = (dc: string) => `https://mail.zoho.${dc}/api`;
+ export const isDataCenter = (dc: unknown): dc is string => typeof dc === "string" && ZOHO_DATA_CENTERS.includes(dc);
+-
+-export interface Deps {
+-  env: (k: string) => string | undefined;
+-  createClient: (url: string, key: string, options?: Record<string, unknown>) => any;
+-  service: any;                                   // service-role client: ONLY used after the caller has been authorized
+-  fetch: (url: string, init?: Record<string, unknown>) => Promise<any>;
+-  encrypt: (s: string) => Promise<string>;
+-  decrypt: (s: string) => Promise<string>;
+-  now: () => number;
+-}
+-
+-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+-
+-export function buildAuthUrl(dc: string, clientId: string, redirectUri: string, state: string): string {
+-  const u = new URL(`${accountsHost(dc)}/oauth/v2/auth`);
+-  u.searchParams.set("scope", ZOHO_SCOPES);
+-  u.searchParams.set("client_id", clientId);
+-  u.searchParams.set("response_type", "code");
+-  u.searchParams.set("access_type", "offline");
+-  u.searchParams.set("prompt", "consent");
+-  u.searchParams.set("redirect_uri", redirectUri);
+-  u.searchParams.set("state", state);
+-  return u.toString();
+-}
+-
+-/** POST, signed-in administrator only (admin AND active Master User). Returns {url} for the browser to open. */
+-export async function handleConnect(req: Request, deps: Deps): Promise<Response> {
+-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+-  const auth = await requireIntelligenceAdmin(req, { createClient: deps.createClient, url: deps.env("SUPABASE_URL"), anonKey: deps.env("SUPABASE_ANON_KEY") });
+-  if (!auth.ok) return json({ error: auth.error }, auth.status);
+-  let body: any = {};
+-  try { body = await req.json(); } catch { /* empty body: validated below */ }
+-  if (!isDataCenter(body?.data_center)) return json({ error: "Unknown Zoho data center" }, 400);
+-  const clientId = deps.env("ZOHO_CLIENT_ID"), redirectUri = deps.env("ZOHO_REDIRECT_URI");
+-  if (!clientId || !redirectUri) return json({ error: "Zoho is not configured on the server" }, 500);
+-
+-  const jwt = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+-  const user = deps.createClient(deps.env("SUPABASE_URL")!, deps.env("SUPABASE_ANON_KEY")!, { global: { headers: { Authorization: `Bearer ${jwt}` } }, auth: { persistSession: false } });
+-  const { data: org, error } = await user.rpc("intel_admin_org");
+-  if (error || !org) return json({ error: "KairFlow Intelligence is restricted." }, 403);
+-  const { data: row, error: insErr } = await deps.service.from("intel_oauth_states")
+-    .insert({ organization_id: org, user_id: auth.userId, data_center: body.data_center }).select("state").single();
+-  if (insErr || !row) return json({ error: "Could not start the connection" }, 500);
+-  return json({ url: buildAuthUrl(body.data_center, clientId, redirectUri, row.state) });
+-}
+-
+-/** GET from Zoho's redirect. Trust comes ONLY from the single-use state row created by handleConnect. */
+-export async function handleCallback(req: Request, deps: Deps): Promise<Response> {
+-  const app = deps.env("APP_URL") || "/";
+-  const back = (flag: string) => Response.redirect(`${app}${app.includes("?") ? "&" : "?"}intelligence=${flag}`, 302);
+-  try {
+-    const url = new URL(req.url);
+-    const code = url.searchParams.get("code"), state = url.searchParams.get("state") || "";
+-    if (!code || !/^[0-9a-f-]{36}$/i.test(state)) return new Response("Missing or invalid code or state", { status: 400 });
+-
+-    const { data: st } = await deps.service.from("intel_oauth_states").select("organization_id,user_id,data_center,provider,created_at,used_at").eq("state", state).maybeSingle();
+-    if (!st || (st.provider ?? "zoho") !== "zoho" || st.used_at || deps.now() - new Date(st.created_at).getTime() > STATE_TTL_MS || !isDataCenter(st.data_center)) {
+-      return new Response("This connection attempt has expired or was already used. Go back to Intelligence settings and try again.", { status: 401 });
+-    }
+-    const { data: claimed } = await deps.service.from("intel_oauth_states").update({ used_at: new Date(deps.now()).toISOString() }).eq("state", state).is("used_at", null).select("state").maybeSingle();
+-    if (!claimed) return new Response("This connection attempt was already used.", { status: 401 });
+-
+-    // The person who started it must STILL be authorized, or nothing is stored.
+-    const { data: ok } = await deps.service.rpc("intel_is_authorized_user", { p_user_id: st.user_id, p_organization_id: st.organization_id });
+-    if (ok !== true) return back("zoho_denied");
+-
+-    const form = new URLSearchParams({ grant_type: "authorization_code", code, client_id: deps.env("ZOHO_CLIENT_ID")!, client_secret: deps.env("ZOHO_CLIENT_SECRET")!, redirect_uri: deps.env("ZOHO_REDIRECT_URI")! });
+-    const tr = await deps.fetch(`${accountsHost(st.data_center)}/oauth/v2/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
+-    const tok = await tr.json().catch(() => ({}));
+-    if (!tr.ok || !tok.refresh_token) return back("zoho_error");
+-
+-    const ar = await deps.fetch(`${apiBase(st.data_center)}/accounts`, { headers: { Authorization: `Zoho-oauthtoken ${tok.access_token}`, Accept: "application/json" } });
+-    const accounts = (await ar.json().catch(() => ({})))?.data;
+-    const acct = Array.isArray(accounts) ? accounts[0] : null;
+-    if (!ar.ok || !acct?.accountId) return back("zoho_error");
+-
+-    await deps.service.from("intel_mail_account").upsert({
+-      organization_id: st.organization_id, provider: "zoho", data_center: st.data_center, account_id: String(acct.accountId),
+-      mailbox: String(acct.primaryEmailAddress || acct.mailboxAddress || acct.emailAddress || ""), scope: ZOHO_SCOPES,
+-      refresh_token_enc: await deps.encrypt(tok.refresh_token), status: "connected", last_error: "", connected_at: new Date(deps.now()).toISOString(),
+-    });
+-    return back("zoho_connected");
+-  } catch {
+-    return back("zoho_error");   // never echo internals (or tokens) to the browser
+-  }
+-}
+-
+-/** POST. Callable ONLY by the registered agent identity. Returns a short-lived access token; the refresh token never leaves the server. */
+-export async function handleToken(req: Request, deps: Deps): Promise<Response> {
+-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+-  const m = /^Bearer\s+(\S+)$/i.exec(req.headers.get("Authorization") || "");
+-  if (!m) return json({ error: "Not authenticated" }, 401);
+-  const anon = deps.createClient(deps.env("SUPABASE_URL")!, deps.env("SUPABASE_ANON_KEY")!, { auth: { persistSession: false } });
+-  const { data: u, error } = await anon.auth.getUser(m[1]);
+-  const uid = u?.user?.id;
+-  if (error || !uid) return json({ error: "Not authenticated" }, 401);
+-
+-  const { data: s } = await deps.service.from("intel_settings").select("organization_id,agent_user_id,kill_switch").eq("agent_user_id", uid).maybeSingle();
+-  if (!s || s.agent_user_id !== uid) return json({ error: "Not allowed" }, 403);     // admins and everyone else are refused here too
+-  const { data: acct } = await deps.service.from("intel_mail_account").select("provider,data_center,account_id,refresh_token_enc,status").eq("organization_id", s.organization_id).maybeSingle();
+-  if (acct && (acct.provider ?? "zoho") !== "zoho") return json({ error: "Zoho is not the connected mailbox" }, 409);
+-  if (!acct || acct.status === "disconnected" || !acct.refresh_token_enc || !isDataCenter(acct.data_center)) return json({ error: "Zoho is not connected" }, 409);
+-
+-  let refresh: string;
+-  try { refresh = await deps.decrypt(acct.refresh_token_enc); } catch { return json({ error: "Stored connection is unreadable; reconnect Zoho" }, 409); }
+-  const form = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: deps.env("ZOHO_CLIENT_ID")!, client_secret: deps.env("ZOHO_CLIENT_SECRET")! });
+-  const tr = await deps.fetch(`${accountsHost(acct.data_center)}/oauth/v2/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
+-  const tok = await tr.json().catch(() => ({}));
+-  if (!tr.ok || !tok.access_token) {
+-    const bad = tr.status >= 400 && tr.status < 500;
+-    await deps.service.from("intel_mail_account").update(bad ? { status: "error", last_error: "Zoho refused the stored connection; reconnect Zoho Mail." } : { last_error: "Zoho was temporarily unreachable." }).eq("organization_id", s.organization_id);
+-    return json({ error: "Zoho token refresh failed" }, bad ? 409 : 503);
+-  }
+-  return json({ access_token: tok.access_token, expires_in: Number(tok.expires_in || 3600), api_base: apiBase(acct.data_center), account_id: acct.account_id });
+-}

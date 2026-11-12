@@ -373,7 +373,7 @@ class FollowupDrafts(unittest.TestCase):
     def test_adopted_lead_followup_has_no_fake_thread_and_waits_for_approval_path(self):
         calls = []
         kb = [{"key": "studio.about", "body": "About"}, {"key": "services.indie_game_developer", "body": "Do 2D."}, {"key": "portfolio.main", "body": "https://s.test"}]
-        st = {"sender_name": "A", "sender_email": "a@s.t", "physical_address": "1 Road", "opt_out_text": "reply unsubscribe", "autonomy": "autonomous"}
+        st = {"sender_name": "A", "sender_email": "a@s.t", "physical_address": "1 Road", "opt_out_text": "reply unsubscribe", "autonomy": "autonomous", "campaigns": [{"type": "indie_game_developer", "status": "active"}]}
         P = {"id": "p", "type": "indie_game_developer", "name": "Pixel", "contact_email": "r@pixel.com", "contact_name": "", "status": "contacted", "domain": "pixel.com", "origin": "crm_existing"}
         ctx = {"prospect": P, "evidence": [], "lead": {"sent_flags": [True, True, False, False]},
                "messages": [{"kind": "initial", "state": "sent", "direction": "outbound", "subject": "Imported from CRM history", "sent_at": "2026-10-20T00:00:00Z", "created_at": "2026-11-02T00:00:00Z", "rfc_message_id": None}]}
@@ -411,14 +411,14 @@ class ReengagementDraft(unittest.TestCase):
             {"key": "services.indie_game_developer", "body": "We create 2D animation for indie games."},
             {"key": "portfolio.main", "body": "Portfolio: https://studio.test/portfolio"},
         ]
-        st = {"sender_name": "John", "sender_email": "john@studio.test", "physical_address": "1 Road", "opt_out_text": "Reply unsubscribe", "autonomy": "shadow"}
-        prospect = {"id": "p", "type": "indie_game_developer", "name": "Pixel Moon", "contact_email": "a@pixel.test", "contact_name": "", "status": "contacted", "domain": "pixel.test"}
+        st = {"sender_name": "John", "sender_email": "john@studio.test", "physical_address": "1 Road", "opt_out_text": "Reply unsubscribe", "autonomy": "shadow", "campaigns": [{"type": "indie_game_developer", "status": "active"}]}
+        prospect = {"id": "p", "type": "indie_game_developer", "name": "Pixel Moon", "contact_email": "a@pixel.test", "contact_name": "", "status": "contacted", "domain": "pixel.test", "meta": {"project_latest_activity_date": "2026-11-01"}}
         messages = [
             {"kind": "initial", "state": "sent", "direction": "outbound", "sent_at": "2026-10-01T00:00:00Z", "subject": "Initial"},
             {"kind": "followup", "state": "sent", "direction": "outbound", "sent_at": "2026-10-10T00:00:00Z", "subject": "Follow-up 1"},
             {"kind": "followup", "state": "sent", "direction": "outbound", "sent_at": "2026-10-20T00:00:00Z", "subject": "Follow-up 2"},
         ]
-        ctx = {"prospect": prospect, "evidence": [{"id": "ev", "verified": True, "snippet": "A hand-drawn 2D adventure with a cinematic trailer."}], "lead": {}, "messages": messages}
+        ctx = {"prospect": prospect, "evidence": [{"id": "ev", "verified": True, "fact_type": "development_update", "url": "https://pixel.test/devlog", "event_date": "2026-11-01", "snippet": "A hand-drawn 2D adventure with a cinematic trailer received a new development update."}], "lead": {}, "messages": messages}
         def rpc(name, p=None):
             calls.append((name, p or {}))
             if name == "intel_agent_context": return ctx
@@ -451,13 +451,16 @@ class Discovery(unittest.TestCase):
             if name == "intel_agent_source_use": return 1
             if name == "intel_agent_upsert_prospect": return {"prospect_id": f"p{len(calls)}", "created": True}
             return None
+        from unittest.mock import patch
         from kairflow_intel import sources
-        orig = sources.discover; sources.discover = lambda f, t, c, **kwargs: [{"name": f"G{i}", "website": f"https://g{i}.test"} for i in range(10)]
+        candidates = [{"name": f"G{i}", "website": "", "meta": {"source": "steam", "source_key": "steam", "project_title": f"Game {i}",
+            "project_url": f"https://store.steampowered.com/app/{i}/", "source_url": f"https://store.steampowered.com/app/{i}/", "steam_appid": str(i)}} for i in range(10)]
         try:
             d = jobs.Deps(cfg=CFG, rpc=rpc, fetcher=None, zoho=None, llm=None)
             self.assertEqual(jobs.h_discover(d, {"payload": {"type": "indie_game_developer"}}), {"skipped": "campaign paused"})
-            out = jobs.h_discover(d, {"payload": {"type": "indie_game_developer", "manual": True, "limit": 3}})
-        finally: sources.discover = orig
+            with patch("kairflow_intel.jobs.sources.discover_batch", return_value={"candidates": candidates, "next_cursor": {}}):
+                out = jobs.h_discover(d, {"payload": {"type": "indie_game_developer", "manual": True, "limit": 3}})
+        finally: pass
         self.assertEqual(out["new"], 3)
 
 

@@ -10,7 +10,8 @@ I = re.I | re.U
 
 INDIE = {
     "style_2d": r"\b2d\b|hand[- ]drawn|pixel ?art|sprite[- ]based|side[- ]scroll",
-    "style_anime": r"\banime\b|\bmanga\b|visual novel|\bjrpg\b|anime[- ]inspired",
+    "style_anime": r"\banime\b|\bmanga\b|anime[- ]inspired",
+    "anime_style_description": r"anime[- ]style|anime[- ]aesthetics?|anime[- ]inspired (art|visuals|character designs?|aesthetics?)|manga[- ]inspired (art|visuals|character designs?)",
     "style_stylized": r"styli[sz]ed|cel[- ]?shad|painterly|hand[- ]painted|illustrated",
     "narrative": r"story[- ]rich|story[- ]driven|narrative|visual novel|branching story",
     "upcoming_release": r"coming soon|wishlist|release date|launch(ing)? (on|in|this|next)|early access|demo (is )?(available|out|now)|playable demo",
