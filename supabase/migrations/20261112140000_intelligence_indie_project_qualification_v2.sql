@@ -167,7 +167,7 @@ begin
      and not exists (select 1 from public.intel_evidence e where e.prospect_id = new.id and e.verified and e.url ~* '^https?://[^/[:space:]]*\.[^/[:space:]]+' and coalesce(e.snippet, '') <> ''
        and e.fact_type in ('anime_style_description','official_anime_style_description','official_visual_style')
        and (public._intel_indie_domain(e.url) = public._intel_indie_domain(new.website) or public._intel_indie_domain(e.url) = public._intel_indie_domain(new.project_source_url))
-       and coalesce(e.snippet, '') ~* '(anime|manga).{0,60}(style|inspired|art|visuals?|aesthetics?|character design|illustration)|(style|art|visuals?|aesthetics?).{0,60}(anime|manga)')) then
+       and coalesce(e.snippet, '') ~* '(anime|manga).{0,60}(style|inspired|art|visuals?|aesthetics?|character design|illustration)|(style|art|visuals?|aesthetics?).{0,60}(anime|manga)') then
     raise exception 'indie V2 requires verified anime-compatible visual or explicit official style evidence';
   end if;
   if not (
