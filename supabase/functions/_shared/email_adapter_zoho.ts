@@ -120,6 +120,17 @@ async function syncZoho(ctx: AdapterContext, account: AdapterAccount, checkpoint
     : { messages, next_checkpoint: nextCheckpoint, has_more: hasMore, complete: !hasMore };
 }
 
+
+// Diagnostics only: Zoho's error envelope (status code/description, errorCode, moreInfo). Email addresses are masked, text is truncated,
+// and nothing else from the response (no tokens, no message content) is ever logged.
+async function logZohoFailure(response: Response): Promise<void> {
+  try {
+    const b: any = await response.clone().json();
+    const clean = (v: unknown, n: number) => String(v ?? "").replace(/[^\s@,;]+@[^\s@,;]+/g, "[email]").slice(0, n);
+    console.error("email-send: zoho response", JSON.stringify({ http: response.status, code: b?.status?.code ?? null, description: clean(b?.status?.description, 120), errorCode: clean(b?.data?.errorCode, 60), moreInfo: clean(b?.data?.moreInfo, 160) }));
+  } catch { console.error("email-send: zoho response", JSON.stringify({ http: response.status, body: "unreadable" })); }
+}
+
 export const zohoAdapter: EmailAdapter = {
   providerKey: "zoho", adapterKey: "zoho", displayName: "Zoho Mail", operations: ["send", "reply", "sync", "list_folders"], legacyFlagKey: null, defaultDailyLimit: 50,
   configurationProblem: () => null,
@@ -147,7 +158,12 @@ export const zohoAdapter: EmailAdapter = {
     };
     if (input.cc.length) payload.ccAddress = input.cc.join(",");
     if (input.bcc.length) payload.bccAddress = input.bcc.join(",");
-    if (input.replyTo) payload.replyTo = input.replyTo;
+    // Zoho refuses (HTTP 500 "verify the ReplyTo address") any ReplyTo that is not a verified address on the account.
+    // The generated per-conversation plus-address (name+k<12 hex>@domain) can never be verified there, so it is not sent;
+    // Zoho replies thread through the In-Reply-To/References headers captured by Zoho sync. An explicit, person-chosen
+    // reply-to is still passed through unchanged.
+    const generatedThreadReplyTo = /\+k[0-9a-f]{12}@/i.test(input.replyTo || "");
+    if (input.replyTo && !generatedThreadReplyTo) payload.replyTo = input.replyTo;
     const parent = input.thread?.provider_message_id;
     if (input.thread?.parent_direction === "outbound") {
       return { ok: false, unknown: false, retryable: false, status: 409, message: "Zoho cannot safely reply to an outbound parent; start a new correspondence instead", attempts: 0 };
@@ -163,9 +179,9 @@ export const zohoAdapter: EmailAdapter = {
         body: JSON.stringify(parent ? { ...payload, action: "reply" } : payload),
       });
     } catch { return { ok: false, unknown: true, retryable: false, status: 0, message: "Zoho delivery outcome is not yet confirmed", attempts: 1 }; }
-    if (response.status === 429 || response.status >= 500) return { ok: false, unknown: true, retryable: false, status: response.status, message: "Zoho delivery outcome is not yet confirmed", attempts: 1 };
+    if (response.status === 429 || response.status >= 500) { await logZohoFailure(response); return { ok: false, unknown: true, retryable: false, status: response.status, message: "Zoho delivery outcome is not yet confirmed", attempts: 1 }; }
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) return { ok: false, unknown: false, retryable: false, status: response.status || 502, message: "Zoho rejected the message", attempts: 1 };
+    if (!response.ok) { await logZohoFailure(response); return { ok: false, unknown: false, retryable: false, status: response.status || 502, message: "Zoho rejected the message", attempts: 1 }; }
     const row = data?.data || {};
     if (!row.messageId) return { ok: false, unknown: true, retryable: false, status: response.status || 200, message: "Zoho accepted a request but did not return a message identifier", attempts: 1 };
     return { ok: true, providerMessageId: String(row.messageId), providerThreadId: row.threadId ? String(row.threadId) : undefined, attempts: 1 };
