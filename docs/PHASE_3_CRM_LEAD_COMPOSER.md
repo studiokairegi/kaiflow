@@ -1,5 +1,7 @@
 # Manual Lead Email Composition — Phase 3: CRM Lead Composer Integration
 
+> **Superseded entry point (12 Nov 2026):** Compose is no longer a pipeline-card button that switches to the Inbox tab. It is a mail icon on the opened saved-lead card that opens a modal composer over the CRM and returns to the CRM after sending. See `CRM_MODAL_COMPOSER_CHANGE.md`. The sender selector, send path and CRM recording described below are unchanged.
+
 **Status:** implemented in source, tests pass. Not deployed; no migration; no real email sent.
 
 ## Behaviour
