@@ -171,7 +171,12 @@ test("P6 tokens: email-send authenticates as the caller (anon key + their JWT); 
   const src = read("supabase/functions/email-send/index.ts");
   const auth = /async authenticate\(r\)[\s\S]*?\n    \},\n/.exec(src);
   assert.ok(auth, "authenticate() not found");
-  assert.match(auth[0], /SUPABASE_ANON_KEY/);
+  assert.match(auth[0], /getSupabasePublicKey\(\)/);
+  const helper = /function getSupabasePublicKey\(\)[\s\S]*?\n\}\n/.exec(src);
+  assert.ok(helper, "getSupabasePublicKey() not found");
+  assert.match(helper[0], /SUPABASE_ANON_KEY/);
+  assert.match(helper[0], /SUPABASE_PUBLISHABLE_KEYS/);
+  assert.doesNotMatch(helper[0], /SERVICE_ROLE|SECRET_KEYS/);
   assert.doesNotMatch(auth[0], /SERVICE_ROLE/);
   assert.match(auth[0], /email_has_access/);
   assert.match(auth[0], /email_require_access/);
@@ -395,4 +400,35 @@ test("P6 composer: a send cannot start without a sender, a valid recipient, a su
   const good = { accountId: "a", to: "ada@x.test", cc: "", bcc: "", subject: "Hi", body: "Text" };
   assert.equal(composeProblem(good), "");
   for (const o of [{ accountId: "" }, { to: "" }, { to: "bad" }, { cc: "bad" }, { subject: " " }, { body: "" }]) assert.notEqual(composeProblem({ ...good, ...o }), "");
+});
+
+test("P6 email-send: key checks fail with a named cause, and a failed auth never claims a send may have happened", async () => {
+  const src = read("supabase/functions/email-send/index.ts");
+  assert.match(src, /function requireTokenKey\(\)/);
+  assert.match(src, /getProviderAccessToken: async \(account, operation\) => \{\s+try \{\s+requireTokenKey\(\);/, "key is validated before token resolution");
+  const auth = /async authenticate\(r\)[\s\S]*?\n    \},\n/.exec(src)[0];
+  assert.match(auth, /accessErr/);
+  assert.match(auth, /orgErr\) throw/);
+  assert.doesNotMatch(auth, /SERVICE_ROLE|ENCRYPTION_KEY/);
+  const h = rig();
+  const logged = [];
+  const orig = console.error; console.error = (...a) => logged.push(a.join(" "));
+  try {
+    h.deps.authenticate = async () => { throw new Error("Session check unavailable"); };
+    const res = await handleSend(req(body()), h.deps);
+    assert.equal(res.status, 500);
+    const j = await res.json();
+    assert.equal(j.code, "internal_error");
+    assert.doesNotMatch(j.error, /Sent folder/);
+    assert.match(logged.join("\n"), /"stage":"authenticate"/);
+    assert.match(logged.join("\n"), /request_id/);
+    untouched(h, "auth outage");
+    // After authentication, an unexpected failure keeps the Sent-folder warning and records the last stage reached.
+    const h2 = rig(); logged.length = 0;
+    h2.deps.store.createOutbound = async () => { throw new Error("db down"); };
+    const res2 = await handleSend(req(body()), h2.deps);
+    assert.equal(res2.status, 500);
+    assert.match((await res2.json()).error, /Sent folder/);
+    assert.match(logged.join("\n"), /"stage":"createOutbound"/);
+  } finally { console.error = orig; }
 });
