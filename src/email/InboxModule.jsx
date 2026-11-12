@@ -12,7 +12,7 @@ import { IconBack, IconNewChat, IconSearch } from "../chat/icons.jsx";
 import "../chat/chat.css";
 import "./styles/inbox-chat.css";
 import { emailApi } from "./lib/api.js";
-import { accountCanSend, accountConnectionLabel, accountListView, trustedProviderRows, FOLDERS, buildForward, participantLabel, providerForAccount, leadComposeReadiness } from "./lib/logic.js";
+import { accountCanSend, accountConnectionLabel, accountListView, trustedProviderRows, FOLDERS, buildForward, participantLabel, providerForAccount } from "./lib/logic.js";
 import { initialsOf, when } from "./lib/helpers.js";
 import ComposeDialog from "./components/ComposeDialog.jsx";
 import ConversationList from "./components/ConversationList.jsx";
@@ -22,7 +22,7 @@ import InlineReply from "./components/InlineReply.jsx";
 const PAGE_SIZE = 50;
 const MAX_ROWS = 500;
 
-export default function InboxModule({ supabase, access, leads = [], onOpenLead, onUnreadChanged, composeRequest = null, onComposeHandled, onLeadEmailSent, openConversationRequest = null, onOpenConversationHandled, theme = "dark" }) {
+export default function InboxModule({ supabase, access, leads = [], onOpenLead, onUnreadChanged, onLeadEmailSent, openConversationRequest = null, onOpenConversationHandled, theme = "dark" }) {
   const [folder, setFolder] = useState("inbox");
   const [searchText, setSearchText] = useState("");
   const [search, setSearch] = useState("");
@@ -30,7 +30,6 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
   const [providerFilter, setProviderFilter] = useState("all");
   const [selected, setSelected] = useState(null);
   const [composer, setComposer] = useState(null);
-  const [composeNotice, setComposeNotice] = useState("");
   const [activeMsg, setActiveMsg] = useState(null);
   const [tick, setTick] = useState(0);
   const [limit, setLimit] = useState(PAGE_SIZE);
@@ -65,23 +64,6 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
     setSelected(openConversationRequest.id);
     onOpenConversationHandled?.();
   }, [openConversationRequest, allowed]);   // eslint-disable-line react-hooks/exhaustive-deps
-  // CRM "Compose" hand-off: open the normal composer once the sender accounts are known, with the recipient and the CRM lead id filled in.
-  // If accounts or providers cannot be verified the request is dropped (the setup/error screens explain why) and never opens a send path.
-  useEffect(() => {
-    if (!composeRequest || !allowed) return;
-    // Do not consume while loading or when either registry failed; stale data must not authorize a send.
-    const readiness = leadComposeReadiness({ accounts, providers });
-    if (readiness === "waiting" || readiness === "error") return;
-    if (readiness === "ready") {
-      setComposeNotice("");
-      setSelected(null);
-      setComposer({ title: `Email ${composeRequest.label || composeRequest.to}`, to: composeRequest.to, crmLeadId: composeRequest.leadId, crmLeadLabel: composeRequest.label || "" });
-      onComposeHandled?.();
-    } else {
-      setComposeNotice("No connected sender can send right now. Connect or reauthorize an email account, then try Compose again.");
-      onComposeHandled?.();
-    }
-  }, [composeRequest, allowed, accounts.loading, accounts.data, accounts.error, providers.loading, providers.data, providers.error]);   // eslint-disable-line react-hooks/exhaustive-deps
   if (!allowed) return <Banner tone="warn">Email is restricted.</Banner>;
   const accts = Array.isArray(accounts.data) ? accounts.data : [];
   // A stale registry must never authorize actions after a failed refresh.
@@ -103,7 +85,6 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
   return (
     <div className="inbox-page-wrap">
       <section className={`chat-root chat-theme-${theme} chat-page inbox-page${selected ? " has-active-conversation" : ""}`} aria-label="Inbox">
-        {composeNotice && <Banner tone="warn">{composeNotice}</Banner>}
         <aside className="chat-sidebar">
           <div className="chat-sidebar-top">
             <div className="chat-topbar">

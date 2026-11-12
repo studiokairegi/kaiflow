@@ -296,11 +296,12 @@ test("OAuth send boundary checks the database connection state", () => {
   assert.match(store, /select\("id,organization_id,provider,address,display_name,status,connection_status"\)/);
   assert.match(logic, /resolved\.row\.capabilities\?\.oauth === true && account\.connection_status !== "connected"/);
 });
-test("CRM compose handoff uses fail-closed readiness and consumes unavailable requests with an explanation", () => {
-  const inbox = fs.readFileSync(new URL("./InboxModule.jsx", import.meta.url), "utf8");
+test("CRM lead composer modal uses fail-closed readiness and explains an unavailable sender", () => {
+  const inbox = fs.readFileSync(new URL("./components/LeadComposeModal.jsx", import.meta.url), "utf8");
   const logic = fs.readFileSync(new URL("./lib/logic.js", import.meta.url), "utf8");
   assert.match(inbox, /leadComposeReadiness\(\{ accounts, providers \}\)/);
-  assert.match(inbox, /readiness === "waiting" \|\| readiness === "error"/);
+  assert.match(inbox, /readiness === "waiting"/);
+  assert.match(inbox, /readiness === "error"/);
   assert.match(inbox, /No connected sender can send right now/);
   assert.match(logic, /return "waiting"/);
   assert.match(logic, /return "error"/);

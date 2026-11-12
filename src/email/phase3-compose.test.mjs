@@ -56,33 +56,43 @@ test("the hand-off id reaches the send request as crm.lead_id, and is omitted fo
   assert.match(read("./lib/api.js"), /crm: m\.crmLeadId \? \{ lead_id: m\.crmLeadId \} : null/);
 });
 
-test("composer wiring: ComposeDialog forwards the lead id; InboxModule opens it from the request after accounts load", () => {
+test("composer wiring: ComposeDialog forwards the lead id; the modal opens it over the CRM after accounts load", () => {
   const dialog = read("./components/ComposeDialog.jsx");
   assert.match(dialog, /crmLeadId: initial\.crmLeadId \|\| null/);
   assert.match(dialog, /initial\.crmLeadId &&/);
   assert.match(dialog, /compose-crm-recipient-warning/);
   assert.match(dialog, /Send without linking to/);
+  const modal = read("./components/LeadComposeModal.jsx");
+  assert.match(modal, /crmLeadId: target\.leadId/);
+  assert.match(modal, /to: target\.to/);
+  assert.match(modal, /leadComposeReadiness\(\{ accounts, providers \}\)/);
+  assert.match(modal, /readiness === "ready"|else \{\s*const accts/); // only the ready branch renders the dialog
+  assert.match(modal, /No connected sender can send right now/);
+  assert.match(modal, /onSent\?\.\(target\.leadId\);\s*onClose\(\)/); // closes back to the CRM after sending
   const inbox = read("./InboxModule.jsx");
-  assert.match(inbox, /composeRequest/);
-  assert.match(inbox, /crmLeadId: composeRequest\.leadId/);
-  assert.match(inbox, /to: composeRequest\.to/);
-  assert.match(inbox, /leadComposeReadiness\(\{ accounts, providers \}\)/); // readiness helper refuses loading/error/stale registries
-  assert.match(inbox, /onComposeHandled\?\.\(\)/);
-  assert.match(inbox, /readiness === "ready"/);
-  assert.match(inbox, /else \{\s*setComposeNotice\("No connected sender can send right now/);
-  const app = fs.readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
-  assert.match(app, /view !== "projects" \|\| workspace !== "leads" \|\| crmTab !== "inbox".*setComposeRequest\(null\)/s);
-  // the existing manual Compose entry points are untouched
+  assert.ok(!/composeRequest/.test(inbox)); // no Inbox tab hand-off any more
   assert.equal((inbox.match(/setComposer\(\{ title: "New message" \}\)/g) || []).length, 2);
 });
 
-test("CRM board: button only for email-authorized users and eligible leads; clicks never open or drag the card", () => {
+test("CRM lead card: icon only for saved, email-authorized, eligible leads; opens a modal and never switches to Inbox", () => {
   const app = fs.readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
-  assert.match(app, /canAccessEmail\(emailAccess\) && \(\(\) => \{\s*const target = leadComposeTarget\(lead, userId\);\s*if \(!target\) return null;/);
-  assert.match(app, /onPointerDown=\{\(e\) => e\.stopPropagation\(\)\}\s*onClick=\{\(e\) => \{ e\.stopPropagation\(\); setComposeRequest\(\{ \.\.\.target, nonce: Date\.now\(\) \}\); setCrmTab\("inbox"\); \}\}/);
-  assert.match(app, /composeRequest=\{composeRequest\} onComposeHandled=\{\(\) => setComposeRequest\(null\)\}/);
+  assert.match(app, /composeTarget=\{canAccessEmail\(emailAccess\) && editingLead\.id \? leadComposeTarget\(/);
+  assert.match(app, /onCompose=\{setLeadComposer\}/);
+  assert.match(app, /composeTarget && onCompose && \(/);
+  assert.match(app, /<LeadComposeModal/);
+  assert.ok(!/setComposeRequest/.test(app));
+  assert.ok(!/setComposeRequest|setCrmTab\("inbox"\); \}\}/.test(app.slice(app.indexOf("data-testid=\"lead-compose-button\"") - 600, app.indexOf("data-testid=\"lead-compose-button\"") + 200)));
 });
 
 test("Phase 3 leaves the intelligence AI routing / autonomy files alone", () => {
-  assert.ok(!/composeRequest|leadComposeTarget/.test(read("../intelligence/api.js")));
+  assert.ok(!/composeRequest|leadComposeTarget|LeadComposeModal/.test(read("../intelligence/api.js")));
+});
+
+test("composer modal stacks above the lead editor and the open lead card re-reads its timeline after a send", () => {
+  const app = fs.readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
+  const z = Number(read("./components/LeadComposeModal.jsx").match(/WRAP = \{[^}]*zIndex: (\d+)/)[1]);
+  const overlay = Number(app.match(/  overlay: \{[^}]*?zIndex: (\d+)/s)[1]);
+  assert.ok(z > overlay);
+  assert.match(app, /setLeadTimelineNonce\(\(n\) => n \+ 1\)/);
+  assert.match(app, /\[lead\.id, isNew, timelineNonce\]/);
 });
