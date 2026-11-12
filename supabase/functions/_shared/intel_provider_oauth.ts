@@ -1,6 +1,7 @@
 // Provider-neutral OAuth orchestration. Provider-specific protocol details live in the
 // adapter registry below; database manifests are descriptive and never execute code.
 import { corsHeaders } from "./cors.ts";
+import { isRevokedProviderRefresh } from "./email_adapter.ts";
 import { requireIntelligenceAdmin } from "./intel_auth.ts";
 import { GMAIL_SCOPE_LIST, GMAIL_SCOPES, GOOGLE_AUTH_URL, GOOGLE_TOKEN_URL, GMAIL_API_BASE, hasAllScopes } from "./intel_gmail_logic.ts";
 import { ZOHO_DATA_CENTERS, ZOHO_SCOPES, accountsHost as zohoAccountsHost, apiBase as zohoApiBase, isDataCenter } from "./intel_zoho_logic.ts";
@@ -35,7 +36,7 @@ function gmailOAuthConfig(deps: ProviderOAuthDeps): GmailOAuthConfig {
     redirectUri: deps.env("GOOGLE_GMAIL_REDIRECT_URI"),
   };
   if (gmail.clientId && gmail.clientSecret) {
-    return { ...gmail, source: "gmail" };
+    return { clientId: gmail.clientId, clientSecret: gmail.clientSecret, redirectUri: gmail.redirectUri, source: "gmail" };
   }
   const legacy = {
     clientId: deps.env("GOOGLE_CLIENT_ID"),
@@ -43,7 +44,7 @@ function gmailOAuthConfig(deps: ProviderOAuthDeps): GmailOAuthConfig {
     redirectUri: deps.env("GOOGLE_REDIRECT_URI"),
   };
   if (legacy.clientId && legacy.clientSecret) {
-    return { ...legacy, source: "legacy" };
+    return { clientId: legacy.clientId, clientSecret: legacy.clientSecret, redirectUri: legacy.redirectUri, source: "legacy" };
   }
   throw new Error("Gmail OAuth is not configured");
 }
@@ -93,7 +94,7 @@ const gmailAdapter: OAuthAdapter = {
     };
     const primary = await request(config);
     if (config.source === "gmail" && primary.status === 400 && primary.data?.error === "invalid_grant") {
-      const legacy = { clientId: deps.env("GOOGLE_CLIENT_ID"), clientSecret: deps.env("GOOGLE_CLIENT_SECRET") };
+      const legacy = { clientId: deps.env("GOOGLE_CLIENT_ID")!, clientSecret: deps.env("GOOGLE_CLIENT_SECRET")! };
       if (legacy.clientId && legacy.clientSecret) {
         return request({ ...legacy, source: "legacy" });
       }
@@ -145,6 +146,81 @@ const zohoAdapter: OAuthAdapter = {
 
 // Register reviewed OAuth implementations here. The dispatcher and UI remain provider-neutral.
 const OAUTH_ADAPTERS: Record<string, OAuthAdapter> = { gmail: gmailAdapter, zoho: zohoAdapter };
+
+/**
+ * Resolve a short-lived access token for a shared Intelligence mailbox.
+ * This is server-only and deliberately accepts an account UUID + organization UUID,
+ * never credentials from a browser. It refreshes through the SAME OAuth adapters,
+ * client IDs, regional configuration and encrypted refresh-token record used by
+ * Settings/Intelligence. No second credential vault is read or written.
+ */
+export async function getSharedProviderAccessToken(input: {
+  accountId: string; organizationId: string; provider: "gmail" | "zoho";
+  operation: "send" | "sync";
+}, deps: ProviderOAuthDeps): Promise<{
+  provider: "gmail" | "zoho"; access_token: string; api_base: string;
+  external_account_id: string; mailbox: string; expires_in: number;
+}> {
+  const { accountId, organizationId, provider, operation } = input;
+  if (!/^[0-9a-f-]{36}$/i.test(accountId) || !/^[0-9a-f-]{36}$/i.test(organizationId)) throw new Error("Invalid mailbox identity");
+  const { data: account, error: accountError } = await deps.service.from("intel_provider_accounts")
+    .select("id,organization_id,provider_key,external_account_id,mailbox,credentials_ciphertext,status,is_enabled,send_enabled,auth_method,data_center,allowed_message_purposes")
+    .eq("id", accountId).eq("organization_id", organizationId).eq("provider_key", provider).maybeSingle();
+  if (accountError) throw new Error("Mailbox account lookup failed");
+  if (!account || account.status !== "connected" || account.is_enabled !== true || !account.credentials_ciphertext) throw new Error("Mailbox account is not connected or enabled");
+
+  const { data: providerPolicy, error: policyError } = await deps.service.from("intel_email_provider_registry")
+    .select("enabled,sending_enabled,manifest").eq("provider_key", provider).maybeSingle();
+  if (policyError || !providerPolicy?.enabled) throw new Error("Mailbox provider is disabled by organization policy");
+  if (operation === "send") {
+    const { data: providerEnabled, error: gateError } = await deps.service.rpc("email_provider_enabled", { p_provider: provider });
+    if (gateError || providerEnabled !== true || providerPolicy.sending_enabled !== true || account.send_enabled !== true) throw new Error("Mailbox sending is disabled by organization policy");
+    const purposes = Array.isArray(account.allowed_message_purposes) ? account.allowed_message_purposes : [];
+    if (!purposes.includes("business_correspondence")) throw new Error("Mailbox is not authorized for manual correspondence");
+    const manifestPurposes = providerPolicy.manifest?.message_purposes;
+    if (!Array.isArray(manifestPurposes) || !manifestPurposes.includes("business_correspondence")) throw new Error("Mailbox provider is not authorized for manual correspondence");
+  }
+
+  const adapter = OAUTH_ADAPTERS[provider];
+  if (!adapter) throw new Error("Mailbox OAuth adapter is not installed");
+  let credentials: any;
+  try {
+    const decrypted = await deps.decrypt(account.credentials_ciphertext);
+    try { credentials = JSON.parse(decrypted); }
+    catch { credentials = { refresh_token: decrypted }; }
+  } catch {
+    throw new Error("Stored provider credentials are unreadable; reconnect this account in Settings");
+  }
+  let refreshed: { ok: boolean; status: number; data: any };
+  try { refreshed = await adapter.refresh(String(credentials.refresh_token || ""), deps, credentials); }
+  catch {
+    await deps.service.from("intel_provider_accounts").update({ health_status: "degraded", last_error: "Provider token endpoint temporarily unavailable.", updated_at: new Date(deps.now()).toISOString() })
+      .eq("id", account.id).eq("organization_id", organizationId);
+    throw new Error("Provider token endpoint temporarily unavailable");
+  }
+  if (!refreshed.ok) {
+    const revoked = isRevokedProviderRefresh(provider, refreshed.status, refreshed.data);
+    const throttled = refreshed.status === 429 || refreshed.data?.error === "rate_limit_exceeded" || refreshed.data?.error === "temporarily_unavailable";
+    const message = revoked
+      ? "Provider authorization was revoked; reconnect this account."
+      : throttled ? "Provider token endpoint is rate limited; retry will be attempted." : "Provider token endpoint temporarily unavailable.";
+    await deps.service.from("intel_provider_accounts").update(revoked
+      ? { status: "error", health_status: "unhealthy", last_error: message, updated_at: new Date(deps.now()).toISOString() }
+      : { health_status: "degraded", last_error: message, updated_at: new Date(deps.now()).toISOString() })
+      .eq("id", account.id).eq("organization_id", organizationId);
+    throw new Error(revoked
+      ? "Provider authorization was revoked; reconnect this account in Settings"
+      : "Provider token refresh failed temporarily; retry will be attempted");
+  }
+  await deps.service.from("intel_provider_accounts").update({ health_status: "healthy", last_health_check_at: new Date(deps.now()).toISOString(), last_error: "", updated_at: new Date(deps.now()).toISOString() })
+    .eq("id", account.id).eq("organization_id", organizationId);
+  return {
+    provider, access_token: String(refreshed.data.access_token), api_base: provider === "zoho"
+      ? zohoApiBase(String(credentials.data_center || account.data_center || "com")) : adapter.apiBase,
+    external_account_id: String(account.external_account_id || (provider === "gmail" ? "me" : "")),
+    mailbox: String(account.mailbox || ""), expires_in: Number(refreshed.data.expires_in || 3600),
+  };
+}
 
 export async function handleProviderConnect(req: Request, deps: ProviderOAuthDeps): Promise<Response> {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });

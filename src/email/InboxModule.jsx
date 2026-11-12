@@ -1,4 +1,4 @@
-// KairFlow Inbox (Resend). Lives in the CRM area next to Pipeline / Contacts / Intelligence and renders only for people the
+// KairFlow shared mailbox Inbox. Lives in the CRM area next to Pipeline / Contacts / Intelligence and renders only for people the
 // database allows (same rule as Intelligence). The database re-checks every read and write; this file never holds provider keys.
 // The screen is built from the main Chat's own layout and classes. Layout: components/ (screen pieces), lib/ (api, pure logic,
 // helpers), styles/ (email-specific CSS on top of chat.css).
@@ -8,13 +8,12 @@ import { canAccessEmail } from "./access.js";
 import { useLoad } from "../intelligence/kit.jsx";
 import { usePolling } from "../chat/hooks.js";
 import { dayLabel } from "../chat/logic.js";
-import { IconBack, IconClose, IconNewChat, IconSearch } from "../chat/icons.jsx";
+import { IconBack, IconNewChat, IconSearch } from "../chat/icons.jsx";
 import "../chat/chat.css";
 import "./styles/inbox-chat.css";
 import { emailApi } from "./lib/api.js";
 import { accountCanSend, accountConnectionLabel, accountListView, trustedProviderRows, FOLDERS, buildForward, participantLabel, providerForAccount, leadComposeReadiness } from "./lib/logic.js";
 import { initialsOf, when } from "./lib/helpers.js";
-import SetupAccount from "./components/SetupAccount.jsx";
 import ComposeDialog from "./components/ComposeDialog.jsx";
 import ConversationList from "./components/ConversationList.jsx";
 import EmailMessage from "./components/EmailMessage.jsx";
@@ -32,7 +31,6 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
   const [selected, setSelected] = useState(null);
   const [composer, setComposer] = useState(null);
   const [composeNotice, setComposeNotice] = useState("");
-  const [showAddAccount, setShowAddAccount] = useState(false);
   const [activeMsg, setActiveMsg] = useState(null);
   const [tick, setTick] = useState(0);
   const [limit, setLimit] = useState(PAGE_SIZE);
@@ -91,7 +89,7 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
   const sendProviderRows = accounts.error ? [] : providerRows;
   const own = accts.map((a) => a.address);
   const accountView = accountListView(accounts);
-  if (accountView === "empty") return <div style={S.page}><SetupAccount supabase={supabase} providers={providerRows} providersLoading={providers.loading} providersError={providers.error} onRetry={() => providers.reload()} onDone={refresh} /></div>;
+  if (accountView === "empty") return <div style={S.page}><Banner tone="warn">No connected mailbox accounts are available. Connect Gmail, Zoho or SMTP once in Settings → Intelligence → Email accounts. The Inbox reuses those existing accounts; it does not create separate connections.</Banner></div>;
   if (accountView === "error" && !accts.length) return <div style={S.page}><Banner tone="bad" action={<button type="button" className="chat-button" onClick={() => accounts.reload()}>Retry</button>}>Could not load your email accounts: {accounts.error}</Banner></div>;
 
   const t = thread.data;
@@ -111,7 +109,6 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
             <div className="chat-topbar">
               <h2>Inbox</h2>
               <div className="inbox-header-actions">
-                <button type="button" className="chat-button quiet inbox-add-account" disabled={providers.loading || Boolean(providers.error || accounts.error)} onClick={() => setShowAddAccount(true)}>Add account</button>
                 <button type="button" className="chat-icon-btn solid" onClick={() => setComposer({ title: "New message" })} aria-label="Compose" title="Compose" disabled={Boolean(accounts.error || providers.error || providers.loading || !accts.length)}><IconNewChat /></button>
               </div>
             </div>
@@ -199,12 +196,7 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
         </main>
 
         {composer && <ComposeDialog key={composer.draftId || composer.conversationId || composer.title || "new"} supabase={supabase} accounts={accts} providers={sendProviderRows} initial={composer} onClose={() => setComposer(null)} onCopyToNew={(draft) => setComposer({ title: "New message", ...draft })} onSent={() => { const leadId = composer?.crmLeadId; setComposer(null); refresh(); if (leadId) onLeadEmailSent?.(leadId); }} />}
-        {showAddAccount && <div className="chat-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setShowAddAccount(false); }}>
-          <div className="chat-modal inbox-account-setup" role="dialog" aria-modal="true" aria-labelledby="inbox-account-setup-title">
-            <div className="chat-modal-head"><h2 id="inbox-account-setup-title">Add an email account</h2><button type="button" className="chat-icon-btn" onClick={() => setShowAddAccount(false)} aria-label="Close"><IconClose /></button></div>
-            <div className="chat-modal-body"><SetupAccount supabase={supabase} providers={providerRows} providersLoading={providers.loading} providersError={providers.error} onRetry={() => providers.reload()} onCancel={() => setShowAddAccount(false)} onDone={async () => { setShowAddAccount(false); refresh(); }} /></div>
-          </div>
-        </div>}
+
       </section>
     </div>
   );

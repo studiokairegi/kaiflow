@@ -29,7 +29,18 @@ export type AdapterErrorCode =
   | "adapter_unavailable"       // registry names an adapter this deployment does not contain
   | "not_configured"            // server-side secret/config missing
   | "account_not_usable"        // account disconnected, expired or not active
-  | "rate_limited" | "provider_rejected" | "provider_unavailable" | "outcome_unknown";
+  | "rate_limited" | "provider_rejected" | "provider_unavailable" | "outcome_unknown" | "sync_deadline";
+
+/** Provider refresh responses that definitively indicate a revoked user grant. */
+export function isRevokedProviderRefresh(provider: string, status: number, data: unknown): boolean {
+  const body = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  const code = String(body.error || body.code || "").toLowerCase();
+  if (status === 401) return true;
+  if (provider === "gmail") return status === 400 && code === "invalid_grant";
+  // Zoho's token endpoint may return an OAuth error code in its JSON body.
+  // invalid_client is deliberately excluded: it indicates app configuration, not user revocation.
+  return provider === "zoho" && ["invalid_grant", "invalid_code"].includes(code);
+}
 
 export class AdapterError extends Error {
   readonly code: AdapterErrorCode;
@@ -47,7 +58,7 @@ export class AdapterError extends Error {
 }
 const STATUS_FOR_CODE: Record<AdapterErrorCode, number> = {
   unsupported_operation: 501, provider_not_registered: 409, provider_disabled: 503, adapter_unavailable: 503, not_configured: 503,
-  account_not_usable: 409, rate_limited: 429, provider_rejected: 422, provider_unavailable: 502, outcome_unknown: 202,
+  account_not_usable: 409, rate_limited: 429, provider_rejected: 422, provider_unavailable: 502, outcome_unknown: 202, sync_deadline: 202,
 };
 
 /** Thrown, never silently ignored, when an operation the provider does not support is requested. */
@@ -65,7 +76,7 @@ export interface AdapterSendInput {
   to: string[]; cc: string[]; bcc: string[];
   subject: string; text: string; html: string;
   replyTo: string;
-  thread: { in_reply_to: string; references: string } | null;
+  thread: { in_reply_to: string; references: string; provider_message_id?: string | null; provider_thread_id?: string | null; parent_direction?: "inbound" | "outbound" | null } | null;
   attachments: { filename: string; content_base64: string; content_type?: string }[];
   idempotencyKey: string;
   /** Persisted server-generated email_messages.id used to reconcile a provider-accepted send from signed webhooks. */
@@ -76,7 +87,7 @@ export interface AdapterSendInput {
 
 /** What a provider answers to `send`. `unknown` means the provider may have accepted the message: never resent automatically. */
 export type AdapterSendOutcome =
-  | { ok: true; providerMessageId: string; rfcMessageId?: string; attempts: number }
+  | { ok: true; providerMessageId: string; rfcMessageId?: string; providerThreadId?: string; attempts: number }
   | { ok: false; unknown: boolean; retryable: boolean; status: number; message: string; attempts: number };
 
 /** Account as read from the DATABASE by the shared service. Never constructed from browser input. */
@@ -86,9 +97,13 @@ export interface AdapterContext {
   env: (k: string) => string | undefined;
   fetch: typeof fetch;
   now: () => number;
+  /** Absolute epoch deadline for the currently leased account sync. */
+  deadlineAt?: number;
   sleep?: (ms: number) => Promise<void>;
   /** Server-only credential resolver. Never pass this context or its result to a browser. */
   getCredentials?: (account: AdapterAccount) => Promise<unknown | null>;
+  /** Obtain a short-lived provider token from the existing Intelligence OAuth lifecycle. Server-only. */
+  getProviderAccessToken?: (account: AdapterAccount, operation: "send" | "sync") => Promise<{ provider: string; access_token: string; api_base: string; external_account_id: string; mailbox: string; expires_in: number }>;
 }
 
 export interface AdapterSyncMessage {
@@ -125,6 +140,8 @@ export interface AdapterSyncPage {
   next_checkpoint: unknown;
   has_more: boolean;
   complete: boolean;
+  /** True when the provider page was only partially fetched; persist messages but never advance its checkpoint. */
+  partial?: boolean;
 }
 
 /** An adapter owns ONE provider key. Optional members are optional capabilities: the registry (database) says which are on. */

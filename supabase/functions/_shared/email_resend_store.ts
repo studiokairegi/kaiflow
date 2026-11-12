@@ -81,9 +81,14 @@ export function makeSendStore(service: any): SendStore {
         must(await service.rpc("email_mark_provider_accepted", {
           p_message_id: messageId, p_provider_message_id: patch.provider_message_id, p_sent_at: patch.sent_at || null,
         }), "mark provider accepted");
-        if (typeof patch.rfc_message_id === "string") {
-          must(await service.from("email_messages").update({ rfc_message_id: patch.rfc_message_id }).eq("id", messageId), "save RFC Message-ID");
+        const extra: Record<string, unknown> = {};
+        if (typeof patch.rfc_message_id === "string") extra.rfc_message_id = patch.rfc_message_id;
+        if (typeof patch.provider_thread_id === "string") {
+          const { data: current, error } = await service.from("email_messages").select("headers").eq("id", messageId).maybeSingle();
+          if (error) throw new Error(`load provider thread metadata: ${error.message}`);
+          extra.headers = { ...(current?.headers || {}), "x-kairflow-provider-thread-id": patch.provider_thread_id };
         }
+        if (Object.keys(extra).length) must(await service.from("email_messages").update(extra).eq("id", messageId), "save provider message metadata");
         return;
       }
       must(await service.from("email_messages").update(patch).eq("id", messageId), "update message");

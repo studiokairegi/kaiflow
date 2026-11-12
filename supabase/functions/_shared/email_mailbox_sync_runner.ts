@@ -30,13 +30,29 @@ export function secretMatches(expected: string | undefined, given: string | null
 export async function runMailboxSync(deps: RunnerDeps): Promise<RunnerSummary> {
   const accounts = await deps.listAccounts(MAX_ACCOUNTS_PER_RUN);
   const summary: RunnerSummary = { accounts: accounts.length, synced: 0, skipped: 0, failed: 0, results: [] };
+  const runStartedAt = Date.now();
+  const RUN_BUDGET_MS = 100_000;
+  const ACCOUNT_BUDGET_MS = 40_000;
+  const MIN_ACCOUNT_START_BUDGET_MS = 5_000;
+  const context = deps.makeContext();
   const note = (a: AdapterAccount, status: string) => summary.results.push({ account_id: a.id, provider: a.provider, status });
   for (const account of accounts) {
+    if (Date.now() - runStartedAt >= RUN_BUDGET_MS) {
+      summary.skipped += accounts.length - summary.results.length;
+      for (const pending of accounts.slice(summary.results.length)) note(pending, "deferred:run_deadline");
+      break;
+    }
     let result: SyncResult | null = null;
+    const remainingRunBudget = runStartedAt + RUN_BUDGET_MS - Date.now();
+    if (remainingRunBudget < MIN_ACCOUNT_START_BUDGET_MS) {
+      summary.skipped++; note(account, "deferred:insufficient_run_budget"); continue;
+    }
+    // Adapters consult this before each provider request/message; cap the account by both budgets.
+    context.deadlineAt = Math.min(runStartedAt + RUN_BUDGET_MS, Date.now() + ACCOUNT_BUDGET_MS);
     try {
       const resolved = resolveAdapter(account.provider, await deps.getRegistryRow(account.provider), deps.adapters ?? BUILTIN_ADAPTERS);
       if (!resolved.operations.includes("sync")) { summary.skipped++; note(account, "no_sync_capability"); continue; }
-      result = await synchronizeMailbox({ account, adapter: resolved.adapter, context: deps.makeContext(), store: deps.store });
+      result = await synchronizeMailbox({ account, adapter: resolved.adapter, context, store: deps.store });
     } catch {
       summary.failed++; note(account, "failed"); continue;
     }

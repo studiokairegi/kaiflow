@@ -21,6 +21,10 @@ class FakeRpc:
             if m["state"] == "sent": return {"ok": False, "reason": "already_sent"}
             if m["state"] != "approved": return {"ok": False, "reason": "not_approved"}
             m["state"] = "reserved"; return {"ok": True, "message": dict(m)}
+        if name == "intel_agent_assign_provider_account":
+            assigned = dict(m)
+            assigned.update({"provider_account_id": "test-zoho-account", "provider_key": "zoho"})
+            return {"ok": True, "legacy": False, "message": assigned}
         if name == "intel_agent_acquire_send_slot": return {"ok": True, "resumed": False}
         if name == "intel_agent_mark_sending": m["state"] = "sending"; return True
         if name == "intel_agent_confirm_send":
@@ -56,6 +60,30 @@ class Sending(unittest.TestCase):
     def setUp(self): self.r, self.z = FakeRpc(), FakeZoho(); self.r.add("m1")
 
 
+    def test_missing_provider_assignment_fails_closed_without_legacy_send(self):
+        self.r.add("missing-assignment")
+        calls = []
+        def rpc(name, params=None):
+            calls.append(name)
+            if name == "intel_agent_assign_provider_account":
+                return None
+            return self.r(name, params)
+        out = mailops.send_message(rpc, self.z, "missing-assignment")
+        self.assertEqual(out["reason"], "provider_assignment_unavailable")
+        self.assertEqual(self.z.sent, [])
+        self.assertIn("intel_agent_fail_send", calls)
+        self.assertNotIn("intel_agent_acquire_send_slot", calls)
+
+    def test_malformed_provider_assignment_fails_closed_without_legacy_send(self):
+        self.r.add("malformed-assignment")
+        def rpc(name, params=None):
+            if name == "intel_agent_assign_provider_account":
+                return {"legacy": True, "message": self.r.msgs["malformed-assignment"]}
+            return self.r(name, params)
+        out = mailops.send_message(rpc, self.z, "malformed-assignment")
+        self.assertEqual(out["reason"], "provider_assignment_unavailable")
+        self.assertEqual(self.z.sent, [])
+
     def test_prospecting_consent_denial_never_calls_provider(self):
         self.r.add("no-consent")
         def rpc(name, params=None):
@@ -89,6 +117,8 @@ class Sending(unittest.TestCase):
         def rpc(name, params=None):
             params = params or {}; rpc_calls.append(name)
             if name == "intel_agent_reserve_send": return {"ok": True, "message": {"id": "m1", "in_reply_to": "<parent@x>", "prospect_id": "p1", "state": "approved"}}
+            if name == "intel_agent_assign_provider_account":
+                return {"ok": True, "message": {"id": "m1", "in_reply_to": "<parent@x>", "prospect_id": "p1", "state": "approved", "provider_account_id": "test-zoho-account", "provider_key": "zoho"}}
             if name == "intel_agent_acquire_send_slot": return {"ok": True, "resumed": False}
             if name == "intel_agent_mark_sending": return True
             if name == "intel_agent_context": raise TransientError("db unavailable")
@@ -165,6 +195,8 @@ class Sending(unittest.TestCase):
             if name == "intel_agent_settings": return {"kill_switch": False}
             if name == "intel_agent_send_window_status": return {"allowed": True, "reason": "inside_send_window"}
             if name == "intel_agent_reserve_send": return {"ok": True, "message": dict(message)}
+            if name == "intel_agent_assign_provider_account":
+                return {"ok": True, "message": {**message, "provider_account_id": "test-zoho-account", "provider_key": "zoho"}}
             if name == "intel_agent_acquire_send_slot": return {"ok": False, "reason": "send_spacing", "retry_after": 73}
             if name == "intel_agent_enqueue_job": return "queued"
             return None

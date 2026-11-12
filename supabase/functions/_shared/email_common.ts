@@ -38,11 +38,11 @@ export const forwardSubject = (s: string): string => (/^\s*fwd?\s*:/i.test(s) ? 
 export const parseMessageIds = (v: unknown): string[] => String(v ?? "").match(/<[^<>\s]+>/g) || [];
 
 /** In-Reply-To / References for a reply to `parent`. Null when the parent has no Message-ID we know. */
-export function buildThreadHeaders(parent: { rfc_message_id?: string | null; references_ids?: string | null } | null): { in_reply_to: string; references: string } | null {
+export function buildThreadHeaders(parent: { rfc_message_id?: string | null; references_ids?: string | null; provider_message_id?: string | null; provider_thread_id?: string | null; parent_direction?: "inbound" | "outbound" | null } | null): { in_reply_to: string; references: string; provider_message_id?: string | null; provider_thread_id?: string | null; parent_direction?: "inbound" | "outbound" | null } | null {
   const id = parseMessageIds(parent?.rfc_message_id)[0];
-  if (!id) return null;
-  const chain = [...parseMessageIds(parent?.references_ids), id].filter((x, i, a) => a.indexOf(x) === i).slice(-20);
-  return { in_reply_to: id, references: chain.join(" ") };
+  if (!id && !parent?.provider_message_id && !parent?.provider_thread_id) return null;
+  const chain = [...parseMessageIds(parent?.references_ids), ...(id ? [id] : [])].filter((x, i, a) => a.indexOf(x) === i).slice(-20);
+  return { in_reply_to: id || "", references: chain.join(" "), ...(parent?.provider_message_id ? { provider_message_id: parent.provider_message_id } : {}), ...(parent?.provider_thread_id ? { provider_thread_id: parent.provider_thread_id } : {}), ...(parent?.parent_direction ? { parent_direction: parent.parent_direction } : {}) };
 }
 
 /** Plus-address token: replies to john+k1a2b3c4d5e6f@domain land in the right conversation even if a mail server rewrites Message-ID. */

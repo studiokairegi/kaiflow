@@ -63,9 +63,10 @@ def build_registry() -> ProviderRegistry:
         provider_key="zoho", display_name="Zoho Mail", adapter_version="1.0.0",
         capabilities=frozenset({"send", "receive", "threading", "sent-reconciliation", "connection-test"}),
         auth_methods=frozenset({"oauth2"}),
-        # Zoho prospecting is permitted only through the mandatory human-approval
-        # gate enforced by the database before account assignment and final send.
-        message_purposes=frozenset({"business_correspondence", "consented_prospecting"}),
+        # Zoho is exclusively for user-initiated business correspondence.
+        # Campaign/outreach eligibility is denied at the provider manifest boundary;
+        # a human-approval flag must never turn Zoho into an outreach provider.
+        message_purposes=frozenset({"business_correspondence"}),
         supports_multiple_accounts=True, account_selection_required=True,
     ), create_zoho_adapter)
     registry.register(ProviderManifest(

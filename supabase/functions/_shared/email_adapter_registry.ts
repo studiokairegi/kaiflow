@@ -4,14 +4,20 @@
 // Pure: no database, no network. The store hands in the registry row; tests hand in fakes.
 import { AdapterError, ADAPTER_OPERATIONS, CAPABILITY_FOR_OPERATION, adapterProblems, adapterSupports, requireOperation } from "./email_adapter.ts";
 import type { AdapterOperation, EmailAdapter } from "./email_adapter.ts";
-import { resendAdapter } from "./email_adapter_resend.ts";
 
 /** Row of public.email_provider_registry as the store returns it. */
 export interface RegistryRow { provider_key: string; adapter_key: string; display_name: string; capabilities: Record<string, unknown>; enabled: boolean }
 
-/** Adapters compiled into this deployment, by adapter_key. Adding a provider = add its adapter file here AND insert its registry row
- *  (the row is inserted by a deliberate migration, never as a side effect of connecting an account). */
-export const BUILTIN_ADAPTERS: Readonly<Record<string, EmailAdapter>> = Object.freeze({ [resendAdapter.adapterKey]: resendAdapter });
+import { resendAdapter } from "./email_adapter_resend.ts";
+import { gmailAdapter } from "./email_adapter_gmail.ts";
+import { zohoAdapter } from "./email_adapter_zoho.ts";
+
+/** Resend's adapter remains compiled only for legacy webhook parsing/regression compatibility.
+ * The central Inbox registry row and send flag are disabled by the shared-account migration,
+ * so it cannot be selected for a live Inbox send or mailbox sync. */
+export const BUILTIN_ADAPTERS: Readonly<Record<string, EmailAdapter>> = Object.freeze({
+  [resendAdapter.adapterKey]: resendAdapter, [gmailAdapter.adapterKey]: gmailAdapter, [zohoAdapter.adapterKey]: zohoAdapter,
+});
 
 /** Validates the raw database row. Returns null when it is not usable as a registry row. */
 export function normalizeRegistryRow(raw: unknown): RegistryRow | null {

@@ -254,7 +254,7 @@ export const resendAdapter: EmailAdapter = {
       thread: i.thread, replyTo: i.replyTo, correlationId: i.correlationId,
     });
     const out = await sendViaResend(ctx.fetch, apiKey, payload, i.idempotencyKey, { sleep: ctx.sleep });
-    if (!out.ok) return out;
+    if (out.ok === false) return out;
     // Resend generates the RFC Message-ID. Since July 2026 it is available from GET /emails/:id.
     // Failure to retrieve it must not turn an accepted send into a failed/unknown send; the signed
     // email.* webhook also carries message_id and can repair the row asynchronously.

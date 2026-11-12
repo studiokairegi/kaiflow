@@ -81,7 +81,7 @@ test("selection: the adapter comes from the database registry row for the accoun
   assert.equal(r.adapter, resendAdapter);
   assert.deepEqual([...r.operations].sort(), ["forward", "reply", "send"]);
   assert.deepEqual(publicCapabilities(r), { provider: "resend", display_name: "Resend", operations: r.operations });
-  assert.deepEqual(Object.keys(BUILTIN_ADAPTERS), ["resend"]);                           // Gmail/Zoho are not built in
+  assert.deepEqual(Object.keys(BUILTIN_ADAPTERS).sort(), ["gmail", "resend", "zoho"]); // code-installed adapters; database capabilities remain the runtime gate
 });
 
 test("selection: unknown, mismatched, disabled and uninstalled providers are refused with normalised codes", () => {
@@ -378,7 +378,7 @@ test("structure: the new general-Email adapter files do not touch Intelligence",
 
 test("structure: the browser-facing email-send entry point passes no provider and still wires only dependencies", () => {
   const src = read("email-send/index.ts");
-  assert.equal(/provider/i.test(noComments(src)), false);
+  assert.equal(/body\?\.provider|raw\.provider|r\.provider/i.test(noComments(src)), false); // provider identity is never accepted from browser input
   assert.match(src, /makeSendStore\(service\)/);
 });
 

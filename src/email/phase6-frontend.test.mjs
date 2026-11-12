@@ -30,17 +30,15 @@ test("Phase 6 connection labels do not misreport Resend as OAuth-connected", () 
 
 test("Phase 6 UI uses the registry and does not hardcode fake mailbox providers", () => {
   const inbox = fs.readFileSync(new URL("./InboxModule.jsx", import.meta.url), "utf8");
-  const setup = fs.readFileSync(new URL("./components/SetupAccount.jsx", import.meta.url), "utf8");
   const compose = fs.readFileSync(new URL("./components/ComposeDialog.jsx", import.meta.url), "utf8");
   const api = fs.readFileSync(new URL("./lib/api.js", import.meta.url), "utf8");
   assert.match(inbox, /emailApi\.providers\(supabase\)/);
   assert.match(inbox, /accountCanSend\(accts\.find\(\(a\) => a\.id === convo\.account_id\)/);
-  assert.match(setup, /availableMailProviders\(providers\)/);
-  assert.match(setup, /emailApi\.addAccount\(supabase, address, name, selected\.provider_key\)/);
+  assert.doesNotMatch(inbox, /SetupAccount|emailApi\.addAccount|showAddAccount/);
+  assert.match(inbox, /Settings → Intelligence → Email accounts/);
   assert.match(compose, /disabled=\{Boolean\(draftId \|\| conversationId\)\}/);
   assert.match(compose, /accountCanSend\(selectedAccount, providers\)/);
   assert.match(api, /email_provider_registry_list/);
-  assert.doesNotMatch(setup, /gmail|zoho/i);
 });
 
 
@@ -60,18 +58,16 @@ test("account loading distinguishes failure from a successfully empty list", () 
 test("legacy Email API entry point is the canonical implementation", () => {
   assert.equal(compatibilityEmailApi, canonicalEmailApi);
   assert.equal(typeof compatibilityEmailApi.send, "function");
-  assert.equal(typeof compatibilityEmailApi.addAccount, "function");
+  assert.equal("addAccount" in compatibilityEmailApi, false);
 });
 
-test("Phase 6 UI exposes safe retry and add-account workflows", () => {
+test("Inbox has no independent mailbox connection or account-creation workflow", () => {
   const inbox = fs.readFileSync(new URL("./InboxModule.jsx", import.meta.url), "utf8");
-  const setup = fs.readFileSync(new URL("./components/SetupAccount.jsx", import.meta.url), "utf8");
+  const api = fs.readFileSync(new URL("./lib/api.js", import.meta.url), "utf8");
   assert.match(inbox, /trustedProviderRows\(providers\.data, providers\.error\)/);
   assert.match(inbox, /accountView === "error"/);
   assert.match(inbox, /accounts\.reload\(\)/);
   assert.match(inbox, /providers\.reload\(\)/);
-  assert.match(inbox, /Add account/);
-  assert.match(inbox, /showAddAccount &&/);
-  assert.match(setup, /providersError \? \[\] : availableMailProviders/);
-  assert.match(setup, /onRetry/);
+  assert.doesNotMatch(inbox, /Add account|showAddAccount|SetupAccount/);
+  assert.doesNotMatch(api, /email_upsert_account|addAccount:/);
 });

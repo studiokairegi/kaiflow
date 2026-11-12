@@ -3,6 +3,7 @@
 import type { AdapterAccount } from "./email_adapter.ts";
 import type { MailboxSyncStore, NormalizedMailboxMessage } from "./email_mailbox_sync.ts";
 import { encryptEmailCredentials, decryptEmailCredentials, type EncryptedEnvelope } from "./email_token_vault.ts";
+import { decryptText } from "./crypto.ts";
 
 const must = <T>(r: { data: T; error: { message: string } | null }, label: string): T => {
   if (r.error) throw new Error(`${label}: ${r.error.message}`);
@@ -98,7 +99,37 @@ export function makeMailboxSyncStore(service: any): MailboxSyncStore {
     async failSync(accountId, leaseToken, safeError, retryAt) {
       must(await service.rpc("email_fail_sync", { p_account_id: accountId, p_lease_token: leaseToken, p_safe_error: safeError, p_retry_at: retryAt }), "record mailbox sync failure");
     },
+    async releaseIneligibleSync(accountId, leaseToken) {
+      return must(await service.rpc("email_release_sync_ineligible", { p_account_id: accountId, p_lease_token: leaseToken }), "release ineligible mailbox sync lease") === true;
+    },
   };
+}
+
+/** Load credentials from the authoritative Intelligence account row.
+ * The Inbox account UUID is the same UUID; this function never reads or writes the Inbox credential vault.
+ * Decryption uses the existing Intelligence key/envelope format and is server-only.
+ */
+export async function loadSharedIntelligenceCredentials(service: any, input: {
+  accountId: string; organizationId: string; provider: string; encryptionKey: string;
+}): Promise<unknown | null> {
+  if (!input.accountId || !input.organizationId || !input.provider || !input.encryptionKey) {
+    throw new Error("Shared mailbox credential identity or Intelligence encryption key is missing");
+  }
+  const row = must(await service.from("intel_provider_accounts")
+    .select("id,organization_id,provider_key,credentials_ciphertext,status,auth_method,data_center")
+    .eq("id", input.accountId)
+    .eq("organization_id", input.organizationId)
+    .eq("provider_key", input.provider)
+    .maybeSingle(), "load shared Intelligence mailbox credentials") as any;
+  if (!row) return null;
+  if (row.status !== "connected" || !row.credentials_ciphertext) return null;
+  try {
+    const plain = await decryptText(String(row.credentials_ciphertext), input.encryptionKey);
+    return JSON.parse(plain);
+  } catch {
+    // Never fall back to a second credential record when the authoritative secret is unreadable.
+    throw new Error("Shared mailbox credentials could not be decrypted; reconnect the account in Settings");
+  }
 }
 
 /** Save an encrypted token set. Account/provider/organization are checked by database constraints and AES-GCM AAD. */

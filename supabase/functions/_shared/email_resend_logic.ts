@@ -135,7 +135,7 @@ export interface SendStore {
   /** Atomically writes the CRM timeline entry and its full email activity record. Safe to retry after provider acceptance. */
   recordCrmActivity(messageId: string): Promise<{ recorded: boolean; duplicate: boolean }>;
   /** Scoped to the organization AND the account, so another account's thread can never supply reply headers. */
-  getThreadParent(orgId: string, conversationId: string, accountId: string): Promise<{ rfc_message_id: string | null; references_ids: string | null } | null>;
+  getThreadParent(orgId: string, conversationId: string, accountId: string): Promise<{ rfc_message_id: string | null; references_ids: string | null; provider_message_id?: string | null; provider_thread_id?: string | null; parent_direction?: "inbound" | "outbound" | null } | null>;
   /** Outbound messages created since `sinceIso`; when `provider` is given, only that provider's (its quota is its own). */
   countOutboundSince(orgId: string, sinceIso: string, provider?: string): Promise<number>;
   createOutbound(p: Record<string, unknown>): Promise<{ duplicate: boolean; message_id: string; conversation_id: string; status: string; provider_message_id?: string | null; rate_limited?: "minute" | "day" }>;
@@ -155,6 +155,7 @@ export interface SendDeps {
   audit?: (e: AuditEvent) => void;
   /** Adapters available to this deployment, by adapter_key. Defaults to BUILTIN_ADAPTERS; set only by tests and by future wiring that adds a provider. */
   adapters?: Readonly<Record<string, EmailAdapter>>;
+  getProviderAccessToken?: AdapterContext["getProviderAccessToken"];
 }
 
 /** Audit record. Never contains recipient addresses, subjects, bodies, attachment names or credentials. */
@@ -233,7 +234,7 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
     return adapterErrorResponse(new AdapterError("account_not_usable", "This sender account is not connected. Reconnect it or choose another sender.", { provider: resolved.adapter.providerKey }));
   }
   const { adapter } = resolved;
-  const ctx: AdapterContext = { env: deps.env, fetch: deps.fetch, now: deps.now, sleep: deps.sleep };
+  const ctx: AdapterContext = { env: deps.env, fetch: deps.fetch, now: deps.now, sleep: deps.sleep, getProviderAccessToken: deps.getProviderAccessToken };
 
   // 3. Server-side configuration (for Resend: the API key), then the legacy shared kill switch if the adapter has one.
   const problem = adapter.configurationProblem(deps.env);
@@ -375,7 +376,7 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
   }
 
   audit({ event: "send_attempt", ...who, account_id: account.id, provider: adapter.providerKey, message_id: created.message_id });
-  const adapterAccount: AdapterAccount = { id: account.id, organization_id: auth.organizationId, provider: adapter.providerKey, address: account.address, display_name: account.display_name, status: account.status };
+  const adapterAccount: AdapterAccount = { id: account.id, organization_id: auth.organizationId, provider: adapter.providerKey, address: account.address, display_name: account.display_name, status: account.status, connection_status: account.connection_status };
   const input: AdapterSendInput = {
     fromEmail: account.address, fromName: account.display_name, to: r.to, cc: r.cc, bcc: r.bcc, subject: r.subject, text: r.text, html: r.html,
     replyTo, thread, attachments: r.attachments, idempotencyKey: r.idempotency_key, correlationId: created.message_id,
@@ -388,7 +389,7 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
     console.error("email-send: adapter threw", adapter.providerKey, safeMsg(e));
     outcome = { ok: false as const, unknown: true, retryable: false, status: 0, message: "The email provider gave an unreadable answer", attempts: 0 };
   }
-  const out = outcome.ok ? { ok: true as const, id: outcome.providerMessageId, rfcMessageId: outcome.rfcMessageId, attempts: outcome.attempts } : outcome;
+  const out = outcome.ok ? { ok: true as const, id: outcome.providerMessageId, rfcMessageId: outcome.rfcMessageId, providerThreadId: outcome.providerThreadId, attempts: outcome.attempts } : outcome;
   audit({ event: "send_result", ...who, account_id: account.id, provider: adapter.providerKey, message_id: created.message_id, ...(out.ok ? { provider_message_id: out.id } : {}), status: out.ok ? "sent" : out.unknown ? "unknown" : "failed", attempts: out.attempts });
 
   if (out.ok) {
@@ -398,7 +399,8 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await deps.store.markResult(created.message_id, { status: "sent", provider_message_id: out.id, sent_at: new Date(deps.now()).toISOString(), error: "",
-          ...(typeof out.rfcMessageId === "string" ? { rfc_message_id: out.rfcMessageId } : {}) });
+          ...(typeof out.rfcMessageId === "string" ? { rfc_message_id: out.rfcMessageId } : {}),
+          ...(typeof out.providerThreadId === "string" ? { provider_thread_id: out.providerThreadId } : {}) });
         persisted = true;
         break;
       } catch (e) {

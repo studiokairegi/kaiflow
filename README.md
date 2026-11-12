@@ -96,7 +96,7 @@ To remove only the controller auto-start, run `.\windows\uninstall-controller.ps
 `python -m unittest discover -s tests -t .`
 
 ## What is NOT verified here
-The Zoho Mail endpoints in `kairflow_intel/zoho.py` and Gmail endpoints in `kairflow_intel/gmail.py` follow their public API contracts but still require read-only acceptance tests against real connected accounts. SMTP is send-only; it does not synchronize inbound replies. The separate Resend transactional integration is not an Emma prospect-mail provider.
+The central Inbox now has Gmail and Zoho send adapters that reuse Settings/Intelligence account identities and OAuth token refresh. They still require live acceptance against authorized connected mailboxes. Paginated Gmail/Zoho Inbox ingestion adapters are implemented but remain disabled pending live acceptance; native incremental/delta synchronization and several mailbox operations are not yet complete. SMTP/IMAP are deferred by owner decision for this cycle; preserve their existing settings and credentials. The separate Resend transactional integration is not an Emma prospect-mail provider. See `docs/PHASE_EMAIL_SHARED_GATEWAY_GMAIL_ZOHO_SEND.md` for the exact implemented/unverified boundary.
 Run `selftest zoho` after connecting and adjust response parsing in that one file if anything differs.
 
 ## Phase 12 operations

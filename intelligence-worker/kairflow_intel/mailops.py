@@ -45,14 +45,16 @@ def send_message(rpc, zoho, message_id: str) -> dict:
     # Assign a concrete mailbox and reserve its quota atomically. The SQL gate also
     # requires explicit prospecting consent or a genuine inbound correspondence thread.
     try:
-        assigned = rpc("intel_agent_assign_provider_account", {"p_message_id": message_id}) or {}
+        assigned = rpc("intel_agent_assign_provider_account", {"p_message_id": message_id})
     except Exception as exc:
         rpc("intel_agent_fail_send", {"p_message_id": message_id, "p_error": f"provider assignment failed: {type(exc).__name__}"[:300], "p_permanent": False})
         return {"sent": False, "reason": "provider_assignment_retry"}
-    if not assigned:
-        # Compatibility with pre-2.5 installations and lightweight test doubles; the
-        # deployed migration always returns a structured result.
-        assigned = {"ok": True, "legacy": True, "message": m}
+    # Account assignment is a mandatory security boundary. A missing/empty/malformed
+    # RPC result must never activate the legacy configured adapter: that could send
+    # through the wrong mailbox or bypass current account-purpose/quota policy.
+    if not isinstance(assigned, dict) or not isinstance(assigned.get("ok"), bool):
+        rpc("intel_agent_fail_send", {"p_message_id": message_id, "p_error": "provider assignment returned no valid decision", "p_permanent": False})
+        return {"sent": False, "reason": "provider_assignment_unavailable"}
     if not assigned.get("ok"):
         reason = assigned.get("reason", "provider_assignment_denied")
         if reason == "provider_account_quota":

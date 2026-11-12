@@ -13,7 +13,7 @@ function callbackService() {
     from(table) {
       if (table === "intel_provider_oauth_states") return {
         select() { return this; }, eq() { return this; }, is() { return this; },
-        async maybeSingle() { return { data: { organization_id: "org-1", user_id: "user-1", provider_key: "gmail",
+        async maybeSingle() { return { data: { organization_id: "33333333-3333-4333-8333-333333333333", user_id: "user-1", provider_key: "gmail",
           created_at: new Date(NOW - 1000).toISOString(), expires_at: new Date(NOW + 500000).toISOString(), used_at: null } }; },
         update(value) { saved.stateUsed = !!value.used_at; return this; },
       };
@@ -106,7 +106,7 @@ function tokenService(accountOverrides = {}, providerOverrides = {}) {
   return {
     async rpc(name, args) { assert.equal(name, "email_provider_enabled"); assert.equal(args.p_provider, "gmail"); return { data: true, error: null }; },
     from(table) {
-      if (table === "intel_settings") return { select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: { organization_id: "org-1", agent_user_id: "agent-1" } }; } };
+      if (table === "intel_settings") return { select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: { organization_id: "33333333-3333-4333-8333-333333333333", agent_user_id: "agent-1" } }; } };
       if (table === "intel_provider_accounts") return {
         select() { return this; }, eq() { return this; },
         async maybeSingle() { return { data: account }; },
@@ -179,7 +179,7 @@ test("Zoho OAuth callback stores a data-center-scoped inactive account", async (
     from(table) {
       if (table === "intel_provider_oauth_states") return {
         select() { return this; }, eq() { return this; }, is() { return this; },
-        async maybeSingle() { return { data: { organization_id: "org-1", user_id: "user-1", provider_key: "zoho", metadata: { data_center: "eu" }, created_at: new Date(NOW - 1000).toISOString(), expires_at: new Date(NOW + 500000).toISOString(), used_at: null } }; },
+        async maybeSingle() { return { data: { organization_id: "33333333-3333-4333-8333-333333333333", user_id: "user-1", provider_key: "zoho", metadata: { data_center: "eu" }, created_at: new Date(NOW - 1000).toISOString(), expires_at: new Date(NOW + 500000).toISOString(), used_at: null } }; },
         update() { return this; },
       };
       if (table === "intel_email_provider_registry") return { select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: { enabled: true } }; } };
@@ -209,4 +209,60 @@ test("Zoho OAuth callback stores a data-center-scoped inactive account", async (
   assert.equal(saved.is_enabled, false);
   assert.equal(saved.send_enabled, false);
   assert.deepEqual(calls, ["https://accounts.zoho.eu/oauth/v2/token", "https://mail.zoho.eu/api/accounts"]);
+});
+
+import { getSharedProviderAccessToken } from "../../supabase/functions/_shared/intel_provider_oauth.ts";
+
+test("shared Inbox token gateway refreshes the existing Gmail account without creating a second credential record", async () => {
+  const updates = [];
+  const account = { id: ACCOUNT, organization_id: "33333333-3333-4333-8333-333333333333", provider_key: "gmail", external_account_id: "me", mailbox: "studio@gmail.com",
+    credentials_ciphertext: "ciphertext", status: "connected", is_enabled: true, send_enabled: true, auth_method: "oauth2", data_center: null,
+    allowed_message_purposes: ["business_correspondence", "consented_prospecting"] };
+  const service = {
+    from(table) {
+      if (table === "intel_provider_accounts") return {
+        select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: account, error: null }; },
+        update(value) { updates.push(value); return this; },
+      };
+      if (table === "intel_email_provider_registry") return { select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: { enabled: true, sending_enabled: true, manifest: { message_purposes: ["business_correspondence", "consented_prospecting"] } }, error: null }; } };
+      throw new Error(`unexpected table ${table}`);
+    },
+    async rpc(name, args) { assert.equal(name, "email_provider_enabled"); assert.equal(args.p_provider, "gmail"); return { data: true, error: null }; },
+  };
+  const calls = [];
+  const deps = { env: (k) => ({ GOOGLE_GMAIL_CLIENT_ID: "client", GOOGLE_GMAIL_CLIENT_SECRET: "secret" })[k], createClient: () => ({}), service,
+    fetch: async (url, init) => { calls.push({ url, init }); return new Response(JSON.stringify({ access_token: "fresh-access", expires_in: 3600 }), { status: 200 }); },
+    encrypt: async (v) => v, decrypt: async (v) => { assert.equal(v, "ciphertext"); return JSON.stringify({ refresh_token: "existing-refresh" }); }, now: () => NOW };
+  const token = await getSharedProviderAccessToken({ accountId: ACCOUNT, organizationId: "33333333-3333-4333-8333-333333333333", provider: "gmail", operation: "send" }, deps);
+  assert.equal(token.access_token, "fresh-access");
+  assert.equal(token.mailbox, "studio@gmail.com");
+  assert.equal(token.api_base, GMAIL_API_BASE);
+  assert.equal(calls.length, 1);
+  assert.match(String(calls[0].init.body), /existing-refresh/);
+  assert.equal(updates.length, 1);
+});
+
+test("shared Inbox token gateway rejects cross-organization account lookup", async () => {
+  let refreshed = false;
+  const service = { from(table) {
+    if (table === "intel_provider_accounts") return { select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: null, error: null }; }, update() { throw new Error("must not update"); } };
+    throw new Error(`unexpected table ${table}`);
+  } };
+  await assert.rejects(() => getSharedProviderAccessToken({ accountId: ACCOUNT, organizationId: "33333333-3333-4333-8333-333333333333", provider: "gmail", operation: "send" }, {
+    env: () => "x", createClient: () => ({}), service, fetch: async () => { refreshed = true; return new Response("{}", { status: 200 }); }, encrypt: async (v) => v, decrypt: async (v) => v, now: () => NOW,
+  }), /not connected or enabled/);
+  assert.equal(refreshed, false);
+});
+
+test("shared Inbox token gateway enforces Zoho manual-correspondence purpose before token refresh", async () => {
+  const service = { from(table) {
+    if (table === "intel_provider_accounts") return { select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: { id: ACCOUNT, organization_id: "33333333-3333-4333-8333-333333333333", provider_key: "zoho", external_account_id: "123", mailbox: "studio@zoho.eu", credentials_ciphertext: "cipher", status: "connected", is_enabled: true, send_enabled: true, allowed_message_purposes: ["consented_prospecting"] }, error: null }; } };
+    if (table === "intel_email_provider_registry") return { select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: { enabled: true, sending_enabled: true, manifest: { message_purposes: ["business_correspondence"] } }, error: null }; } };
+    throw new Error(`unexpected table ${table}`);
+  }, async rpc() { return { data: true, error: null }; } };
+  let refreshed = false;
+  await assert.rejects(() => getSharedProviderAccessToken({ accountId: ACCOUNT, organizationId: "33333333-3333-4333-8333-333333333333", provider: "zoho", operation: "send" }, {
+    env: () => "x", createClient: () => ({}), service, fetch: async () => { refreshed = true; return new Response("{}", { status: 200 }); }, encrypt: async (v) => v, decrypt: async (v) => JSON.stringify({ refresh_token: "refresh", data_center: "eu" }), now: () => NOW,
+  }), /not authorized for manual correspondence/);
+  assert.equal(refreshed, false);
 });

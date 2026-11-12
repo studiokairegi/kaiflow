@@ -3,8 +3,16 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { handleSend } from "../_shared/email_resend_logic.ts";
 import { makeSendStore } from "../_shared/email_resend_store.ts";
+import { getSharedProviderAccessToken } from "../_shared/intel_provider_oauth.ts";
+import { encryptText, decryptText } from "../_shared/crypto.ts";
 
 const service = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
+const oauthDeps = {
+  env: (name: string) => Deno.env.get(name), createClient, service,
+  fetch: (url: string, init?: Record<string, unknown>) => fetch(url, init as RequestInit),
+  encrypt: (value: string) => encryptText(value, Deno.env.get("INTEL_TOKEN_ENCRYPTION_KEY") || ""),
+  decrypt: (value: string) => decryptText(value, Deno.env.get("INTEL_TOKEN_ENCRYPTION_KEY") || ""), now: () => Date.now(),
+};
 
 Deno.serve((req) =>
   handleSend(req, {
@@ -12,6 +20,10 @@ Deno.serve((req) =>
     fetch: (url, init) => fetch(url, init as RequestInit),
     now: () => Date.now(),
     store: makeSendStore(service),
+    getProviderAccessToken: (account, operation) => getSharedProviderAccessToken({
+      accountId: account.id, organizationId: String(account.organization_id || ""),
+      provider: account.provider as "gmail" | "zoho", operation,
+    }, oauthDeps),
     async authenticate(r) {
       const m = /^Bearer\s+(\S+)$/i.exec(r.headers.get("Authorization") || "");
       if (!m) return { ok: false, status: 401, error: "Not authenticated" };

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
-import { makeMailboxSyncStore, saveEmailCredentials, loadEmailCredentials } from './email_mailbox_store.ts';
+import { makeMailboxSyncStore, saveEmailCredentials, loadEmailCredentials, loadSharedIntelligenceCredentials } from './email_mailbox_store.ts';
+import { encryptText } from './crypto.ts';
 
 globalThis.crypto ??= webcrypto;
 const key = Buffer.alloc(32, 3).toString('base64');
@@ -36,6 +37,7 @@ test('mailbox sync store uses service RPCs for lease lifecycle', async () => {
     if (name === 'email_claim_sync') return { data: { claimed: true, lease_token: 'lease-1', checkpoint: { history: '1' } }, error: null };
     if (name === 'email_renew_sync' || name === 'email_commit_sync_checkpoint' || name === 'email_finish_sync') return { data: true, error: null };
     if (name === 'email_fail_sync') return { data: true, error: null };
+    if (name === 'email_release_sync_ineligible') return { data: true, error: null };
     throw new Error(`unexpected RPC ${name}`);
   } };
   const store = makeMailboxSyncStore(service);
@@ -44,7 +46,9 @@ test('mailbox sync store uses service RPCs for lease lifecycle', async () => {
   assert.equal(await store.commitCheckpoint('a1', 'lease-1', { history: '2' }, 1, 3), true);
   assert.equal(await store.finishSync('a1', 'lease-1', { pages: 2, messages: 3, inserted: 2, updated: 1, partial: false }), true);
   await store.failSync('a1', 'lease-1', 'safe failure', new Date().toISOString());
-  assert.deepEqual(calls.map(([name]) => name), ['email_claim_sync', 'email_renew_sync', 'email_commit_sync_checkpoint', 'email_finish_sync', 'email_fail_sync']);
+  assert.equal(await store.releaseIneligibleSync('a1', 'lease-1'), true);
+  assert.deepEqual(calls.map(([name]) => name), ['email_claim_sync', 'email_renew_sync', 'email_commit_sync_checkpoint', 'email_finish_sync', 'email_fail_sync', 'email_release_sync_ineligible']);
+  assert.deepEqual(calls[5][1], { p_account_id: 'a1', p_lease_token: 'lease-1' });
 });
 
 test('mailbox persistence reconciles provider folder, deletion and update state for both directions', async () => {
@@ -83,4 +87,47 @@ test('mailbox persistence fails if provider state cannot be reconciled', async (
   await assert.rejects(() => store.persistMessage({ id: 'a1', organization_id: 'o1', provider: 'zoho' }, {
     provider_message_id: 'provider-1', direction: 'inbound', from_email: 'sender@example.com', to_emails: [], subject: 'x', is_read: false,
   }), /could not be reconciled/);
+});
+
+
+test('shared Inbox credential lookup reads the same Intelligence account ID and decrypts only the authoritative ciphertext', async () => {
+  const credentials = { refresh_token: 'intel-refresh-secret', data_center: 'eu' };
+  const ciphertext = await encryptText(JSON.stringify(credentials), key);
+  const state = { query: [] };
+  const service = {
+    from(table) {
+      assert.equal(table, 'intel_provider_accounts');
+      const query = {
+        eq(column, value) { state.query.push([column, value]); return this; },
+        async maybeSingle() {
+          return { data: {
+            id: 'same-account-id', organization_id: 'org-1', provider_key: 'zoho',
+            credentials_ciphertext: ciphertext, status: 'connected', auth_method: 'oauth2', data_center: 'eu',
+          }, error: null };
+        },
+      };
+      return { select() { return query; } };
+    },
+  };
+  const loaded = await loadSharedIntelligenceCredentials(service, {
+    accountId: 'same-account-id', organizationId: 'org-1', provider: 'zoho', encryptionKey: key,
+  });
+  assert.deepEqual(loaded, credentials);
+  assert.deepEqual(state.query, [
+    ['id', 'same-account-id'], ['organization_id', 'org-1'], ['provider_key', 'zoho'],
+  ]);
+});
+
+test('shared Inbox credential lookup fails closed for unreadable Intelligence ciphertext', async () => {
+  const service = {
+    from() {
+      const query = { eq() { return this; }, async maybeSingle() {
+        return { data: { id: 'a', organization_id: 'o', provider_key: 'gmail', credentials_ciphertext: 'not-valid', status: 'connected' }, error: null };
+      } };
+      return { select() { return query; } };
+    },
+  };
+  await assert.rejects(() => loadSharedIntelligenceCredentials(service, {
+    accountId: 'a', organizationId: 'o', provider: 'gmail', encryptionKey: key,
+  }), /could not be decrypted/);
 });

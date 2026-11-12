@@ -26,7 +26,7 @@ class RegistryTests(unittest.TestCase):
         self.assertNotIn("resend", registry.keys())
         self.assertTrue(registry.manifest("gmail").supports_multiple_accounts)
         self.assertTrue(registry.manifest("zoho").supports_multiple_accounts)
-        self.assertIn("consented_prospecting", registry.manifest("zoho").message_purposes)
+        self.assertEqual(registry.manifest("zoho").message_purposes, frozenset({"business_correspondence"}))
 
     def test_gmail_factory_reuses_same_client_for_any_account_id(self):
         from kairflow_intel.providers.gmail import create_gmail_adapter

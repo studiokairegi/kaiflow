@@ -12,6 +12,13 @@ export interface MailboxSyncStore {
   commitCheckpoint(accountId: string, leaseToken: string, checkpoint: unknown, pages: number, messages: number): Promise<boolean>;
   finishSync(accountId: string, leaseToken: string, result: { pages: number; messages: number; inserted: number; updated: number; partial: boolean }): Promise<boolean>;
   failSync(accountId: string, leaseToken: string, safeError: string, retryAt: string): Promise<void>;
+  /**
+   * Round 7.1: release the lease WITHOUT recording a failure when the account is no longer eligible.
+   * Resolves true only when the database confirmed the account is ineligible now and released the lease.
+   * It never changes failure counters, retry time, error text or checkpoint. False means the account is
+   * still eligible, so the caller must treat the problem as a genuine failure.
+   */
+  releaseIneligibleSync(accountId: string, leaseToken: string): Promise<boolean>;
 }
 
 export interface SyncResult {
@@ -30,6 +37,7 @@ export interface SyncResult {
 
 const MAX_PAGES_PER_RUN = 8;
 const LEASE_SECONDS = 180;
+const MAX_ACCOUNT_RUNTIME_MS = 40_000;
 const safeError = (e: unknown): string => {
   // Persist a fixed operational message only. Provider/database exceptions may contain addresses,
   // message fragments, response bodies, headers or credentials and are never copied to sync state.
@@ -44,13 +52,15 @@ export async function synchronizeMailbox(
   const now = input.now ?? context.now;
   if (!adapter.operations.includes("sync") || typeof adapter.sync !== "function") throw new CapabilityError(adapter.providerKey, "sync");
   if (account.status !== "active" || account.connection_status !== "connected") throw new AdapterError("account_not_usable", "Mailbox account is not connected", { provider: adapter.providerKey, operation: "sync" });
-  if (typeof context.getCredentials !== "function" || await context.getCredentials(account) == null) throw new AdapterError("not_configured", "Mailbox credentials are unavailable; reconnect the account", { provider: adapter.providerKey, operation: "sync" });
+  // The shared provider-token gateway is the authoritative credential check. Avoid a second
+  // decrypt/read here; it would duplicate work on every account before the token refresh.
   const claim = await store.claimSync(account.id, LEASE_SECONDS);
   if (!claim.claimed || !claim.leaseToken) return { ok: false, status: "skipped", skip_reason: claim.reason || "sync_unavailable", retry_at: claim.retryAt, pages: 0, messages_seen: 0, messages_inserted: 0, messages_updated: 0, checkpoint_committed: false, has_more: true };
 
   let checkpoint = claim.checkpoint;
   let pages = 0, seen = 0, inserted = 0, updated = 0;
   let hasMore = true;
+  const accountDeadline = now() + MAX_ACCOUNT_RUNTIME_MS;
   let heartbeatBusy = false;
   let leaseLost = false;
   // Keep the lease alive while a provider request or persistence operation is pending.
@@ -65,13 +75,31 @@ export async function synchronizeMailbox(
   }, Math.floor(LEASE_SECONDS * 1000 / 3));
   try {
     while (hasMore && pages < MAX_PAGES_PER_RUN) {
+      if (now() >= accountDeadline) break;
       if (leaseLost || !await store.renewSync(account.id, claim.leaseToken, LEASE_SECONDS)) throw new AdapterError("account_not_usable", "Mailbox synchronization lease was lost; retry is required", { provider: adapter.providerKey, operation: "sync" });
-      const raw = await adapter.sync(context, account, checkpoint) as AdapterSyncPage;
+      let raw: AdapterSyncPage;
+      try { raw = await adapter.sync(context, account, checkpoint) as AdapterSyncPage; }
+      catch (error) {
+        if (error instanceof AdapterError && error.code === "sync_deadline") {
+          // A deadline before any message was recovered must back off visibly; otherwise the
+          // same un-fetchable page could be retried on every scheduler tick with a healthy status.
+          if (seen === 0 && pages === 0) throw error;
+          hasMore = true; break;
+        }
+        throw error;
+      }
       if (leaseLost) throw new AdapterError("account_not_usable", "Mailbox synchronization lease was lost; retry is required", { provider: adapter.providerKey, operation: "sync" });
       if (!raw || !Array.isArray(raw.messages) || typeof raw.has_more !== "boolean" || typeof raw.complete !== "boolean" || !Object.prototype.hasOwnProperty.call(raw, "next_checkpoint")) {
         throw new AdapterError("provider_rejected", "The mailbox provider returned an invalid synchronization page", { provider: adapter.providerKey, operation: "sync" });
       }
+      // Round 7.2: re-check the lease, and with it current eligibility, BEFORE any fetched message is saved.
+      // An account disabled during the provider request must not have this page ingested. A refusal
+      // here flows to the ineligible-release check in the catch block; nothing from the page is written.
+      if (!await store.renewSync(account.id, claim.leaseToken, LEASE_SECONDS)) throw new AdapterError("account_not_usable", "Mailbox synchronization lease was lost; retry is required", { provider: adapter.providerKey, operation: "sync" });
       const pageIds = new Set<string>();
+      // Finish persisting the bounded provider response even if the provider deadline
+      // expires after fetch. Interrupting local upserts would replay the same prefix
+      // forever without a durable provider-row offset. Provider requests remain deadline-bound.
       for (const message of raw.messages) {
         if (!message || typeof message.provider_message_id !== "string" || !message.provider_message_id.trim() || !["inbound", "outbound"].includes(message.direction)) {
           throw new AdapterError("provider_rejected", "The mailbox provider returned a message without a valid identity", { provider: adapter.providerKey, operation: "sync" });
@@ -83,6 +111,21 @@ export async function synchronizeMailbox(
         seen++;
         if (result.inserted) inserted++;
         else if (result.updated) updated++;
+      }
+      // Partial provider pages carry an in-page resume cursor (Gmail pageToken+offset,
+      // Zoho start+offset). Persist the recovered prefix first, then commit only that
+      // safe prefix so the next run does not refetch it. A zero-progress partial must
+      // enter normal failure/backoff rather than masquerading as healthy progress.
+      if (raw.partial) {
+        if (JSON.stringify(raw.next_checkpoint) === JSON.stringify(checkpoint)) {
+          throw new AdapterError("sync_deadline", "Mailbox page made no resumable progress before its deadline", { provider: adapter.providerKey, operation: "sync" });
+        }
+        const partialCommitted = await store.commitCheckpoint(account.id, claim.leaseToken, raw.next_checkpoint, pages + 1, seen);
+        if (!partialCommitted) throw new AdapterError("account_not_usable", "Mailbox synchronization lease expired while saving partial-page progress", { provider: adapter.providerKey, operation: "sync" });
+        checkpoint = raw.next_checkpoint;
+        pages++;
+        hasMore = true;
+        break;
       }
       // A provider page is committed only after all message upserts succeeded.
       const committed = await store.commitCheckpoint(account.id, claim.leaseToken, raw.next_checkpoint, pages + 1, seen);
@@ -101,6 +144,16 @@ export async function synchronizeMailbox(
     if (!released) throw new AdapterError("account_not_usable", "Mailbox synchronization lease expired before completion", { provider: adapter.providerKey, operation: "sync" });
     return { ok: true, status: partial ? "partial" : "completed", pages, messages_seen: seen, messages_inserted: inserted, messages_updated: updated, checkpoint_committed: pages > 0, has_more: hasMore };
   } catch (error) {
+    // Round 7.1: stop provider work and ask the database whether the account is ineligible NOW.
+    // Losing eligibility is an operator action, not a provider failure: no failure count, no backoff.
+    // The check runs for every error path, so a lost renewal, refused checkpoint, refused finish or a
+    // provider error raised after the account was disabled are all handled identically. If the
+    // database cannot answer, fall through to the normal failure path; lease expiry is the backstop.
+    let releasedIneligible = false;
+    try { releasedIneligible = (await store.releaseIneligibleSync(account.id, claim.leaseToken)) === true; } catch { releasedIneligible = false; }
+    if (releasedIneligible) {
+      return { ok: false, status: "skipped", skip_reason: "account_ineligible", pages, messages_seen: seen, messages_inserted: inserted, messages_updated: updated, checkpoint_committed: pages > 0, has_more: true };
+    }
     const message = safeError(error);
     const retryDelayMs = Math.min(6 * 60 * 60_000, 60_000 * (2 ** Math.min(claim.consecutiveFailures ?? 0, 8)));
     // Recording the failure can itself fail (database unavailable). That must never turn a handled sync failure into a thrown error:
