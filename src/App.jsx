@@ -39,7 +39,10 @@ import { allowedWorkspaceKeys, friendlyInviteError, readFunctionError } from "./
 import "./studio/invite.css";
 import { canAccessIntelligence, loadIntelligenceAccess } from "./intelligence/access.js";
 import { canAccessEmail, loadEmailAccess } from "./email/access.js";
-import { leadComposeTarget, mergeEmailTimeline, sortEmailTimelineForDisplay, EMAIL_TIMELINE_TYPES } from "./email/lib/logic.js";
+import { IconNewChat } from "./chat/icons.jsx";
+import "./chat/chat.css";
+import "./email/styles/inbox-chat.css";
+import { leadComposeTarget, leadComposeBlockReason, mergeEmailTimeline, sortEmailTimelineForDisplay, EMAIL_TIMELINE_TYPES } from "./email/lib/logic.js";
 import AiGeneratedBadge, { isAiGeneratedLead } from "./intelligence/AiGeneratedBadge.jsx";
 
 // Used only as a guaranteed-empty UUID filter when a studio has no mapped
@@ -75,7 +78,7 @@ const PortfolioTab = lazyWithSuspense(() => import("./portfolio/PortfolioTab.jsx
 const PaymentsModule = lazyWithSuspense(() => import("./payments/PaymentsModule.jsx"), { label: "Loading payments…", logo: true });
 const IntelligenceModule = lazyWithSuspense(() => import("./intelligence/IntelligenceModule.jsx"), { label: "Loading intelligence…" });
 import { useEmailUnread } from "./email/lib/useEmailUnread.js";
-const LeadComposeModal = lazyWithSuspense(() => import("./email/components/LeadComposeModal.jsx"), { label: "Loading composer…" });
+const LeadComposeModal = lazyWithSuspense(() => import("./email/LeadComposeModal.jsx"), { label: "Opening composer\u2026" });
 const InboxModule = lazyWithSuspense(() => import("./email/InboxModule.jsx"), { label: "Loading inbox…" });
 const ChatPage = lazyWithSuspense(() => import("./chat/ChatPage.jsx"), { label: "Loading studio chat…" });
 const DonutBreakdown = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "DonutBreakdown", label: "" });
@@ -2715,10 +2718,6 @@ const SpinnerIcon = ({ size = 18 }) => (
   </svg>
 );
 
-const ComposeMailIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 7 9 6 9-6" /></svg>
-);
-
 const CopyIcon = () => (
   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
     <rect x="9" y="9" width="12" height="12" rx="2" />
@@ -2931,10 +2930,11 @@ export default function ShotTracker() {
   const [leadChannelFilter, setLeadChannelFilter] = useState("all");
   const [leadSearch, setLeadSearch] = useState("");
   const [openConversationRequest, setOpenConversationRequest] = useState(null); // lead timeline "Open email" -> Inbox conversation
-  const [leadTimelineNonce, setLeadTimelineNonce] = useState(0); // bumped after a send so the open lead card re-reads its timeline at once
-  const [leadComposer, setLeadComposer] = useState(null); // CRM lead -> modal composer opened over the CRM (see leadComposeTarget); never switches tabs
+  const [leadComposeModal, setLeadComposeModal] = useState(null); // CRM lead -> composer modal over the pipeline (never navigates to the Inbox)
+  const [leadTimelineTick, setLeadTimelineTick] = useState(0);
+  const [composeRequest, setComposeRequest] = useState(null); // CRM lead -> Inbox composer hand-off (see leadComposeTarget)
   const [crmTab, setCrmTab] = useState("pipeline"); // "pipeline" | "contacts" | "portfolio" | "intelligence" (CRM Intelligence lives inside the CRM module, only for the authorized admin)
-  useEffect(() => { if (view !== "projects" || workspace !== "leads") setLeadComposer(null); }, [view, workspace]); // close the lead composer if the user leaves the CRM
+  useEffect(() => { if (view !== "projects" || workspace !== "leads" || crmTab !== "inbox") setComposeRequest(null); }, [view, workspace, crmTab]); // never replay a CRM compose request after leaving Inbox
   const [leadStatusFilter, setLeadStatusFilter] = useState("all");
   const [leadPriorityFilter, setLeadPriorityFilter] = useState("all");
   const [leadFollowupFilter, setLeadFollowupFilter] = useState("all");
@@ -6559,6 +6559,22 @@ export default function ShotTracker() {
                                 <span style={styles.cardTag}>{lead.outcomeReason}</span>
                               )}
                             </div>
+                            {canAccessEmail(emailAccess) && (() => {
+                              const target = leadComposeTarget(lead, userId);
+                              if (!target) return null;
+                              return (
+                                <button
+                                  type="button"
+                                  style={styles.cardCompose}
+                                  title={`Compose an email to ${target.to}`}
+                                  aria-label={`Compose email to ${target.label}`}
+                                  onPointerDown={(e) => e.stopPropagation()}
+                                  onClick={(e) => { e.stopPropagation(); setLeadComposeModal({ ...target, nonce: Date.now() }); }}
+                                >
+                                  Compose
+                                </button>
+                              );
+                            })()}
                           </div>
                         );
                       })}
@@ -6604,7 +6620,7 @@ export default function ShotTracker() {
         </>
       )}
 
-      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessEmail(emailAccess) && <InboxModule access={emailAccess} supabase={supabase} leads={leads} openConversationRequest={openConversationRequest} onOpenConversationHandled={() => setOpenConversationRequest(null)} onUnreadChanged={emailInbox.refresh} onLeadEmailSent={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) refreshLeadTimeline(l); }} onOpenLead={async (leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { const fresh = await refreshLeadTimeline(l); setCrmTab("pipeline"); setEditingLead(fresh); } }} />}
+      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessEmail(emailAccess) && <InboxModule access={emailAccess} supabase={supabase} leads={leads} composeRequest={composeRequest} onComposeHandled={() => setComposeRequest(null)} openConversationRequest={openConversationRequest} onOpenConversationHandled={() => setOpenConversationRequest(null)} onUnreadChanged={emailInbox.refresh} onLeadEmailSent={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) refreshLeadTimeline(l); }} onOpenLead={async (leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { const fresh = await refreshLeadTimeline(l); setCrmTab("pipeline"); setEditingLead(fresh); } }} />}
       {view === "projects" && workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
           </div>
         </div>
@@ -6978,22 +6994,22 @@ export default function ShotTracker() {
           liveStage={leads.find((l) => l.id === editingLead.id)?.stage}
           loadServerTimeline={canAccessEmail(emailAccess) ? loadLeadServerTimeline : undefined}
           onOpenEmail={canAccessEmail(emailAccess) ? openLeadEmail : undefined}
-          composeTarget={canAccessEmail(emailAccess) && editingLead.id ? leadComposeTarget(leads.find((l) => l.id === editingLead.id) || editingLead, userId) : null}
-          onCompose={setLeadComposer}
-          timelineNonce={leadTimelineNonce}
+          composeBlockReason={leadComposeBlockReason(editingLead, userId, emailAccess)}
+          onComposeEmail={() => {
+            const target = leadComposeTarget(editingLead, userId);
+            if (target) setLeadComposeModal({ ...target, nonce: Date.now() });
+          }}
+          timelineRefreshKey={leadTimelineTick}
         />
       )}
 
-      {leadComposer && canAccessEmail(emailAccess) && (
-        // The wrapper keeps the lazy-load placeholder centered over the CRM (not in page flow) while the composer code loads the first time.
-        <div style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "#e8ecf4" }}>
-          <LeadComposeModal
-            supabase={supabase}
-            target={leadComposer}
-            onClose={() => setLeadComposer(null)}
-            onSent={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) refreshLeadTimeline(l); setLeadTimelineNonce((n) => n + 1); }}
-          />
-        </div>
+      {leadComposeModal && canAccessEmail(emailAccess) && (
+        <LeadComposeModal
+          supabase={supabase}
+          request={leadComposeModal}
+          onClose={() => setLeadComposeModal(null)}
+          onSent={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) refreshLeadTimeline(l); setLeadTimelineTick((t) => t + 1); }}
+        />
       )}
 
       {showPaymentsLocked && (
@@ -11258,10 +11274,11 @@ function LeadEditor({
   liveStage = undefined,
   loadServerTimeline = undefined,
   onOpenEmail = undefined,
-  composeTarget = null,
-  onCompose = undefined,
-  timelineNonce = 0,
+  composeBlockReason = undefined,
+  onComposeEmail = undefined,
+  timelineRefreshKey = 0,
 }) {
+  const [composeHint, setComposeHint] = useState("");
   const [form, setForm] = useState(() => ({ ...lead, emails: normalizeEmails(lead.emails, followupSchedule.length) }));
   const [isEditing, setIsEditing] = useState(isNew);
   // Quick-pick reason list shown by the "Mark lost" button specifically.
@@ -11286,7 +11303,7 @@ function LeadEditor({
     pull();
     const timer = setInterval(pull, 30000);
     return () => { alive = false; clearInterval(timer); };
-  }, [lead.id, isNew, timelineNonce]);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lead.id, isNew, timelineRefreshKey]);   // eslint-disable-line react-hooks/exhaustive-deps
   const timelineEntries = sortEmailTimelineForDisplay(mergeEmailTimeline(form.activityLog, serverLog));
 
   // The lead was dragged to another column while this editor was open: follow it, unless the person
@@ -11444,13 +11461,24 @@ function LeadEditor({
                       <CopyIcon />
                     </button>
                   )}
-                  {composeTarget && onCompose && (
-                    <button type="button" style={styles.copyIconButton} onClick={() => onCompose(composeTarget)} title={`Compose an email to ${composeTarget.to}`} aria-label={`Compose email to ${composeTarget.label}`} data-testid="lead-compose-button">
-                      <ComposeMailIcon />
-                    </button>
+                  {form.email && !isNew && onComposeEmail && (
+                    <span className="chat-root chat-theme-dark" style={{ display: "inline-flex", marginLeft: 8, verticalAlign: "middle" }}>
+                      <button
+                        type="button"
+                        className="chat-icon-btn solid sm"
+                        style={composeBlockReason ? { opacity: 0.4, cursor: "not-allowed", filter: "grayscale(1)" } : undefined}
+                        title={composeBlockReason || "Compose an email to this lead"}
+                        aria-label={composeBlockReason ? `Email unavailable: ${composeBlockReason}` : "Compose email to this lead"}
+                        aria-disabled={composeBlockReason ? "true" : undefined}
+                        onClick={() => { if (composeBlockReason) { setComposeHint("shown"); return; } onComposeEmail(); }}
+                      >
+                        <IconNewChat size={16} />
+                      </button>
+                    </span>
                   )}
                   {copiedEmail && <span style={styles.copiedTag}>Copied</span>}
                 </p>
+                {composeHint && composeBlockReason && <p style={{ ...styles.copiedTag, color: textMuted, margin: "4px 0 0" }}>{composeBlockReason}</p>}
               </div>
             </div>
 

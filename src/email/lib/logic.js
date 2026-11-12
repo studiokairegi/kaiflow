@@ -31,6 +31,19 @@ export function leadComposeTarget(lead, userId) {
   return { leadId: String(lead.id).toLowerCase(), to: valid[0], label: String(lead.companyName || "").trim() || String(lead.contactPerson || "").trim() || valid[0] };
 }
 
+/** Why the mail icon on an opened lead is unavailable. Returns null when the lead can be emailed (same rules as leadComposeTarget),
+ *  otherwise a short human reason for the tooltip. `emailAccess` is the tri-state from email/access.js (null = still checking). */
+export function leadComposeBlockReason(lead, userId, emailAccess) {
+  if (emailAccess === null || emailAccess === undefined) return "Checking email access\u2026";
+  if (emailAccess !== true) return "Email access is not enabled for this account";
+  if (!lead || !UUID_RE.test(String(lead.id || ""))) return "Save this lead before emailing it";
+  if (lead.archivedAt) return "Archived leads can't be emailed. Restore it first";
+  if (lead.ownerUserId && lead.ownerUserId !== userId) return "This lead belongs to another user";
+  if (!String(lead.email || "").trim()) return "This lead has no email address";
+  if (!parseRecipients(lead.email).valid.length) return "The email address on this lead isn't valid";
+  return null;
+}
+
 /** Resolve CRM compose hand-off readiness without consuming a request while registries are still loading or errored. */
 export function leadComposeReadiness({ accounts, providers } = {}) {
   if (!accounts || !providers || accounts.loading || providers.loading) return "waiting";
