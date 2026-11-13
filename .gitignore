@@ -8,3 +8,13 @@ paystack-live.env.txt
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Generated build output
+/dist/
+/node_modules/.vite/
+
+# Local worker artifacts and backups
+/intelligence-worker/controller.py.before-python-env-fix.bak
+/intelligence-worker/wmic
+/intelligence-worker/worker.log
+/supabase/functions/intel-provider-health/index.production-backup.ts
