@@ -104,7 +104,7 @@ begin
       v_clean := v_clean || jsonb_build_object('followup_business_days', (a ->> 'followup_business_days')::int);
     end if;
     if a ? 'max_followups' then
-      if (a ->> 'max_followups') !~ '^\d$' or (a ->> 'max_followups')::int > 3 then return jsonb_build_object('ok', false, 'reason', 'max_followups_must_be_0_to_3'); end if;
+      if (a ->> 'max_followups') !~ '^\d$' or (a ->> 'max_followups')::int > 4 then return jsonb_build_object('ok', false, 'reason', 'max_followups_must_be_0_to_4'); end if;
       v_clean := v_clean || jsonb_build_object('max_followups', (a ->> 'max_followups')::int);
     end if;
     if v_clean = '{}'::jsonb then return jsonb_build_object('ok', false, 'reason', 'nothing_to_change'); end if;
