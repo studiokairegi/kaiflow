@@ -4,6 +4,7 @@
 // link, valid for the usual 14 days, for the invoice's outstanding balance. If a link cannot be created the PDF is
 // produced WITHOUT a button. A URL is never invented.
 import { checkoutUrl, isCheckoutToken } from "./providers.js";
+import { normalizeLang } from "../i18n/languages.js";
 
 export const PAYABLE_DOC_TYPES = new Set(["invoice", "proforma"]);
 
@@ -22,11 +23,12 @@ export function isValidPayUrl(url) {
   } catch { return false; }
 }
 
-// create = (invoiceId, amountOrNull, days) => Promise<{token}>, i.e. api.createCheckoutSession.
+// create = (invoiceId, amountOrNull, days, language) => Promise<{token}>, i.e. api.createCheckoutSession.
+// The link is created in the invoice's language, so a Japanese PDF always opens a Japanese checkout.
 export async function requestPayLink(invoice, balance, { create, origin, days = 14 }) {
   if (!payLinkEligible(invoice, balance)) return { ok: false, reason: "not_payable" };
   try {
-    const r = await create(invoice.id, null, days);
+    const r = await create(invoice.id, null, days, normalizeLang(invoice.language));
     if (!r?.token || !isCheckoutToken(r.token)) return { ok: false, reason: "no_token" };
     const url = checkoutUrl(r.token, origin);
     if (!isValidPayUrl(url)) return { ok: false, reason: "bad_url" };
@@ -49,4 +51,16 @@ export function drawPayNowButton(doc, url, { x, y, w = 46, h = 11, brand = { ink
   doc.rect(x + 3, y + h - 1.6, w - 6, 0.7, "F");
   doc.link(x, y, w, h, { url });
   return y + h;
+}
+
+// One-line, user-facing reason when a payable document was downloaded WITHOUT its Pay Now button. Returns "" when
+// nothing needs saying (not payable by design, or the link was added).
+export function payLinkFailureNotice(invoice, balance, result) {
+  if (!result || result.ok || !payLinkEligible(invoice, balance)) return "";
+  const why = {
+    create_failed: "the payment link could not be created (check that Paystack is connected, you are an admin, the database is up to date, and you are online)",
+    no_token: "the payment service returned no link",
+    bad_url: "the payment link was not valid",
+  }[result.reason] || "the payment link could not be created";
+  return `The PDF was downloaded without a Pay Now button because ${why}.`;
 }

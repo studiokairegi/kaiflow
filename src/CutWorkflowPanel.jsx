@@ -91,6 +91,7 @@ export default function CutWorkflowPanel({ shotId, projectName, clientName, shar
   const [inHouseNote, setInHouseNote] = useState("");
   const [internalNote, setInternalNote] = useState("");
   const [progress, setProgress] = useState(null);
+  const [phase, setPhase] = useState(null);
   const [upload, setUpload] = useState({ error: "", pending: null }); // pending keeps file + key for retry
   const fileRef = useRef(null);
   // Held in a ref so a parent re-render with a new callback identity can never retrigger a load.
@@ -133,14 +134,16 @@ export default function CutWorkflowPanel({ shotId, projectName, clientName, shar
     setProgress(0);
     setBusy("upload");
     try {
-      await uploadFinalFile({ shotId, file, uploadKey: key, onProgress: setProgress });
+      await uploadFinalFile({ shotId, file, uploadKey: key, onProgress: setProgress, onStatus: (name, detail) => setPhase(name === "verifying" ? `verifying:${detail ?? 0}` : name === "checking" ? "checking" : name === "finalizing" ? "finalizing" : null) });
       setUpload({ error: "", pending: null });
       await refresh();
     } catch (e) {
-      setUpload({ error: e.message, pending: { file, key } }); // keep file + key => safe retry
+      // Keep file + key => safe retry, except after a validation rejection: that key is permanently bound to the rejected file.
+      setUpload({ error: e.message, pending: { file, key: e.code === "final_invalid" ? newUploadKey() : key } });
       await refresh();
     }
     setProgress(null);
+    setPhase(null);
     setBusy("");
   };
 
@@ -313,7 +316,7 @@ export default function CutWorkflowPanel({ shotId, projectName, clientName, shar
                 <div style={{ height: 6, borderRadius: 999, background: "rgba(255,255,255,0.08)" }}>
                   <div style={{ height: "100%", width: `${progress}%`, background: C.teal, borderRadius: 999 }} />
                 </div>
-                <span style={{ fontSize: 11.5, color: C.muted }}>{progress}%{progress === 100 ? " · verifying in Drive…" : ""}</span>
+                <span style={{ fontSize: 11.5, color: C.muted }}>{progress}%{phase === "checking" ? " · checking Google Drive for the earlier upload…" : phase?.startsWith("verifying:") ? ` · verifying file ${phase.slice(10)}%` : phase === "finalizing" || progress === 100 ? " · verifying in Drive…" : ""}</span>
               </div>
             )}
             {upload.error && (

@@ -36,7 +36,7 @@ function Row({ message, grouped, actions, busyId, downloadBusyId, active, onActi
   return (
     <article
       id={`chat-message-${message.id}`}
-      className={`chat-msg ${mine ? "mine" : "theirs"}${grouped ? " grouped" : ""}${jump ? " jump" : ""}${active ? " active" : ""}${message.status ? ` is-${message.status}` : ""}`}
+      className={`chat-msg ${mine ? "mine" : "theirs"}${grouped ? " grouped" : ""}${jump ? " jump" : ""}${active ? " active" : ""}${message.status ? ` is-${message.status}` : ""}${message.isError ? " is-error" : ""}`}
       onClick={onActivate}
     >
       {!mine && <span className="chat-msg-avatar" aria-hidden="true">{grouped ? "" : message.avatar}</span>}
@@ -56,6 +56,7 @@ function Row({ message, grouped, actions, busyId, downloadBusyId, active, onActi
         <div className={`chat-bubble${message.deleted ? " deleted" : ""}`} title={grouped && message.createdAt ? new Date(message.createdAt).toLocaleTimeString() : undefined}>
           {message.deleted ? <em>This message was deleted.</em> : <MessageBody body={message.body} />}
           {!message.deleted && <Attachments items={message.attachments} onOpen={actions.openAttachment} busyId={downloadBusyId} />}
+          {!message.deleted && message.extra}
           {grouped && message.pinned && <span className="chat-pin-flag inline" title="Pinned"><IconPin size={12} filled /></span>}
         </div>
         {message.createdAt && !message.status && <time className="chat-msg-time" dateTime={message.createdAt} title={new Date(message.createdAt).toLocaleString()}>{formatChatTime(message.createdAt)}</time>}
@@ -97,6 +98,7 @@ function Row({ message, grouped, actions, busyId, downloadBusyId, active, onActi
 export default function MessageList({
   conversationKey, messages, outbox = [], typing = [], loading = false, hasOlder = false, loadingOlder = false,
   onLoadOlder, jumpId = null, onJumpDone, actions = {}, busyId = null, downloadBusyId = null, empty = null, notices = null, now,
+  typingStyle = "line", typingAvatar = "",
 }) {
   const scrollerRef = useRef(null);
   const contentRef = useRef(null);
@@ -189,7 +191,13 @@ export default function MessageList({
               </React.Fragment>
             );
           })}
-          {typing.length > 0 && (
+          {typing.length > 0 && typingStyle === "bubble" && (
+            <div className="chat-msg theirs chat-typing-row" role="status" aria-label={`${typing.join(", ")} typing`}>
+              <span className="chat-msg-avatar" aria-hidden="true">{typingAvatar}</span>
+              <div className="chat-msg-main"><div className="chat-bubble chat-typing-bubble"><span className="chat-typing-dots" aria-hidden="true"><i /><i /><i /></span><span>typing…</span></div></div>
+            </div>
+          )}
+          {typing.length > 0 && typingStyle !== "bubble" && (
             <div className="chat-typing" aria-live="polite"><span className="chat-typing-dots" aria-hidden="true"><i /><i /><i /></span>{typing.join(", ")} {typing.length > 1 ? "are" : "is"} typing…</div>
           )}
         </div>

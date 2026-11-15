@@ -7,6 +7,7 @@ import { lazyWithSuspense } from "./lazy.jsx";
 const ClientPortalChat = lazyWithSuspense(() => import("./chat/ClientPortalChat.jsx"), { label: "Loading chat…" });
 import { startAutoRefresh } from "./autoRefresh.js";
 import { getFreelancerReview } from "./cutWorkflowApi.js";
+import { uploadResumableDriveFile, pendingStorageKey } from "./resumableDriveUpload.js";
 import { workflowLabel } from "./cutWorkflow.js";
 
 const ink = "#14191c";
@@ -246,6 +247,9 @@ export function FreelancerView({ token }) {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [uploadOk, setUploadOk] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const [uploadPhase, setUploadPhase] = useState(null);
+  const [uploadNote, setUploadNote] = useState("");
   const fileInputRef = React.useRef(null);
   const uploadingRef = React.useRef(false);
   uploadingRef.current = uploading;
@@ -289,35 +293,40 @@ export function FreelancerView({ token }) {
     if (!file) return;
     setUploadError("");
     setUploadOk(false);
+    setUploadNote("");
+    setUploadPhase(null);
     setUploading(true);
     try {
-      const form = new FormData();
-      form.append("token", token);
-      form.append("file", file);
-
-      const res = await fetch(functionUrl("freelancer-drive-upload"), {
-        method: "POST",
-        body: form,
-      });
-      const result = await res.json().catch(() => ({}));
-
-      if (result?.error === "not_connected") {
-        // Previously fell back to uploading straight into the public
-        // Supabase Storage bucket when a project wasn't Drive-connected
-        // yet. All uploads - studio and freelancer - now go to Drive
-        // only, so there's nothing to fall back to: surface this clearly
-        // instead of silently switching storage backends.
-        throw new Error(result?.message || "This project isn't set up to receive Drive uploads yet - let the studio know.");
-      } else if (!res.ok || !result?.success) {
-        throw new Error(result?.error || result?.message || "Upload failed");
+      let result;
+      try {
+        result = await uploadResumableDriveFile({
+          url: functionUrl("freelancer-drive-upload"),
+          actionPayload: { token },
+          // Recovery state (upload id, Drive session, content fingerprint) is persisted per share token,
+          // so a refresh/reopen followed by re-selecting the same file resumes instead of duplicating.
+          storageKey: pendingStorageKey(`freelancer.${token}`),
+          file,
+          onProgress: setUploadProgress,
+          onStatus: (name, detail) => setUploadPhase(name === "verifying" ? `verifying:${detail ?? 0}` : name === "checking" || name === "finalizing" ? name : null),
+        });
+      } catch (uploadErr) {
+        if (uploadErr.message === "not_connected") {
+          throw new Error("This project isn't set up to receive Drive uploads yet - let the studio know.");
+        }
+        throw uploadErr;
       }
+      if (!result?.success) throw new Error(result?.error || "Upload failed");
 
+      setUploadProgress(null);
       setUploadOk(true);
+      // The file is safely in Drive but Google refused the "anyone with the link" permission: tell the freelancer instead of reporting a clean success.
+      if (result.shared === false) setUploadNote("Your file was uploaded, but link sharing couldn't be turned on automatically. Please let the studio know so they can share it.");
       await loadShot();
     } catch (err) {
       console.error("Upload failed:", err);
       setUploadError(err.message || "Upload failed, please try again.");
     }
+    setUploadPhase(null);
     setUploading(false);
   };
 
@@ -495,9 +504,13 @@ export function FreelancerView({ token }) {
             ? "Upload corrected version"
             : "Upload finished work"}
         </button>
+        {uploading && (uploadProgress !== null || uploadPhase) && (
+          <p style={{ fontSize: 12.5, color: teal, marginTop: 8 }} aria-live="polite">{uploadPhase === "checking" ? "Checking Google Drive for your earlier upload…" : uploadPhase?.startsWith("verifying:") ? `Verifying your file… ${uploadPhase.slice(10)}%` : uploadPhase === "finalizing" ? "Finishing up…" : `Uploading directly to Google Drive… ${uploadProgress}%`}</p>
+        )}
         {uploadOk && (
           <p style={{ fontSize: 12.5, color: "#3DDC84", marginTop: 8 }}>Uploaded, thanks!</p>
         )}
+        {uploadNote && <p style={{ fontSize: 12.5, color: "#E0B84C", marginTop: 8 }} role="status">{uploadNote}</p>}
         {uploadError && <p style={{ fontSize: 12.5, color: "#FF4D4D", marginTop: 8 }}>{uploadError}</p>}
 
         <h3 style={{ margin: "28px 0 10px", fontSize: 15 }}>Chat with the studio</h3>

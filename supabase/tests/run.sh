@@ -26,6 +26,8 @@ run "$root/supabase/migrations/20261025110000_paystack_production_live_apple_pay
 run "$root/supabase/migrations/20261025110000_paystack_production_live_apple_pay.sql"   # idempotent re-run
 run "$root/supabase/migrations/20261026090000_checkout_quotes_wise_manual.sql"
 run "$root/supabase/migrations/20261026090000_checkout_quotes_wise_manual.sql"   # idempotent re-run
+run "$root/supabase/migrations/20270111090000_invoice_client_language.sql"
+run "$root/supabase/migrations/20270111090000_invoice_client_language.sql"   # idempotent re-run
 echo "migrations applied (payments + portfolio + live checkout migrations applied twice)"
 out="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/payments.test.sql" 2>&1)"; code=$?
 echo "$out" | grep -E "PASS|FAIL|SUMMARY|ERROR" | sed 's/^psql:[^ ]* //'
@@ -41,4 +43,7 @@ echo "$out4" | grep -E "PASS|FAIL|SUMMARY|ERROR" | sed 's/^psql:[^ ]* //'
 [ $code4 -eq 0 ] || exit $code4
 out5="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/payments_quotes_wise.test.sql" 2>&1)"; code5=$?
 echo "$out5" | grep -E "PASS|FAIL|SUMMARY|ERROR" | sed 's/^psql:[^ ]* //'
-exit $code5
+[ $code5 -eq 0 ] || exit $code5
+out6="$(psql -v ON_ERROR_STOP=1 -d "$DB" -f "$here/payments_language.test.sql" 2>&1)"; code6=$?
+echo "$out6" | grep -E "PASS|FAIL|SUMMARY|ERROR" | sed 's/^psql:[^ ]* //'
+exit $code6

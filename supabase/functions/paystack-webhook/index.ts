@@ -64,9 +64,12 @@ Deno.serve(async (req) => {
   if (!ev) return reply(500, { error: "Could not record the event." });
   if (ev.status === "processed" || ev.status === "ignored") return reply(200, { duplicate: true });
 
-  const finish = (status: "processed" | "ignored" | "failed", error = "", extra: Record<string, unknown> = {}) =>
-    service.from("paystack_webhook_events")
+  const finish = async (status: "processed" | "ignored" | "failed", error = "", extra: Record<string, unknown> = {}) => {
+    const { error: upErr } = await service.from("paystack_webhook_events")
       .update({ status, error: error.slice(0, 500), processed_at: new Date().toISOString(), ...extra }).eq("id", ev!.id);
+    // Never swallowed: an event stuck in "received" is re-processed on retry (safe, idempotent) but must be visible.
+    if (upErr) console.error("paystack-webhook could not record event status", { event, status, msg: upErr.message });
+  };
 
   try {
     if (!isHandledEvent(event)) { await finish("ignored", "event type not handled"); return reply(200); }

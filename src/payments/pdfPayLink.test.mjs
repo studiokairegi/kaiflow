@@ -23,7 +23,7 @@ test("URL shape: https /pay/{64 hex}, nothing else", () => {
 test("link comes from the existing session RPC (invoice id in, token out); the URL is built from the returned token", async () => {
   const seen = [];
   const r = await requestPayLink(inv, 150000, { origin: "https://studiokairegi.com", create: async (...a) => { seen.push(a); return { token: TOKEN, expires_at: "2026-11-07T00:00:00Z" }; } });
-  assert.deepEqual(seen, [["i1", null, 14]]);
+  assert.deepEqual(seen, [["i1", null, 14, "en"]]);   // 4th argument: the invoice's language (English when the invoice has none)
   assert.deepEqual(r, { ok: true, url: `https://studiokairegi.com/pay/${TOKEN}`, expiresAt: "2026-11-07T00:00:00Z" });
 });
 

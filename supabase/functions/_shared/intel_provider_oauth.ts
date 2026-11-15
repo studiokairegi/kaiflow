@@ -1,7 +1,7 @@
 // Provider-neutral OAuth orchestration. Provider-specific protocol details live in the
 // adapter registry below; database manifests are descriptive and never execute code.
 import { corsHeaders } from "./cors.ts";
-import { isRevokedProviderRefresh } from "./email_adapter.ts";
+import { isRevokedProviderRefresh, isThrottledProviderRefresh } from "./email_adapter.ts";
 import { requireIntelligenceAdmin } from "./intel_auth.ts";
 import { GMAIL_SCOPE_LIST, GMAIL_SCOPES, GOOGLE_AUTH_URL, GOOGLE_TOKEN_URL, GMAIL_API_BASE, hasAllScopes } from "./intel_gmail_logic.ts";
 import { ZOHO_DATA_CENTERS, ZOHO_SCOPES, accountsHost as zohoAccountsHost, apiBase as zohoApiBase, isDataCenter } from "./intel_zoho_logic.ts";
@@ -17,6 +17,8 @@ export interface ProviderOAuthDeps {
   encrypt: (value: string) => Promise<string>;
   decrypt: (value: string) => Promise<string>;
   now: () => number;
+  /** Optional per-isolate memo of short-lived access tokens. Omitted in tests; entrypoints pass a module-level Map. */
+  tokenCache?: Map<string, { token: string; expiresAtMs: number }>;
 }
 
 interface OAuthAdapter {
@@ -148,6 +150,26 @@ const zohoAdapter: OAuthAdapter = {
 const OAUTH_ADAPTERS: Record<string, OAuthAdapter> = { gmail: gmailAdapter, zoho: zohoAdapter };
 
 /**
+ * Refresh through the adapter, reusing a still-valid access token when the entrypoint supplied a cache.
+ * Zoho throttles refresh-token exchanges, so re-minting a token on every call (cron sync, sends, worker jobs)
+ * is itself what eventually gets the grant refused. The cache key includes the ciphertext, so reconnecting
+ * (new credentials) never serves a stale token. `force` bypasses it, e.g. after the provider answered 401.
+ */
+async function refreshAccessToken(adapter: OAuthAdapter, accountId: string, ciphertext: string, credentials: any, deps: ProviderOAuthDeps, force = false): Promise<{ ok: boolean; status: number; data: any }> {
+  const key = `${accountId}:${ciphertext}`;
+  const now = deps.now();
+  const hit = force ? undefined : deps.tokenCache?.get(key);
+  if (hit && hit.expiresAtMs > now) return { ok: true, status: 200, data: { access_token: hit.token, expires_in: Math.max(1, Math.floor((hit.expiresAtMs - now) / 1000)) } };
+  if (deps.tokenCache) deps.tokenCache.delete(key);
+  const out = await adapter.refresh(String(credentials.refresh_token || ""), deps, credentials);
+  if (out.ok && deps.tokenCache) {
+    const ttl = Math.max(0, Number(out.data?.expires_in || 3600) - 120) * 1000;
+    if (ttl > 0) deps.tokenCache.set(key, { token: String(out.data.access_token), expiresAtMs: now + ttl });
+  }
+  return out;
+}
+
+/**
  * Resolve a short-lived access token for a shared Intelligence mailbox.
  * This is server-only and deliberately accepts an account UUID + organization UUID,
  * never credentials from a browser. It refreshes through the SAME OAuth adapters,
@@ -192,7 +214,7 @@ export async function getSharedProviderAccessToken(input: {
     throw new Error("Stored provider credentials are unreadable; reconnect this account in Settings");
   }
   let refreshed: { ok: boolean; status: number; data: any };
-  try { refreshed = await adapter.refresh(String(credentials.refresh_token || ""), deps, credentials); }
+  try { refreshed = await refreshAccessToken(adapter, account.id, account.credentials_ciphertext, credentials, deps); }
   catch {
     await deps.service.from("intel_provider_accounts").update({ health_status: "degraded", last_error: "Provider token endpoint temporarily unavailable.", updated_at: new Date(deps.now()).toISOString() })
       .eq("id", account.id).eq("organization_id", organizationId);
@@ -200,7 +222,7 @@ export async function getSharedProviderAccessToken(input: {
   }
   if (!refreshed.ok) {
     const revoked = isRevokedProviderRefresh(provider, refreshed.status, refreshed.data);
-    const throttled = refreshed.status === 429 || refreshed.data?.error === "rate_limit_exceeded" || refreshed.data?.error === "temporarily_unavailable";
+    const throttled = isThrottledProviderRefresh(refreshed.status, refreshed.data);
     const message = revoked
       ? "Provider authorization was revoked; reconnect this account."
       : throttled ? "Provider token endpoint is rate limited; retry will be attempted." : "Provider token endpoint temporarily unavailable.";
@@ -352,21 +374,28 @@ export async function handleProviderToken(req: Request, deps: ProviderOAuthDeps)
     catch { credentials = { refresh_token: decrypted }; } // one-time compatibility with migrated legacy ciphertext
   } catch { return json({ error: "Stored provider credentials are unreadable; reconnect the account" }, 409); }
   let refreshed: { ok: boolean; status: number; data: any };
-  try { refreshed = await adapter.refresh(String(credentials.refresh_token || ""), deps, credentials); }
+  try { refreshed = await refreshAccessToken(adapter, account.id, account.credentials_ciphertext, credentials, deps, body?.force === true); }
   catch {
     await deps.service.from("intel_provider_accounts").update({ health_status: "degraded", last_error: "Provider token endpoint temporarily unavailable.", updated_at: new Date(deps.now()).toISOString() })
       .eq("id", account.id).eq("organization_id", settings.organization_id);
     return json({ error: "Provider token endpoint temporarily unavailable" }, 503);
   }
   if (!refreshed.ok) {
-    const bad = refreshed.status >= 400 && refreshed.status < 500;
-    const invalidGrant = refreshed.status === 400 && refreshed.data?.error === "invalid_grant";
-    const message = invalidGrant ? "Provider authorization was revoked; reconnect this account." : "Provider refused the stored authorization; reconnect this account.";
-    await deps.service.from("intel_provider_accounts").update(bad
+    // Same classifier as the shared Inbox gateway. Only a definitive revocation disables the mailbox;
+    // throttling, outages, unknown 4xx bodies and misconfiguration leave it connected and retryable.
+    const revoked = isRevokedProviderRefresh(account.provider_key, refreshed.status, refreshed.data);
+    const throttled = !revoked && isThrottledProviderRefresh(refreshed.status, refreshed.data);
+    const code = String(refreshed.data?.error || "").toLowerCase();
+    const message = revoked ? "Provider authorization was revoked; reconnect this account."
+      : throttled ? "Provider token endpoint is rate limited; retry will be attempted."
+      : code === "invalid_client" ? "Provider rejected the server OAuth client credentials; check the app configuration."
+      : "Provider token endpoint temporarily unavailable.";
+    console.error("[Intelligence OAuth] token refresh failed", JSON.stringify({ provider: account.provider_key, http: refreshed.status, error: code.slice(0, 60), revoked, throttled }));
+    await deps.service.from("intel_provider_accounts").update(revoked
       ? { status: "error", health_status: "unhealthy", last_error: message, updated_at: new Date(deps.now()).toISOString() }
-      : { health_status: "degraded", last_error: "Provider token endpoint temporarily unavailable.", updated_at: new Date(deps.now()).toISOString() })
+      : { health_status: "degraded", last_error: message, updated_at: new Date(deps.now()).toISOString() })
       .eq("id", account.id).eq("organization_id", settings.organization_id);
-    return json({ error: "Provider token refresh failed" }, bad ? 409 : 503);
+    return json({ error: revoked ? "Provider authorization was revoked; reconnect this account" : "Provider token refresh failed", retryable: !revoked }, revoked ? 409 : throttled ? 429 : 503);
   }
   await deps.service.from("intel_provider_accounts").update({ health_status: "healthy", last_health_check_at: new Date(deps.now()).toISOString(), last_error: "", updated_at: new Date(deps.now()).toISOString() })
     .eq("id", account.id).eq("organization_id", settings.organization_id);

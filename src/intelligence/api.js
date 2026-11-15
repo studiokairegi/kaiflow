@@ -6,6 +6,9 @@ async function call(supabase, name, args) {
   return data;
 }
 
+/** The chat tab must keep working when a newer migration is not applied yet (deploy order is migrations first, but a lagging database must not blank the tab). */
+const missingObject = (e) => /PGRST20[0-9]|42703|42883|could not find|does not exist|schema cache/i.test(`${e?.code || ""} ${e?.message || ""}`);
+
 async function read(query) {
   const { data, error } = await query;
   if (error) throw new Error(error.message || "Could not load data");
@@ -78,10 +81,23 @@ export const intelApi = {
   chatSend: (s, threadId, text, clientKey) => call(s, "intel_admin_chat_send", { p_thread_id: threadId, p_text: text, p_client_key: clientKey }),
   chatThreads: (s) => read(s.from("intel_chat_threads").select("id,title,updated_at").order("updated_at", { ascending: false }).limit(30)),
   // Newest rows, shown oldest-first: ascending + limit would return the OLDEST rows and freeze long threads.
-  chatMessages: async (s, threadId) => (await read(s.from("intel_chat_messages").select("id,role,content,status,tool_name,reply_to,created_at").eq("thread_id", threadId).order("id", { ascending: false }).limit(300))).reverse(),
+  chatMessages: async (s, threadId) => {
+    const load = (cols) => read(s.from("intel_chat_messages").select(cols).eq("thread_id", threadId).order("id", { ascending: false }).limit(300));
+    try { return (await load("id,role,content,status,tool_name,reply_to,created_at,ai_provider,ai_model,ai_route_reason,ai_latency_ms,ai_mode,kb_keys")).reverse(); }
+    catch (e) { if (!missingObject(e)) throw e; return (await load("id,role,content,status,tool_name,reply_to,created_at")).reverse(); }   // provenance migration not applied: no AI badge, but the conversation loads
+  },
 
-  chatActions: async (s, threadId) => (await read(s.from("intel_chat_actions").select("id,message_id,tool,summary,status,result,created_at,expires_at").eq("thread_id", threadId).order("created_at", { ascending: false }).limit(100))).reverse(),
-  chatConfirm: (s, actionId) => call(s, "intel_admin_chat_confirm", { p_action_id: actionId }),
+  chatActions: async (s, threadId) => {
+    const load = (cols) => read(s.from("intel_chat_actions").select(cols).eq("thread_id", threadId).order("created_at", { ascending: false }).limit(300)); // 300 = the message window: every card for a loaded message is included
+    try { return (await load("id,message_id,tool,args,summary,status,result,created_at,decided_at,expires_at,category,auto")).reverse(); }
+    catch (e) { if (!missingObject(e)) throw e; return (await load("id,message_id,tool,args,summary,status,result,created_at,decided_at,expires_at")).reverse(); }
+  },
+  chatConfirm: (s, actionId, auto = false) => call(s, "intel_admin_chat_confirm", { p_action_id: actionId, p_auto: auto === true }),
+  chatClaim: (s, actionId, auto = false) => call(s, "intel_admin_chat_claim", { p_action_id: actionId, p_auto: auto === true }),
+  chatFinish: (s, actionId, ok, result) => call(s, "intel_admin_chat_finish", { p_action_id: actionId, p_ok: ok === true, p_result: result || {} }),
+  setEmmaAuthority: (s, patch) => call(s, "intel_admin_set_emma_authority", { p_patch: patch }),
+  // A database without the recover function answers "not found" every time: report that once instead of failing, so the 3-second poll does not retry it forever.
+  chatRecoverStuck: async (s) => { try { return await call(s, "intel_admin_chat_recover_stuck", { p_minutes: 5 }); } catch (e) { if (missingObject(e)) return { ok: false, unavailable: true }; throw e; } },
   chatCancel: (s, actionId) => call(s, "intel_admin_chat_cancel", { p_action_id: actionId }),
 
   settings: async (s) => (await read(s.from("intel_settings").select("*").limit(1)))[0] || null,
@@ -90,7 +106,7 @@ export const intelApi = {
   evidence: (s, prospectId) => read(s.from("intel_evidence").select("*").eq("prospect_id", prospectId).order("fetched_at")),
   messages: (s) => read(s.from("intel_messages").select("*").order("created_at", { ascending: false }).limit(800)),
   actions: (s) => read(s.from("intel_actions").select("*").order("id", { ascending: false }).limit(300)),
-  jobs: (s) => read(s.from("intel_jobs").select("id,kind,state,attempts,max_attempts,last_error,run_after,updated_at").in("state", ["failed", "dead", "running", "queued"]).order("updated_at", { ascending: false }).limit(100)),
+  jobs: (s) => read(s.from("intel_jobs").select("id,kind,state,attempts,max_attempts,last_error,run_after,lease_until,updated_at").in("state", ["failed", "dead", "running", "queued"]).order("updated_at", { ascending: false }).limit(100)),
   kb: (s) => read(s.from("intel_kb").select("*").order("key")),
   suppressions: (s) => read(s.from("intel_suppressions").select("*").order("created_at", { ascending: false }).limit(500)),
   leadsFor: async (s, ids) => (ids.length ? read(s.from("leads").select("id,stage,source_kind,company_name").in("id", ids)) : []),

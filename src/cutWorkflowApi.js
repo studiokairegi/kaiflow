@@ -5,6 +5,7 @@
 
 import { supabase, functionUrl } from "./supabaseClient";
 import { describeWorkflowError } from "./cutWorkflow.js";
+import { uploadResumableDriveFile, pendingStorageKey } from "./resumableDriveUpload.js";
 
 function rpcError(error) {
   return new Error(describeWorkflowError(error));
@@ -71,42 +72,48 @@ export const routeClientRevision = (shotId, route, note) =>
 export const addCutNote = (shotId, body, audience = "internal") =>
   call("add_cut_note", { p_shot_id: shotId, p_body: body, p_audience: audience });
 
-/**
- * Upload the QC-adjusted final file. XHR (not fetch) so the UI can show real
- * upload progress. Pass the SAME uploadKey when retrying the same file so a
- * network retry can't create a second record.
- */
-export async function uploadFinalFile({ shotId, file, uploadKey, onProgress }) {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (!session) throw new Error("Please sign in again.");
-
-  const body = new FormData();
-  body.append("shotId", shotId);
-  body.append("uploadKey", uploadKey);
-  body.append("file", file);
-
-  return await new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", functionUrl("final-qc-upload"));
-    xhr.setRequestHeader("Authorization", `Bearer ${session.access_token}`);
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
-    };
-    xhr.onerror = () => reject(new Error("Network error. Retry to continue; your upload key is preserved."));
-    xhr.onload = () => {
-      let result = {};
-      try {
-        result = JSON.parse(xhr.responseText);
-      } catch {
-        /* non-JSON error body */
-      }
-      if (xhr.status >= 200 && xhr.status < 300 && result.success) return resolve(result);
-      reject(new Error(result.message || describeWorkflowError(result.error, "Upload failed")));
-    };
-    xhr.send(body);
-  });
+/** Upload the QC-adjusted final file directly to Drive using a resumable session. */
+export async function uploadFinalFile({ shotId, file, uploadKey, onProgress, onStatus }) {
+  // The auth header is resolved for EVERY request (init, recover, finalize), not once up front: a transfer that outlives
+  // the access-token lifetime must still finalize with the refreshed session (getSession() refreshes an expired token).
+  const getHeaders = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) throw new Error("Please sign in again.");
+    return { Authorization: `Bearer ${session.access_token}` };
+  };
+  await getHeaders(); // fail fast, before reading the file, when signed out
+  let result;
+  try {
+    result = await uploadResumableDriveFile({
+      url: functionUrl("final-qc-upload"),
+      headers: getHeaders,
+      actionPayload: { shotId, uploadKey },
+      // Persisted per shot + file content: after a reload the original upload key is reused (it wins over
+      // `uploadKey`), so the interrupted upload is recovered/finalized instead of duplicated.
+      uploadId: uploadKey,
+      storageKey: pendingStorageKey(`finalqc.${shotId}`),
+      file,
+      onProgress,
+      onStatus,
+    });
+  } catch (error) {
+    // The Final QC upload key doubles as the Drive upload id. A file whose bytes did not match what the user selected is
+    // permanently bound to that key (a retry would find the same bad file again), so surface it exactly like a validation
+    // rejection: the panel rotates to a NEW key and the retry uploads fresh.
+    if (error?.code === "file_mismatch") {
+      const rejected = new Error(error.message);
+      rejected.code = "final_invalid";
+      throw rejected;
+    }
+    throw error;
+  }
+  if (!result?.success) {
+    // The server stores a rejected file against its upload key permanently, so the caller must use a NEW key to retry.
+    const failure = new Error(result?.error || "The final file failed Drive validation.");
+    failure.code = "final_invalid";
+    throw failure;
+  }
+  return result;
 }
 
 // ------------------------------------------------------------------ client

@@ -2,20 +2,10 @@
 // (atomic, server-validated). Direct table access here is read-only, apart from
 // the user's own settings / FX snapshots / custom accounts / contacts.
 import { supabase } from "../supabaseClient";
+import { fetchAll as pagedFetchAll } from "./paging.js";
 
-const PAGE = 1000;
-async function fetchAll(table, { select = "*", order, ascending = true } = {}) {
-  const out = [];
-  for (let from = 0; ; from += PAGE) {
-    let q = supabase.from(table).select(select).range(from, from + PAGE - 1);
-    if (order) q = q.order(order, { ascending });
-    const { data, error } = await q;
-    if (error) throw error;
-    out.push(...(data || []));
-    if (!data || data.length < PAGE) break;
-  }
-  return out;
-}
+// Paged reads live in paging.js (client injected) so the ordering/tiebreak logic can be unit-tested.
+const fetchAll = (table, opts) => pagedFetchAll(supabase, table, opts);
 
 export async function rpc(name, args = {}) {
   const { data, error } = await supabase.rpc(name, args);
@@ -33,7 +23,7 @@ export async function loadLedger() {
     fetchAll("invoice_payments", { order: "paid_date", ascending: false }),
     fetchAll("bills", { order: "issue_date", ascending: false }),
     fetchAll("bill_payments", { order: "paid_date", ascending: false }),
-    fetchAll("bill_shots"),
+    fetchAll("bill_shots", { tiebreak: ["bill_id", "shot_id"] }),
     fetchAll("finance_contacts", { order: "name" }),
     fetchAll("bank_reconciliations", { order: "created_at", ascending: false }),
     supabase.from("finance_audit_log").select("*").order("at", { ascending: false }).limit(200).then((r) => r.data || []),

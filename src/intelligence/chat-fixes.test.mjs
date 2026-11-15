@@ -28,8 +28,8 @@ test("chat messages: a thread longer than the limit shows the NEWEST rows, oldes
 test("chat actions: the newest cards are kept, in time order", async () => {
   const rows = Array.from({ length: 130 }, (_, i) => ({ id: `a${i}`, created_at: `2026-11-04T10:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z` }));
   const out = await intelApi.chatActions(fakeSupabase(rows), "t");
-  assert.equal(out.length, 100);
-  assert.equal(out.at(-1).id, "a129"); assert.equal(out[0].id, "a30");
+  assert.equal(out.length, 130, "the limit (300) matches the message window, so every card for a loaded message is kept");
+  assert.equal(out.at(-1).id, "a129"); assert.equal(out[0].id, "a0");
 });
 
 test("an unanswered message stops 'working' after the timeout, and an answered one never counts as overdue", () => {

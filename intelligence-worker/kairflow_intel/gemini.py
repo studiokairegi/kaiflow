@@ -29,7 +29,8 @@ DEFAULT_MODEL = "gemini-3.8-flash"      # Phase 6: one pinned stable ID for chat
 
 class GeminiClient:
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL, session: requests.Session | None = None, *,
-                 thinking: str = "low", max_output_fast: int = 2048, max_output: int = 4096, json_model: str | None = None):
+                 thinking: str = "low", max_output_fast: int = 2048, max_output: int = 4096, json_model: str | None = None,
+                 fast_model: str | None = None):
         if not api_key:
             raise PermanentError("Gemini API key is not set")
         if thinking == "minimal":
@@ -40,6 +41,7 @@ class GeminiClient:
             raise ValueError("thinking must be one of: low, medium, high")
         self._key, self.model, self.s = api_key, model or DEFAULT_MODEL, session or requests.Session()
         self.thinking, self.max_output_fast, self.max_output = thinking, max_output_fast, max_output
+        self.fast_model = fast_model or None                 # optional: model for fast=True structured calls; None = json_model
         self.json_model = json_model or self.model          # generate_json uses this pinned ID; chat_json keeps `model`
 
     @staticmethod
@@ -84,14 +86,15 @@ class GeminiClient:
         return self.chat_json_ex(system, messages, schema, timeout=timeout).data
 
     # ---- generate_json: the same contract as OllamaClient.generate_json, plus per-call provenance (Phase 2) --------------------------
-    def _generation_config(self, fast: bool) -> dict:
+    def _generation_config(self, fast: bool, model: str | None = None) -> dict:
         """`fast` has no separate Gemini model (Ollama uses a 1.5B and a 3B model; Gemini uses one). The mapping is: fast=True gets a smaller output
         budget, fast=False a larger one. Both use the configured thinking level (default low; never 'minimal'). Thinking tokens count toward
         maxOutputTokens, which is why the budget is far above the 1,500 used for chat planning. thinkingLevel is only sent to Gemini 3.x models."""
         cfg = {"responseMimeType": "application/json", "maxOutputTokens": self.max_output_fast if fast else self.max_output}
-        if not self.json_model.startswith("gemini-3"):
+        model = model or self.json_model
+        if not model.startswith("gemini-3"):
             cfg["temperature"] = 0
-        if self.thinking and self.json_model.startswith("gemini-3"):
+        if self.thinking and model.startswith("gemini-3"):
             cfg["thinkingConfig"] = {"thinkingLevel": self.thinking}
         return cfg
 
@@ -151,14 +154,15 @@ class GeminiClient:
         """Same prompt layout and validation as Ollama's generate_json. Raises GeminiTransient (use the Ollama fallback) or GeminiPermanent
         (bad key / model; pause Gemini). Truncated, empty, blocked, non-JSON and schema-invalid answers are discarded and raised as transient."""
         untrusted = untrusted[:MAX_UNTRUSTED_CHARS]
+        model = (self.fast_model if fast and self.fast_model else self.json_model)
         system = (UNTRUSTED_NOTICE + "\n\nReturn ONLY one JSON object that matches this JSON schema, with no other text:\n"
                   + json.dumps(schema, ensure_ascii=False))
         payload = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": f"{instruction}\n\n<untrusted>\n{untrusted}\n</untrusted>"}]}],
-            "generationConfig": self._generation_config(fast),
+            "generationConfig": self._generation_config(fast, model),
         }
-        return self._call(self.json_model, payload, schema, timeout, site)
+        return self._call(model, payload, schema, timeout, site)
 
     def _call(self, model: str, payload: dict, schema: dict, timeout: int, site: str) -> AIResult:
         """POST one generateContent request and turn the answer into a validated AIResult, or raise GeminiTransient / GeminiPermanent.
@@ -230,6 +234,21 @@ class FallbackLLM:
         self.router = AIRouter(primary, fallback, settings, clock)
         self.last_backend = "ollama"          # Agent Chat heartbeat only; per-call provenance is AIResult.provider
         self.last_chat: dict = {}
+        self._usage: dict[str, int] = {}      # Phase 4: calls served per provider since start (the worker diffs it around each job)
+
+    def _count(self, res):
+        """Count one SERVED call. `fallbacks` = calls Ollama served although Gemini was intended: route_reason is set to anything other than the
+        three CONFIGURED Ollama routes (policy, D1 privacy, rollback flag), i.e. no key, cooldown, budget, an upstream failure, a rejected draft."""
+        try:
+            self._usage[res.provider] = self._usage.get(res.provider, 0) + 1
+            if res.provider == "ollama" and getattr(res, "route_reason", None) not in (None, "policy_ollama", "d1_private", "forced_ollama"):
+                self._usage["fallbacks"] = self._usage.get("fallbacks", 0) + 1
+        except Exception:
+            pass
+        return res
+
+    def usage_counts(self) -> dict:
+        return dict(self._usage)
 
     @property
     def last_gemini_error(self) -> str | None:
@@ -256,13 +275,14 @@ class FallbackLLM:
         return res.data
 
     def chat_json_ex(self, site: str, system: str, messages: list[dict], schema: dict, **kw) -> AIResult:
-        return self.router.chat_json_ex(site, system, messages, schema, **kw)
+        return self._count(self.router.chat_json_ex(site, system, messages, schema, **kw))
 
-    def generate_json(self, instruction: str, untrusted: str, schema: dict, **kw) -> dict:
-        return self.router.generate_json(instruction, untrusted, schema, **kw)
+    def generate_json(self, instruction: str, untrusted: str, schema: dict, *, site: str = "unspecified", fast: bool = False, **kw) -> dict:
+        # Same behaviour as AIRouter.generate_json, but through generate_json_ex so the call is counted (Phase 4 job metadata).
+        return self.generate_json_ex(site, instruction, untrusted, schema, fast=fast, **kw).data
 
     def generate_json_ex(self, site: str, instruction: str, untrusted: str, schema: dict, **kw) -> AIResult:
-        return self.router.generate_json_ex(site, instruction, untrusted, schema, **kw)
+        return self._count(self.router.generate_json_ex(site, instruction, untrusted, schema, **kw))
 
     def ai_status(self) -> dict:
         return self.router.status()

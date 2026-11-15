@@ -5,10 +5,26 @@ export const FOLDERS = Object.freeze([["inbox", "Inbox"], ["unread", "Unread"], 
 const EMAIL_RE = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 export const isEmail = (s) => typeof s === "string" && s.length <= 254 && EMAIL_RE.test(s.trim());
 
+/** Split on , ; and newlines, but not inside "quoted display names" or <angle brackets>: `"Doe, John" <j@x.com>` is ONE recipient. */
+function splitRecipientList(text) {
+  const parts = [];
+  let cur = "", quoted = false, angle = false;
+  for (const ch of String(text || "")) {
+    if (ch === "\n") { parts.push(cur); cur = ""; quoted = false; angle = false; continue; }   // a line break always ends a recipient (also recovers from an unbalanced quote)
+    if (ch === '"' && !angle) quoted = !quoted;
+    else if (ch === "<" && !quoted) angle = true;
+    else if (ch === ">" && !quoted) angle = false;
+    if ((ch === "," || ch === ";") && !quoted && !angle) { parts.push(cur); cur = ""; continue; }
+    cur += ch;
+  }
+  parts.push(cur);
+  return parts;
+}
+
 /** "a@x.com, B <b@y.com>; c@z.com" -> { valid: [...lower-cased addresses], invalid: [...as typed] } (duplicates removed). */
 export function parseRecipients(text) {
   const valid = [], invalid = [];
-  for (const raw of String(text || "").split(/[,;\n]+/).map((x) => x.trim()).filter(Boolean)) {
+  for (const raw of splitRecipientList(text).map((x) => x.trim()).filter(Boolean)) {
     const m = /<([^<>]+)>\s*$/.exec(raw);
     const addr = (m ? m[1] : raw).trim().toLowerCase();
     if (!isEmail(addr)) invalid.push(raw);
@@ -88,7 +104,10 @@ export const normalizeSubject = (s) => {
   for (let i = 0; i < 10 && re.test(out); i++) out = out.replace(re, "");
   return out.replace(/\s+/g, " ").trim().toLowerCase();
 };
-export const replySubject = (s) => (/^\s*re\s*:/i.test(s || "") ? s : `Re: ${s || ""}`.trim());
+// Any existing reply prefix (Re, Re[2], and the common localized Aw / Sv / Antw) means the subject already is a reply: keep it as is
+// so it still matches the thread. Sv/Vs/Rv style *forward* prefixes are not treated as replies.
+const REPLY_PREFIX_RE = /^\s*(re|aw|sv|antw)(\[\d+\])?\s*:/i;
+export const replySubject = (s) => (REPLY_PREFIX_RE.test(s || "") ? s : `Re: ${s || ""}`.trim());
 export const forwardSubject = (s) => (/^\s*fwd?\s*:/i.test(s || "") ? s : `Fwd: ${s || ""}`.trim());
 
 const lc = (x) => String(x || "").toLowerCase();
@@ -224,4 +243,13 @@ export function activeMailProviders(flags, all) {
 export function newArrivals(prev, next) {
   if (prev == null) return 0;
   return Math.max(0, (Number(next) || 0) - (Number(prev) || 0));
+}
+
+/** Auto-mark-read decision for the open conversation. Returns the stamp to record when it should be marked read now, otherwise "".
+ *  A conversation is auto-marked once per open, and again only when a new message arrives (message_count changes). A change of unread_count
+ *  alone (the user pressed "Mark unread") must never trigger it, or that button would be undone as soon as the thread reloads. */
+export function autoReadStamp(conversation, lastStamp) {
+  if (!conversation || !(Number(conversation.unread_count) > 0)) return "";
+  const stamp = `${conversation.id}:${conversation.message_count}`;
+  return stamp === lastStamp ? "" : stamp;
 }

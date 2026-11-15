@@ -12,7 +12,7 @@ import { IconBack, IconNewChat, IconSearch } from "../chat/icons.jsx";
 import "../chat/chat.css";
 import "./styles/inbox-chat.css";
 import { emailApi } from "./lib/api.js";
-import { accountCanSend, accountConnectionLabel, accountListView, trustedProviderRows, FOLDERS, buildForward, participantLabel, providerForAccount, leadComposeReadiness } from "./lib/logic.js";
+import { accountCanSend, accountConnectionLabel, accountListView, trustedProviderRows, FOLDERS, buildForward, participantLabel, providerForAccount, leadComposeReadiness, autoReadStamp } from "./lib/logic.js";
 import { initialsOf, when } from "./lib/helpers.js";
 import ComposeDialog from "./components/ComposeDialog.jsx";
 import ConversationList from "./components/ConversationList.jsx";
@@ -40,20 +40,49 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
 
   const accounts = useLoad(() => (allowed ? emailApi.accounts(supabase) : Promise.resolve([])), [supabase, allowed, tick]);
   const providers = useLoad(() => (allowed ? emailApi.providers(supabase) : Promise.resolve([])), [supabase, allowed, tick]);
-  const list = useLoad(() => (allowed ? emailApi.list(supabase, folder, search, accountFilter === "all" ? null : accountFilter, providerFilter === "all" ? null : providerFilter, limit) : Promise.resolve([])), [supabase, allowed, folder, search, accountFilter, providerFilter, limit, tick]);
-  const thread = useLoad(() => (allowed && selected ? emailApi.get(supabase, selected) : Promise.resolve(null)), [supabase, allowed, selected, tick]);
+  // useLoad keeps the previous result while the next one loads (and after a failed load). Tag each result with the request it answers so
+  // a different folder / search / conversation is never shown under the new selection. `limit` is not part of the key: "Load more" keeps its rows.
+  const listKey = JSON.stringify([folder, search, accountFilter, providerFilter]);
+  const list = useLoad(() => (allowed ? emailApi.list(supabase, folder, search, accountFilter === "all" ? null : accountFilter, providerFilter === "all" ? null : providerFilter, limit).then((rows) => ({ key: listKey, rows })) : Promise.resolve({ key: listKey, rows: [] })), [supabase, allowed, folder, search, accountFilter, providerFilter, limit, tick]);
+  // The thread loader tags its outcome (success or failure) with the conversation id it answers. A failed background refresh keeps the last good
+  // copy of that same conversation on screen with an error; a failure for a newly selected conversation shows an error, never the previous thread.
+  const threadGood = useRef(null);
+  const thread = useLoad(async () => {
+    if (!allowed || !selected) return null;
+    const id = selected;
+    try {
+      const result = await emailApi.get(supabase, id);
+      threadGood.current = { id, result };
+      return { id, result, failed: "" };
+    } catch (e) {
+      return { id, result: threadGood.current?.id === id ? threadGood.current.result : null, failed: e?.message || "Could not load the conversation" };
+    }
+  }, [supabase, allowed, selected, tick]);
+  const threadNow = thread.data?.id === selected ? thread.data : null;
+  const t = threadNow?.result || null;
+  const threadError = threadNow?.failed || "";
+  const listCurrent = list.data?.key === listKey;
+  const rows = listCurrent ? (list.data.rows || []) : [];
+  const listLoading = list.loading || (!listCurrent && !list.error);
 
-  // Opening a conversation marks it read (the database keeps the counts).
+  // Opening a conversation marks it read (the database keeps the counts). This runs once per opened conversation, and again only when a new
+  // message arrives in it (message_count changes). It must NOT re-run when unread_count changes by itself, or "Mark unread" on the open
+  // conversation would be undone as soon as the thread reloads.
+  const autoRead = useRef("");
+  useEffect(() => { autoRead.current = ""; }, [selected]);
   useEffect(() => {
-    const c = thread.data?.conversation;
-    if (c && c.unread_count > 0) emailApi.markRead(supabase, c.id, true).then(() => { setTick((t) => t + 1); onUnreadChanged?.(); }).catch(() => {});
-  }, [thread.data?.conversation?.id, thread.data?.conversation?.unread_count]);   // eslint-disable-line react-hooks/exhaustive-deps
+    const c = t?.conversation;
+    const stamp = autoReadStamp(c, autoRead.current);
+    if (!stamp) return;
+    autoRead.current = stamp;
+    emailApi.markRead(supabase, c.id, true).then(() => { setTick((n) => n + 1); onUnreadChanged?.(); }).catch(() => { autoRead.current = ""; });
+  }, [t?.conversation?.id, t?.conversation?.message_count, t?.conversation?.unread_count]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // Like the main chat: land on the newest message when a conversation opens or a new message arrives.
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [thread.data?.conversation?.id, thread.data?.messages?.length]);
+  }, [t?.conversation?.id, t?.messages?.length]);
 
   const poll = () => setTick((t) => t + 1);
   const refresh = () => { poll(); onUnreadChanged?.(); };   // after something the user did: also update the badge in the app
@@ -92,13 +121,11 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
   if (accountView === "empty") return <div style={S.page}><Banner tone="warn">No connected mailbox accounts are available. Connect Gmail, Zoho or SMTP once in Settings → Intelligence → Email accounts. The Inbox reuses those existing accounts; it does not create separate connections.</Banner></div>;
   if (accountView === "error" && !accts.length) return <div style={S.page}><Banner tone="bad" action={<button type="button" className="chat-button" onClick={() => accounts.reload()}>Retry</button>}>Could not load your email accounts: {accounts.error}</Banner></div>;
 
-  const t = thread.data;
   const convo = t?.conversation;
   const messages = t?.messages || [];
-  const errorText = list.error || thread.error || action.error;
+  const errorText = list.error || threadError || action.error;
   const forward = (m) => setComposer({ title: "Forward", ...buildForward(m, when(m.received_at || m.sent_at)), accountId: convo.account_id });
   const editDraft = (m) => setComposer({ title: "Draft", draftId: m.id, conversationId: m.conversation_id, accountId: m.account_id, to: (m.to_emails || []).join(", "), cc: (m.cc_emails || []).join(", "), bcc: (m.bcc_emails || []).join(", "), subject: m.subject, body: m.body_text, crmLeadId: m.crm_lead_id || null, crmLeadLabel: leads?.find((lead) => lead.id === m.crm_lead_id)?.companyName?.trim() || leads?.find((lead) => lead.id === m.crm_lead_id)?.contactPerson?.trim() || "" });
-  const rows = list.data || [];
 
   return (
     <div className="inbox-page-wrap">
@@ -137,11 +164,12 @@ export default function InboxModule({ supabase, access, leads = [], onOpenLead, 
               {FOLDERS.map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={folder === id} className={folder === id ? "active" : ""} onClick={() => { setFolder(id); setLimit(PAGE_SIZE); setSelected(null); }}>{label}</button>)}
             </div>
           </div>
-          <ConversationList rows={rows} loading={list.loading} hasMore={rows.length >= limit && limit < MAX_ROWS} onLoadMore={() => setLimit((n) => Math.min(n + PAGE_SIZE, MAX_ROWS))} search={search} selected={selected} own={own} error={!selected ? errorText : ""} onSelect={(id) => { setSelected(id); setActiveMsg(null); }} />
+          <ConversationList rows={rows} loading={listLoading} hasMore={rows.length >= limit && limit < MAX_ROWS} capped={rows.length >= MAX_ROWS} cap={MAX_ROWS} onLoadMore={() => setLimit((n) => Math.min(n + PAGE_SIZE, MAX_ROWS))} search={search} selected={selected} own={own} error={!selected ? errorText : ""} onSelect={(id) => { setSelected(id); setActiveMsg(null); }} />
         </aside>
 
         <main className="chat-main">
-          {selected && thread.loading && !t && <div className="chat-welcome"><div className="chat-spinner" aria-hidden="true" /><p>Opening conversation…</p></div>}
+          {selected && !t && !threadNow && <div className="chat-welcome"><div className="chat-spinner" aria-hidden="true" /><p>Opening conversation…</p></div>}
+          {selected && !t && threadNow && <div className="chat-welcome"><div className="chat-alert error" role="alert"><span>{threadError}</span></div><button type="button" className="chat-button" onClick={() => thread.reload()}>Retry</button></div>}
           {convo && <>
             <header className="chat-header">
               <button type="button" className="chat-icon-btn chat-back" aria-label="Back to conversations" onClick={() => setSelected(null)}><IconBack /></button>

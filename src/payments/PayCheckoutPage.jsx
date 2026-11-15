@@ -4,6 +4,9 @@ import { getPublicCheckout, startPublicCheckout, confirmPublicCheckout, getCheck
 import { isCheckoutToken } from "./providers.js";
 import { describeRate, quoteSecondsLeft, quoteIsLive, needsRequote } from "./quote.js";
 import { orderMethods, wiseInstructions } from "./wise.js";
+import { checkoutT, localizeError } from "../i18n/checkoutStrings.js";
+import { normalizeLang, localeFor } from "../i18n/languages.js";
+import { formatCountdownJa, formatDateTimeJa, currencyLabel } from "../i18n/checkoutFormat.js";
 
 const BRAND = {
   ink: "#11161b",
@@ -33,56 +36,60 @@ const card = { background: BRAND.white, border: `1px solid ${BRAND.line}`, borde
 const muted = { color: BRAND.muted, margin: 0, lineHeight: 1.55 };
 const label = { fontSize: 12, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: BRAND.muted };
 
-const MESSAGES = {
-  notfound: ["Payment link unavailable", "Check the link you were sent, or contact Studio Kairegi for a new one."],
-  expired: ["Payment link expired", "Contact Studio Kairegi and we’ll send you a new link."],
-  cancelled: ["Payment link inactive", "Contact Studio Kairegi if you think this is a mistake."],
-  paid: ["Invoice already paid", "Thank you. Nothing more is due."],
-  error: ["We couldn’t load this page", "Please try again in a moment."],
-};
+// Renders a translated template that embeds React nodes: "{ref}" -> <strong>…</strong>, "{link}" -> <a>…</a>.
+function rich(template, parts) {
+  return String(template).split(/(\{\w+\})/).map((seg, i) => {
+    const m = /^\{(\w+)\}$/.exec(seg);
+    return m && parts[m[1]] !== undefined ? <React.Fragment key={i}>{parts[m[1]]}</React.Fragment> : seg;
+  });
+}
 
-function formatExpiry(iso) {
+const JA_FONTS = "'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Noto Sans JP', Meiryo, ";
+
+function formatExpiry(iso, locale) {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
-  return new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" }).format(d);
+  return new Intl.DateTimeFormat(locale, { day: "numeric", month: "short", year: "numeric" }).format(d);
 }
 
-function Shell({ children }) {
+function Shell({ children, lang = "en", tr }) {
   useEffect(() => {
     const meta = [["robots", "noindex, nofollow"], ["referrer", "no-referrer"]].map(([name, content]) => {
       const m = document.createElement("meta"); m.name = name; m.content = content; document.head.appendChild(m); return m;
     });
-    document.title = "Secure payment · Studio Kairegi";
-    return () => meta.forEach((m) => m.remove());
-  }, []);
+    const prevLang = document.documentElement.lang;
+    document.documentElement.lang = lang;
+    document.title = tr("page.title");
+    return () => { meta.forEach((m) => m.remove()); document.documentElement.lang = prevLang; };
+  }, [lang]);   // eslint-disable-line react-hooks/exhaustive-deps
   return (
-    <main className="kf-payment-page" style={page}>
+    <main className="kf-payment-page" lang={lang} style={lang === "ja" ? { ...page, fontFamily: JA_FONTS + page.fontFamily } : page}>
       <div className="kf-payment-shell" style={shell}>{children}</div>
     </main>
   );
 }
 
-function BrandHeader() {
+function BrandHeader({ tr }) {
   return (
     <div className="kf-payment-brand-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, padding: "22px 24px", borderBottom: `1px solid ${BRAND.line}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <img src="/logo.png" alt="Studio Kairegi" style={{ width: 42, height: 42, objectFit: "contain" }} />
         <div>
           <div style={{ fontSize: 15, fontWeight: 800, letterSpacing: ".04em" }}>STUDIO KAIREGI</div>
-          <div style={{ color: BRAND.muted, fontSize: 12, marginTop: 2 }}>Secure client checkout</div>
+          <div style={{ color: BRAND.muted, fontSize: 12, marginTop: 2 }}>{tr("brand.tagline")}</div>
         </div>
       </div>
-      <div style={{ ...label, color: BRAND.accent }}>Payment</div>
+      <div style={{ ...label, color: BRAND.accent }}>{tr("brand.badge")}</div>
     </div>
   );
 }
 
-function SecurityNote({ expiresAt, wise }) {
+function SecurityNote({ expiresAt, wise, tr, locale }) {
   return (
     <p style={{ margin: "18px 0 0", paddingTop: 14, borderTop: `1px solid ${BRAND.line}`, color: BRAND.muted, fontSize: 12, lineHeight: 1.5 }}>
-      {wise ? "Studio Kairegi never receives your Wise login or card details." : "Card and bank details are entered on Paystack’s secure page; Studio Kairegi never receives them."}
-      {expiresAt ? ` Link expires ${formatExpiry(expiresAt)}.` : ""}
+      {wise ? tr("security.wise") : tr("security.paystack")}
+      {expiresAt ? tr("security.expires", { date: formatExpiry(expiresAt, locale) }) : ""}
     </p>
   );
 }
@@ -107,8 +114,14 @@ function MethodIcon({ kind, color }) {
 
 function ReturnView({ token }) {
   const [res, setRes] = useState({ status: "checking" });
+  const [lang, setLang] = useState(null);          // unknown until the link's language arrives, so the page never flashes English first
   const tries = useRef(0);
   const reference = useRef(new URLSearchParams(window.location.search).get("reference") || "");
+  useEffect(() => {
+    let live = true;
+    getPublicCheckout(token).then((d) => { if (live) setLang(normalizeLang(d?.language)); }).catch(() => { if (live) setLang("en"); });
+    return () => { live = false; };
+  }, [token]);
   useEffect(() => {
     let live = true; let timer;
     const check = async () => {
@@ -125,72 +138,80 @@ function ReturnView({ token }) {
     return () => { live = false; clearTimeout(timer); };
   }, [token]);
 
-  const back = <a href={`/pay/${token}`} style={{ color: BRAND.ink, fontWeight: 700 }}>Return to payment</a>;
+  const tr = checkoutT(lang || "en");
+  const locale = localeFor(lang || "en");
+  if (!lang) {
+    return <Shell lang="en" tr={tr}><div className="kf-payment-card" style={card}><BrandHeader tr={tr} /><div style={{ padding: "42px 34px 36px" }} aria-busy="true" /></div></Shell>;
+  }
+  const back = <a href={`/pay/${token}`} style={{ color: BRAND.ink, fontWeight: 700 }}>{tr("return.back")}</a>;
+  const strong = (v) => <strong>{v}</strong>;
+  const heading = { fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" };
   return (
-    <Shell>
+    <Shell lang={lang} tr={tr}>
       <div className="kf-payment-card" style={card}>
-        <BrandHeader />
+        <BrandHeader tr={tr} />
         <div className="kf-payment-result-body" style={{ padding: "42px 34px 36px", maxWidth: 660 }}>
-          {res.status === "checking" && <><div style={label}>Checking payment</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Confirming your payment</h1><p role="status" style={muted}>We’re verifying the transaction with Paystack. Please don’t make another payment while this is checking.</p></>}
-          {res.status === "paid" && <><div style={{ ...label, color: BRAND.accent }}>Payment received</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Thank you.</h1><p style={muted}>Invoice Ref. <strong>{res.invoice_number}</strong> for <strong>{formatMoney(res.currency, res.amount)}</strong> has been confirmed and marked paid.</p>{res.reference && <p style={{ ...muted, fontSize: 12, marginTop: 16 }}>Reference: {res.reference}</p>}</>}
-          {res.status === "paid_elsewhere" && <><div style={{ ...label, color: BRAND.accent }}>Invoice settled</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Nothing more is due.</h1><p style={muted}>Invoice Ref. <strong>{res.invoice_number}</strong> has already been settled.</p></>}
-          {res.status === "pending" && <><div style={{ ...label, color: BRAND.warning }}>Payment pending</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>We’re waiting for confirmation.</h1><p role="status" style={muted}>Your payment hasn’t been confirmed yet. Bank transfers can take a few minutes. This page will keep checking automatically; you do not need to pay again.</p></>}
-          {res.status === "incomplete" && <><div style={label}>Payment not completed</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>No payment was taken.</h1><p style={muted}>You can return to the payment page and try again.</p><p style={{ marginTop: 20 }}>{back}</p></>}
-          {res.status === "failed" && <><div style={{ ...label, color: BRAND.danger }}>Payment unsuccessful</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>The payment didn’t go through.</h1><p style={muted}>The invoice has not been marked paid. You can return and try again.</p><p style={{ marginTop: 20 }}>{back}</p></>}
-          {res.status === "review" && <><div style={{ ...label, color: BRAND.warning }}>Payment under review</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>We’re checking your payment.</h1><p style={muted}>{res.message || "Please do not pay again while we verify the transaction."}</p></>}
-          {res.status === "notfound" && <><div style={{ ...label, color: BRAND.danger }}>Link unavailable</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>{MESSAGES.notfound[0]}</h1><p style={muted}>{MESSAGES.notfound[1]}</p></>}
-          {res.status === "error" && <><div style={{ ...label, color: BRAND.danger }}>Couldn’t confirm</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>Please try again.</h1><p style={muted}>If you already paid, the transaction will be recorded automatically once Paystack confirms it.</p></>}
+          {res.status === "checking" && <><div style={label}>{tr("return.checking.label")}</div><h1 style={heading}>{tr("return.checking.title")}</h1><p role="status" style={muted}>{tr("return.checking.body")}</p></>}
+          {res.status === "paid" && <><div style={{ ...label, color: BRAND.accent }}>{tr("return.paid.label")}</div><h1 style={heading}>{tr("return.paid.title")}</h1><p style={muted}>{rich(tr.raw("return.paid.body"), { ref: strong(res.invoice_number), amount: strong(formatMoney(res.currency, res.amount)) })}</p>{res.reference && <p style={{ ...muted, fontSize: 12, marginTop: 16 }}>{tr("return.reference", { ref: res.reference })}</p>}</>}
+          {res.status === "paid_elsewhere" && <><div style={{ ...label, color: BRAND.accent }}>{tr("return.elsewhere.label")}</div><h1 style={heading}>{tr("return.elsewhere.title")}</h1><p style={muted}>{rich(tr.raw("return.elsewhere.body"), { ref: strong(res.invoice_number) })}</p></>}
+          {res.status === "pending" && <><div style={{ ...label, color: BRAND.warning }}>{tr("return.pending.label")}</div><h1 style={heading}>{tr("return.pending.title")}</h1><p role="status" style={muted}>{tr("return.pending.body")}</p></>}
+          {res.status === "incomplete" && <><div style={label}>{tr("return.incomplete.label")}</div><h1 style={heading}>{tr("return.incomplete.title")}</h1><p style={muted}>{tr("return.incomplete.body")}</p><p style={{ marginTop: 20 }}>{back}</p></>}
+          {res.status === "failed" && <><div style={{ ...label, color: BRAND.danger }}>{tr("return.failed.label")}</div><h1 style={heading}>{tr("return.failed.title")}</h1><p style={muted}>{tr("return.failed.body")}</p><p style={{ marginTop: 20 }}>{back}</p></>}
+          {res.status === "review" && <><div style={{ ...label, color: BRAND.warning }}>{tr("return.review.label")}</div><h1 style={heading}>{tr("return.review.title")}</h1><p style={muted}>{lang === "en" ? (res.message || tr("return.review.body")) : tr("return.review.body")}</p></>}
+          {res.status === "notfound" && <><div style={{ ...label, color: BRAND.danger }}>{tr("return.notfound.label")}</div><h1 style={heading}>{tr("msg.notfound.title")}</h1><p style={muted}>{tr("msg.notfound.body")}</p></>}
+          {res.status === "error" && <><div style={{ ...label, color: BRAND.danger }}>{tr("return.error.label")}</div><h1 style={heading}>{tr("return.error.title")}</h1><p style={muted}>{tr("return.error.body")}</p></>}
         </div>
       </div>
     </Shell>
   );
 }
 
-const fmtTime = (iso) => {
+const fmtTime = (iso, locale) => {
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(d);
+  return Number.isNaN(d.getTime()) ? "" : new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(d);
 };
 const mmss = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 const row = { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 14, fontSize: 13.5, padding: "7px 0" };
 const primaryBtn = (disabled) => ({ width: "100%", minHeight: 52, padding: "13px 16px", borderRadius: 14, border: "none", background: disabled ? "#9ba3a5" : BRAND.primary, color: BRAND.white, fontSize: 15, fontWeight: 800, fontFamily: "inherit", cursor: disabled ? "not-allowed" : "pointer", boxShadow: disabled ? "none" : "0 5px 16px rgba(8,125,184,.22)" });
+const secondaryBtn = { width: "100%", minHeight: 48, padding: "12px 16px", borderRadius: 14, border: `1px solid ${BRAND.line}`, background: BRAND.white, color: BRAND.ink, fontSize: 14, fontWeight: 700, fontFamily: "inherit", cursor: "pointer" };
 const ghostBtn = { background: "none", border: "none", padding: 0, color: BRAND.muted, fontSize: 13, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", textDecoration: "underline" };
 
-function QuoteSummary({ quote, data }) {
+function QuoteSummary({ quote, data, tr, locale }) {
   const inv = quote.invoice_currency;
   if (!quote.converted) {
     return (
       <div>
-        <div style={row}><span style={muted}>Amount due now</span><strong>{formatMoney(inv, quote.invoice_amount)}</strong></div>
-        <div style={{ ...row, borderTop: `1px solid ${BRAND.line}`, marginTop: 6, paddingTop: 12 }}><strong>You will be charged</strong><strong style={{ fontSize: 20 }}>{formatMoney(quote.charge_currency, quote.charge_amount)}</strong></div>
+        <div style={row}><span style={muted}>{tr("review.amountDue")}</span><strong>{formatMoney(inv, quote.invoice_amount)}</strong></div>
+        <div style={{ ...row, borderTop: `1px solid ${BRAND.line}`, marginTop: 6, paddingTop: 12 }}><strong>{tr("review.willCharge")}</strong><strong style={{ fontSize: 20 }}>{formatMoney(quote.charge_currency, quote.charge_amount)}</strong></div>
       </div>
     );
   }
   return (
     <div>
-      <p style={{ ...muted, fontSize: 13.5, marginBottom: 10 }}>This invoice is in <strong style={{ color: BRAND.ink }}>{inv}</strong>. Paystack takes payment in <strong style={{ color: BRAND.ink }}>{quote.charge_currency}</strong>, so your payment is converted before you pay.</p>
-      <div style={row}><span style={muted}>Invoice amount</span><strong>{formatMoney(inv, data.original_amount)}</strong></div>
-      <div style={row}><span style={muted}>Amount you’re paying now</span><strong>{formatMoney(inv, quote.invoice_amount)}</strong></div>
-      <div style={row}><span style={muted}>Exchange rate</span><strong>{describeRate(quote.fx_base, quote.fx_quote, quote.fx_rate)}</strong></div>
-      <div style={row}><span style={muted}>Rate as of</span><span>{fmtTime(quote.fx_rate_fetched_at)}</span></div>
-      <div style={row}><span style={muted}>Converted amount</span><strong>{formatMoney(quote.charge_currency, quote.converted_amount)}</strong></div>
-      <div style={row}><span style={muted}>Conversion fee or markup</span><span>{Number(quote.fee_amount) > 0 || Number(quote.markup_pct) > 0 ? `${formatMoney(quote.charge_currency, quote.fee_amount)} (${quote.markup_pct}%)` : "None"}</span></div>
-      <div style={{ ...row, borderTop: `1px solid ${BRAND.line}`, marginTop: 6, paddingTop: 12 }}><strong>Paystack will charge</strong><strong style={{ fontSize: 20 }}>{formatMoney(quote.charge_currency, quote.charge_amount)}</strong></div>
+      <p style={{ ...muted, fontSize: 13.5, marginBottom: 10 }}>{rich(tr.raw("review.convIntro"), { inv: <strong style={{ color: BRAND.ink }}>{currencyLabel(inv, tr.lang)}</strong>, chg: <strong style={{ color: BRAND.ink }}>{currencyLabel(quote.charge_currency, tr.lang)}</strong> })}</p>
+      <div style={row}><span style={muted}>{tr("review.invoiceAmount")}</span><strong>{formatMoney(inv, data.original_amount)}</strong></div>
+      <div style={row}><span style={muted}>{tr("review.payingNow")}</span><strong>{formatMoney(inv, quote.invoice_amount)}</strong></div>
+      <div style={row}><span style={muted}>{tr("review.rate")}</span><strong>{describeRate(quote.fx_base, quote.fx_quote, quote.fx_rate)}</strong></div>
+      <div style={row}><span style={muted}>{tr("review.rateAsOf")}</span><span>{tr.lang === "ja" ? formatDateTimeJa(quote.fx_rate_fetched_at) : fmtTime(quote.fx_rate_fetched_at, locale)}</span></div>
+      <div style={row}><span style={muted}>{tr("review.converted")}</span><strong>{formatMoney(quote.charge_currency, quote.converted_amount)}</strong></div>
+      <div style={row}><span style={muted}>{tr("review.fee")}</span><span>{Number(quote.fee_amount) > 0 || Number(quote.markup_pct) > 0 ? `${formatMoney(quote.charge_currency, quote.fee_amount)} (${quote.markup_pct}%)` : tr("review.feeNone")}</span></div>
+      <div style={{ ...row, borderTop: `1px solid ${BRAND.line}`, marginTop: 6, paddingTop: 12 }}><strong>{tr("review.paystackCharges")}</strong><strong style={{ fontSize: 20 }}>{formatMoney(quote.charge_currency, quote.charge_amount)}</strong></div>
     </div>
   );
 }
 
-function CopyRow({ label: l, value }) {
+function CopyRow({ label: l, value, tr }) {
   const [done, setDone] = useState(false);
   const copy = async () => { try { await navigator.clipboard.writeText(value); setDone(true); setTimeout(() => setDone(false), 1500); } catch { setDone(false); } };
   return (
-    <div style={{ ...row, alignItems: "center" }}>
+    <div style={{ ...row, alignItems: "center", flexWrap: "wrap" }}>
       <span style={muted}>{l}</span>
-      <span style={{ display: "flex", alignItems: "center", gap: 10, textAlign: "right", wordBreak: "break-word" }}><strong>{value}</strong><button type="button" onClick={copy} style={ghostBtn} aria-label={`Copy ${l}`}>{done ? "Copied" : "Copy"}</button></span>
+      <span style={{ display: "flex", alignItems: "center", gap: 10, textAlign: "right", overflowWrap: "anywhere", minWidth: 0 }}><strong>{value}</strong><button type="button" onClick={copy} style={ghostBtn} aria-label={tr("wise.copyAria", { label: l })}>{done ? tr("wise.copied") : tr("wise.copy")}</button></span>
     </div>
   );
 }
 
-function WisePanel({ token, data, email, onBack }) {
+function WisePanel({ token, data, email, onBack, tr, lang }) {
   const [t, setT] = useState(null);
   const [err, setErr] = useState("");
   const [form, setForm] = useState({ transferReference: "", payerName: "", note: "" });
@@ -198,51 +219,55 @@ function WisePanel({ token, data, email, onBack }) {
   const [submitted, setSubmitted] = useState(false);
   useEffect(() => {
     let live = true;
-    startWiseTransfer(token, email.trim()).then((r) => { if (live) { setT(r.transfer); setSubmitted(r.transfer?.status === "submitted"); } }).catch((e) => { if (live) setErr(e.message); });
+    startWiseTransfer(token, email.trim()).then((r) => { if (live) { setT(r.transfer); setSubmitted(r.transfer?.status === "submitted"); } }).catch((e) => { if (live) setErr(localizeError(e, tr, "error.start")); });
     return () => { live = false; };
   }, [token]);
   const submit = async () => {
     setBusy(true); setErr("");
     try { await submitWiseTransfer(token, { reference: t.reference, ...form }); setSubmitted(true); }
-    catch (e) { setErr(e.message || "We couldn’t record that. Please try again."); }
+    catch (e) { setErr(lang === "en" ? (e.message || tr("wise.submitError")) : tr("wise.submitError")); }
     setBusy(false);
   };
-  if (err && !t) return <div><p role="alert" style={{ color: BRAND.danger, fontSize: 13.5 }}>{err}</p><button type="button" style={ghostBtn} onClick={onBack}>Back to payment options</button></div>;
-  if (!t) return <p style={muted}>Preparing your transfer details…</p>;
-  const ins = wiseInstructions(t);
+  if (err && !t) return <div><p role="alert" style={{ color: BRAND.danger, fontSize: 13.5 }}>{err}</p><button type="button" style={ghostBtn} onClick={onBack}>{tr("wise.back")}</button></div>;
+  if (!t) return <p style={muted}>{tr("wise.preparing")}</p>;
+  const ins = wiseInstructions(t, lang);
   if (submitted) {
     return (
       <div role="status">
-        <div style={{ ...label, color: BRAND.warning }}>Transfer submitted</div>
-        <h2 style={{ fontSize: 22, margin: "8px 0 10px" }}>We’ll confirm once the money arrives.</h2>
-        <p style={muted}>Invoice Ref. <strong style={{ color: BRAND.ink }}>{t.invoice_number}</strong> stays open until Studio Kairegi confirms the funds. Keep reference <strong style={{ color: BRAND.ink }}>{t.reference}</strong> for any questions{t.support_contact ? ` — contact ${t.support_contact}` : ""}.</p>
-        <p style={{ marginTop: 18 }}><button type="button" style={ghostBtn} onClick={onBack}>Back to payment options</button></p>
+        <div style={{ ...label, color: BRAND.warning }}>{tr("wise.submittedLabel")}</div>
+        <h2 style={{ fontSize: 22, margin: "8px 0 10px" }}>{tr("wise.submittedTitle")}</h2>
+        <p style={muted}>{rich(tr.raw("wise.submittedBody"), { ref: <strong style={{ color: BRAND.ink }}>{t.invoice_number}</strong>, tref: <strong style={{ color: BRAND.ink }}>{t.reference}</strong>, contact: t.support_contact ? tr("wise.submittedContact", { contact: t.support_contact }) : "" })}</p>
+        <p style={{ marginTop: 18 }}><button type="button" style={ghostBtn} onClick={onBack}>{tr("wise.back")}</button></p>
       </div>
     );
   }
   return (
     <div>
-      <div style={label}>Wise · Manual transfer</div>
-      <h2 style={{ fontSize: 22, margin: "8px 0 6px" }}>Send with Wise to M-PESA</h2>
+      <div style={label}>{tr("wise.label")}</div>
+      <h2 style={{ fontSize: 22, margin: "8px 0 6px" }}>{tr("wise.title")}</h2>
       <div style={{ background: "#fff8e8", border: "1px solid #ecd9a7", color: BRAND.warning, borderRadius: 12, padding: 12, fontSize: 12.5, lineHeight: 1.5, margin: "10px 0 14px" }}>{ins.warnings[0]}</div>
-      <CopyRow label="Recipient name" value={t.recipient_name} />
-      <div style={row}><span style={muted}>Country</span><strong>{t.country}</strong></div>
-      <div style={row}><span style={muted}>Mobile provider</span><strong>{t.mobile_provider}</strong></div>
-      <CopyRow label="Mobile number" value={t.phone} />
-      <CopyRow label="Our reference" value={t.reference} />
-      <div style={{ ...row, borderTop: `1px solid ${BRAND.line}`, marginTop: 6 }}><span style={muted}>Invoice amount</span><strong>{formatMoney(data.currency, t.original_amount)}</strong></div>
-      <div style={row}><span style={muted}>Remaining due</span><strong>{formatMoney(data.currency, t.invoice_outstanding)}</strong></div>
-      <div style={row}><span style={muted}>Amount expected</span><strong>{formatMoney(t.currency, t.amount)}</strong></div>
-      <p style={{ ...muted, fontSize: 12.5 }}>Wise delivers Kenyan shillings (KES) to M-PESA. Wise shows the amount the recipient gets before you pay; make sure it matches {formatMoney(t.currency, t.amount)} at the exchange rate Wise shows you. If you’re unsure, contact us first.{t.instructions ? ` ${t.instructions}` : ""}</p>
-      <ol style={{ paddingLeft: 18, margin: "10px 0 14px", fontSize: 13, lineHeight: 1.55 }}>{ins.steps.map((s) => <li key={s}>{s}</li>)}</ol>
+      <CopyRow tr={tr} label={tr("wise.recipient")} value={t.recipient_name} />
+      <div style={row}><span style={muted}>{tr("wise.country")}</span><strong>{t.country}</strong></div>
+      <div style={row}><span style={muted}>{tr("wise.provider")}</span><strong>{t.mobile_provider}</strong></div>
+      <CopyRow tr={tr} label={tr("wise.number")} value={t.phone} />
+      <CopyRow tr={tr} label={tr("wise.ourRef")} value={t.reference} />
+      <div style={{ ...row, borderTop: `1px solid ${BRAND.line}`, marginTop: 6 }}><span style={muted}>{tr("wise.invoiceAmount")}</span><strong>{formatMoney(data.currency, t.original_amount)}</strong></div>
+      <div style={row}><span style={muted}>{tr("wise.remaining")}</span><strong>{formatMoney(data.currency, t.invoice_outstanding)}</strong></div>
+      <div style={row}><span style={muted}>{tr("wise.expected")}</span><strong>{formatMoney(t.currency, t.amount)}</strong></div>
+      <p style={{ ...muted, fontSize: 12.5 }}>{tr("wise.kesNote", { amount: formatMoney(t.currency, t.amount) })}{t.instructions ? ` ${t.instructions}` : ""}</p>
+      <ol style={{ paddingLeft: 20, margin: "10px 0 14px", fontSize: 13, lineHeight: 1.7 }}>{ins.steps.map((st) => <li key={st} style={{ whiteSpace: "pre-line", overflowWrap: "anywhere", marginBottom: 4 }}>{st}</li>)}</ol>
       <p style={{ ...muted, fontSize: 12.5 }}>{ins.warnings[1]} {ins.warnings[2]}</p>
-      <div style={{ marginTop: 14, display: "grid", gap: 10 }}>
-        <label style={{ fontSize: 13, fontWeight: 700 }} htmlFor="wise-ref">Wise transfer reference</label>
-        <input id="wise-ref" value={form.transferReference} onChange={(e) => setForm({ ...form, transferReference: e.target.value })} placeholder="From your Wise confirmation" style={{ padding: "12px 14px", borderRadius: 12, border: `1px solid ${BRAND.line}`, fontSize: 15, fontFamily: "inherit" }} />
-        <input aria-label="Your name (optional)" value={form.payerName} onChange={(e) => setForm({ ...form, payerName: e.target.value })} placeholder="Your name (optional)" style={{ padding: "12px 14px", borderRadius: 12, border: `1px solid ${BRAND.line}`, fontSize: 15, fontFamily: "inherit" }} />
+      <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${BRAND.line}`, display: "grid", gap: 14 }}>
+        <div style={{ display: "grid", gap: 8 }}>
+          <label style={{ fontSize: 13, fontWeight: 700 }} htmlFor="wise-ref">{tr("wise.refLabel")}</label>
+          <input id="wise-ref" value={form.transferReference} onChange={(e) => setForm({ ...form, transferReference: e.target.value })} placeholder={tr("wise.refPlaceholder")} style={{ padding: "12px 14px", borderRadius: 12, border: `1px solid ${BRAND.line}`, fontSize: 15, fontFamily: "inherit", width: "100%", boxSizing: "border-box" }} />
+          <input aria-label={tr("wise.nameOptional")} value={form.payerName} onChange={(e) => setForm({ ...form, payerName: e.target.value })} placeholder={tr("wise.nameOptional")} style={{ padding: "12px 14px", borderRadius: 12, border: `1px solid ${BRAND.line}`, fontSize: 15, fontFamily: "inherit", width: "100%", boxSizing: "border-box" }} />
+        </div>
         {err && <p role="alert" style={{ color: BRAND.danger, fontSize: 12.5, margin: 0 }}>{err}</p>}
-        <button type="button" disabled={busy || form.transferReference.trim().length < 4} onClick={submit} style={primaryBtn(busy || form.transferReference.trim().length < 4)}>{busy ? "Submitting…" : "I’ve sent the transfer"}</button>
-        <button type="button" style={ghostBtn} onClick={onBack}>Back to payment options</button>
+        <div style={{ display: "grid", gap: 10 }}>
+          <button type="button" disabled={busy || form.transferReference.trim().length < 4} onClick={submit} style={primaryBtn(busy || form.transferReference.trim().length < 4)}>{busy ? tr("wise.submitting") : tr("wise.submit")}</button>
+          <button type="button" style={secondaryBtn} onClick={onBack}>{tr("wise.back")}</button>
+        </div>
       </div>
     </div>
   );
@@ -290,10 +315,15 @@ function CheckoutView({ token }) {
 
   const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
   const { phase, data } = state;
+  // The link carries its own language (set when the link was made). Unknown / not-found links fall back to English.
+  const lang = normalizeLang(data?.language);
+  const tr = checkoutT(lang);
+  const locale = localeFor(lang);
   const live = phase === "open" || phase === "pending";
-  const methods = useMemo(() => orderMethods((data?.methods || []).filter((m) => m.channel !== "apple_pay" || applePaySupported)), [data, applePaySupported]);
+  const methods = useMemo(() => orderMethods((data?.methods || []).filter((m) => m.channel !== "bank_transfer" && (m.channel !== "apple_pay" || applePaySupported))), [data, applePaySupported]);
   const paystack = methods.filter((m) => m.provider === "paystack");
   const wise = methods.find((m) => m.provider === "wise");
+  const methodName = (m) => (lang !== "en" && ["card", "bank_transfer", "apple_pay"].includes(m.channel) ? tr(`method.${m.channel}`) : m.name);
 
   // A quote is the price the client confirms. Ask the server for a fresh one (expired, superseded, or first view).
   const requestQuote = async (channel, why = "") => {
@@ -304,14 +334,14 @@ function CheckoutView({ token }) {
       if (why) setNotice(why);
       setNow(Date.now());
     } catch (e) {
-      setError(e.code === "fx_unavailable" ? e.message : (e.message || "We couldn’t prepare your payment. Please try again."));
+      setError(localizeError(e, tr, "error.prepare"));
     }
     setBusy("");
   };
 
   const choose = (m) => {
     if (inflight.current || busy) return;
-    if (!emailOk) { setError("Enter your email address so Paystack can send your receipt."); return; }
+    if (!emailOk) { setError(tr("choose.emailError")); return; }
     requestQuote(m.channel);
   };
 
@@ -324,7 +354,7 @@ function CheckoutView({ token }) {
     return () => clearInterval(id);
   }, [quote]);
   useEffect(() => {
-    if (quote && secs === 0 && !busy && !inflight.current) requestQuote(step.channel, "The price expired, so we refreshed it. Please review and confirm again.");
+    if (quote && secs === 0 && !busy && !inflight.current) requestQuote(step.channel, tr("review.noticeExpired"));
   }, [secs, quote]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const confirm = async () => {
@@ -334,11 +364,11 @@ function CheckoutView({ token }) {
       const r = await startPublicCheckout(token, email.trim(), step.channel, quote.quote_id);
       if (r.status === "redirect" && r.authorization_url) { window.location.assign(r.authorization_url); return; }
       if (r.status === "paid") { window.location.assign(`/pay/${token}/return?reference=${encodeURIComponent(r.reference || "")}`); return; }
-      setNotice(r.message || "A payment for this invoice is already in progress.");
+      setNotice(lang === "en" ? (r.message || tr("review.noticeInProgress")) : tr("review.noticeInProgress"));
     } catch (e) {
       inflight.current = false; setBusy("");
-      if (needsRequote(e.code)) { await requestQuote(step.channel, "The amount changed, so we refreshed it. Please review and confirm again."); return; }
-      setError(e.message || "We couldn’t start the payment. Please try again.");
+      if (needsRequote(e.code)) { await requestQuote(step.channel, tr("review.noticeChanged")); return; }
+      setError(localizeError(e, tr, "error.start"));
       return;
     }
     inflight.current = false; setBusy("");
@@ -350,79 +380,80 @@ function CheckoutView({ token }) {
       <button className="kf-payment-method" key={m.channel} type="button" disabled={!!busy} onClick={() => choose(m)}
         style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", minHeight: primary ? 60 : 54, padding: "13px 15px", borderRadius: 14, border: `1px solid ${primary ? BRAND.primary : BRAND.line}`, background: primary ? BRAND.primary : BRAND.white, color: primary ? BRAND.white : BRAND.ink, cursor: busy ? "not-allowed" : "pointer", fontSize: 15, fontWeight: 700, fontFamily: "inherit", textAlign: "left", boxShadow: primary ? "0 5px 16px rgba(8,125,184,.16)" : "none" }}>
         <MethodIcon kind={m.channel} color={primary ? BRAND.white : BRAND.muted} />
-        <span style={{ flex: 1 }}>{m.name}{m.converted ? <span style={{ display: "block", fontSize: 11.5, fontWeight: 600, opacity: .72 }}>Charged in {m.charge_currency}</span> : null}</span>
-        <span style={{ fontSize: 12, fontWeight: 600, opacity: .75 }}>{loading ? "Preparing…" : "Select"}</span>
+        <span style={{ flex: 1 }}>{methodName(m)}{m.converted ? <span style={{ display: "block", fontSize: 11.5, fontWeight: 600, opacity: .72 }}>{tr("method.chargedIn", { ccy: currencyLabel(m.charge_currency, lang) })}</span> : null}</span>
+        <span style={{ fontSize: 12, fontWeight: 600, opacity: .75 }}>{loading ? tr("method.preparing") : tr("method.select")}</span>
       </button>
     );
   };
 
+  const unavailable = ["notfound", "expired", "cancelled", "paid", "error"].includes(phase);
   return (
-    <Shell>
+    <Shell lang={lang} tr={tr}>
       <div className="kf-payment-card" style={card}>
-        <BrandHeader />
-        {phase === "loading" && <div style={{ padding: 36 }}><p style={muted}>Loading secure payment details…</p></div>}
-        {MESSAGES[phase] && <div className="kf-payment-result-body" style={{ padding: "42px 34px" }}><div style={{ ...label, color: BRAND.danger }}>Unavailable</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>{MESSAGES[phase][0]}</h1><p style={muted}>{MESSAGES[phase][1]}</p></div>}
+        <BrandHeader tr={tr} />
+        {phase === "loading" && <div style={{ padding: 36 }}><p style={muted}>{checkoutT("en")("loading")}<br />{checkoutT("ja")("loading")}</p></div>}
+        {unavailable && <div className="kf-payment-result-body" style={{ padding: "42px 34px" }}><div style={{ ...label, color: BRAND.danger }}>{tr("unavailable")}</div><h1 style={{ fontSize: 30, lineHeight: 1.1, margin: "10px 0 12px" }}>{tr(`msg.${phase}.title`)}</h1><p style={muted}>{tr(`msg.${phase}.body`)}</p></div>}
         {live && data && (
           <div className="kf-payment-columns" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))" }}>
             <section className="kf-payment-summary" style={{ padding: "36px 30px", background: BRAND.paper, borderRight: `1px solid ${BRAND.line}` }}>
-              <div style={label}>Secure checkout</div>
+              <div style={label}>{tr("summary.label")}</div>
               <h1 style={{ fontSize: "clamp(30px, 5vw, 46px)", lineHeight: 1, letterSpacing: "-.04em", margin: "12px 0 8px" }}>{formatMoney(data.currency, data.amount)}</h1>
-              <p style={{ ...muted, fontSize: 14 }}>Due now · Invoice Ref. <strong style={{ color: BRAND.ink }}>{data.invoice_number}</strong>{data.client_name ? ` · ${data.client_name}` : ""}</p>
+              <p style={{ ...muted, fontSize: 14 }}>{rich(tr.raw("summary.due"), { ref: <strong style={{ color: BRAND.ink }}>{data.invoice_number}</strong> })}{data.client_name ? tr("summary.client", { client: data.client_name }) : ""}</p>
               <div style={{ marginTop: 22, borderTop: `1px solid ${BRAND.line}`, paddingTop: 10 }}>
-                <div style={row}><span style={muted}>Invoice amount</span><strong>{formatMoney(data.currency, data.original_amount)}</strong></div>
-                <div style={row}><span style={muted}>Remaining due</span><strong>{formatMoney(data.currency, data.outstanding)}</strong></div>
-                <div style={row}><span style={muted}>Invoice currency</span><strong>{data.currency}</strong></div>
+                <div style={row}><span style={muted}>{tr("row.invoiceAmount")}</span><strong>{formatMoney(data.currency, data.original_amount)}</strong></div>
+                <div style={row}><span style={muted}>{tr("row.remaining")}</span><strong>{formatMoney(data.currency, data.outstanding)}</strong></div>
+                <div style={row}><span style={muted}>{tr("row.invoiceCurrency")}</span><strong>{currencyLabel(data.currency, lang)}</strong></div>
               </div>
-              {phase === "pending" && <div role="status" style={{ background: "#fff8e8", border: "1px solid #ecd9a7", color: BRAND.warning, borderRadius: 14, padding: 14, marginTop: 20, fontSize: 13.5, lineHeight: 1.5 }}>A payment for this invoice is already in progress. <a href={`/pay/${token}/return`} style={{ color: BRAND.ink, fontWeight: 700 }}>Check its status</a> before paying again.</div>}
-              <SecurityNote expiresAt={data.expires_at} wise={step.name === "wise"} />
+              {phase === "pending" && <div role="status" style={{ background: "#fff8e8", border: "1px solid #ecd9a7", color: BRAND.warning, borderRadius: 14, padding: 14, marginTop: 20, fontSize: 13.5, lineHeight: 1.5 }}>{rich(tr.raw("pending.banner"), { link: <a href={`/pay/${token}/return`} style={{ color: BRAND.ink, fontWeight: 700 }}>{tr("pending.link")}</a> })}</div>}
+              <SecurityNote expiresAt={data.expires_at} wise={step.name === "wise"} tr={tr} locale={locale} />
             </section>
 
             <section className="kf-payment-actions" style={{ padding: "32px 28px" }}>
               {step.name === "choose" && (
                 <>
-                  <h2 style={{ fontSize: 22, margin: "0 0 18px" }}>Choose how to pay</h2>
-                  <label style={{ display: "block", fontSize: 13, fontWeight: 700, marginBottom: 7 }} htmlFor="payer-email">Email for your receipt</label>
-                  <input id="payer-email" type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com"
+                  <h2 style={{ fontSize: 22, margin: "0 0 18px" }}>{tr("choose.title")}</h2>
+                  <label style={{ display: "block", fontSize: 13, fontWeight: 700, marginBottom: 7 }} htmlFor="payer-email">{tr("choose.emailLabel")}</label>
+                  <input id="payer-email" type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder={tr("choose.emailPlaceholder")}
                     style={{ width: "100%", boxSizing: "border-box", padding: "13px 14px", borderRadius: 12, border: `1px solid ${error ? "#d58a8a" : BRAND.line}`, fontSize: 15, fontFamily: "inherit", outline: "none" }} />
                   {error && <p role="alert" style={{ color: BRAND.danger, fontSize: 12.5, margin: "7px 0 0" }}>{error}</p>}
                   {paystack.length > 0 && (
                     <div style={{ marginTop: 18 }}>
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}><span style={label}>Recommended</span><ProviderMark id="paystack" name="Paystack" /></div>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}><span style={label}>{tr("choose.recommended")}</span><ProviderMark id="paystack" name="Paystack" /></div>
                       <div style={{ display: "grid", gap: 10 }}>{paystack.map((m) => methodBtn(m, true))}</div>
-                      {data.methods?.some((m) => m.channel === "apple_pay") && !applePaySupported && <p style={{ ...muted, fontSize: 12, marginTop: 10 }}>Apple Pay is available on supported Apple devices and Safari.</p>}
+                      {data.methods?.some((m) => m.channel === "apple_pay") && !applePaySupported && <p style={{ ...muted, fontSize: 12, marginTop: 10 }}>{tr("choose.applePayNote")}</p>}
                     </div>
                   )}
                   {wise && (
                     <div style={{ marginTop: 22 }}>
-                      <div style={{ ...label, marginBottom: 8 }}>Other way to pay</div>
+                      <div style={{ ...label, marginBottom: 8 }}>{tr("choose.other")}</div>
                       <button className="kf-payment-method" type="button" disabled={!!busy} onClick={() => { setError(""); setStep({ name: "wise" }); }}
                         style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", padding: "12px 14px", borderRadius: 14, border: `1px solid ${BRAND.line}`, background: "#fafaf8", color: BRAND.ink, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
                         <MethodIcon kind="wise" color={BRAND.muted} />
                         <span style={{ flex: 1 }}>
-                          <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700 }}><ProviderMark id="wise" name="Wise" /><span>International transfer to M-PESA</span></span>
-                          <span style={{ display: "block", fontSize: 12, color: BRAND.muted, marginTop: 3, lineHeight: 1.45 }}>Use Wise to send your payment to our M-PESA wallet. Transfer instructions are provided after you select this option.</span>
+                          <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700 }}><ProviderMark id="wise" name="Wise" /><span>{tr("choose.wiseTitle")}</span></span>
+                          <span style={{ display: "block", fontSize: 12, color: BRAND.muted, marginTop: 3, lineHeight: 1.45 }}>{tr("choose.wiseDesc")}</span>
                         </span>
                       </button>
-                      <p style={{ ...muted, fontSize: 11.5, marginTop: 6 }}>Manual transfer: we confirm it by hand, so it can take longer than card payment.</p>
+                      <p style={{ ...muted, fontSize: 11.5, marginTop: 6 }}>{tr("choose.wiseNote")}</p>
                     </div>
                   )}
-                  {methods.length === 0 && <p style={{ ...muted, marginTop: 14, fontSize: 13 }}>Online payment is not available for this invoice right now. Please contact Studio Kairegi.</p>}
+                  {methods.length === 0 && <p style={{ ...muted, marginTop: 14, fontSize: 13 }}>{tr("choose.none")}</p>}
                 </>
               )}
 
               {step.name === "review" && quote && (
                 <>
-                  <h2 style={{ fontSize: 22, margin: "0 0 14px" }}>Review your payment</h2>
+                  <h2 style={{ fontSize: 22, margin: "0 0 14px" }}>{tr("review.title")}</h2>
                   {notice && <p role="status" style={{ background: BRAND.accentSoft, border: `1px solid ${BRAND.accent}55`, borderRadius: 12, padding: 12, fontSize: 12.5, lineHeight: 1.45, margin: "0 0 14px" }}>{notice}</p>}
-                  <QuoteSummary quote={quote} data={data} />
-                  <p style={{ ...muted, fontSize: 12, margin: "12px 0" }}>{quote.converted ? "This price is held for " : "Confirm within "}<strong style={{ color: BRAND.ink }}>{mmss(secs)}</strong>{quote.converted ? ". After that we refresh the rate and ask you to confirm again." : "."}</p>
+                  <QuoteSummary quote={quote} data={data} tr={tr} locale={locale} />
+                  <p style={{ ...muted, fontSize: 12, margin: "12px 0" }}>{rich(tr.raw(quote.converted ? "review.heldConv" : "review.heldPlain"), { time: <strong style={{ color: BRAND.ink }}>{lang === "ja" ? formatCountdownJa(secs) : mmss(secs)}</strong> })}</p>
                   {error && <p role="alert" style={{ color: BRAND.danger, fontSize: 12.5, margin: "0 0 10px" }}>{error}</p>}
-                  <button type="button" onClick={confirm} disabled={!!busy || secs === 0} style={primaryBtn(!!busy || secs === 0)}>{busy ? "Opening Paystack…" : "Confirm amount and continue to Paystack"}</button>
-                  <p style={{ margin: "12px 0 0" }}><button type="button" style={ghostBtn} disabled={!!busy} onClick={() => { setStep({ name: "choose" }); setNotice(""); setError(""); }}>Back to payment options</button></p>
+                  <button type="button" onClick={confirm} disabled={!!busy || secs === 0} style={primaryBtn(!!busy || secs === 0)}>{busy ? tr("review.opening") : tr("review.confirm")}</button>
+                  <p style={{ margin: "12px 0 0" }}><button type="button" style={ghostBtn} disabled={!!busy} onClick={() => { setStep({ name: "choose" }); setNotice(""); setError(""); }}>{tr("review.back")}</button></p>
                 </>
               )}
 
-              {step.name === "wise" && <WisePanel token={token} data={data} email={email} onBack={() => setStep({ name: "choose" })} />}
+              {step.name === "wise" && <WisePanel token={token} data={data} email={email} onBack={() => setStep({ name: "choose" })} tr={tr} lang={lang} />}
               {notice && step.name !== "review" && <p role="status" style={{ background: BRAND.accentSoft, border: `1px solid ${BRAND.accent}55`, borderRadius: 12, padding: 12, fontSize: 12.5, lineHeight: 1.45, marginTop: 14 }}>{notice}</p>}
             </section>
           </div>

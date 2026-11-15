@@ -37,9 +37,23 @@ export function isRevokedProviderRefresh(provider: string, status: number, data:
   const code = String(body.error || body.code || "").toLowerCase();
   if (status === 401) return true;
   if (provider === "gmail") return status === 400 && code === "invalid_grant";
-  // Zoho's token endpoint may return an OAuth error code in its JSON body.
+  // Zoho's token endpoint may return an OAuth error code in its JSON body (often with HTTP 200).
   // invalid_client is deliberately excluded: it indicates app configuration, not user revocation.
   return provider === "zoho" && ["invalid_grant", "invalid_code"].includes(code);
+}
+
+/**
+ * Provider refresh responses that mean "slow down", never "the grant is gone".
+ * Zoho caps refresh-token -> access-token exchanges (roughly 10 per 10 minutes per refresh token) and
+ * answers the excess with an "Access Denied ... too many requests" body, which is a 4xx and must not be
+ * treated as a revoked authorization.
+ */
+export function isThrottledProviderRefresh(status: number, data: unknown): boolean {
+  const body = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  const code = String(body.error || body.code || "").toLowerCase();
+  const text = String(body.error_description || body.message || "").toLowerCase();
+  return status === 429 || ["rate_limit_exceeded", "temporarily_unavailable", "too_many_requests"].includes(code) ||
+    (code === "access denied" && /too many requests|try again after/.test(text));
 }
 
 export class AdapterError extends Error {

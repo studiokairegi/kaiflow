@@ -45,6 +45,7 @@ DEFAULT_POLICY = {"discovery": "gemini_first", "research": "gemini_first"}   # P
 SITE_DEFAULTS = {"health.gemini": "gemini_first", "health.ollama": "ollama"}   # Phase 6: the selftest pins one check to each provider (no private data is sent)
 KNOWN_SITES = frozenset({                                        # every call-site tag the worker passes; a typo in KAIRFLOW_AI_POLICY is rejected at startup
     "discovery.news", "discovery.manual_post", "discovery.studio_profile", "research.entity", "research.studio_reeval",
+    "research.qualification_review",                             # Phase 6: needs_review explanation only; never writes a score or decision
     "drafting.initial", "drafting.followup", "drafting.reply", "drafting.takeover", "drafting.takeover_followup", "drafting.takeover_reply",
     "drafting.takeover_analysis", "classification.inbound", "chat.plan", "health.chat", "health.gemini", "health.ollama"})
 R_GEMINI_DRAFT_REJECTED = "gemini_draft_rejected"               # route_reason of the Ollama retry after a Gemini-written draft failed validation
@@ -56,6 +57,7 @@ DEFAULT_JSON_MODEL = "gemini-3.8-flash"                         # exact pinned I
 class RouterSettings:
     policy: dict = field(default_factory=lambda: dict(DEFAULT_POLICY))   # "default" | group | "group.name" -> "ollama" | "gemini_first"
     model: str = DEFAULT_JSON_MODEL                     # exact model ID for generate_json; Agent Chat keeps KAIRFLOW_GEMINI_MODEL until Phase 6
+    fast_model: str = ""                                # optional exact model ID for fast=True structured calls (F-07); "" = use `model` (previous behaviour)
     force_ollama: bool = False
     d1: str = "A"                                       # A: private groups stay on Ollama. C: everything may go to Gemini unredacted.
     thinking: str = "low"                               # thinkingLevel sent to Gemini 3.x models; thinking cannot be disabled
@@ -139,6 +141,9 @@ def settings_from_env(e: dict) -> RouterSettings:
     model = (e.get("KAIRFLOW_GEMINI_JSON_MODEL") or DEFAULT_JSON_MODEL).strip()
     if not re.fullmatch(r"gemini-[a-z0-9][a-z0-9.\-]{1,60}", model) or "latest" in model:
         raise ValueError("KAIRFLOW_GEMINI_JSON_MODEL must be an exact Gemini model ID such as gemini-3.8-flash (no 'latest' alias)")
+    fast_model = (e.get("KAIRFLOW_GEMINI_FAST_MODEL") or "").strip()
+    if fast_model and (not re.fullmatch(r"gemini-[a-z0-9][a-z0-9.\-]{1,60}", fast_model) or "latest" in fast_model):
+        raise ValueError("KAIRFLOW_GEMINI_FAST_MODEL must be an exact Gemini model ID (no 'latest' alias) or empty")
     reserve_raw = (e.get("KAIRFLOW_GEMINI_DRAFT_RESERVE") or "").strip()
     try:
         reserve = float(reserve_raw) if reserve_raw else 0.25
@@ -152,7 +157,7 @@ def settings_from_env(e: dict) -> RouterSettings:
     base = {} if "default" in user_policy else DEFAULT_POLICY
     return RouterSettings(
         policy={**base, **user_policy},
-        model=model,
+        model=model, fast_model=fast_model,
         force_ollama=_truthy(e.get("KAIRFLOW_AI_FORCE_OLLAMA")),
         d1=d1, thinking=thinking,
         max_output_fast=_int(e, "KAIRFLOW_GEMINI_MAX_OUTPUT_FAST", 2048, 256, 65536),

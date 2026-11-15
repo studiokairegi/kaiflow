@@ -11,6 +11,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 
 const service = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
 const oauthDeps = {
+  tokenCache: new Map<string, { token: string; expiresAtMs: number }>(),
   env: (name: string) => Deno.env.get(name), createClient, service,
   fetch: (url: string, init?: Record<string, unknown>) => fetch(url, { ...(init as RequestInit), signal: (init as RequestInit)?.signal || AbortSignal.timeout(15_000) }),
   encrypt: (value: string) => encryptText(value, Deno.env.get("INTEL_TOKEN_ENCRYPTION_KEY") || ""),

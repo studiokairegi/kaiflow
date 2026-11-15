@@ -6,6 +6,7 @@ import { FINANCE_CURRENCIES, formatMoney, r2, todayLocal } from "./currency.js";
 import { rpc, saveManualFxRate, saveDefaultBank, saveFxSnapshot } from "./api.js";
 import { RevenueTrendChart } from "../DashboardCharts.jsx";
 import { useLedger } from "./useLedger.js";
+import { sourcesKey as sourcesKeyOf } from "./sourcesKey.js";
 import { dashboardSummary, fxIssues } from "./reports.js";
 import { Sales, Expenses } from "./Sales.jsx";
 import { Purchases } from "./Purchases.jsx";
@@ -45,7 +46,7 @@ function Overview({ ctx, go }) {
   const projectBy = new Map(projects.map((p) => [p.id, p]));
   const docsAR = invoices.map((i) => ({ id: i.id, number: i.invoiceNumber, dueDate: i.dueDate, party: projectBy.get(i.projectId)?.client || "", projectId: i.projectId }));
   const docsAP = data.bills.map((b) => ({ id: b.id, number: b.bill_number, dueDate: b.due_date || b.issue_date, party: b.vendor_name, projectId: b.project_id }));
-  const s = useMemo(() => dashboardSummary(data, { today: today(), docsAR, docsAP }), [data, invoices]);
+  const s = useMemo(() => dashboardSummary(data, { today: today(), docsAR, docsAP }), [data, invoices, projects]);
   const attention = [];
   if (s.fxIssueCount) attention.push({ tone: "warn", text: `${s.fxIssueCount} transaction(s) need an exchange rate and are excluded from base-currency totals.`, label: "Resolve", to: "settings" });
   if (s.overdueCount) attention.push({ tone: "bad", text: `${s.overdueCount} overdue invoice(s).`, label: "View", to: "sales" });
@@ -183,11 +184,15 @@ export default function FinanceModule({ userId, projects, invoices, expenses, ca
   const ledger = useLedger(userId);
   const [tab, setTab] = useState("overview");
   const first = useRef(true);
+  // App passes freshly filtered arrays on every render, so their identity changes constantly. Keying the
+  // reload on identity restarted the ledger load on every unrelated App re-render and discarded the one in
+  // flight (useLedger ignores superseded loads), leaving Finance stuck on the loader. Key on content instead.
+  const sourcesKey = useMemo(() => sourcesKeyOf(invoices, expenses), [invoices, expenses]);
   useEffect(() => {
     // An invoice/expense was saved elsewhere in the app: pull the ledger entries it just produced.
     if (first.current) { first.current = false; return; }
     ledger.reload();
-  }, [invoices, expenses]);
+  }, [sourcesKey]);
   if (ledger.loading) return <LogoLoader label="Loading Finance" />;
   if (!ledger.data) {
     return <div style={S.page}><Banner tone="bad" action={<Btn small onClick={ledger.reload}>Retry</Btn>}>Finance couldn't load: {ledger.error || "no data"}. If this is the first run, apply migration_finance_v2.sql in Supabase.</Banner></div>;

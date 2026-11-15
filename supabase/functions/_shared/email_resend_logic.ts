@@ -214,8 +214,11 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
   const auth = await deps.authenticate(req);
   if (!auth.ok) return refuse(auth.status, auth.status === 401 ? "unauthenticated" : "forbidden", auth.error);
 
-  const text = await req.text();
-  if (text.length > LIMITS.maxRequestBytes) return refuse(413, "request_too_large", "Request is too large");
+  // Bound the read BEFORE buffering: refuse on the declared length, and stop streaming as soon as the cap is crossed.
+  if (Number(req.headers.get("content-length") || 0) > LIMITS.maxRequestBytes) return refuse(413, "request_too_large", "Request is too large");
+  const bodyBytes = await readCapped(new Response(req.body), LIMITS.maxRequestBytes);
+  if (!bodyBytes) return refuse(413, "request_too_large", "Request is too large");
+  const text = new TextDecoder().decode(bodyBytes);
   let raw: unknown;
   try { raw = JSON.parse(text); } catch { return refuse(400, "invalid_request", "Invalid request"); }
   const v = validateSendRequest(raw);

@@ -78,9 +78,36 @@ def _studio_sentence(text: str, pat: str, scan: int = 25) -> str | None:
     return first
 
 
+# A sentence that denies, ends or already satisfies a need ("not looking for an animator", "no longer hiring", "already hired") must not be
+# evidence that the team is seeking animation help. Checked on the words just before the match, and on the matched phrase itself.
+_NEGATION = re.compile(r"\b(?:not|no|never|no longer|cannot|can't|cant|isn't|aren't|don't|doesn't|won't|without|already (?:hired|found|have|has|got))\b|n't\b", I)
+# What counts as an explicit request for animation help. "animated trailer/cutscene" alone only says a game HAS animation, not that it wants help.
+SEEKING_EXPLICIT = re.compile(r"(looking for|seeking|hiring|need(ing)?|searching for) (an? )?(2d |freelance |anime )?animators?|animation (freelancer|support|partner|help)", I)
+
+
+def _seeking_sentence(text: str, pat: str) -> str | None:
+    """First sentence matching the seeking_animation pattern that is not negated. None when every match is negated."""
+    for m in re.finditer(pat, text, I):
+        sent = sentence_around(text, m.start(), m.end())
+        if not sent:
+            continue
+        before = text[max(0, m.start() - 40): m.start()]
+        # only look back inside the same sentence
+        before = re.split(r"[.!?\n。]", before)[-1]
+        if _NEGATION.search(before) or _NEGATION.search(m.group(0)):
+            continue
+        return sent
+    return None
+
+
 def detect(text: str, table: dict[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for name, pat in table.items():
+        if table is INDIE and name == "seeking_animation":
+            sent = _seeking_sentence(text, pat)
+            if sent:
+                out[name] = sent
+            continue
         if table is STUDIO:
             sent = _studio_sentence(text, pat)
             if sent:

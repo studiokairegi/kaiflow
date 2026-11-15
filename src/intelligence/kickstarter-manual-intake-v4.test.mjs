@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 const api = readFileSync(new URL('./api.js', import.meta.url), 'utf8');
 const panels = readFileSync(new URL('./DiscoveryPanels.jsx', import.meta.url), 'utf8');
 const campaign = readFileSync(new URL('./CampaignView.jsx', import.meta.url), 'utf8');
-const migration = readFileSync(new URL('../../supabase/migrations/20261112170000_intelligence_kickstarter_manual_intake_v4.sql', import.meta.url), 'utf8');
+const migration = readFileSync(new URL('../../supabase/migrations/20261112200311_kickstarter_manual_intake_v4.sql', import.meta.url), 'utf8');
 
 test('Kickstarter intake is an explicit administrator-submitted workflow', () => {
   assert.match(api, /addKickstarterProject:\s*\(s, project\)\s*=>\s*call\(s, "intel_admin_add_kickstarter_project"/);

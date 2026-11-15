@@ -14,6 +14,7 @@ const toBase64 = (file) => new Promise((resolve, reject) => {
 });
 
 export const emailApi = {
+  setActiveOrganization: (s, organizationId) => call(s, "email_set_active_organization", { p_organization_id: organizationId }),
   accounts: (s) => call(s, "email_list_accounts"),
   providers: (s) => call(s, "email_provider_registry_list"),
   list: (s, folder, search, accountId = null, provider = null, limit = 50) => call(s, "email_list_conversations", { p_folder: folder, p_search: search || null, p_limit: Math.min(Math.max(Number(limit) || 50, 1), 500), p_offset: 0, p_account_id: accountId || null, p_provider: provider || null }),

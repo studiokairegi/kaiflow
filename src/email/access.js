@@ -18,3 +18,16 @@ export async function loadEmailAccess(supabase, userId) {
     return false;
   }
 }
+
+/** Tells the database which studio the person is working in, so every email_* function (and the email-send function) uses it instead of
+ *  guessing the first studio. Best effort: a failure keeps the previous server-side choice (the old behavior) and never blocks the Inbox. */
+export async function syncActiveEmailOrganization(supabase, organizationId) {
+  const id = typeof organizationId === "string" ? organizationId.trim() : "";
+  if (!supabase || !id) return false;
+  try {
+    const { error } = await supabase.rpc("email_set_active_organization", { p_organization_id: id });
+    return !error;
+  } catch {
+    return false;
+  }
+}

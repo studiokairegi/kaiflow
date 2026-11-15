@@ -266,6 +266,83 @@ def itch(fetcher, keywords: list[str], limit: int = MAX_PER_RUN) -> list[dict]:
     return itch_page(fetcher, keywords, None, limit)[0]
 
 
+PRESSKIT_SOURCE = "presskit"
+
+
+def presskit_urls_from(criteria) -> list[str] | None:
+    """The administrator-listed press-kit URLs in criteria["presskit_urls"], or None when the list is missing or malformed."""
+    raw = criteria.get("presskit_urls") if isinstance(criteria, dict) else None
+    if not isinstance(raw, list) or not raw:
+        return None
+    out = []
+    for u in raw:
+        if not isinstance(u, str):
+            return None
+        u = u.strip()
+        p = urlparse(u)
+        if p.scheme not in ("http", "https") or not p.hostname or "." not in p.hostname:
+            return None
+        host = p.hostname.lower().removeprefix("www.")
+        if host == "kickstarter.com" or host.endswith(".kickstarter.com"):
+            return None                      # Kickstarter is manual-only: never fetched, never listed as a source URL
+        if u not in out:
+            out.append(u)
+    return out
+
+
+def presskit_candidate(html: str, url: str) -> dict | None:
+    """One discovery candidate from one press-kit page, or None. Needs a developer name AND a game title read from the page."""
+    from . import presskit
+    kit = presskit.parse(html, url)
+    if not kit["is_presskit"]:
+        return None
+    facts = {f["fact_type"]: f["value"] for f in reversed(kit["facts"])}
+    developer = (facts.get("presskit_developer") or "").strip()
+    title = (kit["title"] or "").strip()
+    if len(developer) < 2 or len(title) < 2:
+        return None
+    p = urlparse(url)
+    website = kit["website"] if kit["website"] and urlparse(kit["website"]).scheme in ("http", "https") else f"{p.scheme}://{p.netloc}"
+    lang = (BeautifulSoup(html, "lxml").html or {}).get("lang", "") if html else ""
+    lang = str(lang)[:2].lower()
+    short = "; ".join(f"{k.removeprefix('presskit_')}: {v}" for k, v in facts.items() if k in ("presskit_publisher", "presskit_release", "presskit_platforms"))[:600]
+    return {"name": developer[:120], "website": website, "contact_email": "", "contact_source_url": "", "country": "",
+            "meta": {"language": lang if lang in ("en", "ja") else "other", "source": PRESSKIT_SOURCE, "source_key": PRESSKIT_SOURCE,
+                     "project_title": title, "project_url": url, "project_source_url": url, "source_url": url, "developer_name": developer,
+                     # Listed by a press kit, not verified: research decides whether the official site confirms it.
+                     "developer_identity_status": "presskit_listed_developer", "presskit_url": url, "short": short,
+                     "presskit_press_email": kit["press_emails"][0]["email"] if kit["press_emails"] else ""}}
+
+
+def presskit_page(fetcher, urls: list[str], cursor: dict | None = None, limit: int = 12) -> tuple[list[dict], dict | None]:
+    """One slice of the administrator-listed press-kit URLs. A blocked or unreadable page yields nothing; a budget denial propagates."""
+    try:
+        start = max(0, int((cursor or {}).get("index", 0)))
+    except (TypeError, ValueError):
+        start = 0
+    rows, seen = [], set()
+    for u in urls[start:start + max(1, limit)]:
+        try:
+            got = _safe(fetcher.fetch, u)
+        except PermanentError as exc:
+            if "budget" in str(exc).lower():
+                raise
+            continue
+        if not got:
+            continue
+        final, html = got
+        cand = presskit_candidate(html, final)
+        if not cand:
+            continue
+        key = (cand["name"].casefold(), cand["meta"]["project_title"].casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(cand)
+    nxt = start + max(1, limit)
+    return rows, ({"index": nxt} if nxt < len(urls) else None)
+
+
 def discover_batch(fetcher, ptype: str, criteria: dict, *, cursor=None, enabled_sources=None,
                    reserve_source=None, report_source=None, source_status=None, limit: int = 25) -> dict:
     """One resumable discovery slice per authorized source. Budget/circuit holds retain cursors; transient errors bubble up."""
@@ -275,24 +352,30 @@ def discover_batch(fetcher, ptype: str, criteria: dict, *, cursor=None, enabled_
     requested = criteria.get("sources")
     raw_keywords = criteria.get("keywords")
     keywords = [k.strip() for k in raw_keywords if isinstance(k, str) and k.strip()] if isinstance(raw_keywords, list) else []
-    if not isinstance(requested, list) or not requested or not keywords or enabled_sources is None or reserve_source is None:
+    if (not isinstance(requested, list) or not requested or enabled_sources is None or reserve_source is None
+            or (not keywords and any(k != PRESSKIT_SOURCE for k in requested))):
         return {"candidates": [], "next_cursor": {}}
-    if any(not isinstance(key, str) or key not in ("steam", "itch") for key in requested):
+    if any(not isinstance(key, str) or key not in ("steam", "itch", PRESSKIT_SOURCE) for key in requested):
         return {"candidates": [], "next_cursor": {}}
+    kit_urls = presskit_urls_from(criteria) if PRESSKIT_SOURCE in requested else None
     state = cursor if isinstance(cursor, dict) else {}
     status_map = source_status if isinstance(source_status, dict) else {}
     candidates, next_state, deferred = [], {}, {}
     quota = max(1, min(25, int(limit) // max(1, len(requested))))
 
     def initial_cursor(key):
-        return ({"keyword_index": 0, "start": 0} if key == "steam" else {"keyword_index": 0, "page": 1, "offset": 0})
+        return ({"keyword_index": 0, "start": 0} if key == "steam" else {"index": 0} if key == PRESSKIT_SOURCE else {"keyword_index": 0, "page": 1, "offset": 0})
 
-    for key, adapter in (("steam", steam_page), ("itch", itch_page)):
+    for key, adapter in (("steam", steam_page), ("itch", itch_page), (PRESSKIT_SOURCE, lambda f, _kws, cur, q: presskit_page(f, kit_urls or [], cur, q))):
         if key not in requested:
             continue
         if key not in enabled_sources:
             if report_source:
                 report_source(key, False, "requested source is not registry-authorized")
+            continue
+        if key == PRESSKIT_SOURCE and not kit_urls:
+            if report_source:
+                report_source(key, False, "presskit source needs criteria.presskit_urls: a list of http(s) press-kit URLs")
             continue
         current = state.get(key) if isinstance(state.get(key), dict) else initial_cursor(key)
         # A source can finish while another source still has pages or is waiting for
@@ -383,19 +466,25 @@ def discover(fetcher, ptype: str, criteria: dict, *, enabled_sources=None, reser
     kws = [k.strip() for k in raw_keywords if isinstance(k, str) and k.strip()] if isinstance(raw_keywords, list) else []
     if ptype == "indie_game_developer":
         requested = criteria.get("sources")
-        if not isinstance(requested, list) or not kws or enabled_sources is None or reserve_source is None:
+        if (not isinstance(requested, list) or enabled_sources is None or reserve_source is None
+                or (not kws and (not requested or any(k != PRESSKIT_SOURCE for k in requested)))):
             return []
         out = []
         # Validate requested source values instead of silently treating malformed
         # configuration as an empty/partially authorized request.
-        if any(not isinstance(key, str) or key not in ("steam", "itch") for key in requested):
+        if any(not isinstance(key, str) or key not in ("steam", "itch", PRESSKIT_SOURCE) for key in requested):
             return []
-        for key, adapter in (("steam", steam), ("itch", itch)):
+        kit_urls = presskit_urls_from(criteria) if PRESSKIT_SOURCE in requested else None
+        for key, adapter in (("steam", steam), ("itch", itch), (PRESSKIT_SOURCE, lambda f, _kws: presskit_page(f, kit_urls or [], None, MAX_PER_RUN)[0])):
             if key not in requested:
                 continue
             if key not in enabled_sources:
                 if report_source:
                     report_source(key, False, "requested source is not registry-authorized")
+                continue
+            if key == PRESSKIT_SOURCE and not kit_urls:
+                if report_source:
+                    report_source(key, False, "presskit source needs criteria.presskit_urls: a list of http(s) press-kit URLs")
                 continue
             class MeteredFetcher:
                 def fetch(self, url):

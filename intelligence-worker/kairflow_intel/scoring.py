@@ -220,7 +220,7 @@ def indie_mandatory_gates(meta: dict, evidence_rows: list[dict], contactability_
     identity_source = str(meta.get("source_key") or meta.get("source") or "").casefold()
     identity_status = str(meta.get("developer_identity_status") or "").casefold()
     identity_unverified = (
-        identity_source in {"kickstarter_manual", "itch"}
+        identity_source in {"kickstarter_manual", "itch", "presskit"}
         and identity_status not in {"independently_verified", "human_confirmed", "verified"}
     )
     project_identity = _identifiable(title) and _identifiable(developer_name) and has_project_source and not identity_unverified

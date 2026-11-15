@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { S, T, Pill, Banner, Table, Btn, useBusy } from "../finance/ui.jsx";
 import { intelApi } from "./api.js";
-import { fmtWhen } from "./logic.js";
+import { fmtWhen, jobPhase, jobSummary } from "./logic.js";
 import { Muted, Section, Select, useLoad, confirmAction } from "./kit.jsx";
 
 export default function LogsView({ supabase, tick }) {
@@ -14,18 +14,26 @@ export default function LogsView({ supabase, tick }) {
     run(async () => { const result = await intelApi.requeueJob(supabase, job.id); if (!result?.ok) throw new Error(result?.reason || "Job could not be requeued."); await jobs.reload(); });
   };
   const rows = (acts.data || []).filter((a) => !who || a.actor === who);
+  const now = Date.now();
+  const summary = jobSummary(jobs.data, now);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {(acts.error || jobs.error || actionError) && <Banner tone="bad">{actionError || acts.error || jobs.error}</Banner>}
-      <Section title="Jobs" hint="Queued and running work, and anything that failed. Failed jobs retry automatically; dead ones need a look.">
+      <Section title="Jobs" hint="Queued and running work, and anything that failed. A job that failed shows as Retrying with its next try time; a job that cannot succeed shows as Failed permanently and needs a look. Requeue after you fix the cause.">
+        {(summary.dead > 0 || summary.retrying > 0 || summary.stalled > 0) && (
+          <Banner tone={summary.dead > 0 ? "bad" : "warn"}>
+            {[summary.dead && `${summary.dead} failed permanently`, summary.retrying && `${summary.retrying} retrying after an error`, summary.stalled && `${summary.stalled} stalled`].filter(Boolean).join(", ")}.
+          </Banner>
+        )}
         <Table rowKey={(r) => r.id} empty={jobs.loading ? "Loading…" : "No active or failed jobs."} rows={jobs.data || []}
           columns={[
             { key: "kind", label: "Job" },
-            { key: "state", label: "State", render: (r) => <Pill tone={r.state === "dead" ? "bad" : r.state === "failed" ? "warn" : "info"}>{r.state}</Pill> },
+            { key: "state", label: "State", render: (r) => { const p = jobPhase(r, now); return <Pill tone={p.tone}>{p.label}</Pill>; } },
             { key: "attempts", label: "Tries", num: true, render: (r) => `${r.attempts}/${r.max_attempts}` },
+            { key: "next", label: "Next try", render: (r) => (jobPhase(r, now).key === "retrying" ? fmtWhen(r.run_after) : <span style={{ color: T.faint }}>—</span>) },
             { key: "last_error", label: "Last error", render: (r) => <span style={{ color: T.muted }}>{r.last_error || "-"}</span> },
             { key: "updated_at", label: "Updated", render: (r) => fmtWhen(r.updated_at) },
-            { key: "recover", label: "Recovery", render: (r) => ["dead", "failed"].includes(r.state)
+            { key: "recover", label: "Recovery", render: (r) => jobPhase(r, now).recoverable
               ? <Btn small disabled={busy} onClick={() => recover(r)}>Requeue</Btn> : <span style={{ color: T.faint }}>—</span> },
           ]} />
       </Section>

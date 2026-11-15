@@ -15,6 +15,7 @@ from typing import Callable
 from . import classify as cls, discovery, drafting, mailops, policy, research, sources, studio_reeval
 from .ai_call import call_json, composed
 from .errors import PermanentError, RpcError, TransientError
+from .job_policy import classify_failure, scrub_error, settle_delays, transient_backoff
 from .safety import MeteredFetcher
 from .protected_accounts import match_protected
 
@@ -79,9 +80,10 @@ def h_discover(d: Deps, job):
     if t == "indie_game_developer":
         requested = configured.get("sources")
         keywords = configured.get("keywords")
+        only_presskit = isinstance(requested, list) and bool(requested) and all(key == sources.PRESSKIT_SOURCE for key in requested)
         if (not isinstance(requested, list) or not requested or
-                any(not isinstance(key, str) or key not in ("steam", "itch") for key in requested) or
-                not isinstance(keywords, list) or not any(isinstance(k, str) and k.strip() for k in keywords)):
+                any(not isinstance(key, str) or key not in ("steam", "itch", sources.PRESSKIT_SOURCE) for key in requested) or
+                (not only_presskit and (not isinstance(keywords, list) or not any(isinstance(k, str) and k.strip() for k in keywords)))):
             return {"skipped": "indie discovery requires valid explicitly configured sources and non-empty keywords"}
         if not any(key in enabled_sources for key in requested):
             return {"skipped": "no requested indie source is registry-authorized"}
@@ -102,6 +104,7 @@ def h_discover(d: Deps, job):
 
     new = 0
     recorded = 0
+    by_source: dict[str, dict] = {}          # Phase 5: yield per source, so discovery quality is measurable (seen / new / already known)
     for c in candidates[:limit]:
         meta = dict(c.get("meta") or {})
         if t == "indie_game_developer":
@@ -110,11 +113,11 @@ def h_discover(d: Deps, job):
             # developer or protected game is excluded; an unrelated developer with a protected
             # third-party publisher is not.
             protected = match_protected(c.get("name", ""), project_title, *(meta.get("developer_names") or []))
-            if protected:
+            if protected or not (meta.get("project_url") or meta.get("project_source_url") or meta.get("source_url")):
+                skip_key = str(meta.get("source_key") or meta.get("source") or "unknown")[:40]
+                by_source.setdefault(skip_key, {"seen": 0, "new": 0, "already_known": 0, "suppressed": 0, "skipped": 0})["skipped"] += 1
                 continue
             project_url = meta.get("project_url") or meta.get("project_source_url") or meta.get("source_url") or ""
-            if not project_url:
-                continue
             meta.setdefault("project_title", project_title)
             meta.setdefault("project_url", project_url)
             meta.setdefault("project_source_url", project_url)
@@ -133,6 +136,15 @@ def h_discover(d: Deps, job):
                 "p_title": str(meta.get("project_title") or "")[:300], "p_snippet": str(meta.get("short") or meta.get("description") or "")[:600],
                 "p_language": language, "p_prospect_id": r["prospect_id"], "p_meta": meta})
             recorded += 1
+        src_key = str(meta.get("source_key") or meta.get("source") or "unknown")[:40]
+        tally = by_source.setdefault(src_key, {"seen": 0, "new": 0, "already_known": 0, "suppressed": 0, "skipped": 0})
+        tally["seen"] += 1
+        if r.get("suppressed"):
+            tally["suppressed"] += 1
+        elif r["created"]:
+            tally["new"] += 1
+        else:
+            tally["already_known"] += 1
         if r["created"] and not r.get("suppressed"):
             new += 1
         if t == "indie_game_developer" and not r.get("suppressed"):
@@ -147,7 +159,8 @@ def h_discover(d: Deps, job):
         schedule_bucket = int(d.clock() // max(60, continuation_delay))
         _enq(d, "discover", {"type": t, "limit": limit, "manual": manual, "cursor": next_cursor},
              f"discover:{t}:cursor:{cursor_key}:{continuation_delay}:{schedule_bucket}", delay=continuation_delay)
-    return {"new": new, "discovered": len(candidates), "recorded": recorded, "manual": manual,
+    return {"new": new, "discovered": len(candidates), "recorded": recorded, "manual": manual, "by_source": by_source,
+            "duplicate_rate": (round(sum(x["already_known"] for x in by_source.values()) / max(1, sum(x["seen"] for x in by_source.values())), 3)),
             "next_cursor": next_cursor if t == "indie_game_developer" else None}
 
 
@@ -200,7 +213,10 @@ def h_qualify(d: Deps, job):
     if ctx and ctx.get("prospect", {}).get("type") == "indie_game_developer":
         ctx = d.rpc("intel_agent_indie_context", {"p_prospect_id": pid})
     camp = next((c for c in d.rpc("intel_agent_settings", {})["campaigns"] if c["type"] == ctx["prospect"]["type"]), {"criteria": {}})
-    res = research.qualify(d.rpc, ctx, camp["criteria"])
+    # llm is used only for the Phase 6 needs_review explanation (research.qualify never lets it touch the
+    # score or decision); the same router already used for research/drafting, so no new D1 decision applies.
+    # getattr (not d.llm) so any older/fake Deps without an llm attribute still gets the deterministic note.
+    res = research.qualify(d.rpc, ctx, camp["criteria"], llm=getattr(d, "llm", None))
     if res.decision == "qualified" and res.contactability.get("status") == "pass" and not res.held:       # suitability and contactability are independent gates
         _enq(d, "resolve", {"prospect_id": pid}, f"resolve:{pid}")
     return {"score": res.score, "decision": res.decision, "contactability": res.contactability, **({"held": "older scoring model kept; candidate recorded"} if res.held else {})}
@@ -774,6 +790,11 @@ class Worker:
         self._active_job = None
         self._last_job_completed_at = None
         self._last_job_error = None
+        # Phase 4: operational counters and the last scheduler problem, published in the heartbeat so the app can show them.
+        self._started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(deps.clock()))
+        self._jobs_succeeded = 0
+        self._jobs_failed = 0
+        self._scheduler_error = None
 
     def _heartbeat(self) -> None:
         d = self.d
@@ -786,50 +807,187 @@ class Worker:
             "active_job": self._active_job,
             "last_job_completed_at": self._last_job_completed_at,
             "last_job_error": self._last_job_error,
+            "started_at": self._started_at,
+            "jobs_succeeded": self._jobs_succeeded,
+            "jobs_failed": self._jobs_failed,
+            "scheduler_error": self._scheduler_error,
         }
         d.rpc("intel_agent_heartbeat", {"p_worker_id": d.cfg.worker_id, "p_info": info})
 
     def periodic(self) -> None:
+        """Enqueue the scheduled work. Every enqueue is idempotent (bucketed keys).
+
+        A database rejection of ONE enqueue (RpcError) is recorded and the remaining schedule still runs, so one bad campaign row or one
+        rejected job kind can no longer stop every other kind of scheduled work. A network failure (TransientError) aborts the pass: the
+        database is unreachable, so the remaining calls would only wait for their timeouts."""
         d, now = self.d, self.d.clock()
         st = d.rpc("intel_agent_settings", {})
         today = st["today"]
+        problems: list[str] = []
+
+        def enq(kind, payload, key, **kw):
+            try:
+                _enq(d, kind, payload, key, **kw)
+            except RpcError as exc:
+                problems.append(f"{kind}: {str(exc)[:80]}")
+
         for kind, secs in (("sync_mail", 120), ("reconcile", 300), ("classify", 120), ("followup_scan", 3600)):
-            _enq(d, kind, {}, f"{kind}:{int(now // secs)}")
-        _enq(d, "retention", {}, f"retention:{today}")
+            enq(kind, {}, f"{kind}:{int(now // secs)}")
+        enq("retention", {}, f"retention:{today}")
         for c in st["campaigns"]:
             if c["status"] == "active":
                 if c["type"] == "indie_game_developer":
                     # Do not restart the first keyword while a paginated cursor is queued/running.
                     # The continuation job survives the source's daily budget reset.
-                    pending_cursor = bool(d.rpc("intel_agent_discovery_has_pending", {"p_type": c["type"]}))
+                    try:
+                        pending_cursor = bool(d.rpc("intel_agent_discovery_has_pending", {"p_type": c["type"]}))
+                    except RpcError as exc:
+                        problems.append(f"discovery_has_pending: {str(exc)[:80]}")
+                        pending_cursor = True      # unknown: do not start a second first-page run
                     if not pending_cursor:
-                        _enq(d, "discover", {"type": c["type"]}, f"discover:{c['type']}:{today}")
+                        enq("discover", {"type": c["type"]}, f"discover:{c['type']}:{today}")
                 else:
-                    _enq(d, "discover", {"type": c["type"]}, f"discover:{c['type']}:{today}")
+                    enq("discover", {"type": c["type"]}, f"discover:{c['type']}:{today}")
                 if c["type"] == "animation_studio_support":     # autonomous discovery: weekly seed, daily news, 6-hourly feeds, monthly archive check
                     wk, mo = time.strftime("%G-W%V", time.gmtime(now)), time.strftime("%Y-%m", time.gmtime(now))
-                    _enq(d, "seed_sources", {"type": c["type"]}, f"seed:{wk}")
-                    _enq(d, "news_scan", {}, f"news:{today}")
-                    _enq(d, "feed_poll", {}, f"feeds:{int(now // 21600)}")
-                    _enq(d, "crawl_index", {}, f"crawl:{mo}")
+                    enq("seed_sources", {"type": c["type"]}, f"seed:{wk}")
+                    enq("news_scan", {}, f"news:{today}")
+                    enq("feed_poll", {}, f"feeds:{int(now // 21600)}")
+                    enq("crawl_index", {}, f"crawl:{mo}")
         if not st["kill_switch"]:
-            for i, m in enumerate(d.rpc("intel_agent_approved_outbound", {"p_limit": 10}) or []):
-                _enq(d, "send", {"message_id": m["id"]}, f"send:{m['id']}:{int(now // 900)}", delay=i * 60)
+            try:
+                approved = d.rpc("intel_agent_approved_outbound", {"p_limit": 10}) or []
+            except RpcError as exc:
+                problems.append(f"approved_outbound: {str(exc)[:80]}")
+                approved = []
+            for i, m in enumerate(approved):
+                enq("send", {"message_id": m["id"]}, f"send:{m['id']}:{int(now // 900)}", delay=i * 60)
+        if problems:
+            raise RpcError("scheduler pass incomplete: " + "; ".join(problems)[:300], "scheduler", 0)
+
+    def _housekeeping(self) -> None:
+        """Heartbeat and scheduling run on a 30 s cadence and must never stop job claiming.
+
+        Before Phase 4 an exception from either one escaped tick() before the claim call, so a single failing scheduled step (or a heartbeat
+        refusal) starved the whole queue for as long as it kept failing. The cadence timestamp is now set first, failures are recorded in
+        `scheduler_error` (published in the heartbeat), and the claim below still runs. A network outage still surfaces from the claim itself."""
+        d = self.d
+        self._hb = d.clock()
+        errors = []
+        network_down = False
+        try:
+            self._heartbeat()
+        except TransientError as exc:
+            network_down = True          # the database is unreachable: a scheduler pass would only wait for its own timeouts
+            errors.append(f"heartbeat: {type(exc).__name__}")
+        except Exception as exc:
+            errors.append(f"heartbeat: {type(exc).__name__}: {str(exc)[:80]}")
+        try:
+            if not network_down:
+                self.periodic()
+        except TransientError as exc:
+            errors.append(f"scheduler: {type(exc).__name__}")
+        except Exception as exc:
+            errors.append(f"scheduler: {str(exc)[:200]}" if isinstance(exc, RpcError) else f"scheduler: {type(exc).__name__}: {str(exc)[:80]}")
+        self._scheduler_error = "; ".join(errors)[:400] if errors else None
+        if errors and self._scheduler_error != getattr(self, "_logged_scheduler_error", None):
+            self._logged_scheduler_error = self._scheduler_error      # log a problem when it appears or changes, not every 30 s
+            print(f"[worker] housekeeping problem (job claiming continues): {self._scheduler_error}")
+        elif not errors:
+            self._logged_scheduler_error = None
 
     def tick(self) -> bool:
         d = self.d
         if d.clock() - self._hb > 30:
-            self._heartbeat()
-            self.periodic()
-            self._hb = d.clock()
+            self._housekeeping()
         job = d.rpc("intel_agent_claim_job", {"p_worker_id": d.cfg.worker_id, "p_kinds": None, "p_lease_seconds": 300})
         if not job:
             return False
         self.run_job(job)
         return True
 
+    # ---- settlement helpers -------------------------------------------------------------------------------------------------------
+
+    def _settle(self, name: str, params: dict):
+        """Call a job-settlement RPC (complete / fail) with bounded retries on network errors only.
+
+        The handler has already done its work when we get here, so a short outage must not turn a finished job into a re-run. Delays are
+        2, 5, 10, 20, 30 s (about a minute in total, well inside the lease that the last renewal granted). The final TransientError is
+        re-raised for the caller to decide; an RpcError is a definite database answer and is never retried here."""
+        d, delays = self.d, settle_delays()
+        for n in range(len(delays) + 1):
+            try:
+                return d.rpc(name, params)
+            except TransientError:
+                if n == len(delays):
+                    raise
+                d.sleep(delays[n])
+
+    def _ai_counts(self) -> dict:
+        snap = getattr(self.d.llm, "usage_counts", None)
+        try:
+            return {str(k): int(v) for k, v in dict(snap()).items()} if callable(snap) else {}
+        except Exception:
+            return {}
+
+    def _run_meta(self, job, started: float, ai_before: dict) -> dict:
+        """Secret-free execution metadata stored with the job result: how long it took, which attempt, which worker, and how many model
+        calls each provider served (and how many Ollama served although Gemini was allowed or intended)."""
+        after = self._ai_counts()
+        ai = {k: after[k] - ai_before.get(k, 0) for k in after if after[k] - ai_before.get(k, 0) > 0}
+        meta = {"duration_ms": max(0, int((self.d.clock() - started) * 1000)), "attempt": job.get("attempts"),
+                "worker_id": str(self.d.cfg.worker_id)[:80]}
+        if ai:
+            meta["ai_calls"] = ai
+        return meta
+
+    def _audit(self, action: str, job, detail: dict) -> None:
+        try:
+            self.d.rpc("intel_agent_log", {"p_action": action, "p_entity_type": "job", "p_entity_id": str(job.get("id", "")),
+                                           "p_detail": {"kind": job.get("kind"), **detail}})
+        except Exception:
+            pass          # the audit trail is best effort here; the job row itself carries last_error
+
+    def _record_failure(self, job, exc: BaseException, started: float, ai_before: dict) -> None:
+        """Persist a handler failure with an actionable, scrubbed reason, then an audit row.
+
+        transient   -> queued again with a schedule that spans hours for background work (seconds for Agent Chat)
+        permanent   -> dead at once and visible (was: retried daily up to the attempt limit, which looked like an ordinary scheduled job)
+        unexpected  -> treated like transient (a bug or a library fault may clear), with the exception class in the message"""
+        d = self.d
+        error_class, permanent = classify_failure(exc)
+        attempts = int(job.get("attempts") or 1)
+        retry = transient_backoff(job.get("kind"), attempts, d.rand)
+        label = {"transient": "transient", "database_busy": "transient", "permanent": "permanent",
+                 "database_rejected": "permanent"}.get(error_class, f"unexpected {type(exc).__name__}")
+        text = scrub_error(f"{label}: {exc}", 400)
+        outcome = None
+        try:
+            if permanent:
+                try:
+                    outcome = self._settle("intel_agent_fail_job_permanent", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id, "p_error": text})
+                except RpcError:
+                    # The permanent-failure function only exists after migration 20261219100000; on an older schema keep the previous behaviour.
+                    outcome = self._settle("intel_agent_fail_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id, "p_error": text, "p_retry_seconds": 86400})
+            else:
+                outcome = self._settle("intel_agent_fail_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id, "p_error": text, "p_retry_seconds": retry})
+        except TransientError:
+            # Database unreachable even after the bounded retries: the lease expires and the claim recovers the job. Nothing else is safe to do.
+            self._last_job_error = f"{type(exc).__name__} (failure could not be recorded; lease expiry will recover the job)"
+            return
+        self._last_job_error = type(exc).__name__
+        if outcome == "not_owner":
+            self._last_job_error = "lease lost during failure"
+            return
+        self._jobs_failed += 1
+        meta = self._run_meta(job, started, ai_before)
+        self._audit("job_failed", job, {"error_class": error_class, "error": text[:300], "outcome": outcome,
+                                        "attempt": job.get("attempts"), "max_attempts": job.get("max_attempts"),
+                                        "retry_seconds": None if outcome == "dead" or permanent else retry, **meta})
+
     def run_job(self, job) -> None:
         d, h = self.d, HANDLERS.get(job["kind"])
+        started, ai_before = d.clock(), self._ai_counts()
         self._active_job = {"id": job.get("id"), "kind": job.get("kind")}
         lease = _Lease(d.rpc, job, d.cfg.worker_id, heartbeat=self._heartbeat) if self.lease_thread else None
         try:
@@ -846,61 +1004,52 @@ class Worker:
                 # The database may already have reclaimed this job. Never mark it
                 # complete or failed as the former owner; the new lease owner decides.
                 self._last_job_error = "lease lost"
-                try:
-                    d.rpc("intel_agent_log", {"p_action": "job_lease_lost", "p_entity_type": "job",
-                        "p_entity_id": str(job.get("id", "")), "p_detail": {"kind": job.get("kind"), "reason": self._last_job_error}})
-                except Exception:
-                    pass
+                self._audit("job_lease_lost", job, {"reason": self._last_job_error})
                 return
             if isinstance(result, dict) and result.get("reason") in DEFER:
                 result = {**result, "deferred": True}
             if isinstance(result, dict) and result.get("job_failure"):
-                if result.get("terminal_failure"):
-                    outcome = d.rpc("intel_agent_fail_job_permanent", {
-                        "p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
-                        "p_error": f"permanent: {result.get('reason', 'terminal send denial')}"[:1000]
-                    })
-                else:
-                    outcome = d.rpc("intel_agent_fail_job", {
-                        "p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
-                        "p_error": f"send: {result.get('reason', 'send failed')}"[:1000],
-                        "p_retry_seconds": 86400
-                    })
+                try:
+                    if result.get("terminal_failure"):
+                        outcome = self._settle("intel_agent_fail_job_permanent", {
+                            "p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
+                            "p_error": f"permanent: {result.get('reason', 'terminal send denial')}"[:1000]})
+                    else:
+                        outcome = self._settle("intel_agent_fail_job", {
+                            "p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
+                            "p_error": f"send: {result.get('reason', 'send failed')}"[:1000], "p_retry_seconds": 86400})
+                except TransientError:
+                    self._last_job_error = "send job failure could not be recorded"
+                    return
                 if outcome not in ("dead", "queued"):
                     self._last_job_error = "send job failure could not be recorded"
                     return
+                self._jobs_failed += 1
                 self._last_job_completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(d.clock()))
                 self._last_job_error = None
                 return
-            completed = d.rpc("intel_agent_complete_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
-                "p_result": result if isinstance(result, dict) else {"value": result}})
+            payload = dict(result) if isinstance(result, dict) else {"value": result}
+            payload["_run"] = self._run_meta(job, started, ai_before)
+            try:
+                completed = self._settle("intel_agent_complete_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id, "p_result": payload})
+            except TransientError:
+                # The work is done but the database could not be told, even after retries. NEVER report a finished job as a failure
+                # (that used to fall into the transient handler below and re-queue it); leave the lease to expire. Handlers are idempotent.
+                self._last_job_error = "completion could not be recorded (database unreachable); the job will be re-run after its lease expires"
+                return
             if completed is not True:
                 self._last_job_error = "job completion rejected because lease ownership was lost"
                 return
+            self._jobs_succeeded += 1
             self._last_job_completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(d.clock()))
             self._last_job_error = None
-        except TransientError as exc:
-            if lease and lease.lost.is_set():
-                self._last_job_error = "lease lost during transient failure"
-                return
-            d.rpc("intel_agent_fail_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
-                "p_error": f"transient: {exc}", "p_retry_seconds": min(30 * 2 ** max(job["attempts"] - 1, 0), 3600)})
-            self._last_job_error = type(exc).__name__
-        except (PermanentError, RpcError) as exc:
+        except Exception as exc:  # never let one bad job stop the worker
             if lease and lease.lost.is_set():
                 self._last_job_error = "lease lost during failure"
                 return
-            d.rpc("intel_agent_fail_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
-                "p_error": f"permanent: {exc}", "p_retry_seconds": 86400})
-            self._last_job_error = type(exc).__name__
-        except Exception as exc:  # never let one bad job stop the worker
-            if lease and lease.lost.is_set():
-                self._last_job_error = "lease lost during unexpected failure"
-                return
-            d.rpc("intel_agent_fail_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
-                "p_error": f"unexpected {type(exc).__name__}: {exc}"[:400], "p_retry_seconds": 300})
-            self._last_job_error = type(exc).__name__
-            traceback.print_exc()
+            self._record_failure(job, exc, started, ai_before)
+            if classify_failure(exc)[0] == "unexpected":
+                traceback.print_exc()
         finally:
             self._active_job = None
 
@@ -914,4 +1063,10 @@ class Worker:
             except (TransientError, RpcError) as exc:          # Supabase unreachable: wait and try again, forever
                 backoff = min(backoff * 2 or 15, 300)
                 print(f"[worker] waiting {backoff}s: {exc}")
+                stop.wait(backoff)
+            except Exception as exc:                            # a bug must not end the loop (the controller would only restart it 20 s later)
+                backoff = min(backoff * 2 or 15, 300)
+                self._last_job_error = f"worker loop error: {type(exc).__name__}"
+                print(f"[worker] unexpected {type(exc).__name__} in the worker loop; waiting {backoff}s")
+                traceback.print_exc()
                 stop.wait(backoff)

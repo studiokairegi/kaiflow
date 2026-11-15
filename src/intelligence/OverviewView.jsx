@@ -1,8 +1,9 @@
 import React, { useState } from "react";
 import { S, T, Btn, Pill, Banner, useBusy } from "../finance/ui.jsx";
 import { intelApi } from "./api.js";
-import { AUTONOMY, attentionItems, workerState, mailStatusLabel, sendingReadiness, queueDiscovery, DISCOVERY_TYPES } from "./logic.js";
+import { AUTONOMY, attentionItems, workerState, workerSchedulerNotice, mailStatusLabel, sendingReadiness, queueDiscovery, DISCOVERY_TYPES } from "./logic.js";
 import { Kpi, Section, Muted, confirmAction } from "./kit.jsx";
+import EmmaSwitch from "./EmmaSwitch.jsx";
 
 export default function OverviewView({ o, mail, supabase, onChanged, setTab, onNeedsDecision }) {
   const { busy, error, run } = useBusy();
@@ -33,6 +34,7 @@ export default function OverviewView({ o, mail, supabase, onChanged, setTab, onN
       <Banner tone={sending.tone} action={<Btn kind={o.kill_switch ? "primary" : "danger"} disabled={busy} onClick={toggle}>{o.kill_switch ? "Enable sending" : "Emergency stop"}</Btn>}>
         {sending.text}
       </Banner>
+      <EmmaSwitch compact />
       <div style={S.row}>
         <Pill tone={w.tone}>{w.label}</Pill>
         <Pill tone={mail?.status === "connected" ? "ok" : "warn"}>{mailStatusLabel(mail)}</Pill>
@@ -59,6 +61,8 @@ export default function OverviewView({ o, mail, supabase, onChanged, setTab, onN
         {o.oldest_queued_seconds != null && <Muted>Oldest queued job: {Math.max(0, Math.round(o.oldest_queued_seconds / 60))} minutes</Muted>}
         {o.worker_info?.active_job?.kind && <Muted>Currently processing: {o.worker_info.active_job.kind}</Muted>}
         {o.worker_info?.last_job_error && <Banner tone="warn">Last worker job issue: {o.worker_info.last_job_error}</Banner>}
+        {workerSchedulerNotice(o.worker_info) && <Banner tone="warn">{workerSchedulerNotice(o.worker_info)}</Banner>}
+        {o.worker_info?.jobs_succeeded != null && <Muted>Since Emma last started: {o.worker_info.jobs_succeeded} job(s) succeeded and {o.worker_info.jobs_failed ?? 0} attempt(s) failed (a job that is retried counts each failed attempt).</Muted>}
         {o.worker_info?.ollama === false && <Banner tone="warn">Ollama did not report healthy at the last worker heartbeat.</Banner>}
       </Section>
       <div style={S.grid(300)}>

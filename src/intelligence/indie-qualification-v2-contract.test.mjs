@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { criteriaPatch } from "./logic.js";
 
-const migration = readFileSync(new URL("../../supabase/migrations/20261112140000_intelligence_indie_project_qualification_v2.sql", import.meta.url), "utf8");
+const migration = readFileSync(new URL("../../supabase/migrations/20261112200258_indie_project_qualification_v2.sql", import.meta.url), "utf8");
 const scoring = readFileSync(new URL("../../intelligence-worker/kairflow_intel/scoring.py", import.meta.url), "utf8");
 const research = readFileSync(new URL("../../intelligence-worker/kairflow_intel/research.py", import.meta.url), "utf8");
 const jobs = readFileSync(new URL("../../intelligence-worker/kairflow_intel/jobs.py", import.meta.url), "utf8");

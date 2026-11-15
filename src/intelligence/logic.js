@@ -165,6 +165,61 @@ export function isHttpUrl(s) {
 
 export const fmtWhen = (iso) => (iso ? new Date(iso).toLocaleString() : "-");
 
+/**
+ * What a job row really means to the person reading it (Phase 4).
+ *
+ * The database only ever stores queued / running / succeeded / dead for jobs that the worker touches (the `failed` state exists in the
+ * schema but no function sets it), so a job that FAILED and is waiting for its next try looks exactly like a job that was deliberately
+ * scheduled for later. The difference is in the row: attempts > 0 and a last_error that does not start with "deferred:".
+ * `nowMs` is injected so this stays a pure function.
+ */
+export function jobPhase(job, nowMs = Date.now()) {
+  const state = job?.state;
+  const err = String(job?.last_error || "");
+  const due = job?.run_after ? new Date(job.run_after).getTime() : 0;
+  if (state === "dead") return { key: "dead", label: "Failed permanently", tone: "bad", needsAttention: true, recoverable: true };
+  if (state === "failed") return { key: "failed", label: "Failed, retry pending", tone: "warn", needsAttention: true, recoverable: true };
+  if (state === "succeeded") return { key: "succeeded", label: "Done", tone: "ok", needsAttention: false, recoverable: false };
+  if (state === "running") {
+    const lease = job?.lease_until ? new Date(job.lease_until).getTime() : 0;
+    if (lease && lease <= nowMs) return { key: "stalled", label: "Stalled (lease expired)", tone: "warn", needsAttention: true, recoverable: false };
+    return { key: "running", label: "Running", tone: "info", needsAttention: false, recoverable: false };
+  }
+  if (state === "queued") {
+    if ((job?.attempts || 0) > 0 && err && !err.startsWith("deferred:")) {
+      return { key: "retrying", label: `Retrying (try ${job.attempts} of ${job.max_attempts})`, tone: "warn", needsAttention: true, recoverable: true };
+    }
+    if (err.startsWith("deferred:")) return { key: "deferred", label: "Deferred by a safeguard", tone: "muted", needsAttention: false, recoverable: false };
+    if (due > nowMs) return { key: "scheduled", label: "Scheduled", tone: "muted", needsAttention: false, recoverable: false };
+    return { key: "waiting", label: "Waiting for the worker", tone: "info", needsAttention: false, recoverable: false };
+  }
+  return { key: "unknown", label: state || "-", tone: "muted", needsAttention: false, recoverable: false };
+}
+
+/** Counts for the jobs list header and the Overview, from the same rows the table shows. */
+export function jobSummary(jobs, nowMs = Date.now()) {
+  const out = { dead: 0, retrying: 0, stalled: 0, running: 0, waiting: 0, scheduled: 0, deferred: 0, failed: 0 };
+  for (const j of jobs || []) {
+    const k = jobPhase(j, nowMs).key;
+    if (k in out) out[k] += 1;
+  }
+  return out;
+}
+
+/** One line for the Overview when the worker reports a scheduling problem in its heartbeat (jobs keep running meanwhile). */
+export function workerSchedulerNotice(info) {
+  const e = info && typeof info.scheduler_error === "string" ? info.scheduler_error.trim() : "";
+  return e ? `Emma could not complete her scheduling pass (jobs already queued still run): ${e}` : "";
+}
+
+/** Controller crash-loop notice for Settings: only after repeated unexpected stops, so one ordinary restart stays quiet. */
+export function controllerRestartNotice(status) {
+  const n = Number(status?.consecutive_failures || 0);
+  if (!status || n < 3 || status.worker_running) return "";
+  const wait = Number.isFinite(status.next_restart_seconds) ? ` The next automatic restart is in about ${Math.max(0, Math.round(status.next_restart_seconds))} s.` : "";
+  return `Emma has stopped unexpectedly ${n} times in a row.${wait} Restarts are being spaced out; check worker.log for the cause.`;
+}
+
 /** Knowledge-base entries the agent needs before it may draft anything. It never invents studio facts. */
 export const REQUIRED_KB = Object.freeze([
   { key: "studio.about", kind: "studio", label: "Short studio description" },
@@ -236,16 +291,31 @@ export const TOOL_LABEL = Object.freeze({
   approve_messages: "Prepared an approval", discard_messages: "Prepared a discard", resume_campaign: "Prepared starting a campaign", set_campaign_cap: "Prepared a campaign limit",
   enable_sending: "Prepared turning sending on", set_autonomy: "Prepared an autonomy change", update_limits: "Prepared new limits", add_suppression: "Prepared a suppression",
   review_prospect: "Prepared a prospect decision",
+  settings_overview: "Checked settings", knowledge_list: "Listed knowledge entries", knowledge_get: "Read a knowledge entry", list_drafts: "Listed drafts", check_recipient: "Checked a recipient",
+  save_knowledge: "Prepared a knowledge entry", retire_knowledge: "Prepared retiring an entry", change_setting: "Prepared a setting change", edit_message: "Prepared a draft rewrite", send_email: "Prepared an email",
 });
 
 /** The conversation as the person sees it: user and assistant turns, with the tools used shown under the answer. */
+/** One short line saying what produced an assistant message, or null for rows written before provenance existed. Never implies Gemini unless Gemini answered. */
+export function aiLabel(m) {
+  if (!m) return null;
+  const secs = Number.isFinite(m.ai_latency_ms) ? ` · ${(m.ai_latency_ms / 1000).toFixed(1)} s` : "";
+  const kb = Array.isArray(m.kb_keys) && m.kb_keys.length ? ` · knowledge: ${m.kb_keys.join(", ")}` : "";
+  if (m.ai_mode === "ai" && m.ai_provider === "gemini") return `Answered by Gemini (${m.ai_model || "model unknown"})${secs}${kb}`;
+  if (m.ai_mode === "ai" && m.ai_provider === "ollama") return `Answered by Ollama (${m.ai_model || "model unknown"})${m.ai_route_reason ? ` · fallback reason: ${m.ai_route_reason}` : ""}${secs}${kb}`;
+  if (m.ai_mode === "ai") return `Answered by an AI model (provider not recorded)${secs}${kb}`;
+  if (m.ai_mode === "deterministic_fallback") return "Plain text from the app, not written by an AI model";
+  if (m.ai_mode === "draft_handler") return m.status === "error" ? "No draft was saved (message from the outreach composer, not written by chat)" : "Draft saved by the outreach composer (not written by chat)";
+  if (m.ai_mode === "unavailable") return "No AI provider answered";
+  return null;
+}
 export function chatTurns(messages) {
   const turns = [];
   const tools = new Map();
   for (const m of messages || []) if (m.role === "tool" && m.reply_to != null) tools.set(m.reply_to, [...(tools.get(m.reply_to) || []), m.tool_name]);
   for (const m of messages || []) {
     if (m.role === "user") turns.push({ id: m.id, role: "user", text: m.content });
-    else if (m.role === "assistant") turns.push({ id: m.id, role: "assistant", replyTo: m.reply_to, text: m.content, error: m.status === "error", tools: (tools.get(m.reply_to) || []).map((t) => TOOL_LABEL[t] || t) });
+    else if (m.role === "assistant") turns.push({ id: m.id, role: "assistant", replyTo: m.reply_to, text: m.content, error: m.status === "error", tools: [...new Set((tools.get(m.reply_to) || []).map((t) => TOOL_LABEL[t] || t))], ai: aiLabel(m) });
   }
   return turns;
 }
@@ -256,7 +326,7 @@ export function awaitingAnswer(messages) {
   const last = users[users.length - 1];
   return !(messages || []).some((m) => m.role === "assistant" && m.reply_to === last.id);
 }
-/** How long the chat keeps showing "Working on it…" (and polling) before it tells the person the assistant has not answered. */
+/** How long the chat keeps showing Emma's animated "typing…" bubble (and polling) before it tells the person the assistant has not answered. */
 export const ANSWER_TIMEOUT_MS = 5 * 60 * 1000;
 /** True when the newest user message is still unanswered AND is older than the timeout. */
 export function answerOverdue(messages, now = Date.now()) {
@@ -299,7 +369,7 @@ export const oauthResult = (flag) => OAUTH_RESULTS[flag] || null;
 
 // ---- Chat actions: the assistant PREPARES, the administrator CONFIRMS ----------------------------------------------------------
 export const ACTION_STATUS = Object.freeze({
-  pending: { label: "Waiting for you", tone: "warn" }, confirmed: { label: "Done", tone: "ok" }, cancelled: { label: "Cancelled", tone: "muted" },
+  pending: { label: "Waiting for you", tone: "warn" }, running: { label: "Working", tone: "info" }, confirmed: { label: "Done", tone: "ok" }, cancelled: { label: "Cancelled", tone: "muted" },
   failed: { label: "Failed", tone: "bad" }, expired: { label: "Expired", tone: "muted" },
 });
 /** Cards are grouped under the request they answer. */
@@ -353,3 +423,31 @@ export const proposedTerms = (profile) => {
   const any = (p.proposed_en || []).length || (p.proposed_ja || []).length;
   return any ? { termsEn: joinLines(p.proposed_en), termsJa: joinLines(p.proposed_ja), exclude: joinLines(p.proposed_exclude) } : null;
 };
+
+export const EMMA_LAUNCH_URL = "kairflow-emma://start";
+
+/**
+ * The one Emma switch. `probe` describes what the browser could learn about the local controller:
+ *   { reachable, authFailed, status, launching, stopping, launchTimedOut }
+ * Returns what to show and what a click does. The switch is ON only while the worker is actually running.
+ *   on       worker running                      click -> shutdown (worker AND controller off)
+ *   paused   controller up, worker stopped       click -> start the worker
+ *   off      controller not reachable            click -> launch (kairflow-emma: link starts the controller, which starts the worker)
+ *   pair     controller answered but refused us  no click; pair in Settings
+ *   error    controller answered with an error   no click (never shown as paused)
+ */
+export function emmaSwitch(probe = {}) {
+  const { reachable = false, authFailed = false, status = null, launching = false, stopping = false, launchTimedOut = false } = probe;
+  if (stopping) return { state: "stopping", on: true, busy: true, action: null, tone: "warn", label: "Turning Emma off…", detail: "Stopping the worker and the background controller." };
+  if (launching) return { state: "starting", on: false, busy: true, action: null, tone: "info", label: "Turning Emma on…", detail: "This can take up to a minute." };
+  if (authFailed) return { state: "pair", on: false, busy: false, action: null, tone: "warn", label: "This browser is not paired yet", detail: "Paste the controller token once in the box below." };
+  if (reachable && !status) return { state: "error", on: false, busy: false, action: null, tone: "warn", label: "Emma's controller reported a problem", detail: "It is running but did not give a usable answer. Open the Advanced section below, or check worker.log." };
+  if (reachable && status?.worker_running) return { state: "on", on: true, busy: false, action: "shutdown", tone: "ok", label: "Emma is on", detail: "Switch off to stop the worker and the controller completely." };
+  if (reachable) return { state: "paused", on: false, busy: false, action: "start", tone: "muted", label: "Emma is paused", detail: "The controller is running but the worker is stopped. Switch on to resume." };
+  return {
+    state: "off", on: false, busy: false, action: "launch", tone: "muted", label: "Emma is fully off",
+    detail: launchTimedOut
+      ? "Emma did not come back. Run Install-Emma-Switch.cmd once (in intelligence-worker\\windows), or sign out and in to Windows, then try again."
+      : "Switch on to start the controller and the worker.",
+  };
+}

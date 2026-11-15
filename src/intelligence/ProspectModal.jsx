@@ -12,6 +12,8 @@ export default function ProspectModal({ prospect: p, supabase, onClose, onChange
   const est = p.facts?.estimates || {};
   const dups = Array.isArray(est.duplicate_candidates) ? est.duplicate_candidates : [];
   const qualification = est.qualification_v2 || {};
+  const ambiguousReview = p.status === "needs_review" ? est.ambiguous_evidence_review || null : null;
+  const decisionConfidence = est.qualification_confidence || null;
   const gates = qualification.mandatory_gates || {};
   const gateRows = Object.entries(gates).map(([key, value]) => ({ key, reason: value?.reason || "No explanation recorded", passed: value?.passed === true }));
   const gatesPass = qualification.model === "indie-project-v2" && p.score >= 75 && gateRows.length === 7 && gateRows.every((g) => g.passed) && qualification.contactability?.status === "pass";
@@ -110,6 +112,37 @@ export default function ProspectModal({ prospect: p, supabase, onClose, onChange
             { key: "points", label: "Points", num: true, render: (r) => `${r.points} / ${r.max}` },
             { key: "why", label: "Why" },
           ]} rows={rows} />
+        </div>
+      )}
+
+      {decisionConfidence && (
+        <Muted>
+          Decision confidence: <Pill tone={decisionConfidence.level === "high" ? "ok" : decisionConfidence.level === "medium" ? "warn" : "muted"}>{decisionConfidence.level}</Pill>{" "}
+          {decisionConfidence.basis} (calculated from the score, not by AI).
+        </Muted>
+      )}
+
+      {ambiguousReview && (
+        <div style={S.card}>
+          <h3 style={S.h3}>Why this is in review{" "}
+            <span style={{ marginLeft: 4 }}>
+              <Pill tone={ambiguousReview.generated_by === "model" ? "info" : "muted"}>
+                {ambiguousReview.generated_by === "model" ? "AI-assisted note" : "Automatic note"}
+              </Pill>
+            </span>
+          </h3>
+          <Muted>
+            This note never changed the score or the decision above - it only explains the same breakdown and
+            uncertain criteria a human would otherwise have to read line by line. Always check the evidence yourself.
+          </Muted>
+          <p style={{ margin: "8px 0" }}>{ambiguousReview.summary}</p>
+          <div style={S.grid(220)}>
+            <div><span style={S.label}>Key uncertainty</span><div>{ambiguousReview.key_uncertainty}</div></div>
+            {ambiguousReview.confidence && <div><span style={S.label}>Model confidence (self-reported, not a score)</span>
+              <div><Pill tone={ambiguousReview.confidence === "high" ? "ok" : ambiguousReview.confidence === "medium" ? "warn" : "muted"}>{ambiguousReview.confidence}</Pill></div>
+            </div>}
+          </div>
+          <div style={{ marginTop: 8 }}><span style={S.label}>What to check next</span><div>{ambiguousReview.recommended_human_action}</div></div>
         </div>
       )}
 

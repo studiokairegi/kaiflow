@@ -43,6 +43,7 @@ function requireTokenKey(): string {
 const supabaseUrl = requireEnv("SUPABASE_URL");
 const service = createClient(supabaseUrl, requireEnv("SUPABASE_SERVICE_ROLE_KEY"), { auth: { persistSession: false } });
 const oauthDeps = {
+  tokenCache: new Map<string, { token: string; expiresAtMs: number }>(),
   env: (name: string) => Deno.env.get(name), createClient, service,
   fetch: (url: string, init?: Record<string, unknown>) => fetch(url, init as RequestInit),
   encrypt: (value: string) => encryptText(value, requireTokenKey()),

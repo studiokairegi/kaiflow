@@ -79,3 +79,10 @@ export function buildPayload(job, openUrl) {
 
 // 404/410 mean the browser revoked the subscription: forget it. Anything else is retried by the queue.
 export const isGone = (status) => status === 404 || status === 410;
+
+// A subscription that keeps answering with a client error (401/403 after a key change, 400, 401...)
+// will never work again, so those count as strikes toward removal. Timeouts, 413 (our payload),
+// 429 and 5xx are the push service's problem, not the subscription's: retry them without a strike.
+export const isStrike = (status) => status >= 400 && status < 500 && ![408, 413, 429].includes(status);
+// Consecutive strikes after which a subscription is deleted (a success resets the count).
+export const MAX_FAIL_COUNT = 5;

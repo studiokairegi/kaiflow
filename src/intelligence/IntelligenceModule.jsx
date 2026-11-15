@@ -17,7 +17,7 @@ import ChatView from "./ChatView.jsx";
 import CrmFollowupView from "./CrmFollowupView.jsx";
 
 export const INTELLIGENCE_SECTIONS = Object.freeze([
-  "Overview", "Agent Chat", "Existing Leads", "Indie Game Developers", "Animation Studio Support", "Discovered Prospects",
+  "Overview", "Emma", "Existing Leads", "Indie Game Developers", "Animation Studio Support", "Discovered Prospects",
   "Qualified Leads", "Outreach and Conversations", "Agent Activity Logs", "Settings",
 ]);
 
@@ -71,7 +71,7 @@ function Shell({ supabase, target, onOpenLead }) {
 
   const tabs = [
     { id: "overview", label: "Overview" },
-    { id: "chat", label: "Agent Chat" },
+    { id: "chat", label: "Emma" },
     { id: "crm", label: "Existing Leads" },
     { id: "indie", label: "Indie Game Developers" },
     { id: "studio", label: "Animation Studio Support" },

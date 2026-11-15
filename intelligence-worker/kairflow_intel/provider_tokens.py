@@ -21,7 +21,7 @@ class ProviderAccountTokenProvider:
         try:
             r = self.s.post(
                 f"{self.cfg.supabase_url}/functions/v1/intel-provider-token",
-                json={"account_id": self.account_id}, timeout=20,
+                json={"account_id": self.account_id, **({"force": True} if force else {})}, timeout=20,
                 headers={"apikey": self.cfg.supabase_anon_key,
                          "Authorization": f"Bearer {self.supa.token()}"},
             )

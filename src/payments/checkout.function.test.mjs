@@ -96,14 +96,14 @@ test("start: amount, currency and reference come from the database row; browser 
   assert.equal(prep.p_environment, "live");                                                             // from the server secret, not the request
 });
 
-test("start: bank transfer asks Paystack for the bank_transfer channel only; PayPal/Payoneer are refused before any call", async () => {
+test("start: card and Apple Pay ask Paystack for their own channel only; bank transfer/PayPal/Payoneer are refused before any call", async () => {
   let w = world({ prepare: [newRow], paystack: [initOk] });
-  await call({ action: "start", token: TOKEN, email: "a@b.co", channel: "bank_transfer" });
-  assert.deepEqual(w.fetches[0].body.channels, ["bank_transfer"]);
+  await call({ action: "start", token: TOKEN, email: "a@b.co", channel: "card" });
+  assert.deepEqual(w.fetches[0].body.channels, ["card"]);
   w = world({ prepare: [newRow], paystack: [initOk] });
   await call({ action: "start", token: TOKEN, email: "a@b.co", channel: "apple_pay" });
   assert.deepEqual(w.fetches[0].body.channels, ["apple_pay"]);
-  for (const channel of ["paypal", "payoneer", ""]) {
+  for (const channel of ["bank_transfer", "paypal", "payoneer", ""]) {
     w = world({});
     const res = await call({ action: "start", token: TOKEN, email: "a@b.co", channel });
     assert.equal(res.status, 400); assert.equal(w.fetches.length, 0); assert.equal(w.rpcs.length, 0);
@@ -158,7 +158,7 @@ test("start: an unresolved earlier attempt that Paystack says SUCCEEDED is appli
 
 test("start: a YOUNG unpaid attempt is left open (could still be paid in another tab); no new charge", async () => {
   const w = world({ prepare: [{ ...newRow, action: "verify_first" }], tx: oldTx(3), paystack: [verifyBody({ status: "abandoned" })] });
-  const res = await call({ action: "start", token: TOKEN, email: "a@b.co", channel: "bank_transfer" });
+  const res = await call({ action: "start", token: TOKEN, email: "a@b.co", channel: "card" });
   assert.equal(res.status, 202);
   assert.equal(applied(w).length, 0);                         // not even recorded as abandoned
   assert.ok(!w.fetches.some((f) => f.url.endsWith("/transaction/initialize")));

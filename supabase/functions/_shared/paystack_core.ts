@@ -17,7 +17,8 @@ export type PaystackEnvironment = "test" | "live";
 // Currencies Paystack can collect in principle. Whether THIS merchant account can collect a
 // currency or channel is configuration (payment_providers.settings), not an assumption made here.
 export const PAYSTACK_CURRENCIES = ["NGN", "GHS", "ZAR", "KES", "USD"] as const;
-export const PAYSTACK_CHANNELS = ["card", "bank_transfer", "apple_pay"] as const;
+// bank_transfer was removed: checkout always charges in KES, where Paystack bank transfer is not a working channel.
+export const PAYSTACK_CHANNELS = ["card", "apple_pay"] as const;
 export type PaystackChannel = (typeof PAYSTACK_CHANNELS)[number];
 
 export type EnvReader = { get(key: string): string | undefined };
@@ -93,10 +94,9 @@ export async function identifyWebhookEnvironment(
   return null;
 }
 
-// Paystack hosted-checkout channels for a request. Card -> card only; bank transfer -> bank_transfer only.
+// Paystack hosted-checkout channels for a request. Card -> card only; Apple Pay -> apple_pay only. Anything else is refused.
 export function channelsFor(channel: string): PaystackChannel[] | null {
   if (channel === "card") return ["card"];
-  if (channel === "bank_transfer") return ["bank_transfer"];
   if (channel === "apple_pay") return ["apple_pay"];
   return null;
 }
@@ -107,7 +107,9 @@ export function channelsFor(channel: string): PaystackChannel[] | null {
 export function toMinor(amount: number | string): number {
   const n = Number(amount);
   if (!Number.isFinite(n)) throw new Error("Invalid amount");
-  return Math.round(n * 100 + Number.EPSILON * Math.sign(n));
+  // n * 100 carries binary noise (1.005 * 100 = 100.49999999999999). Trimming to 15 significant digits removes it so
+  // halves round away from zero, like the database's round().
+  return Math.sign(n) * Math.round(Number((Math.abs(n) * 100).toPrecision(15)));
 }
 
 export function fromMinor(minor: number | string | null | undefined): number {
@@ -163,6 +165,13 @@ export async function webhookEventKey(rawBody: string, parsed: any): Promise<str
   const id = parsed?.data?.id;
   const ref = parsed?.data?.reference || parsed?.data?.transaction_reference;
   if (id !== undefined && id !== null) return `${event}:${id}`;
+  // Refund events carry no id of their own: keying them on the charge reference alone made a second partial refund
+  // of the same charge look like a duplicate of the first. Use the refund's own reference, else the whole body
+  // (a Paystack retry resends an identical body, so retries still collapse).
+  if (event.startsWith("refund.")) {
+    const refundRef = parsed?.data?.refund_reference;
+    return refundRef ? `${event}:${refundRef}` : `${event}:sha256:${await sha256Hex(rawBody)}`;
+  }
   if (ref) return `${event}:${ref}`;
   return `${event}:sha256:${await sha256Hex(rawBody)}`;
 }

@@ -28,6 +28,9 @@ export function createNotificationApi(userId) {
       let q = supabase
         .from("activity_log")
         .select(FEED_COLUMNS)
+        // RLS also lets Master Users / assigned members read colleagues' activity, but ack and snooze
+        // only accept the caller's own rows, so the feed must be limited to them.
+        .eq("user_id", userId)
         .in("event_type", FEED_EVENT_TYPES)
         .gt("created_at", new Date(afterMs).toISOString())
         .order("created_at", { ascending: false })

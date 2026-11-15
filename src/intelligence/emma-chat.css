@@ -1,0 +1,26 @@
+/* Emma uses the shared chat theme (chat/chat.css). Only what is specific to Emma lives here. */
+.emma-wrap { height: clamp(480px, calc(100dvh - 250px), 780px); border-radius: 16px; overflow: hidden; }
+.emma-page { box-sizing: border-box; border: 1px solid var(--c-line); border-radius: 16px; }
+.emma-meta { margin-top: 6px; font-size: 11px; opacity: .75; }
+.emma-action { margin-top: 10px; padding: 10px; border-radius: 12px; background: rgba(0,0,0,.22); border: 1px solid rgba(255,255,255,.22); text-shadow: none; }
+.emma-action-summary { white-space: pre-wrap; font-size: 13px; }
+.emma-action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.emma-action-err { font-size: 12px; }
+.emma-chips { flex: none; display: flex; gap: 6px; overflow-x: auto; padding: 8px 12px 0; background: var(--c-panel); border-top: 1px solid var(--c-line); scrollbar-width: thin; }
+.emma-chips .chat-pill-btn { flex: none; white-space: nowrap; }
+.emma-chips .chat-pill-btn:hover:not(:disabled) { border-color: var(--c-accent); color: var(--c-ink); }
+.emma-chips + .chat-composer { border-top: 0; }
+.emma-status { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--c-mute); white-space: nowrap; }
+.emma-status i { width: 8px; height: 8px; border-radius: 50%; background: var(--c-mute); }
+.emma-status.ok i { background: var(--c-ok); } .emma-status.warn i { background: var(--c-warn); } .emma-status.bad i { background: var(--c-danger); }
+.chat-msg.is-error .chat-bubble { outline: 1.5px solid var(--c-danger); }
+@media (max-width: 760px) { .emma-wrap { height: calc(100dvh - 230px); min-height: 420px; } .emma-status { display: none; } }
+.chat-typing-row { margin-top: 10px; }
+.chat-typing-bubble { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.chat-typing-bubble .chat-typing-dots { gap: 4px; }
+.chat-typing-bubble .chat-typing-dots i { width: 7px; height: 7px; background: currentColor; }
+.emma-action-label { font-size: 12px; opacity: .8; }
+.emma-action-note { font-size: 12px; }
+.emma-perms { margin: 8px 12px; padding: 12px; border-radius: 12px; border: 1px solid var(--c-line); background: var(--c-panel); }
+.emma-perm-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-top: 1px solid var(--c-line); }
+.emma-action input, .emma-action textarea, .emma-action select { max-width: 100%; box-sizing: border-box; }

@@ -82,7 +82,8 @@ begin
   perform _t.chk('anon cannot apply a verification', _t.err($q$select payments_apply_verification('x', 'live', 'success', 1, 'KES', 0, 'card', '1', now(), 'ok')$q$) like '%permission denied%');
   perform _t.as_user(_t.id('C'));
   perform _t.chk('even a signed-in admin cannot call the service-only functions from the browser', _t.err(format($q$select * from payments_checkout_prepare(%L, 'a@b.co', 'live', 'card')$q$, _t.get('token'))) like '%permission denied%');
-  perform _t.chk('admin can enable bank transfer and Apple Pay', _t.err($q$select payments_set_paystack_options(array['card','bank_transfer','apple_pay'], array['KES'])$q$) is null);
+  perform _t.chk('admin can enable card and Apple Pay; bank transfer is refused', _t.err($q$select payments_set_paystack_options(array['card','apple_pay'], array['KES'])$q$) is null
+     and _t.err($q$select payments_set_paystack_options(array['card','bank_transfer'], array['KES'])$q$) like '%Unsupported channel%');
   perform _t.chk('unsupported channel / currency are refused', _t.err($q$select payments_set_paystack_options(array['paypal'], array['KES'])$q$) like '%Unsupported channel%'
      and _t.err($q$select payments_set_paystack_options(array['card'], array['EUR'])$q$) like '%cannot collect%'
      and _t.err($q$select payments_set_paystack_options(array['apple_pay'], array['KES'])$q$) is null);
@@ -109,7 +110,7 @@ begin
   update paystack_transactions set authorization_url = 'https://checkout.paystack.com/x' where reference = _t.get('ref');
   select * into r from payments_checkout_prepare(_t.get('token'), 'pay@example.com', 'live', 'card');
   perform _t.chk('refresh / second tab, same channel -> reuse the same checkout', r.action = 'reuse' and r.reference = _t.get('ref') and r.authorization_url like 'https://checkout.paystack.com/%');
-  select * into r from payments_checkout_prepare(_t.get('token'), 'pay@example.com', 'live', 'bank_transfer');
+  select * into r from payments_checkout_prepare(_t.get('token'), 'pay@example.com', 'live', 'apple_pay');
   perform _t.chk('different channel while one is open -> verify_first, not a second charge', r.action = 'verify_first');
   select * into r from payments_checkout_prepare(_t.get('token2'), 'pay@example.com', 'live', 'card');
   perform _t.chk('a DIFFERENT link for the same invoice also cannot start a second attempt', r.action = 'verify_first' and r.reference = _t.get('ref'));

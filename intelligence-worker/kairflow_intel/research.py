@@ -2,6 +2,8 @@
 model only helps identify a named contact, and its claims count only if the text literally appears on the page."""
 from __future__ import annotations
 
+import logging
+
 import hashlib
 import json
 import re
@@ -11,7 +13,7 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from . import contactability, indie_evidence, scoring, signals
+from . import contactability, indie_evidence, presskit, qualification_review, research_report, scoring, signals
 from .errors import PermanentError, TransientError
 from .ai_call import call_json
 from .ollama import validate
@@ -166,7 +168,12 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
     p = ctx["prospect"]
     if run_id is not None and (p.get("type") != "animation_studio_support" or p.get("origin") != "discovered"):
         raise PermanentError("a reevaluation only researches discovered animation_studio_support prospects")
-    add_evidence = _evidence_writer(rpc, p, run_id)
+    _write_evidence = _evidence_writer(rpc, p, run_id)
+    new_evidence: list[dict] = []          # rows written in THIS run, so the research report sees them without another database read
+
+    def add_evidence(url, fact, snippet, h, verified=True):
+        new_evidence.append({"url": url, "fact_type": fact, "snippet": snippet, "verified": bool(verified), "source": "web"})
+        return _write_evidence(url, fact, snippet, h, verified)
     website = str(p.get("website") or "").strip()
     project_source = ""
     if p.get("type") == "indie_game_developer":
@@ -192,6 +199,25 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
                 pages.append(fetched)
         except (PermanentError, TransientError):
             continue
+    # Press kit (indie only): the page most likely to name the developer and publisher, release, platforms and a press contact.
+    # Press-kit pages fetched here are kept OUT of `pages`, so they never change which address choose_contact() selects.
+    presskit_pages: list[tuple[str, str]] = []
+    presskit_parsed: list[dict] = []
+    if p["type"] == "indie_game_developer":
+        fetched_urls = {u for u, _ in pages}
+        known_kits = [(u, h) for u, h in pages if presskit.looks_like_presskit_url(u)]
+        for u in presskit.candidate_urls(final, html, skip=fetched_urls, limit=2, probe=not known_kits):
+            try:
+                fetched = fetcher.fetch(u)
+                if presskit._same_host(urlparse(fetched[0]).hostname or "", urlparse(final).hostname or "") and fetched[0] not in fetched_urls:
+                    presskit_pages.append(fetched)
+                    fetched_urls.add(fetched[0])
+            except (PermanentError, TransientError):
+                continue
+        for u, h in known_kits + presskit_pages:
+            parsed = presskit.parse(h, u, site_host=research_host)
+            if parsed["is_presskit"]:
+                presskit_parsed.append(parsed)
     text = "\n".join(html_to_text(h) for _, h in pages)
     table = signals.INDIE if p["type"] == "indie_game_developer" else signals.STUDIO
     found: dict[str, list[tuple[str, str]]] = {}
@@ -210,7 +236,7 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
         developer_name = str(p.get("name") or verified_before.get("developer_name") or "")
         indie_events = indie_evidence.extract_dated_events(pages)
         indie_visual_candidates = indie_evidence.extract_visual_candidates(pages)
-        indie_identity_mentions = indie_evidence.extract_identity_mentions(pages, developer_name, project_title)
+        indie_identity_mentions = indie_evidence.extract_identity_mentions(pages + presskit_pages, developer_name, project_title)
         for event in indie_events:
             add_evidence(event["url"], event["fact_type"], event["snippet"], _h(event["fact_type"] + event["date"] + event["snippet"]))
         # Visual references are intentionally UNVERIFIED until an administrator inspects the actual asset.
@@ -218,7 +244,15 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
             add_evidence(candidate["url"], candidate["fact_type"], candidate["snippet"], _h(candidate["snippet"]), verified=False)
         for mention in indie_identity_mentions:
             add_evidence(mention["url"], mention["fact_type"], mention["snippet"], _h(mention["fact_type"] + mention["snippet"]))
+        for kit in presskit_parsed:
+            for fact in kit["facts"]:
+                add_evidence(kit["url"], fact["fact_type"], fact["snippet"], _h(fact["fact_type"] + fact["snippet"]))
     emails = [dict(e, url=u) for u, h in pages for e in extract_emails(h)]
+    # Addresses read from a page that parses as a press kit are not used to pick the business contact: the labelled one is a PRESS contact
+    # (kept in presskit_* facts and the report) and the rest are unlabelled. The same address on another page of the site still counts there.
+    kit_urls = {k["url"] for k in presskit_parsed}
+    if kit_urls:
+        emails = [e for e in emails if e["url"] not in kit_urls]
     preset = (p.get("contact_email") or "")
     contact = choose_contact(emails, p["domain"], preset if p["type"] == "indie_game_developer" else "")
 
@@ -301,6 +335,18 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
                     milestones.append(item)
         if milestones:
             verified["project_marketing_milestones"] = milestones[-30:]
+        if presskit_parsed:
+            kit = presskit_parsed[0]
+            by_type = {f["fact_type"]: f["value"] for k in reversed(presskit_parsed) for f in reversed(k["facts"])}      # first page, first fact wins
+            press_email = next((e for k in presskit_parsed for e in k["press_emails"]), None)
+            verified.update({k: v for k, v in {
+                "presskit_url": kit["url"], "presskit_title": kit["title"], "presskit_developer": by_type.get("presskit_developer", ""),
+                "presskit_publisher": by_type.get("presskit_publisher", ""), "presskit_release_text": by_type.get("presskit_release", ""),
+                "presskit_platforms": by_type.get("presskit_platforms", ""), "presskit_website": next((k["website"] for k in presskit_parsed if k["website"]), ""),
+                "presskit_press_email": press_email["email"] if press_email else "",
+                "presskit_press_email_on_site_domain": bool(press_email and press_email["on_site_domain"]),
+                "presskit_links": {kind: url for k in reversed(presskit_parsed) for kind, url in k["links"].items()},
+            }.items() if v not in ("", None, {})})
         verified["visual_review_pending_count"] = _visual_review_pending(ctx.get("evidence") or [], indie_visual_candidates)
         verified["identity_evidence_candidate_count"] = len(indie_identity_mentions)
         # Discovery/research evidence does not silently verify Kickstarter creator attribution.
@@ -367,6 +413,14 @@ def research(rpc, fetcher, llm, ctx: dict, *, run_id: str | None = None) -> dict
             for url, h in pages),
     )
     verified["contactability"] = contact_assessment
+    try:        # Phase 5: a deterministic, evidence-linked report. It explains and never decides; a failure here must not lose the research.
+        prior_rows = [r for r in (ctx.get("evidence") or []) if isinstance(r, dict) and (run_id is None or r.get("reeval_run") == run_id)]
+        verified["research_report"] = research_report.build(
+            p, verified, prior_rows + new_evidence,
+            contactability=contact_assessment, pages_read=len(pages))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("research report failed for prospect %s: %s", p.get("id"), type(exc).__name__)
+        verified["research_report"] = research_report.failure_stub(exc)
     if run_id is not None:
         # By id, never through the canonical-key upsert: after a website recovery that upsert would derive a different key and create a duplicate prospect.
         rpc("intel_agent_reeval_record_research", {"p_run_id": run_id, "p_prospect_id": p["id"], "p_verified": verified, "p_contact_name": name or "",
@@ -420,7 +474,7 @@ def fresh_evidence(rows: list[dict], run_id: str, started_at: str) -> list[dict]
     return out
 
 
-def _qualify_studio(rpc, ctx: dict, criteria: dict, reeval: ReevalScope | None = None) -> scoring.Result:
+def _qualify_studio(rpc, ctx: dict, criteria: dict, reeval: ReevalScope | None = None, llm=None) -> scoring.Result:
     p = ctx["prospect"]
     evidence = ctx["evidence"]
     if reeval is not None:
@@ -454,12 +508,20 @@ def _qualify_studio(rpc, ctx: dict, criteria: dict, reeval: ReevalScope | None =
     ) if current_run_ok and not suppression.get("lookup_unavailable") else {"status": "needs_review", "reason": "suppression status could not be verified", "evidence": {}}
     res = scoring.score_studio(sigs, meta, None, qualify_min=int(criteria.get("qualify_min", 70)), review_min=int(criteria.get("review_min", 50)))
     res.contactability = assessment
+    # Phase 6: a needs_review decision gets a human-readable note next to it. explain_ambiguous never
+    # changes res.score/res.decision/res.breakdown and never raises; with llm=None (the default) it is
+    # the same deterministic note whether or not this call site is ever given a router.
     if reeval is not None:
+        review_note = qualification_review.explain_ambiguous(llm, res, evidence)
         # Deliberate studio-v2 rescore over whatever score was there (legacy or not). Written through the run-scoped function, which re-checks
         # scope, run and "research recorded in this run" in the database. Ordinary qualification never reaches this branch.
+        estimates = {"decision_basis": "deterministic rubric over verified evidence collected in this reevaluation run",
+                     "scoring_model": res.model, "evidence_rows_used": len(evidence), "contactability": assessment,
+                     "qualification_confidence": qualification_review.confidence_indicator(res, scoring.STUDIO_QUALIFY_MIN, scoring.STUDIO_REVIEW_MIN)}
+        if review_note is not None:
+            estimates["ambiguous_evidence_review"] = review_note
         res.write = rpc("intel_agent_reeval_set_score", {"p_run_id": reeval.run_id, "p_prospect_id": p["id"], "p_score": res.score, "p_breakdown": res.breakdown, "p_decision": res.decision,
-                                                         "p_reason": res.reason, "p_estimates": {"decision_basis": "deterministic rubric over verified evidence collected in this reevaluation run",
-                                                                                                 "scoring_model": res.model, "evidence_rows_used": len(evidence), "contactability": assessment}}) or {}
+                                                         "p_reason": res.reason, "p_estimates": estimates}) or {}
         return res
     prior = prior_studio_model(p)
     if prior is not None and prior != scoring.STUDIO_MODEL:
@@ -471,15 +533,23 @@ def _qualify_studio(rpc, ctx: dict, criteria: dict, reeval: ReevalScope | None =
                                          "p_snippet": snap, "p_content_hash": _h(snap), "p_verified": False})
         res.held = True
         return res
+    estimates = {"decision_basis": "deterministic rubric over verified evidence", "scoring_model": res.model, "contactability": assessment,
+                 "qualification_confidence": qualification_review.confidence_indicator(res, scoring.STUDIO_QUALIFY_MIN, scoring.STUDIO_REVIEW_MIN)}
+    review_note = qualification_review.explain_ambiguous(llm, res, evidence)     # after the held branch: a held result stores nothing, so no model call
+    if review_note is not None:
+        estimates["ambiguous_evidence_review"] = review_note
     rpc("intel_agent_set_score", {"p_prospect_id": p["id"], "p_score": res.score, "p_breakdown": res.breakdown, "p_decision": res.decision, "p_reason": res.reason,
-                                  "p_estimates": {"decision_basis": "deterministic rubric over verified evidence", "scoring_model": res.model, "contactability": assessment}})
+                                  "p_estimates": estimates})
     return res
 
 
-def qualify(rpc, ctx: dict, criteria: dict, *, reeval: ReevalScope | None = None) -> scoring.Result:
+def qualify(rpc, ctx: dict, criteria: dict, *, reeval: ReevalScope | None = None, llm=None) -> scoring.Result:
+    """`llm`, when given, is passed to the Phase 6 ambiguous-evidence note for needs_review results only;
+    it never reaches scoring itself. Omitting it (the default) keeps every existing call site's behaviour
+    unchanged and the note deterministic."""
     p = ctx["prospect"]
     if p["type"] != "indie_game_developer":
-        return _qualify_studio(rpc, ctx, criteria, reeval)
+        return _qualify_studio(rpc, ctx, criteria, reeval, llm=llm)
     if reeval is not None:
         raise PermanentError("a reevaluation never applies to indie_game_developer prospects")
     evidence = [e for e in ctx.get("evidence", []) if e.get("verified") and e.get("snippet")]
@@ -552,9 +622,15 @@ def qualify(rpc, ctx: dict, criteria: dict, *, reeval: ReevalScope | None = None
         "evidence_count": len(evidence),
         "contactability": assessment,
     }
+    indie_estimates = {"decision_basis": "deterministic project-first rubric over verified evidence",
+                       "scoring_model": scoring.INDIE_MODEL, "qualification_v2": qualification,
+                       "contactability": assessment, "suppression": suppression,
+                       "qualification_confidence": qualification_review.confidence_indicator(res, scoring.INDIE_QUALIFY_MIN, scoring.INDIE_REVIEW_MIN)}
+    # Phase 6: see the studio branch above for what this note is and is not allowed to do.
+    review_note = qualification_review.explain_ambiguous(llm, res, evidence)
+    if review_note is not None:
+        indie_estimates["ambiguous_evidence_review"] = review_note
     rpc("intel_agent_set_score", {"p_prospect_id": p["id"], "p_score": res.score, "p_breakdown": res.breakdown,
                                   "p_decision": res.decision, "p_reason": res.reason,
-                                  "p_estimates": {"decision_basis": "deterministic project-first rubric over verified evidence",
-                                                  "scoring_model": scoring.INDIE_MODEL, "qualification_v2": qualification,
-                                                  "contactability": assessment, "suppression": suppression}})
+                                  "p_estimates": indie_estimates})
     return res

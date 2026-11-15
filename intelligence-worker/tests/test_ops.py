@@ -33,9 +33,6 @@ class FakeRpc:
         if name == "intel_agent_mark_unknown": m["state"] = "unknown"; return None
         if name == "intel_agent_fail_send": m["state"] = "failed"; m["perm"] = p["p_permanent"]; return None
         if name == "intel_agent_stale_sends": return [dict(x) for x in self.msgs.values() if x["state"] in ("sending", "unknown")]
-        if name == "intel_agent_sync_state":
-            if p.get("p_set") is not None: self.cursor = p["p_set"]
-            return self.cursor
         if name == "intel_agent_record_inbound":
             if p["p_zoho_message_id"] in self.inbound: return {"message_id": self.inbound[p["p_zoho_message_id"]], "duplicate": True}
             self.inbound[p["p_zoho_message_id"]] = "m-" + p["p_zoho_message_id"]; return {"message_id": self.inbound[p["p_zoho_message_id"]], "duplicate": False, "matched": True}
@@ -386,7 +383,7 @@ class WorkerLoop(unittest.TestCase):
         jobs.HANDLERS["send"] = lambda d, j: (_ for _ in ()).throw(exc)
         try: w.run_job({"id": "j1", "kind": "send", "attempts": 3, "payload": {}})
         finally: jobs.HANDLERS["send"] = ORIGINAL_SEND
-        return next(p for n, p in calls if n == "intel_agent_fail_job")
+        return next(p for n, p in calls if n in ("intel_agent_fail_job", "intel_agent_fail_job_permanent"))
 
     def test_unknown_provider_outcome_settles_send_job_without_retry_or_dead_letter(self):
         # The provider may have accepted the email before the timeout. Keep the
@@ -425,14 +422,17 @@ class WorkerLoop(unittest.TestCase):
         self.assertTrue(completion["p_result"]["deferred"])
 
     def test_error_mapping(self):
-        self.assertEqual(self.run_with(TransientError("x"))["p_retry_seconds"], 120)        # exponential backoff
-        self.assertEqual(self.run_with(PermanentError("x"))["p_retry_seconds"], 86400)
-        self.assertEqual(self.run_with(RpcError("x"))["p_retry_seconds"], 86400)
+        # Phase 4: background work backs off 1 min, 5 min, 15 min, 1 h, 2 h (jittered +-10% in production; Deps.rand is the real uniform here,
+        # so assert the band). Permanent and definite database refusals are dead at once (fail_job_permanent, no p_retry_seconds).
+        retry = self.run_with(TransientError("x"))["p_retry_seconds"]               # attempt 3 -> 900 s base
+        self.assertTrue(810 <= retry <= 990, retry)
+        self.assertNotIn("p_retry_seconds", self.run_with(PermanentError("x")))
+        self.assertNotIn("p_retry_seconds", self.run_with(RpcError("x")))
         self.assertTrue(self.run_with(ValueError("boom"))["p_error"].startswith("unexpected ValueError"))
 
     def test_one_bad_job_does_not_stop_the_worker(self):
         w, calls = self.mk(); w.run_job({"id": "j", "kind": "nonsense", "attempts": 1, "payload": {}})
-        self.assertIn("intel_agent_fail_job", [n for n, _ in calls])
+        self.assertIn("intel_agent_fail_job_permanent", [n for n, _ in calls])      # an unknown job kind can never succeed: dead, visible
 
     def test_lost_lease_does_not_complete_or_fail_the_job(self):
         calls = []

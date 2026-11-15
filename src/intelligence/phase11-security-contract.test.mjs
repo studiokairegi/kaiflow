@@ -21,7 +21,7 @@ test("JWT bypass is explicit only for capability, webhook and one-time OAuth end
     "google-drive-connect", "google-drive-callback", "patreon-connect", "patreon-callback",
     "patreon-webhook", "paystack-checkout", "paystack-webhook", "resend-webhook",
     "intel-resend-webhook",
-    "intel-provider-callback", "studio-invite-accept", "freelancer-drive-upload",
+    "intel-provider-callback", "studio-invite-accept", "freelancer-drive-upload", "drive-upload-cleanup",
     "client-final-download", "portfolio-view", "portfolio-media", "portal-chat", "push",
   ];
   for (const name of expected) {
