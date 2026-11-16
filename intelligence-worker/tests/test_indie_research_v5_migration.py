@@ -2,7 +2,7 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-MIGRATION = ROOT / "supabase/migrations/20261112180000_intelligence_indie_research_verification_v5.sql"
+MIGRATION = ROOT / "supabase/migrations/20261112200317_indie_research_verification_v5.sql"
 
 
 class IndieResearchMigrationContract(unittest.TestCase):

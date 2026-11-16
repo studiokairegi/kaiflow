@@ -149,14 +149,14 @@ class ReengagementEvidenceTests(unittest.TestCase):
 class MigrationContractTests(unittest.TestCase):
     def test_sequence_migration_has_four_indie_stages_and_reply_stop(self):
         from pathlib import Path
-        path = Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261112192000_intelligence_indie_outreach_v6.sql"
+        path = Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261112200336_indie_outreach_v6.sql"
         sql = path.read_text()
         for token in ("alter column max_followups set default 4", ">= 5", ">= 10", "interval '3 months'", "interval '6 months'", "f.sent_followups < least(4, s.max_followups)", "f.sent_followups < least(3, s.max_followups)", "direction = 'inbound'"):
             self.assertIn(token, sql)
 
     def test_no_auto_portfolio_for_initial_composition(self):
         from pathlib import Path
-        source = Path(drafting.__file__).read_text()
+        source = Path(drafting.__file__).read_text(encoding="utf-8")
         self.assertIn('allow_portfolio = kind == "reply" and (str((inbound or {}).get("class") or "") == "portfolio_request"', source)
         self.assertIn("initial outreach must not contain portfolio or studio website links", source)
 
