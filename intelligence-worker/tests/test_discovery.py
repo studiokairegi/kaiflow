@@ -266,7 +266,7 @@ class IndieProjectDiscoveryV3(unittest.TestCase):
 
     def test_phase3_migration_uses_project_identity_and_keeps_sources_disabled(self):
         from pathlib import Path
-        migration = Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261112160000_intelligence_indie_project_discovery_v3.sql"
+        migration = Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261112200304_indie_project_discovery_v3.sql"
         sql = migration.read_text()
         self.assertIn("'project:' || md5", sql)
         self.assertIn("game_project", sql)
@@ -759,7 +759,7 @@ class KickstarterManualIntakeV4(unittest.TestCase):
 
     def test_migration_keeps_kickstarter_automated_source_disabled_and_manual_rpc_admin_only(self):
         from pathlib import Path
-        migration = Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261112170000_intelligence_kickstarter_manual_intake_v4.sql"
+        migration = Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261112200311_kickstarter_manual_intake_v4.sql"
         sql = migration.read_text()
         for fragment in ("enabled = false", "'unverified'", "Automated crawling/spidering is prohibited",
                          "intel_admin_add_kickstarter_project", "'manual_post'", "'kickstarter_manual'", "md5(v_url)",
@@ -771,7 +771,7 @@ class KickstarterManualIntakeV4(unittest.TestCase):
             self.assertIn(fragment, sql)
         self.assertNotIn("create or replace function public.kickstarter", sql.lower())
         self.assertNotIn("fetch(", sql.lower())
-        corrective = (Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261112190000_intelligence_kickstarter_exclusion_identity_fixes.sql").read_text()
+        corrective = (Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261112200324_kickstarter_exclusion_identity_fixes.sql").read_text()
         for fragment in ("intel_agent_kickstarter_intake_allowed", "intel_agent_kickstarter_commit_import",
                          "state = 'cancelled'", "tos_status = 'excluded'", "for share",
                          "developer_identity_status", "independently_verified", "kickstarter_creator_role_verified",

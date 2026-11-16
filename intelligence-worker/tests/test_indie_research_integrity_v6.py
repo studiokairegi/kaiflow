@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class Phase5IntegrityMigrationContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.sql = (ROOT / "supabase/migrations/20261112191000_intelligence_indie_research_integrity_v6.sql").read_text()
+        cls.sql = (ROOT / "supabase/migrations/20261112200330_indie_research_integrity_v6.sql").read_text()
         cls.panel = (ROOT / "src/intelligence/IndieAdminPanel.jsx").read_text()
         cls.api = (ROOT / "src/intelligence/api.js").read_text()
 
