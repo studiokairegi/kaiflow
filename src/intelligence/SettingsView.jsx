@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { S, T, Btn, Pill, Banner, Field, Modal, Table, useBusy } from "../finance/ui.jsx";
 import { intelApi } from "./api.js";
-import { AUTONOMY, KB_KINDS, fmtWhen, missingJapaneseKb, missingKb, sourceState } from "./logic.js";
+import { AUTONOMY, KB_KINDS, controllerRestartNotice, fmtWhen, missingJapaneseKb, missingKb, sourceState } from "./logic.js";
 import { Input, Muted, Section, Select, TextArea, useLoad, confirmAction } from "./kit.jsx";
+import EmmaSwitch from "./EmmaSwitch.jsx";
 
 const WORKER_CONTROL_URL = "http://127.0.0.1:17843";
 const CONTROLLER_TOKEN_STORAGE_KEY = "kairflow.intelligence.controller-token.v1";
@@ -71,6 +72,9 @@ function WorkerControlCard() {
   const running = Boolean(status?.worker_running);
   return (
     <Section title="Emma" hint="Emma and the local controller load automatically when you sign in to Windows. Pair this browser once; after that KairFlow reconnects automatically.">
+      <EmmaSwitch />
+      <details style={{ margin: "6px 0" }}>
+        <summary style={{ cursor: "pointer", color: T.muted, fontSize: 13 }}>Advanced: pause or resume the worker only (the controller keeps running)</summary>
       <div style={{ ...S.row, justifyContent: "space-between", flexWrap: "wrap" }}>
         <div style={S.row}>
           <Pill tone={!online ? "warn" : running ? "ok" : "muted"}>{!online ? "Emma status unavailable" : running ? "Emma is online" : "Emma is offline"}</Pill>
@@ -84,11 +88,13 @@ function WorkerControlCard() {
           <Btn kind="link" disabled={busy} onClick={refresh}>Refresh</Btn>
         </div>
       </div>
+      </details>
       {!online && <Banner tone="warn">{controllerToken ? "The saved local pairing could not reach the controller. Check that the controller is installed and running, then refresh." : "Pair this computer once: enter the contents of %LOCALAPPDATA%\\KairFlowIntelligence\\controller.token below. If the controller is not installed yet, run intelligence-worker\\windows\\install-controller.ps1 once."} If Chrome asks to allow local network access, allow it for KairFlow.</Banner>}
       {!controllerToken && <Field label="Pair this computer (one time)" hint="Paste the local controller token once. KairFlow remembers it in this browser on this computer; it is not uploaded to your account or Supabase."><Input type="password" value={controllerToken} onChange={(e) => setControllerToken(e.target.value)} placeholder="Paste controller.token contents once" /></Field>}
       {controllerToken && <div style={S.row}><Pill tone="ok">This browser is paired</Pill><Btn kind="link" onClick={() => setControllerToken("")}>Forget this computer</Btn></div>}
       {error && <Banner tone="bad">{error}</Banner>}
       {status?.last_error && <Banner tone="bad">Worker restart problem: {status.last_error}</Banner>}
+      {controllerRestartNotice(status) && <Banner tone="warn">{controllerRestartNotice(status)}</Banner>}
       {online && !running && status?.last_exit_code !== null && status?.last_exit_code !== undefined && <Banner tone="warn">The worker exited with code {status.last_exit_code}. Check `%LOCALAPPDATA%\KairFlowIntelligence\worker.log` for details.</Banner>}
       {online && !running && <p style={S.sub}>Emma is stopped. Starting her resumes queued discovery, research and drafting work. Email sending remains governed by the existing approval, autonomy, daily-limit and emergency-stop settings.</p>}
       {running && <p style={S.sub}>Emma is running locally. Closing this browser tab will not stop the worker.</p>}
@@ -116,7 +122,8 @@ function SafetyCard({ s, supabase, onSaved }) {
         <Field label="Introductions per day (max 30)"><Input type="number" min="0" max="30" value={f.daily_initial_cap} onChange={set("daily_initial_cap")} /></Field>
         <Field label="Follow-ups per day"><Input type="number" min="0" max="100" value={f.daily_followup_cap} onChange={set("daily_followup_cap")} /></Field>
         <Field label="Follow-up after (business days)"><Input type="number" min="1" max="60" value={f.followup_business_days} onChange={set("followup_business_days")} /></Field>
-        <Field label="Follow-ups per prospect (0-3)"><Input type="number" min="0" max="3" value={f.max_followups} onChange={set("max_followups")} /></Field>
+        <Field label="Follow-ups per prospect (0-4; Indie uses 4 stages)"><Input type="number" min="0" max="4" value={f.max_followups} onChange={set("max_followups")} /></Field>
+        <p style={{ ...S.sub, gridColumn: "1 / -1" }}>For Indie Game Developers, the four stages are Day 5 and Day 10 business-day follow-ups, then Month 3 and Month 6 re-engagement. Re-engagement requires a new verified, dated project update or marketing milestone. Set this to 4 to enable all four stages; 0 disables them. Other campaigns remain capped at three follow-ups.</p>
         <Field label="Automatic replies per conversation"><Input type="number" min="0" max="5" value={f.max_auto_replies_per_thread} onChange={set("max_auto_replies_per_thread")} /></Field>
         <Field label="Studio time zone" hint="Defines the day for limits"><Input value={f.timezone} onChange={set("timezone")} /></Field>
         <Field label="Send from (hour, 0-23)" hint="Local studio time"><Input type="number" min="0" max="23" value={f.send_start_hour} onChange={set("send_start_hour")} /></Field>

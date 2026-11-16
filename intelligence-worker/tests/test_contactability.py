@@ -67,11 +67,45 @@ class Contactability(unittest.TestCase):
         self.assertEqual(r["status"], "needs_review")
         self.assertFalse(r["evidence"]["official_domain_associated"])
 
-    def test_employee_affiliation_does_not_bypass_domain_on_official_source(self):
+    def test_employee_affiliation_does_not_bypass_domain_for_non_indie_campaign(self):
         r = assess(email="producer@gmail.com", official_domain="studio.example",
                    source_url="https://studio.example/team", verification="human_confirmed",
                    verified_email="producer@gmail.com", employee_affiliation=True)
         self.assertEqual(r["status"], "needs_review")
+
+    def test_indie_personal_email_requires_an_association_source_url(self):
+        r = assess(email="maker@gmail.com", official_domain="tinymoon.dev", allow_personal_email=True,
+                   verification="human_confirmed", verified_email="maker@gmail.com")
+        self.assertEqual(r["status"], "needs_review")
+        self.assertIn("source URL", r["reason"])
+
+    def test_verified_personal_email_published_on_official_source_can_pass(self):
+        r = assess(email="producer@gmail.com", official_domain="studio.example",
+                   source_url="https://studio.example/team", verification="human_confirmed",
+                   verified_email="producer@gmail.com", employee_affiliation=True, allow_personal_email=True)
+        self.assertEqual(r["status"], "pass")
+
+    def test_gmail_outlook_and_proton_addresses_can_pass_with_official_association(self):
+        for address in ("founder@gmail.com", "founder@outlook.com", "founder@proton.me", "founder@protonmail.com"):
+            with self.subTest(address=address):
+                r = assess(email=address, official_domain="studio.example", source_url="https://studio.example/team",
+                           verification="human_confirmed", verified_email=address, employee_affiliation=True,
+                           allow_personal_email=True)
+                self.assertEqual(r["status"], "pass")
+
+    def test_personal_email_external_affiliation_requires_a_cited_relationship(self):
+        r = assess(email="producer@proton.me", official_domain="studio.example",
+                   source_url="https://profile.example/producer", verification="human_confirmed",
+                   verified_email="producer@proton.me", employee_affiliation=True,
+                   affiliation_evidence="producer@proton.me is the founder and developer of Studio Example.",
+                   affiliation_source_url="https://profile.example/producer", allow_personal_email=True)
+        self.assertEqual(r["status"], "pass")
+
+    def test_suppression_overrides_all_other_verification(self):
+        r = assess(email="producer@gmail.com", official_domain="studio.example",
+                   source_url="https://studio.example/team", verification="human_confirmed",
+                   verified_email="producer@gmail.com", suppressed=True, suppression_reason="unsubscribe", allow_personal_email=True)
+        self.assertEqual(r["status"], "rejected")
 
     def test_dot_atom_local_part_validation(self):
         for address in (".producer@studio.example", "producer.@studio.example", "pro..ducer@studio.example"):

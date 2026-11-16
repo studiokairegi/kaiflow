@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DIGEST_KEY, POMODORO_KEY, digestAlert, nextMorning, pomodoroAlert } from "./jobs.js";
 import {
-  buildPayload, cleanPrefs, isGone, namespacedKey, safeOpenUrl, shouldDeliver, validSubscription, validateJobs,
+  buildPayload, cleanPrefs, isGone, isStrike, MAX_FAIL_COUNT, namespacedKey, safeOpenUrl, shouldDeliver, validSubscription, validateJobs,
 } from "../../supabase/functions/_shared/push_logic.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -207,4 +207,43 @@ test("the app registers the worker, schedules timers and syncs preferences", () 
   assert.match(app, /digestAlert\(counts\)/); assert.match(app, /syncPushPrefs\(/);
   assert.match(read("src/settings/schema.js"), /messages: true/);
   assert.match(read("public/_headers"), /\/sw\.js\s+Cache-Control: no-cache/);
+});
+
+test("only client errors count as strikes against a subscription", () => {
+  for (const code of [400, 401, 403]) assert.equal(isStrike(code), true, String(code));
+  for (const code of [0, 408, 413, 429, 500, 502, 503]) assert.equal(isStrike(code), false, String(code));
+  assert.ok(MAX_FAIL_COUNT >= 2);
+});
+test("the dispatcher tracks delivery per device, prunes broken subscriptions and finishes once healthy devices are served", () => {
+  const fn = read("supabase/functions/push/index.ts");
+  assert.match(fn, /delivered\.has\(sub\.id\)\) continue/, "already-delivered devices are skipped on retry");
+  assert.match(fn, /update\(\{ delivered_sub_ids: Array\.from\(delivered\) \}\)/);
+  assert.match(fn, /isStrike\(status\)/);
+  assert.match(fn, /update\(\{ fail_count: strikes \}\)/);
+  assert.match(fn, /strikes >= MAX_FAIL_COUNT[\s\S]{0,120}delete\(\)/);
+  assert.match(fn, /update\(\{ fail_count: 0 \}\)/, "a success resets the strike count");
+});
+test("a migration adds delivered_sub_ids and publishes activity_log to realtime idempotently", () => {
+  const sql = read("supabase/migrations/20270109090000_notifications_realtime_and_push_delivery.sql");
+  assert.match(sql, /add column if not exists delivered_sub_ids uuid\[\]/);
+  assert.match(sql, /not exists \([\s\S]{0,200}pg_publication_tables[\s\S]{0,200}tablename = 'activity_log'/);
+  assert.match(sql, /alter publication supabase_realtime add table public\.activity_log/);
+});
+
+test("delivery is persisted after each send, sends have a timeout and database errors are logged", () => {
+  const fn = read("supabase/functions/push/index.ts");
+  const send = fn.indexOf("webpush.sendNotification(");
+  const persist = fn.indexOf("delivered_sub_ids: Array.from(delivered)");
+  const loopEnd = fn.indexOf('push_finish_job');
+  assert.ok(send > -1 && persist > send && persist < loopEnd, "persist right after a successful send, inside the device loop");
+  assert.match(fn, /timeout: SEND_TIMEOUT_MS/);
+  assert.match(fn, /function logDbError[\s\S]{0,200}console\.error/);
+  for (const step of ["record_delivery", "reset_fail_count", "prune_gone", "prune_failing", "record_strike", "finish_job"]) assert.match(fn, new RegExp(`logDbError\\\\?\\("${step}"`), step);
+});
+test("re-arming a pending job clears its delivered devices", () => {
+  const sql = read("supabase/migrations/20270109100000_push_enqueue_reset_delivery.sql");
+  assert.match(sql, /create or replace function public\.push_enqueue_user\(/);
+  assert.match(sql, /on conflict \(dedupe_key\) where dedupe_key is not null and sent_at is null[\s\S]*attempts = 0,\s*delivered_sub_ids = '\{\}'/);
+  assert.match(sql, /grant execute on function public\.push_enqueue_user\([^)]*\) to service_role/);
+  assert.match(sql, /revoke all on function public\.push_enqueue_user\([^)]*\) from public, anon, authenticated/);
 });

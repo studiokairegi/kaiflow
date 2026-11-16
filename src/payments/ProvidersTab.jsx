@@ -30,13 +30,13 @@ function ProviderCard({ p, onManage }) {
   );
 }
 
-const CHANNEL_LABELS = { card: "Card", bank_transfer: "Bank transfer", apple_pay: "Apple Pay" };
+const CHANNEL_LABELS = { card: "Card", apple_pay: "Apple Pay" };
 const CURRENCIES = ["KES", "USD", "NGN", "GHS", "ZAR"];
 
 function ManageDialog({ provider, row, onClose, onChanged }) {
   const { busy, error, run } = useBusy();
   const [status, setStatus] = useState(null);
-  const [channels, setChannels] = useState(() => new Set(row?.settings?.channels || ["card"]));
+  const [channels, setChannels] = useState(() => new Set((row?.settings?.channels || ["card"]).filter((c) => c !== "bank_transfer")));
   const [currencies, setCurrencies] = useState(() => new Set(row?.settings?.currencies || ["KES"]));
   const [saved, setSaved] = useState(false);
   useEffect(() => { api.getPaystackStatus().then(setStatus).catch(() => setStatus({ ok: false, message: "Could not read the server configuration." })); }, []);
@@ -68,6 +68,7 @@ function ManageDialog({ provider, row, onClose, onChanged }) {
           <p style={S.sub}>Enable only payment methods and currencies that are actually active on your Paystack merchant account. Apple Pay must first be activated in Paystack Dashboard; it is then shown here as an available checkout channel.</p>
           <div style={S.row}>{Object.entries(CHANNEL_LABELS).map(([k, l]) => <label key={k}><input type="checkbox" checked={channels.has(k)} onChange={() => flip(channels, setChannels, k)} /> {l}</label>)}</div>
           <div style={{ ...S.row, marginTop: 8 }}>{CURRENCIES.map((c) => <label key={c}><input type="checkbox" checked={currencies.has(c)} onChange={() => flip(currencies, setCurrencies, c)} /> {c}</label>)}</div>
+          {!currencies.has("KES") && <p style={{ ...S.sub, color: "#F2A65A" }}>KES is not selected. Checkout charges in Kenyan shillings, so clients will see “online payment isn’t available” until KES is enabled.</p>}
           <div style={{ marginTop: 10 }}><Btn small disabled={busy || !channels.size || !currencies.size} onClick={saveOptions}>{saved ? "Saved" : "Save channels and currencies"}</Btn></div>
         </>
       )}
@@ -94,7 +95,7 @@ export default function ProvidersTab() {
       <div style={S.card}>
         <h3 style={S.h3}>What clients see</h3>
         {offered.length === 0
-          ? <p style={S.sub}>No payment method is live yet, so a payment link would show “online payment isn’t available for this invoice”. Connect Paystack above to turn on card and bank transfer.</p>
+          ? <p style={S.sub}>No payment method is live yet, so a payment link would show “online payment isn’t available for this invoice”. Connect Paystack above to turn on card payments.</p>
           : <p style={S.sub}>Offered at checkout, in order: {offered.map((p) => p.name).join(", ")}.</p>}
         <p style={S.sub}>Payment links look like <code>/pay/&#123;secure-token&#125;</code>. The token is random and unguessable; invoice IDs are never in the link.</p>
       </div>

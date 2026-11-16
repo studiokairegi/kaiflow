@@ -17,22 +17,43 @@ EV = [{"id": "e0", "verified": True, "snippet": "Hand-drawn 2D adventure coming 
 
 
 class Scoring(unittest.TestCase):
-    def test_indie_strong_with_email_qualifies(self):
-        sig = {"style_2d": "x", "style_anime": "x", "narrative": "x", "upcoming_release": "x", "kickstarter": "x", "seeking_animation": "x", "trailer": "x"}
-        r = scoring.score_indie(sig, {"recent_activity": True, "price_present": True}, {"email": "rina@pixelmoon.com"})
-        self.assertEqual(r.decision, "qualified"); self.assertGreaterEqual(r.score, 70)
+    def test_indie_score_uses_project_first_categories_and_mandatory_gates(self):
+        from datetime import date, timedelta
+        evidence = [
+            {"fact_type": "project_description", "snippet": "Moon game description", "url": "https://game.example/", "verified": True},
+            {"fact_type": "devlog", "snippet": "Latest development update", "url": "https://game.example/devlog", "verified": True},
+            {"fact_type": "anime_visual_screenshot", "snippet": "Official anime-style character screenshot", "url": "https://cdn.example/game.png", "verified": True},
+        ]
+        meta = {"developer_name": "Pixel Moon", "project_title": "Moon Game", "project_url": "https://game.example/", "source": "steam",
+                "contact_email": "rina@pixelmoon.com", "team_size": 2, "indie_status_verified": True,
+                "project_latest_activity_date": (date.today() - timedelta(days=20)).isoformat(),
+                "project_expected_release_date": (date.today() + timedelta(days=100)).isoformat()}
+        contact = {"status": "pass", "reason": "human confirmed", "verified_email": "rina@pixelmoon.com",
+                   "evidence": {"source_url": "https://game.example/contact"}}
+        r = scoring.score_indie({}, meta, {"email": "rina@pixelmoon.com"}, evidence_rows=evidence,
+                                contactability_result=contact, suppression={})
+        self.assertEqual(r.decision, "qualified"); self.assertEqual(r.score, 100)
         self.assertEqual(sum(b["points"] for b in r.breakdown), r.score)
         self.assertTrue(all(b["points"] <= b["max"] for b in r.breakdown))
 
-    def test_suitability_is_not_rejected_for_missing_contact(self):
-        sig = {"style_2d": "x", "style_anime": "x", "upcoming_release": "x", "kickstarter": "x", "seeking_animation": "x", "trailer": "x"}
-        r = scoring.score_indie(sig, {"recent_activity": True, "price_present": True}, {"form_url": "https://x"})
-        self.assertEqual(r.decision, "qualified")  # contactability is assessed separately
+    def test_missing_contact_is_a_mandatory_gate_not_a_suitability_bonus(self):
+        from datetime import date, timedelta
+        evidence = [
+            {"fact_type": "project_description", "snippet": "Moon game description", "url": "https://game.example/", "verified": True},
+            {"fact_type": "devlog", "snippet": "Latest development update", "url": "https://game.example/devlog", "verified": True},
+            {"fact_type": "anime_visual_screenshot", "snippet": "Official anime screenshot", "url": "https://cdn.example/game.png", "verified": True},
+        ]
+        meta = {"developer_name": "Pixel Moon", "project_title": "Moon Game", "project_url": "https://game.example/", "source": "steam",
+                "team_size": 2, "project_latest_activity_date": (date.today() - timedelta(days=20)).isoformat(),
+                "project_expected_release_date": (date.today() + timedelta(days=100)).isoformat()}
+        r = scoring.score_indie({}, meta, {"form_url": "https://x"}, evidence_rows=evidence,
+                                contactability_result={"status": "needs_review"}, suppression={})
+        self.assertEqual(r.decision, "needs_review")
+        self.assertFalse(r.mandatory_gates["verified_usable_email"]["passed"])
 
-    def test_nothing_known_is_rejected_and_budget_not_assumed(self):
+    def test_nothing_known_is_rejected(self):
         r = scoring.score_indie({}, {}, None)
         self.assertEqual((r.score, r.decision), (0, "rejected"))
-        self.assertIn("NOT assumed", next(b for b in r.breakdown if b["criterion"] == "commercial")["why"])
 
     def test_studio_legacy_v1_still_reproducible(self):
         sig = {"recruit_page": "x", "outsourcing": "x", "role_layout": "x", "role_key": "x", "role_inbetween": "x", "production_active": "x", "expansion": "x", "multiple_titles": "x"}
@@ -51,26 +72,33 @@ class Signals(unittest.TestCase):
     def test_nothing_invented(self):
         self.assertEqual(signals.detect_indie("A recipe blog about bread."), {})
 
-    def test_steam_candidate(self):
+    def test_steam_candidate_keeps_developer_contact_and_project_provenance_without_activity_claim(self):
         d = {"type": "game", "name": "Moon", "developers": ["Pixel Moon"], "publishers": ["Pixel Moon"], "release_date": {"coming_soon": True, "date": "Coming soon"},
              "support_info": {"email": "Rina@PixelMoon.com", "url": ""}, "website": "https://pixelmoon.com", "genres": [{"description": "Indie"}], "movies": [{}], "price_overview": {}}
         c = sources.steam_candidate(d, "1")
         self.assertEqual((c["name"], c["contact_email"]), ("Pixel Moon", "rina@pixelmoon.com"))
-        self.assertTrue(c["meta"]["coming_soon"] and c["meta"]["self_published"])
+        self.assertTrue(c["meta"]["coming_soon"])
+        self.assertEqual(c["meta"]["project_url"], "https://store.steampowered.com/app/1/")
+        self.assertNotIn("recent_activity", c["meta"])
+        self.assertNotIn("latest_activity_date", c["meta"])
         self.assertIsNone(sources.steam_candidate({**d, "type": "dlc"}, "1"))
-        self.assertIsNone(sources.steam_candidate({**d, "release_date": {"coming_soon": False, "date": "Mar 3, 2012"}}, "1"))
 
-    def test_steam_candidate_rejects_third_party_publisher(self):
-        d = {"type": "game", "developers": ["Pixel Moon"], "publishers": ["Big Publisher"],
+    def test_steam_candidate_accepts_third_party_publisher_and_keeps_roles_separate(self):
+        d = {"type": "game", "name": "Small Game", "developers": ["Pixel Moon"], "publishers": ["Big Publisher"],
              "release_date": {"coming_soon": True, "date": "Coming soon"}}
-        self.assertIsNone(sources.steam_candidate(d, "2"))
+        candidate = sources.steam_candidate(d, "2")
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["name"], "Pixel Moon")
+        self.assertEqual(candidate["meta"]["publisher_name"], "Big Publisher")
+        self.assertEqual(candidate["meta"]["developer_name"], "Pixel Moon")
 
-    def test_steam_candidate_accepts_multiple_developers_when_all_are_publishers(self):
-        d = {"type": "game", "developers": ["Pixel Moon", "Studio Two"], "publishers": ["studio two", "PIXEL MOON"],
-             "release_date": {"coming_soon": True, "date": "Coming soon"}}
+    def test_steam_candidate_keeps_released_projects_for_later_opportunity_research(self):
+        d = {"type": "game", "name": "Moon", "developers": ["Pixel Moon"], "publishers": ["Publisher"],
+             "release_date": {"coming_soon": False, "date": "Mar 3, 2012"}}
         candidate = sources.steam_candidate(d, "3")
         self.assertIsNotNone(candidate)
-        self.assertTrue(candidate["meta"]["self_published"])
+        self.assertFalse(candidate["meta"]["coming_soon"])
+        self.assertEqual(candidate["meta"]["release_date"], "Mar 3, 2012")
 
 
 class Policy(unittest.TestCase):
@@ -133,13 +161,13 @@ class Classify(unittest.TestCase):
         self.assertEqual(self.c("I am out of the office", subject="Automatic reply")["class"], "out_of_office")
         b = self.c("550 user unknown: ghost@old.com", subject="Undelivered Mail", frm="mailer-daemon@zoho.com")
         self.assertEqual((b["class"], b["related_email"]), ("bounce", "ghost@old.com"))
-        self.assertEqual(self.c("Thanks but we are not interested.")["class"], "rejection")
+        self.assertEqual(self.c("Thanks but we are not interested.")["class"], "not_interested")
 
 
 class Drafting(unittest.TestCase):
     def test_refuses_without_approved_kb(self):
         with self.assertRaises(PermanentError): drafting.build_initial(P, EV, {}, SETTINGS)
-        partial = {k: v for k, v in KB.items() if k != "portfolio.main"}
+        partial = {k: v for k, v in KB.items() if k != "services.indie_game_developer"}
         with self.assertRaises(PermanentError): drafting.build_initial(P, EV, partial, SETTINGS)
 
     def test_uses_only_kb_text_and_verified_evidence(self):
@@ -216,7 +244,7 @@ class Drafting(unittest.TestCase):
         self.assertTrue(m["subject"].startswith("アニメーション制作協力"))
         self.assertIn("ご担当者様", m["body"])
         self.assertIn("レイアウト（LO）", m["body"])
-        self.assertIn("制作実績：https://studio.test/portfolio", m["body"])
+        self.assertNotIn("制作実績：https://studio.test/portfolio", m["body"])
         self.assertIn(ja_kb["policy.opt_out.ja"]["body"], m["body"])
         self.assertNotIn(SETTINGS["opt_out_text"], m["body"])
         self.assertEqual(policy.validate_outbound(m["subject"], m["body"], SETTINGS, drafting.approved_urls(ja_kb), "initial", "tokyo-studio.jp", opt_out_text=ja_kb["policy.opt_out.ja"]["body"]), [])
@@ -237,7 +265,7 @@ class Drafting(unittest.TestCase):
         japan = {**P, "type": "animation_studio_support", "country": "日本", "language": "ja", "name": "Tokyo Studio"}
         f = drafting.build_followup(japan, ja_kb, SETTINGS, "2026-11-05")
         self.assertIn("先日お送りした", f["body"])
-        self.assertIn("制作実績：https://studio.test/portfolio", f["body"])
+        self.assertNotIn("制作実績：https://studio.test/portfolio", f["body"])
         r = drafting.build_auto_reply("portfolio_request", japan, ja_kb, SETTINGS, "Re: ご提案")
         self.assertIn("ご返信いただき", r["body"])
         self.assertNotIn("Thank you", r["body"])

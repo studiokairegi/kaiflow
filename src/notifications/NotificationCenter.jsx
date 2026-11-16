@@ -49,6 +49,7 @@ export default function NotificationCenter({ notifications, onNavigate, buttonSt
     setNavMessage("");
     const eng = engine.current;
     if (!eng) return;
+    eng.dismissToast(); // the reminder has been seen; don't let it pop back when the panel closes
     const ids = await eng.open(); // acknowledges exactly the unread, non-snoozed items right now
     setFresh(new Set(ids));
   }, [engine]);
@@ -67,11 +68,13 @@ export default function NotificationCenter({ notifications, onNavigate, buttonSt
 
   const handleItem = async (n) => {
     const eng = engine.current;
-    if (eng) eng.openItem(n.id);
     let res = { ok: true };
     try { res = (await onNavigate(n)) || { ok: true }; } catch { res = { ok: false, message: "That item couldn't be opened." }; }
-    if (res.ok) close(false);
-    else setNavMessage(res.message || "That item is no longer available.");
+    if (res.ok) {
+      // Only consume the item (mark opened + cancel its snooze push) once it actually opened.
+      if (eng) eng.openItem(n.id);
+      close(false);
+    } else setNavMessage(res.message || "That item is no longer available.");
   };
 
   const label = badgeCount > 0 ? `Notifications, ${badgeCount} unread` : "Notifications";

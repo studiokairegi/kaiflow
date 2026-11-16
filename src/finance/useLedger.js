@@ -8,7 +8,7 @@ export function useLedger(userId) {
   const [state, setState] = useState({ loading: true, error: "", data: null });
   const seq = useRef(0);
   const reload = useCallback(async () => {
-    if (!userId) return;
+    if (!userId) { setState((s) => (s.loading ? { ...s, loading: false } : s)); return; } // otherwise Finance would sit on the loader forever
     const mine = ++seq.current; // an older, slower load must never overwrite a newer one
     try {
       const data = await loadLedger();

@@ -1,0 +1,163 @@
+--- a/intelligence-worker/kairflow_intel/jobs.py
++++ b/intelligence-worker/kairflow_intel/jobs.py
+@@ -676,6 +676,24 @@
+                 return
+             if isinstance(result, dict) and result.get("reason") in DEFER:
+                 result = {**result, "deferred": True}
++
++            # A kill-switch stop is a real deferral, not successful completion.
++            # Do not consume an attempt or mark the job succeeded while sending
++            # is intentionally paused. This also handles the race where the
++            # switch is enabled after the claim but before h_send() runs.
++            if isinstance(result, dict) and result.get("reason") == "kill_switch":
++                deferred = d.rpc("intel_agent_defer_job", {
++                    "p_job_id": job["id"],
++                    "p_worker_id": d.cfg.worker_id,
++                    "p_reason": "kill_switch",
++                    "p_retry_seconds": 300,
++                })
++                if deferred is not True:
++                    self._last_job_error = "job deferral rejected because lease ownership was lost"
++                    return
++                self._last_job_error = None
++                return
++
+             completed = d.rpc("intel_agent_complete_job", {"p_job_id": job["id"], "p_worker_id": d.cfg.worker_id,
+                 "p_result": result if isinstance(result, dict) else {"value": result}})
+             if completed is not True:
+--- a/intelligence-worker/tests/test_ops.py
++++ b/intelligence-worker/tests/test_ops.py
+@@ -385,6 +385,32 @@
+         finally:
+             jobs.HANDLERS["send"] = original
+ 
++    def test_kill_switch_defers_claimed_send_job_instead_of_succeeding(self):
++        calls = []
++        def rpc(name, p=None):
++            p = p or {}
++            calls.append((name, p))
++            if name == "intel_agent_defer_job":
++                return True
++            return None
++
++        w, _ = self.mk()
++        w.d.rpc = rpc
++        original = jobs.HANDLERS.get("send")
++        jobs.HANDLERS["send"] = lambda d, j: {"sent": False, "reason": "kill_switch"}
++        try:
++            w.run_job({"id": "kill-job", "kind": "send", "attempts": 1, "payload": {"message_id": "m1"}})
++        finally:
++            jobs.HANDLERS["send"] = original
++
++        names = [name for name, _ in calls]
++        self.assertIn("intel_agent_defer_job", names)
++        self.assertNotIn("intel_agent_complete_job", names)
++        defer = next(params for name, params in calls if name == "intel_agent_defer_job")
++        self.assertEqual(defer["p_job_id"], "kill-job")
++        self.assertEqual(defer["p_reason"], "kill_switch")
++        self.assertEqual(defer["p_retry_seconds"], 300)
++
+     def test_run_job_does_not_complete_or_fail_after_lease_loss(self):
+         from unittest.mock import patch
+         import threading
+--- /dev/null
++++ b/supabase/migrations/20261219090000_intelligence_kill_switch_job_deferral.sql
+@@ -0,0 +1,98 @@
++-- Keep queued send work queued while the studio kill switch is enabled.
++-- A kill-switch stop is an operator pause, not a successful job completion.
++
++create or replace function public.intel_agent_defer_job(
++  p_job_id uuid,
++  p_worker_id text,
++  p_reason text default 'deferred',
++  p_retry_seconds int default 300
++) returns boolean
++language plpgsql
++security definer
++set search_path = pg_catalog, public
++as $$
++declare
++  v_org uuid := public.intel_agent_org();
++begin
++  update public.intel_jobs
++     set state = 'queued',
++         run_after = now() + make_interval(secs => greatest(1, least(p_retry_seconds, 86400))),
++         locked_by = null,
++         lease_until = null,
++         last_error = null,
++         finished_at = null,
++         updated_at = now()
++   where id = p_job_id
++     and organization_id = v_org
++     and state = 'running'
++     and locked_by = p_worker_id;
++
++  return found;
++end
++$$;
++
++-- Do not claim send jobs while the emergency stop is active. This prevents
++-- needless claim/defer churn; h_send + intel_agent_defer_job still cover the
++-- race where the switch changes after a job is claimed.
++create or replace function public.intel_agent_claim_job(
++  p_worker_id text,
++  p_kinds text[] default null,
++  p_lease_seconds int default 300
++) returns jsonb
++language plpgsql
++security definer
++set search_path = pg_catalog, public
++as $$
++declare
++  v_org uuid := public.intel_agent_org();
++  v_job public.intel_jobs;
++begin
++  update public.intel_jobs
++     set state = case when attempts >= max_attempts then 'dead' else 'queued' end,
++         locked_by = null,
++         lease_until = null,
++         last_error = left(concat_ws(' | ', nullif(last_error, ''),
++           'lease expired at ' || now()::text || ' (previous owner ' || coalesce(locked_by, 'unknown') || ')'), 1000),
++         updated_at = now(),
++         finished_at = case when attempts >= max_attempts then now() else null end
++   where organization_id = v_org
++     and state = 'running'
++     and lease_until is not null
++     and lease_until <= now();
++
++  select * into v_job
++    from public.intel_jobs
++   where organization_id = v_org
++     and state = 'queued'
++     and run_after <= now()
++     and (p_kinds is null or kind = any (p_kinds))
++     and not (
++       kind = 'send'
++       and coalesce((
++         select s.kill_switch
++           from public.intel_settings s
++          where s.organization_id = v_org
++          limit 1
++       ), true)
++     )
++   order by priority desc, run_after, created_at
++   limit 1
++   for update skip locked;
++
++  if not found then
++    return null;
++  end if;
++
++  update public.intel_jobs
++     set state = 'running',
++         attempts = attempts + 1,
++         locked_by = left(p_worker_id, 80),
++         lease_until = now() + make_interval(secs => greatest(30, least(p_lease_seconds, 3600))),
++         updated_at = now(),
++         finished_at = null
++   where id = v_job.id
++   returning * into v_job;
++
++  return to_jsonb(v_job);
++end
++$$;

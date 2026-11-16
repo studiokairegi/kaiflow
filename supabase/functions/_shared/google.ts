@@ -1,7 +1,7 @@
 // Thin wrappers around Google's OAuth token endpoint and the Drive v3 REST
 // API. Plain fetch calls, no googleapis package needed in Deno.
 
-export async function getAccessToken(refreshToken: string): Promise<string> {
+async function refreshAccess(refreshToken: string): Promise<{ token: string; expiresInSeconds: number }> {
   const clientId = Deno.env.get("GOOGLE_CLIENT_ID")!;
   const clientSecret = Deno.env.get("GOOGLE_CLIENT_SECRET")!;
 
@@ -21,7 +21,25 @@ export async function getAccessToken(refreshToken: string): Promise<string> {
     throw new Error(`Token refresh failed: ${res.status} ${body}`);
   }
   const json = await res.json();
-  return json.access_token as string;
+  return { token: json.access_token as string, expiresInSeconds: Number(json.expires_in) || 3000 };
+}
+
+export async function getAccessToken(refreshToken: string): Promise<string> {
+  return (await refreshAccess(refreshToken)).token;
+}
+
+// Isolate-local cache so the several actions of one upload (init / up to 4 recover polls / finalize) do not each
+// pay a Google OAuth round trip (latency + quota). Keyed by the refresh token, never logged, never persisted,
+// dropped a minute before Google's own expiry.
+const accessTokenCache = new Map<string, { token: string; expiresAt: number }>();
+export async function getCachedAccessToken(refreshToken: string): Promise<string> {
+  const now = Date.now();
+  const hit = accessTokenCache.get(refreshToken);
+  if (hit && hit.expiresAt > now + 60_000) return hit.token;
+  const { token, expiresInSeconds } = await refreshAccess(refreshToken);
+  if (accessTokenCache.size >= 100) accessTokenCache.clear();
+  accessTokenCache.set(refreshToken, { token, expiresAt: now + expiresInSeconds * 1000 });
+  return token;
 }
 
 export async function createDriveFolder(
@@ -35,7 +53,7 @@ export async function createDriveFolder(
   };
   if (parentId) metadata.parents = [parentId];
 
-  const res = await fetch("https://www.googleapis.com/drive/v3/files", {
+  const res = await fetch("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -96,7 +114,7 @@ export async function uploadFileToDrive(
   ]);
 
   const res = await fetch(
-    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id",
     {
       method: "POST",
       headers: {
@@ -131,23 +149,26 @@ export async function uploadFileToDrive(
 // (Drive > right-click > Share > Anyone with the link) - so this logs and
 // returns false rather than throwing.
 export async function shareFileWithAnyone(accessToken: string, fileId: string): Promise<boolean> {
-  try {
-    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ role: "reader", type: "anyone" }),
-    });
-    if (!res.ok) {
-      console.error(`Sharing Drive file ${fileId} failed: ${res.status} ${await res.text()}`);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?supportsAllDrives=true`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ role: "reader", type: "anyone" }),
+      });
+      if (res.ok) return true;
+      console.error(`Sharing Drive file ${fileId} failed (attempt ${attempt}): ${res.status} ${await res.text()}`);
+      // 4xx other than rate limiting will not change on retry (e.g. the domain forbids public links).
+      if (res.status < 500 && res.status !== 429) return false;
+    } catch (err) {
+      console.error(`Sharing Drive file ${fileId} failed (attempt ${attempt}):`, err);
     }
-    return res.ok;
-  } catch (err) {
-    console.error(`Sharing Drive file ${fileId} failed:`, err);
-    return false;
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 300 * attempt));
   }
+  return false;
 }
 
 // Moves a Drive file to the owner's trash (not a permanent delete) so a
@@ -157,7 +178,7 @@ export async function shareFileWithAnyone(accessToken: string, fileId: string): 
 // block removing the attachment record from the shot.
 export async function trashDriveFile(accessToken: string, fileId: string): Promise<boolean> {
   try {
-    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -182,13 +203,16 @@ export type DriveFileMeta = {
   size?: string;
   trashed?: boolean;
   parents?: string[];
+  appProperties?: Record<string, string>;
+  createdTime?: string;
+  md5Checksum?: string; // Drive's own MD5 of the stored bytes (binary files only; may lag a just-completed upload)
 };
 
 // Returns null when the file doesn't exist / isn't accessible (404), throws on
 // other failures so callers can tell "gone" from "Drive is having a bad day".
 export async function getDriveFileMeta(accessToken: string, fileId: string): Promise<DriveFileMeta | null> {
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size,trashed,parents`,
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?supportsAllDrives=true&fields=id,name,mimeType,size,trashed,parents,appProperties,md5Checksum`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
   if (res.status === 404) return null;
@@ -199,10 +223,10 @@ export async function getDriveFileMeta(accessToken: string, fileId: string): Pro
 // Lists live files in `folderId` carrying appProperties[key] === value. `key` and `value` are restricted to a
 // safe character set because they are interpolated into the Drive query string.
 export async function listFilesByAppProperty(accessToken: string, folderId: string, key: string, value: string): Promise<DriveFileMeta[]> {
-  if (!/^[A-Za-z0-9_]{1,40}$/.test(key) || !/^[A-Za-z0-9-]{1,64}$/.test(value) || !/^[A-Za-z0-9_-]{5,100}$/.test(folderId)) throw new Error("Invalid Drive query parameters.");
+  if (!/^[A-Za-z0-9_]{1,40}$/.test(key) || !/^[A-Za-z0-9_-]{1,64}$/.test(value) || !/^[A-Za-z0-9_-]{5,100}$/.test(folderId)) throw new Error("Invalid Drive query parameters.");
   const q = `appProperties has { key='${key}' and value='${value}' } and '${folderId}' in parents and trashed = false`;
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${encodeURIComponent("files(id,name,mimeType,size,trashed,parents)")}&pageSize=5&spaces=drive`,
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${encodeURIComponent("files(id,name,mimeType,size,trashed,parents,appProperties,createdTime,md5Checksum)")}&orderBy=createdTime&pageSize=10&spaces=drive&corpora=allDrives&supportsAllDrives=true&includeItemsFromAllDrives=true`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
   if (!res.ok) throw new Error(`Drive file search failed: ${res.status}`);
@@ -219,7 +243,7 @@ export async function findChildFolder(
   const escaped = name.split("\\").join("\\\\").split("'").join("\\'");
   const q = `name = '${escaped}' and '${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)&orderBy=createdTime&pageSize=1`,
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)&orderBy=createdTime&pageSize=1&corpora=allDrives&supportsAllDrives=true&includeItemsFromAllDrives=true`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
   if (!res.ok) throw new Error(`Drive folder lookup failed: ${res.status} ${await res.text()}`);
@@ -237,7 +261,7 @@ export async function findRootFolder(
   const escaped = name.split("\\").join("\\\\").split("'").join("\\'");
   const q = `name = '${escaped}' and 'root' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)&orderBy=createdTime&pageSize=1`,
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)&orderBy=createdTime&pageSize=1&supportsAllDrives=true`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
   if (!res.ok) throw new Error(`Drive root folder lookup failed: ${res.status} ${await res.text()}`);
@@ -251,7 +275,7 @@ export async function findRootFolder(
 export async function fetchDriveFileStream(accessToken: string, fileId: string, range?: string, signal?: AbortSignal): Promise<Response> {
   const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
   if (range) headers.Range = range;
-  return await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, { headers, signal });
+  return await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`, { headers, signal });
 }
 
 // Starts a Drive RESUMABLE upload and returns the session URL. The browser PUTs the file bytes straight
@@ -275,7 +299,7 @@ export async function createResumableUploadSession(
     "X-Upload-Content-Length": String(size),
   };
   if (origin) headers.Origin = origin;
-  const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id", {
+  const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id", {
     method: "POST",
     headers,
     body: JSON.stringify({ name: fileName, parents: [folderId], ...(appProperties ? { appProperties } : {}) }),

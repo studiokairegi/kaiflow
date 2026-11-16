@@ -1,6 +1,6 @@
 // POST /paystack-checkout    body: { action, token, ... }      PUBLIC (deploy with --no-verify-jwt)
 //
-//   start   { token, email, channel: "card" | "bank_transfer" | "apple_pay", quote_id }
+//   start   { token, email, channel: "card" | "apple_pay", quote_id }
 //             -> { status: "redirect", authorization_url }   send the client to Paystack-hosted checkout
 //             -> { status: "paid" | "pending", ... }          nothing new was started
 //   quote   { token, channel }
@@ -274,18 +274,22 @@ async function refreshCheckoutFx(service: any, token: string) {
     } finally {
       clearTimeout(timeout);
     }
-  } catch {
+  } catch (e) {
+    console.error("checkout FX refresh failed (network)", e instanceof Error ? e.message : "unknown");
     return; // Quote RPC may still use a snapshot that is within the strict freshness window.
   }
-  if (!response.ok) return;
+  if (!response.ok) { console.error("checkout FX refresh failed", { http: response.status }); return; }
 
   let payload: any;
-  try { payload = await response.json(); } catch { return; }
+  try { payload = await response.json(); } catch { console.error("checkout FX refresh failed (invalid JSON)"); return; }
   const updatedUnix = Number(payload?.time_last_update_unix);
   const updatedAtMs = updatedUnix * 1000;
   const now = Date.now();
   if (payload?.result !== "success" || !Number.isFinite(updatedAtMs) || updatedAtMs <= 0 ||
-      updatedAtMs > now + 5 * 60 * 1000 || now - updatedAtMs > FX_MAX_AGE_MS || !payload?.rates || typeof payload.rates !== "object") return;
+      updatedAtMs > now + 5 * 60 * 1000 || now - updatedAtMs > FX_MAX_AGE_MS || !payload?.rates || typeof payload.rates !== "object") {
+    console.error("checkout FX refresh rejected the provider response", { result: payload?.result, updatedUnix });
+    return;
+  }
 
   const rates: Record<string, number> = {};
   for (const currency of FX_SUPPORTED) {
@@ -293,7 +297,7 @@ async function refreshCheckoutFx(service: any, token: string) {
     if (Number.isFinite(value) && value > 0) rates[currency] = value;
   }
   // We need KES for Paystack and the original invoice currency to derive a cross rate.
-  if (!rates.KES || Object.keys(rates).length === 0) return;
+  if (!rates.KES || Object.keys(rates).length === 0) { console.error("checkout FX refresh: no usable KES rate"); return; }
 
   const fetchedAt = new Date(updatedAtMs).toISOString();
   const rateDate = fetchedAt.slice(0, 10);

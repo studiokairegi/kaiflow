@@ -38,6 +38,9 @@ verify_jwt = false
 [functions.freelancer-drive-upload]
 verify_jwt = false
 
+[functions.drive-upload-cleanup]
+verify_jwt = false
+
 [functions.client-final-download]
 verify_jwt = false
 

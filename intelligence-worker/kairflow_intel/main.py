@@ -38,7 +38,8 @@ def build(cfg):
     gemini = None
     if getattr(cfg, "gemini_api_key", ""):
         gemini = GeminiClient(cfg.gemini_api_key, getattr(cfg, "gemini_model", "") or ai.model, thinking=ai.thinking,
-                              max_output_fast=ai.max_output_fast, max_output=ai.max_output, json_model=ai.model)
+                              max_output_fast=ai.max_output_fast, max_output=ai.max_output, json_model=ai.model,
+                              fast_model=ai.fast_model or None)
     # Always wrapped so call sites get generate_json_ex (per-call provenance). With no key, or with the default policy, every call still goes to Ollama.
     llm = FallbackLLM(gemini, OllamaClient(cfg), settings=ai)
     return supa, Deps(cfg=cfg, rpc=supa.rpc, fetcher=Fetcher(cfg), zoho=zoho, llm=llm, api=ApiClient(cfg))

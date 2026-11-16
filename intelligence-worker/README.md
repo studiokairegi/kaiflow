@@ -68,7 +68,7 @@ Apply `supabase/migrations/20261116090000_intelligence_crm_takeover.sql`, then r
 
 ## Gemini-first AI routing
 
-Every worker AI call goes through one router: `Gemini (gemini-3.8-flash, free tier)  ->  local Ollama (final fallback)`. Ollama stays installed, bound to loopback, and is never removed. Cost is zero: free-tier Gemini and local Ollama only. **Never enable billing on the Google project and never use a paid model.**
+Every worker AI call goes through one router: `Gemini (gemini-3.8-flash, free tier)  ->  local Ollama (final fallback)`. Copy `intelligence-worker/.env.example` for the full setting list (owner decisions of 12 Nov 2026: free tier, D1=C, 10 RPM / 200 RPD local caps). Ollama stays installed, bound to loopback, and is never removed. Cost is zero: free-tier Gemini and local Ollama only. **Never enable billing on the Google project and never use a paid model.**
 
 **Model.** Pinned by exact ID: `gemini-3.8-flash` (settings `KAIRFLOW_GEMINI_MODEL` for Agent Chat and `KAIRFLOW_GEMINI_JSON_MODEL` for structured extraction). A floating alias such as `latest` is rejected at startup, and a model is never substituted silently. Thinking level is `low`; only `low`, `medium` and `high` are supported. Gemini 3.x thinking cannot be disabled, so `off` and `minimal` are rejected at startup.
 

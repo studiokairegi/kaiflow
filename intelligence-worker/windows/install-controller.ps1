@@ -60,7 +60,11 @@ $manualController = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue 
 }
 if ($manualController) { throw "A local KairFlow controller process is already running. Stop it before installing the scheduled controller." }
 $arguments = "`"$controller`" --worker-dir `"$workerDir`" --env-file `"$envFile`" --python `"$python`" --log-file `"$logFile`" --token-file `"$tokenFile`" --auto-start"
-$action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $workerDir
+# Run the controller itself with pythonw.exe when it sits beside python.exe so no console window stays open after sign-in (closing that window would
+# kill the controller). The worker keeps using python.exe via --python and is started hidden by the controller.
+$controllerExe = Join-Path (Split-Path -Parent $python) "pythonw.exe"
+if (-not (Test-Path -LiteralPath $controllerExe -PathType Leaf)) { $controllerExe = $python }
+$action = New-ScheduledTaskAction -Execute $controllerExe -Argument $arguments -WorkingDirectory $workerDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
@@ -71,3 +75,5 @@ Write-Host "Worker settings: $envFile"
 Write-Host "Local controller token file: $tokenFile"
 Write-Host "Pair KairFlow with this computer once by entering controller.token in Intelligence > Settings. The browser will remember the pairing on this computer."
 Write-Host "After worker.env is configured, Emma starts automatically. Use Stop Emma in KairFlow only when you intentionally want to pause it."
+# Lets the Emma switch in KairFlow turn the controller back on after a full shutdown (per-user link, no administrator needed).
+& (Join-Path $PSScriptRoot "install-launcher.ps1")

@@ -4,7 +4,7 @@ import { participantLabel } from "../lib/logic.js";
 import { initialsOf } from "../lib/helpers.js";
 
 // The sidebar list: one chat-style row per conversation (sender, subject, snippet, unread badge).
-export default function ConversationList({ rows, loading, search, selected, own, error, onSelect, hasMore = false, onLoadMore }) {
+export default function ConversationList({ rows, loading, search, selected, own, error, onSelect, hasMore = false, onLoadMore, capped = false, cap = 500 }) {
   return (
     <div className="chat-sidebar-list">
       {error && <div className="chat-alert error" role="alert"><span>{error}</span></div>}
@@ -25,6 +25,7 @@ export default function ConversationList({ rows, loading, search, selected, own,
           </button>
         );
       })}
+      {capped && !hasMore && <div className="chat-empty inbox-list-capped" role="status"><p>Showing the newest {cap} conversations. Use search, or the folder, account and provider filters, to reach older ones.</p></div>}
       {hasMore && <div className="chat-empty"><button type="button" className="chat-button quiet" disabled={loading} onClick={onLoadMore}>{loading ? "Loading…" : "Load more"}</button></div>}
     </div>
   );

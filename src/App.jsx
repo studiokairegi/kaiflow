@@ -24,7 +24,15 @@ import { canAccessPayments, PAYMENTS_RESTRICTED_BODY, PAYMENTS_RESTRICTED_TITLE 
 import PaymentsRestricted from "./payments/PaymentsRestricted.jsx";
 import GeneratePaymentLinkDialog from "./payments/GeneratePaymentLinkDialog.jsx";
 import { createCheckoutSession } from "./payments/api.js";
-import { requestPayLink, drawPayNowButton } from "./payments/pdfPayLink.js";
+import { requestPayLink, drawPayNowButton, payLinkFailureNotice } from "./payments/pdfPayLink.js";
+import { DOC_LANGUAGES, normalizeLang, languageLabel, defaultLanguageFor, formatDocDate } from "./i18n/languages.js";
+import { invoiceT } from "./i18n/invoiceStrings.js";
+import { fetchAllPages } from "./pagedFetch.js";
+import { splitMilestoneAmounts } from "./milestoneSplit.js";
+import { invoiceLanguageFields, rowHasLanguageColumn } from "./invoiceLanguageColumn.js";
+import { ownedInvoices, isInvoiceNumberTaken, nextInvoiceNumber as pickNextInvoiceNumber, nextInvoiceNumbers as pickNextInvoiceNumbers } from "./invoiceNumbering.js";
+import { flowLines, ensureSpace, invoicePdfFileName, PDF_PAGE_TOP, PDF_PAGE_BOTTOM } from "./invoicePdfLayout.js";
+import { useJapaneseFont, wrapMixed } from "./i18n/pdfJapanese.js";
 import { ActivityCard, ActionButton, GRADIENTS, Icon as KIcon, OutreachArea, Panel, PanelTitle, ProgressRow, WeekStrip } from "./DashboardKit.jsx";
 import NotificationCenter from "./notifications/NotificationCenter.jsx";
 import { useNotifications } from "./notifications/useNotifications.js";
@@ -38,8 +46,11 @@ import { useTeamAccess, MemberAccessRow, AccessFeedback, DepartmentsDrawer } fro
 import { allowedWorkspaceKeys, friendlyInviteError, readFunctionError } from "./studio/access.js";
 import "./studio/invite.css";
 import { canAccessIntelligence, loadIntelligenceAccess } from "./intelligence/access.js";
-import { canAccessEmail, loadEmailAccess } from "./email/access.js";
-import { leadComposeTarget, mergeEmailTimeline, sortEmailTimelineForDisplay, EMAIL_TIMELINE_TYPES } from "./email/lib/logic.js";
+import { canAccessEmail, loadEmailAccess, syncActiveEmailOrganization } from "./email/access.js";
+import { IconNewChat } from "./chat/icons.jsx";
+import "./chat/chat.css";
+import "./email/styles/inbox-chat.css";
+import { leadComposeTarget, leadComposeBlockReason, mergeEmailTimeline, sortEmailTimelineForDisplay, EMAIL_TIMELINE_TYPES } from "./email/lib/logic.js";
 import AiGeneratedBadge, { isAiGeneratedLead } from "./intelligence/AiGeneratedBadge.jsx";
 
 // Used only as a guaranteed-empty UUID filter when a studio has no mapped
@@ -75,7 +86,7 @@ const PortfolioTab = lazyWithSuspense(() => import("./portfolio/PortfolioTab.jsx
 const PaymentsModule = lazyWithSuspense(() => import("./payments/PaymentsModule.jsx"), { label: "Loading payments…", logo: true });
 const IntelligenceModule = lazyWithSuspense(() => import("./intelligence/IntelligenceModule.jsx"), { label: "Loading intelligence…" });
 import { useEmailUnread } from "./email/lib/useEmailUnread.js";
-const LeadComposeModal = lazyWithSuspense(() => import("./email/components/LeadComposeModal.jsx"), { label: "Loading composer…" });
+const LeadComposeModal = lazyWithSuspense(() => import("./email/LeadComposeModal.jsx"), { label: "Opening composer\u2026" });
 const InboxModule = lazyWithSuspense(() => import("./email/InboxModule.jsx"), { label: "Loading inbox…" });
 const ChatPage = lazyWithSuspense(() => import("./chat/ChatPage.jsx"), { label: "Loading studio chat…" });
 const DonutBreakdown = lazyWithSuspense(() => import("./DashboardCharts.jsx"), { pick: "DonutBreakdown", label: "" });
@@ -505,7 +516,6 @@ const DOC_TYPES = [
   { id: "receipt", label: "Receipt" },
 ];
 const DOC_TYPE_PREFIX = { proforma: "PRO", invoice: "INV", receipt: "REC" };
-const DOC_TYPE_TITLE = { proforma: "Proforma Invoice", invoice: "Invoice", receipt: "Receipt" };
 
 function emptyLineItem() {
   return { id: genShareToken(), description: "", qty: "1", unitPrice: "" };
@@ -537,12 +547,13 @@ function addDaysIso(iso, days) {
   return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
 }
 
-function emptyInvoice(projectId, suggestedNumber, currency = "$", docType = "invoice") {
+function emptyInvoice(projectId, suggestedNumber, currency = "$", docType = "invoice", language = "en") {
   const issueDate = todayInZone();
   return {
     projectId,
     invoiceNumber: suggestedNumber,
     docType,
+    language: normalizeLang(language),   // what the client receives: PDF + checkout page ("en" | "ja")
     description: "",
     lineItems: [],
     amountMode: "manual",
@@ -565,6 +576,8 @@ function invoiceFromRow(row) {
     projectId: row.project_id,
     invoiceNumber: row.invoice_number,
     docType: row.doc_type || "invoice",
+    language: normalizeLang(row.language),
+    languageColumn: rowHasLanguageColumn(row),   // not a form field: whether the database has invoices.language
     description: row.description,
     lineItems: Array.isArray(row.line_items) ? row.line_items : [],
     amountMode: row.amount_mode || "manual",
@@ -590,6 +603,9 @@ function invoiceToRow(invoice, userId) {
     project_id: invoice.projectId,
     invoice_number: invoice.invoiceNumber,
     doc_type: invoice.docType || "invoice",
+    // Sent only when the database is known to have the column (see invoiceLanguageColumn.js), so editing existing
+    // invoices keeps working if the frontend is deployed before the language migration.
+    ...invoiceLanguageFields(invoice),
     description: invoice.description,
     line_items: invoice.amountMode === "items" ? invoice.lineItems || [] : [],
     amount_mode: invoice.amountMode || "manual",
@@ -605,24 +621,14 @@ function invoiceToRow(invoice, userId) {
   };
 }
 
+// Pass the user's WHOLE invoice list (see ownedInvoices), not one project's: the database requires a reference to be
+// unique per user across all projects, so a per-project list suggests numbers that already exist elsewhere.
 function nextInvoiceNumber(existingInvoices, docType = "invoice") {
-  const prefix = DOC_TYPE_PREFIX[docType] || DOC_TYPE_PREFIX.invoice;
-  const max = existingInvoices.reduce((m, inv) => {
-    const match = String(inv.invoiceNumber || "").match(/(\d+)$/);
-    const n = match ? parseInt(match[1], 10) : 0;
-    return Math.max(m, n);
-  }, 0);
-  return `${prefix}-${String(max + 1).padStart(4, "0")}`;
+  return pickNextInvoiceNumber(existingInvoices, DOC_TYPE_PREFIX[docType] || DOC_TYPE_PREFIX.invoice);
 }
 
 function nextInvoiceNumbers(existingInvoices, count, docType = "invoice") {
-  const prefix = DOC_TYPE_PREFIX[docType] || DOC_TYPE_PREFIX.invoice;
-  const max = existingInvoices.reduce((m, inv) => {
-    const match = String(inv.invoiceNumber || "").match(/(\d+)$/);
-    const n = match ? parseInt(match[1], 10) : 0;
-    return Math.max(m, n);
-  }, 0);
-  return Array.from({ length: count }, (_, i) => `${prefix}-${String(max + i + 1).padStart(4, "0")}`);
+  return pickNextInvoiceNumbers(existingInvoices, count, DOC_TYPE_PREFIX[docType] || DOC_TYPE_PREFIX.invoice);
 }
 
 const CURRENCIES = [
@@ -2021,8 +2027,19 @@ function computeDashboardStats(projects, cards, leads) {
 }
 
 async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS) {
+  const lang = normalizeLang(invoice.language);
+  const ja = lang === "ja";
+  const tx = invoiceT(lang);
   const { jsPDF } = await import("jspdf"); // ~heavy; only loaded when a PDF is actually requested
-  const doc = new jsPDF();
+  const doc = ja ? new jsPDF({ compress: true }) : new jsPDF();
+  if (ja) {
+    // jsPDF's built-in fonts cannot draw Japanese. Never hand the client a PDF full of blank boxes: fail loudly instead.
+    try { await useJapaneseFont(doc); }
+    catch { throw new Error("The Japanese font could not be loaded, so the Japanese PDF was not created. Check your connection and try again."); }
+  }
+  // Japanese has no spaces for splitTextToSize to break on; English keeps jsPDF's own wrapping so English PDFs are unchanged.
+  const wrap = (text, width) => (ja ? wrapMixed(doc, text, width) : doc.splitTextToSize(text, width));
+  const oneLine = (text, width) => (ja ? wrapMixed(doc, text, width) : [text]);
   const balance = parseMoney(invoice.amount) - parseMoney(invoice.amountPaid);
   const cur = invoice.currency || settings.currencySymbol || "$";
   const left = 20;
@@ -2042,13 +2059,13 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
     y += 5.5;
   }
   if (settings.studioAddress) {
-    const addrLines = doc.splitTextToSize(settings.studioAddress, 105);
+    const addrLines = wrap(settings.studioAddress, 105);
     doc.text(addrLines, left, y);
     y += addrLines.length * 4.5;
   }
   const studioTaxLine = [
-    settings.studioTaxId ? `Tax ID: ${settings.studioTaxId}` : "",
-    settings.studioVatStatus ? `VAT: ${settings.studioVatStatus}` : "",
+    settings.studioTaxId ? tx("taxId", { value: settings.studioTaxId }) : "",
+    settings.studioVatStatus ? tx("vat", { value: settings.studioVatStatus }) : "",
   ]
     .filter(Boolean)
     .join("   \u00b7   ");
@@ -2062,7 +2079,7 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
     y += 4.5;
   }
   if (settings.studioEtimsNumber) {
-    doc.text(`eTIMS no.: ${settings.studioEtimsNumber}`, left, y);
+    doc.text(tx("etims", { value: settings.studioEtimsNumber }), left, y);
     y += 4.5;
   }
 
@@ -2071,15 +2088,19 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
   doc.setFontSize(14);
   doc.setTextColor(0);
   const docType = invoice.docType || "invoice";
-  const documentTitle = DOC_TYPE_TITLE[docType] || "Invoice";
+  const documentTitle = tx(`title.${docType}`) !== `title.${docType}` ? tx(`title.${docType}`) : tx("title.invoice");
   doc.text(documentTitle, left, y);
   y += 6;
   doc.setFontSize(10);
   doc.setTextColor(70);
-  const referenceLabel = docType === "invoice" ? "Payment ref." : `${documentTitle} payment ref.`;
+  const referenceLabel = docType === "invoice" ? tx("ref.invoice") : tx("ref.other", { title: documentTitle });
   const paystackRef = invoiceRefFor(invoice);
-  if (paystackRef) doc.text(`${referenceLabel}: ${paystackRef}`, left, y);
-  const detailsTop = y + 8;
+  // The document's own reference number is always printed (it used to appear only once a Paystack payment existed).
+  const refNumber = String(invoice.invoiceNumber || "").trim();
+  let metaY = y;
+  if (refNumber) { doc.text(tx("number", { value: refNumber }), left, metaY); metaY += 5; }
+  if (paystackRef) { doc.text(`${referenceLabel}: ${paystackRef}`, left, metaY); metaY += 5; }
+  const detailsTop = Math.max(y + 8, metaY + 3);
 
   // --- Left column: issue/due date and status ---
   // A receipt implies payment already happened, so it states when rather
@@ -2087,33 +2108,35 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
   // flatly "Unpaid", since nothing was ever due yet at that stage.
   let statusLabel;
   if (docType === "receipt") {
-    statusLabel = `Payment received${invoice.paidDate ? ` on ${invoice.paidDate}` : ""}`;
+    statusLabel = tx("status.received", { on: invoice.paidDate ? tx("status.receivedOn", { date: formatDocDate(invoice.paidDate, lang) }) : "" });
   } else if (docType === "proforma") {
-    statusLabel = invoice.status === "paid" ? "Paid" : "Awaiting payment";
+    statusLabel = invoice.status === "paid" ? tx("status.paid") : tx("status.awaiting");
   } else {
-    statusLabel = invoice.status === "paid" ? "Paid" : "Unpaid";
+    statusLabel = invoice.status === "paid" ? tx("status.paid") : tx("status.unpaid");
   }
   doc.setFontSize(10);
-  doc.text(`Issue date: ${invoice.issueDate || "-"}`, left, detailsTop);
-  doc.text(`Due date: ${invoice.dueDate || "-"}`, left, detailsTop + 6);
-  doc.text(`Status: ${statusLabel}`, left, detailsTop + 12);
+  doc.text(tx("issueDate", { value: formatDocDate(invoice.issueDate, lang) }), left, detailsTop);
+  doc.text(tx("dueDate", { value: formatDocDate(invoice.dueDate, lang) }), left, detailsTop + 6);
+  doc.text(tx("status", { value: statusLabel }), left, detailsTop + 12);
   const leftColBottom = detailsTop + 12;
 
   // --- Right column: bill-to, with the client's address/tax ID when on file ---
   let billY = detailsTop;
-  doc.text(`Bill to: ${project?.client || "-"}`, 130, billY);
-  billY += 6;
+  const billToLines = oneLine(tx("billTo", { value: project?.client || "-" }), 60);
+  doc.text(billToLines, 130, billY);
+  billY += billToLines.length > 1 ? billToLines.length * 4.5 + 1.5 : 6;
   if (project?.clientAddress) {
-    const clientAddrLines = doc.splitTextToSize(project.clientAddress, 60);
+    const clientAddrLines = wrap(project.clientAddress, 60);
     doc.text(clientAddrLines, 130, billY);
     billY += clientAddrLines.length * 4.5;
   }
   if (project?.clientTaxId) {
-    doc.text(`Tax ID: ${project.clientTaxId}`, 130, billY);
+    doc.text(tx("taxId", { value: project.clientTaxId }), 130, billY);
     billY += 4.5;
   }
-  doc.text(`Project: ${project?.name || "-"}`, 130, billY);
-  const rightColBottom = billY;
+  const projectLines = oneLine(tx("project", { value: project?.name || "-" }), 60);
+  doc.text(projectLines, 130, billY);
+  const rightColBottom = billY + (projectLines.length - 1) * 4.5;
 
   const dividerY = Math.max(leftColBottom, rightColBottom) + 9;
   doc.setDrawColor(200);
@@ -2125,88 +2148,107 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
     invoice.amountMode === "items" && Array.isArray(invoice.lineItems) && invoice.lineItems.length > 0;
   let lineY;
 
+  // Every block below flows onto a new page instead of running off the bottom of the first one.
   if (hasLineItems) {
     let rowY = dividerY + 10;
-    doc.text("Description", left, rowY);
-    doc.text("Qty", 120, rowY, { align: "right" });
-    doc.text("Unit price", 150, rowY, { align: "right" });
-    doc.text("Amount", 170, rowY, { align: "right" });
-    rowY += 8;
-    doc.setFontSize(10);
+    const drawItemsHeader = () => {
+      doc.setFontSize(11);
+      doc.setTextColor(0);
+      doc.text(tx("description"), left, rowY);
+      doc.text(tx("qty"), 120, rowY, { align: "right" });
+      doc.text(tx("unitPrice"), 150, rowY, { align: "right" });
+      doc.text(tx("amount"), 170, rowY, { align: "right" });
+      rowY += 8;
+      doc.setFontSize(10);
+    };
+    drawItemsHeader();
     invoice.lineItems.forEach((li) => {
-      const rowLines = doc.splitTextToSize(li.description || "-", 85);
+      const rowLines = wrap(li.description || "-", 85);
+      const rowH = Math.max(rowLines.length, 1) * 6;
+      if (rowY + rowH > PDF_PAGE_BOTTOM) {
+        doc.addPage();
+        rowY = PDF_PAGE_TOP;
+        drawItemsHeader();
+        doc.setTextColor(0);
+      }
       const rowAmount = parseMoney(li.qty) * parseMoney(li.unitPrice);
       doc.text(rowLines, left, rowY);
       doc.text(String(li.qty ?? ""), 120, rowY, { align: "right" });
       doc.text(`${cur}${formatMoney(li.unitPrice)}`, 150, rowY, { align: "right" });
       doc.text(`${cur}${formatMoney(rowAmount)}`, 170, rowY, { align: "right" });
-      rowY += Math.max(rowLines.length, 1) * 6;
+      rowY += rowH;
     });
     rowY += 4;
+    // Keep the subtotal and the totals block together on one page.
+    rowY = ensureSpace(doc, rowY, 40);
     doc.setFontSize(11);
-    doc.text("Subtotal", 150, rowY, { align: "right" });
+    doc.setTextColor(0);
+    doc.text(tx("subtotal"), 150, rowY, { align: "right" });
     doc.text(`${cur}${formatMoney(invoice.amount)}`, 170, rowY, { align: "right" });
     lineY = rowY + 10;
   } else {
-    doc.text("Description", left, dividerY + 10);
-    doc.text("Amount", 170, dividerY + 10, { align: "right" });
+    doc.text(tx("description"), left, dividerY + 10);
+    doc.text(tx("amount"), 170, dividerY + 10, { align: "right" });
     doc.setFontSize(10);
-    const descLines = doc.splitTextToSize(invoice.description || "Animation services", 140);
-    doc.text(descLines, left, dividerY + 18);
+    const descLines = wrap(invoice.description || tx("defaultDescription"), 140);
     doc.text(`${cur}${formatMoney(invoice.amount)}`, 170, dividerY + 18, { align: "right" });
-    lineY = dividerY + 18 + descLines.length * 6 + 6;
+    lineY = flowLines(doc, descLines, left, dividerY + 18, { pitch: 6 }) + 6;
   }
 
+  lineY = ensureSpace(doc, lineY, 24);   // rule + amount paid + balance due
   doc.setDrawColor(200);
   doc.line(left, lineY, right, lineY);
 
   doc.setFontSize(10);
-  doc.text("Amount paid", 130, lineY + 10);
+  doc.text(tx("amountPaid"), 130, lineY + 10);
   doc.text(`${cur}${formatMoney(invoice.amountPaid)}`, 170, lineY + 10, { align: "right" });
   doc.setFontSize(12);
-  doc.text("Balance due", 130, lineY + 20);
+  doc.text(tx("balanceDue"), 130, lineY + 20);
   doc.text(`${cur}${formatMoney(balance)}`, 170, lineY + 20, { align: "right" });
 
   doc.setFontSize(9);
   doc.setTextColor(130);
   const studioDisplayName = settings.studioLegalName || settings.studioName || "Studio Kairegi";
   const noteByType = {
-    proforma: "This is a proforma invoice / advance payment request. A final invoice will be issued upon delivery.",
-    receipt: `This receipt confirms payment received. Thank you for working with ${studioDisplayName}.`,
-    invoice: `Thank you for working with ${studioDisplayName}.`,
+    proforma: tx("note.proforma"),
+    receipt: tx("note.receipt", { studio: studioDisplayName }),
+    invoice: tx("note.invoice", { studio: studioDisplayName }),
   };
-  let noteY = lineY + 40;
-  if (settings.invoicePaymentInstructions && docType !== "receipt") {
+  let noteY = ensureSpace(doc, lineY + 40, 14);
+  const payInstructions = (ja && settings.invoicePaymentInstructionsJa) || settings.invoicePaymentInstructions;
+  const footerNote = (ja && settings.invoiceFooterNoteJa) || settings.invoiceFooterNote;
+  if (payInstructions && docType !== "receipt") {
     doc.setTextColor(60);
     doc.setFontSize(10);
-    doc.text("How to pay", left, noteY);
+    doc.text(tx("howToPay"), left, noteY);
     doc.setFontSize(9);
-    const payLines = doc.splitTextToSize(settings.invoicePaymentInstructions, 170);
-    doc.text(payLines, left, noteY + 5);
-    noteY += 5 + payLines.length * 4 + 6;
-    doc.setTextColor(130);
+    noteY = flowLines(doc, wrap(payInstructions, 170), left, noteY + 5, { pitch: 4 }) + 6;
   }
-  const noteLines = doc.splitTextToSize(noteByType[docType] || noteByType.invoice, 170);
-  doc.text(noteLines, left, noteY);
-  if (settings.invoiceFooterNote) {
-    const footLines = doc.splitTextToSize(settings.invoiceFooterNote, 170);
-    doc.text(footLines, left, noteY + noteLines.length * 4 + 3);
-    noteY += footLines.length * 4 + 3;
-  }
+  doc.setTextColor(130);
+  doc.setFontSize(9);
+  noteY = flowLines(doc, wrap(noteByType[docType] || noteByType.invoice, 170), left, noteY, { pitch: 4 });
+  if (footerNote) noteY = flowLines(doc, wrap(footerNote, 170), left, noteY + 3, { pitch: 4 });
 
   // --- Pay Now: a real link annotation to the secure hosted checkout. Created through the existing payment-link
   // RPC; if that fails (not an admin, Paystack not connected, offline) the PDF is still produced, without a button.
   const payLink = await requestPayLink(invoice, balance, { create: createCheckoutSession, origin: window.location.origin });
   if (payLink.ok) {
-    let btnY = noteY + noteLines.length * 4 + 10;
-    if (btnY > 262) { doc.addPage(); btnY = 24; }
-    drawPayNowButton(doc, payLink.url, { x: left, y: btnY });
+    let btnY = noteY + 10;
+    if (btnY > 262) { doc.addPage(); btnY = PDF_PAGE_TOP; }
+    drawPayNowButton(doc, payLink.url, { x: left, y: btnY, label: tx("payNow") });
     doc.setFontSize(8);
     doc.setTextColor(130);
-    doc.text("Secure online payment. Amounts are shown in the invoice currency; any currency conversion is explained before you pay.", left, btnY + 17);
+    doc.text(oneLine(tx("payNowCaption"), 170), left, btnY + 17);
   }
 
-  doc.save(`${invoiceRefFor(invoice) || "invoice"}.pdf`);
+  doc.save(invoicePdfFileName(invoice, { paystackRef, fallback: tx("fallbackFileName") }));
+  // A document that should have had a Pay Now button but did not: say why instead of failing silently.
+  const notice = payLinkFailureNotice(invoice, balance, payLink);
+  if (notice) {
+    console.warn("Pay Now link not added to PDF:", payLink.reason, payLink.message || "");
+    return { payLinkNotice: notice };
+  }
+  return {};
 }
 
 
@@ -2715,10 +2757,6 @@ const SpinnerIcon = ({ size = 18 }) => (
   </svg>
 );
 
-const ComposeMailIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 7 9 6 9-6" /></svg>
-);
-
 const CopyIcon = () => (
   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
     <rect x="9" y="9" width="12" height="12" rx="2" />
@@ -2760,6 +2798,13 @@ const LockIcon = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
     <rect x="4" y="11" width="16" height="9" rx="2" />
     <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+  </svg>
+);
+
+const InboxIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M4 4h16l2 11v5H2v-5L4 4z" />
+    <path d="M2 15h6l2 3h4l2-3h6" />
   </svg>
 );
 
@@ -2931,10 +2976,11 @@ export default function ShotTracker() {
   const [leadChannelFilter, setLeadChannelFilter] = useState("all");
   const [leadSearch, setLeadSearch] = useState("");
   const [openConversationRequest, setOpenConversationRequest] = useState(null); // lead timeline "Open email" -> Inbox conversation
-  const [leadTimelineNonce, setLeadTimelineNonce] = useState(0); // bumped after a send so the open lead card re-reads its timeline at once
-  const [leadComposer, setLeadComposer] = useState(null); // CRM lead -> modal composer opened over the CRM (see leadComposeTarget); never switches tabs
+  const [leadComposeModal, setLeadComposeModal] = useState(null); // CRM lead -> composer modal over the pipeline (never navigates to the Inbox)
+  const [leadTimelineTick, setLeadTimelineTick] = useState(0);
+  const [composeRequest, setComposeRequest] = useState(null); // CRM lead -> Inbox composer hand-off (see leadComposeTarget)
   const [crmTab, setCrmTab] = useState("pipeline"); // "pipeline" | "contacts" | "portfolio" | "intelligence" (CRM Intelligence lives inside the CRM module, only for the authorized admin)
-  useEffect(() => { if (view !== "projects" || workspace !== "leads") setLeadComposer(null); }, [view, workspace]); // close the lead composer if the user leaves the CRM
+  useEffect(() => { if (view !== "projects" || workspace !== "leads" || crmTab !== "inbox") setComposeRequest(null); }, [view, workspace, crmTab]); // never replay a CRM compose request after leaving Inbox
   const [leadStatusFilter, setLeadStatusFilter] = useState("all");
   const [leadPriorityFilter, setLeadPriorityFilter] = useState("all");
   const [leadFollowupFilter, setLeadFollowupFilter] = useState("all");
@@ -3031,6 +3077,8 @@ export default function ShotTracker() {
   }, []);
 
   const userId = session?.user?.id || null;
+  // Every invoice this user owns: invoice references are unique per user across projects.
+  const ownInvoices = ownedInvoices(invoices, userId);
   useEffect(() => {
     if (!inviteToken) { setInvitePreview(null); return undefined; }
     let cancelled = false;
@@ -3218,6 +3266,8 @@ export default function ShotTracker() {
     if (!userId) return undefined;
     const check = async () => {
       const [ok, emailOk] = await Promise.all([loadIntelligenceAccess(supabase, userId), loadEmailAccess(supabase, userId)]);
+      // Email follows the studio picked in the header: tell the database BEFORE enabling the Inbox, unread badge and shortcut.
+      if (emailOk === true && !cancelled) await syncActiveEmailOrganization(supabase, activeStudioOrganizationId);
       if (!cancelled) { setIntelAccess(ok); setEmailAccess(emailOk); }
     };
     check();
@@ -3684,7 +3734,7 @@ export default function ShotTracker() {
       const [shotsRes, leadsRes, invoicesRes, expensesRes, teamRes, activityRes, plannersRes, plannerTemplatesRes, pipelineLibraryRes, projectStagesRes] = await Promise.all([
         shotsQuery,
         scopeOwnedQuery(supabase.from("leads").select("*").order("created_at"), ownerScope),
-        scopeOwnedQuery(supabase.from("invoices").select("*").order("created_at"), ownerScope),
+        fetchAllPages(() => scopeOwnedQuery(supabase.from("invoices").select("*").order("created_at").order("id"), ownerScope)),
         scopeOwnedQuery(supabase.from("expenses").select("*").order("created_at"), ownerScope),
         scopeOwnedQuery(supabase.from("team_members").select("*").order("created_at"), ownerScope),
         scopeOwnedQuery(supabase.from("activity_log").select("*").order("created_at", { ascending: false }), ownerScope),
@@ -4799,13 +4849,15 @@ export default function ShotTracker() {
   // new type's prefix swapped in, so a proforma, its receipt, and its
   // final invoice all read as the same document as it progresses.
   const handleGenerateFollowupDoc = (source, targetDocType) => {
-    const projectInvoicesForNumbering = invoices.filter((inv) => inv.projectId === source.projectId);
+    // Keep the source's series (PRO-0004 -> INV-0004) only while that reference is still free for this user.
+    const seriesNumber = numberForDocType(source.invoiceNumber, targetDocType);
     const suggestedNumber =
-      numberForDocType(source.invoiceNumber, targetDocType) ||
-      nextInvoiceNumber(projectInvoicesForNumbering, targetDocType);
+      seriesNumber && !isInvoiceNumberTaken(ownInvoices, seriesNumber)
+        ? seriesNumber
+        : nextInvoiceNumber(ownInvoices, targetDocType);
     const isReceipt = targetDocType === "receipt";
     setEditingInvoice({
-      ...emptyInvoice(source.projectId, suggestedNumber, source.currency, targetDocType),
+      ...emptyInvoice(source.projectId, suggestedNumber, source.currency, targetDocType, source.language),
       description: source.description,
       lineItems: source.lineItems || [],
       amountMode: source.amountMode || "manual",
@@ -4823,9 +4875,10 @@ export default function ShotTracker() {
     const projectShots = cards.filter((c) => c.projectId === selectedProjectId);
     const { totalBudget } = projectBudgetSummary(project, projectShots, projectInvoices);
     const count = percentages.length;
-    const numbers = nextInvoiceNumbers(projectInvoices, count);
+    const numbers = nextInvoiceNumbers(ownInvoices, count);
+    const amounts = splitMilestoneAmounts(totalBudget, percentages);
     const rows = percentages.map((_, i) => {
-      const amount = ((totalBudget * (parseFloat(percentages[i]) || 0)) / 100).toFixed(2);
+      const amount = amounts[i].toFixed(2);
       return {
         projectId: selectedProjectId,
         invoiceNumber: numbers[i],
@@ -4833,6 +4886,7 @@ export default function ShotTracker() {
         amount,
         amountPaid: "",
         currency: project?.currency || settings.currencySymbol,
+        language: defaultLanguageFor(projectInvoices),
         issueDate: todayInZone(),
         dueDate: "",
         status: "unpaid",
@@ -4856,6 +4910,8 @@ export default function ShotTracker() {
       setShowMilestoneModal(false);
     } catch (e) {
       console.error("Milestone invoice creation failed:", e);
+      alertLedgerError(e);
+      if (e?.code === "23505") window.alert("One of the milestone invoice references is already used. Please try again to get the next free references.");
       flashSave(false);
       // Keep the milestone modal open on failure so the user can retry
       // rather than silently ending up with zero milestone invoices.
@@ -5996,6 +6052,29 @@ export default function ShotTracker() {
             {saveState === "error" && "Save failed"}
           </span>
           <NotificationCenter notifications={notifications} onNavigate={handleOpenNotification} buttonStyle={styles.iconButtonGhost} />
+          {canAccessEmail(emailAccess) && visibleWorkspaces.includes("leads") && (
+            <button
+              type="button"
+              style={{ ...styles.iconButtonGhost, position: "relative" }}
+              onClick={() => {
+                setView("projects");
+                setWorkspace("leads");
+                setCrmTab("inbox");
+              }}
+              aria-label={emailInbox.unread > 0 ? `Inbox, ${emailInbox.unread} unread` : "Inbox"}
+              title="Inbox"
+            >
+              <InboxIcon />
+              {emailInbox.unread > 0 && (
+                <span
+                  aria-hidden="true"
+                  style={{ position: "absolute", top: -4, right: -4, minWidth: 18, height: 18, padding: "0 5px", boxSizing: "border-box", borderRadius: 999, background: "#e26f6f", color: "#fff", fontSize: 10.5, fontWeight: 700, lineHeight: "18px", textAlign: "center" }}
+                >
+                  {emailInbox.unread > 99 ? "99+" : emailInbox.unread}
+                </span>
+              )}
+            </button>
+          )}
           {view !== "settings" && (
           <button
             className={tutorialHighlightTarget === "settings" ? "kf-tutorial-highlight" : undefined}
@@ -6016,8 +6095,10 @@ export default function ShotTracker() {
                 setEditingInvoice(
                   emptyInvoice(
                     selectedProjectId,
-                    nextInvoiceNumber(invoices.filter((inv) => inv.projectId === selectedProjectId)),
-                    selectedProject?.currency || settings.currencySymbol
+                    nextInvoiceNumber(ownInvoices),
+                    selectedProject?.currency || settings.currencySymbol,
+                    "invoice",
+                    defaultLanguageFor(invoices.filter((inv) => inv.projectId === selectedProjectId))
                   )
                 )
               }
@@ -6559,6 +6640,22 @@ export default function ShotTracker() {
                                 <span style={styles.cardTag}>{lead.outcomeReason}</span>
                               )}
                             </div>
+                            {canAccessEmail(emailAccess) && (() => {
+                              const target = leadComposeTarget(lead, userId);
+                              if (!target) return null;
+                              return (
+                                <button
+                                  type="button"
+                                  style={styles.cardCompose}
+                                  title={`Compose an email to ${target.to}`}
+                                  aria-label={`Compose email to ${target.label}`}
+                                  onPointerDown={(e) => e.stopPropagation()}
+                                  onClick={(e) => { e.stopPropagation(); setLeadComposeModal({ ...target, nonce: Date.now() }); }}
+                                >
+                                  Compose
+                                </button>
+                              );
+                            })()}
                           </div>
                         );
                       })}
@@ -6596,7 +6693,7 @@ export default function ShotTracker() {
               onPick={(proj) => {
                 setPickInvoiceProject(false);
                 setEditingInvoice(
-                  emptyInvoice(proj.id, nextInvoiceNumber(invoices.filter((inv) => inv.projectId === proj.id)), proj.currency || settings.currencySymbol)
+                  emptyInvoice(proj.id, nextInvoiceNumber(ownInvoices), proj.currency || settings.currencySymbol, "invoice", defaultLanguageFor(invoices.filter((inv) => inv.projectId === proj.id)))
                 );
               }}
             />
@@ -6604,7 +6701,7 @@ export default function ShotTracker() {
         </>
       )}
 
-      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessEmail(emailAccess) && <InboxModule access={emailAccess} supabase={supabase} leads={leads} openConversationRequest={openConversationRequest} onOpenConversationHandled={() => setOpenConversationRequest(null)} onUnreadChanged={emailInbox.refresh} onLeadEmailSent={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) refreshLeadTimeline(l); }} onOpenLead={async (leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { const fresh = await refreshLeadTimeline(l); setCrmTab("pipeline"); setEditingLead(fresh); } }} />}
+      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessEmail(emailAccess) && <InboxModule access={emailAccess} supabase={supabase} leads={leads} composeRequest={composeRequest} onComposeHandled={() => setComposeRequest(null)} openConversationRequest={openConversationRequest} onOpenConversationHandled={() => setOpenConversationRequest(null)} onUnreadChanged={emailInbox.refresh} onLeadEmailSent={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) refreshLeadTimeline(l); }} onOpenLead={async (leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { const fresh = await refreshLeadTimeline(l); setCrmTab("pipeline"); setEditingLead(fresh); } }} />}
       {view === "projects" && workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
           </div>
         </div>
@@ -6815,8 +6912,10 @@ export default function ShotTracker() {
             setEditingInvoice(
               emptyInvoice(
                 selectedProjectId,
-                nextInvoiceNumber(invoices.filter((inv) => inv.projectId === selectedProjectId)),
-                selectedProject?.currency || settings.currencySymbol
+                nextInvoiceNumber(ownInvoices),
+                selectedProject?.currency || settings.currencySymbol,
+                "invoice",
+                defaultLanguageFor(invoices.filter((inv) => inv.projectId === selectedProjectId))
               )
             )
           }
@@ -6824,7 +6923,7 @@ export default function ShotTracker() {
           onMarkPaid={handleMarkInvoicePaid}
           onGeneratePaymentLink={canAccessPayments(settings) ? setPayLinkInvoice : undefined}
           onGenerateFollowup={handleGenerateFollowupDoc}
-          onDownload={(inv) => downloadInvoicePDF(inv, selectedProject, settings)}
+          onDownload={(inv) => downloadInvoicePDF(inv, selectedProject, settings).then((r) => { if (r?.payLinkNotice) window.alert(r.payLinkNotice); }).catch((e) => window.alert(e?.message || "The PDF could not be created. Please try again."))}
           onOpenMilestones={() => setShowMilestoneModal(true)}
           currencySymbol={selectedProject?.currency || settings.currencySymbol}
           hasProAccess={hasProAccess}
@@ -6978,22 +7077,22 @@ export default function ShotTracker() {
           liveStage={leads.find((l) => l.id === editingLead.id)?.stage}
           loadServerTimeline={canAccessEmail(emailAccess) ? loadLeadServerTimeline : undefined}
           onOpenEmail={canAccessEmail(emailAccess) ? openLeadEmail : undefined}
-          composeTarget={canAccessEmail(emailAccess) && editingLead.id ? leadComposeTarget(leads.find((l) => l.id === editingLead.id) || editingLead, userId) : null}
-          onCompose={setLeadComposer}
-          timelineNonce={leadTimelineNonce}
+          composeBlockReason={leadComposeBlockReason(editingLead, userId, emailAccess)}
+          onComposeEmail={() => {
+            const target = leadComposeTarget(editingLead, userId);
+            if (target) setLeadComposeModal({ ...target, nonce: Date.now() });
+          }}
+          timelineRefreshKey={leadTimelineTick}
         />
       )}
 
-      {leadComposer && canAccessEmail(emailAccess) && (
-        // The wrapper keeps the lazy-load placeholder centered over the CRM (not in page flow) while the composer code loads the first time.
-        <div style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "#e8ecf4" }}>
-          <LeadComposeModal
-            supabase={supabase}
-            target={leadComposer}
-            onClose={() => setLeadComposer(null)}
-            onSent={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) refreshLeadTimeline(l); setLeadTimelineNonce((n) => n + 1); }}
-          />
-        </div>
+      {leadComposeModal && canAccessEmail(emailAccess) && (
+        <LeadComposeModal
+          supabase={supabase}
+          request={leadComposeModal}
+          onClose={() => setLeadComposeModal(null)}
+          onSent={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) refreshLeadTimeline(l); setLeadTimelineTick((t) => t + 1); }}
+        />
       )}
 
       {showPaymentsLocked && (
@@ -10273,6 +10372,7 @@ function InvoicesPanel({
                   <span style={styles.invoiceNumber}>{refOf(inv)}</span>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={styles.docTypeTag}>{docTypeLabel}</span>
+                    {normalizeLang(inv.language) === "ja" && <span style={styles.docTypeTag} title="Sent to the client in Japanese">日本語</span>}
                     <span
                       style={{
                         ...styles.invoiceStatusTag,
@@ -11258,10 +11358,11 @@ function LeadEditor({
   liveStage = undefined,
   loadServerTimeline = undefined,
   onOpenEmail = undefined,
-  composeTarget = null,
-  onCompose = undefined,
-  timelineNonce = 0,
+  composeBlockReason = undefined,
+  onComposeEmail = undefined,
+  timelineRefreshKey = 0,
 }) {
+  const [composeHint, setComposeHint] = useState("");
   const [form, setForm] = useState(() => ({ ...lead, emails: normalizeEmails(lead.emails, followupSchedule.length) }));
   const [isEditing, setIsEditing] = useState(isNew);
   // Quick-pick reason list shown by the "Mark lost" button specifically.
@@ -11286,7 +11387,7 @@ function LeadEditor({
     pull();
     const timer = setInterval(pull, 30000);
     return () => { alive = false; clearInterval(timer); };
-  }, [lead.id, isNew, timelineNonce]);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lead.id, isNew, timelineRefreshKey]);   // eslint-disable-line react-hooks/exhaustive-deps
   const timelineEntries = sortEmailTimelineForDisplay(mergeEmailTimeline(form.activityLog, serverLog));
 
   // The lead was dragged to another column while this editor was open: follow it, unless the person
@@ -11444,13 +11545,24 @@ function LeadEditor({
                       <CopyIcon />
                     </button>
                   )}
-                  {composeTarget && onCompose && (
-                    <button type="button" style={styles.copyIconButton} onClick={() => onCompose(composeTarget)} title={`Compose an email to ${composeTarget.to}`} aria-label={`Compose email to ${composeTarget.label}`} data-testid="lead-compose-button">
-                      <ComposeMailIcon />
-                    </button>
+                  {form.email && !isNew && onComposeEmail && (
+                    <span className="chat-root chat-theme-dark" style={{ display: "inline-flex", marginLeft: 8, verticalAlign: "middle" }}>
+                      <button
+                        type="button"
+                        className="chat-icon-btn solid sm"
+                        style={composeBlockReason ? { opacity: 0.4, cursor: "not-allowed", filter: "grayscale(1)" } : undefined}
+                        title={composeBlockReason || "Compose an email to this lead"}
+                        aria-label={composeBlockReason ? `Email unavailable: ${composeBlockReason}` : "Compose email to this lead"}
+                        aria-disabled={composeBlockReason ? "true" : undefined}
+                        onClick={() => { if (composeBlockReason) { setComposeHint("shown"); return; } onComposeEmail(); }}
+                      >
+                        <IconNewChat size={16} />
+                      </button>
+                    </span>
                   )}
                   {copiedEmail && <span style={styles.copiedTag}>Copied</span>}
                 </p>
+                {composeHint && composeBlockReason && <p style={{ ...styles.copiedTag, color: textMuted, margin: "4px 0 0" }}>{composeBlockReason}</p>}
               </div>
             </div>
 
@@ -14225,6 +14337,9 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
       // once it's saved, switching the type shouldn't silently renumber
       // something that might already be on a document the client has.
       const nextNumber = isNew ? numberForDocType(f.invoiceNumber, targetType) || f.invoiceNumber : f.invoiceNumber;
+      // A saved document keeps its payment fields: the ledger rejects edits to the paid amount/status of a posted
+      // invoice, and that error used to surface as a confusing "edit the paid amount" message after a type change.
+      if (!isNew) return { ...f, docType: targetType, invoiceNumber: nextNumber };
       if (targetType === "receipt") {
         const total = f.amountMode === "items" ? lineItemsTotal(f.lineItems) : parseMoney(f.amount);
         return {
@@ -14236,6 +14351,8 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
           paidDate: f.paidDate || todayInZone(),
         };
       }
+      // Leaving Receipt on an unsaved document undoes what choosing Receipt filled in.
+      if (f.docType === "receipt" && f.status === "paid") return { ...f, docType: targetType, invoiceNumber: nextNumber, status: "unpaid", amountPaid: "", paidDate: "" };
       return { ...f, docType: targetType, invoiceNumber: nextNumber };
     });
   };
@@ -14309,6 +14426,22 @@ function InvoiceEditor({ invoice, onCancel, onSave, onDelete, isNew, currencySym
               </>
             )}
           </div>
+        </div>
+
+        <div style={styles.field}>
+          <label style={styles.label} htmlFor="invoice-client-language">Client language</label>
+          <select id="invoice-client-language" style={styles.input} value={normalizeLang(form.language)} onChange={set("language")}>
+            {DOC_LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>
+                {languageLabel(l.code)}
+              </option>
+            ))}
+          </select>
+          <p style={styles.fieldHint}>
+            {normalizeLang(form.language) === "ja"
+              ? "The PDF and its payment page are sent to the client fully in Japanese. Text you type yourself (descriptions, payment instructions, footer note) is printed as written."
+              : "The language of the PDF and of the payment page the client opens."}
+          </p>
         </div>
 
         <div style={styles.field}>
@@ -14567,6 +14700,7 @@ function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, c
     (defaultPercentages && defaultPercentages.length >= 2 && defaultPercentages.length <= 6 ? defaultPercentages : MILESTONE_DEFAULTS).map(String)
   );
   const totalPercent = percentages.reduce((sum, p) => sum + (parseFloat(p) || 0), 0);
+  const milestoneAmounts = splitMilestoneAmounts(totalBudget, percentages);
   const setPct = (i) => (e) => {
     const next = [...percentages];
     next[i] = e.target.value;
@@ -14611,7 +14745,7 @@ function MilestoneModal({ totalBudget, onCancel, onCreate, defaultPercentages, c
               <label style={styles.label}>Amount</label>
               <input
                 style={styles.input}
-                value={`${cur}${formatMoney((totalBudget * (parseFloat(percentages[i]) || 0)) / 100)}`}
+                value={`${cur}${formatMoney(milestoneAmounts[i])}`}
                 disabled
               />
             </div>

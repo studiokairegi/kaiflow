@@ -143,21 +143,57 @@ def decide(transcript: list[dict], ctx: dict, settings: dict, intent: str) -> di
     anchor = max([d for d in [to_date((p.get("takeover") or {}).get("last_contact"))] + [to_date(t["at"]) for t in transcript] if d] or [None], default=None)
     if last["who"] == "them":
         hits = policy.scan_inbound(last["subject"], last["body"])["hits"]
-        if "decline" in hits or intent == "declined":
-            return {"next_action": "stop", "reason": "They said they are not interested. No follow-up was written."}
+        if "unsubscribe" in hits or "complaint" in hits:
+            return {"next_action": "stop", "reason": "They opted out or complained. The suppression boundary takes precedence."}
+        if "not_interested" in hits or "decline" in hits or intent == "declined":
+            return {"next_action": "stop", "reason": "They said they are not interested. No follow-up was written; this is not automatically treated as a legal unsubscribe."}
+        if "already_has_trailer" in hits:
+            return {"next_action": "stop", "reason": "They already have a trailer or no current trailer need. The sequence is stopped for human review."}
+        if "not_now" in hits:
+            return {"next_action": "needs_human", "reason": "They said not now. Pause and review whether a future re-engagement is welcome."}
+        if "wrong_person" in hits or "referral" in hits:
+            return {"next_action": "needs_human", "reason": "They identified a different contact or referral. A person must verify the correct recipient."}
         sensitive = [h for h in ("pricing", "negotiation", "contract", "deadline", "availability", "meeting", "ambiguous") if h in hits]
         if sensitive or intent == "negotiating":
             what = ", ".join(sensitive) if sensitive else "terms or scheduling"
             return {"next_action": "needs_human", "reason": f"Their last message is about {what}. A person should answer it."}
         if intent == "out_of_office":
             return {"next_action": "wait", "reason": "Their last message was an automatic reply."}
-        if intent in GREEN_INTENTS or "portfolio" in hits or "interest" in hits:
+        if intent in GREEN_INTENTS or "portfolio" in hits or "interest" in hits or "tell_me_more" in hits:
             return {"next_action": "reply", "kind": "reply", "reason": "They replied with interest. A reply is ready for your approval."}
         return {"next_action": "needs_human", "reason": "They wrote last and the message needs a person to read it (a question or something unclear)."}
 
     # we wrote last
     ours = [t for t in turns if t["who"] == "us"]
     sent_total = max(len(ours), sum(1 for f in (lead.get("sent_flags") or []) if f))
+    if p.get("type") == "indie_game_developer":
+        from . import indie_outreach
+        initial = ours[0] if ours else None
+        initial_date = to_date((initial or {}).get("at"))
+        if initial_date is None:
+            return {"next_action": "needs_human", "reason": "The original introduction date is unknown; the Indie sequence cannot be timed safely."}
+        sent_followups = max(0, sent_total - 1)
+        max_followups = min(4, max(0, int(settings.get("max_followups", 1))))
+        live_followups = [m for m in ctx.get("messages", []) if m.get("kind") == "followup" and m.get("state") in ("draft", "pending_approval", "approved", "reserved", "sending", "unknown")]
+        if live_followups:
+            return {"next_action": "none", "reason": "A follow-up is already waiting for approval or delivery."}
+        if sent_followups >= max_followups:
+            return {"next_action": "none", "reason": f"The configured Indie follow-up limit ({max_followups}) is reached."}
+        today = to_date(settings.get("today")) or date.today()
+        stage = indie_outreach.due_sequence_stage(initial_date, today, sent_followups)
+        if stage is None:
+            if sent_followups == 0:
+                target = add_business_days(initial_date, 5)
+            elif sent_followups == 1:
+                target = add_business_days(initial_date, 10)
+            elif sent_followups == 2:
+                from .indie_outreach import _add_months
+                target = _add_months(initial_date, 3)
+            else:
+                from .indie_outreach import _add_months
+                target = _add_months(initial_date, 6)
+            return {"next_action": "wait", "reason": f"The Indie sequence is not due until {target.isoformat()}.", "due_on": target.isoformat()}
+        return {"next_action": "follow_up", "kind": stage, "reason": f"The Indie {stage} stage is due from the original introduction date."}
     if sent_total >= MAX_EMAILS_IN_SEQUENCE:
         return {"next_action": "stop", "reason": f"{sent_total} emails were already sent: the sequence is finished."}
     intel_follow = [m for m in ctx.get("messages", []) if m.get("kind") == "followup" and m.get("state") not in ("discarded", "failed")]
@@ -182,9 +218,10 @@ def next_slot(p: dict, lead: dict | None, transcript: list[dict]) -> int:
     try:
         first_free = drafting.next_step({**p, "origin": "crm_existing"}, lead, 0)
     except PermanentError:
-        first_free = drafting.MAX_STEP + 1
-    step = max(first_free, min(ours, drafting.MAX_STEP + 1), 1)
-    if step > drafting.MAX_STEP:
+        first_free = drafting.max_step(p) + 1
+    limit = drafting.max_step(p)
+    step = max(first_free, min(ours, limit + 1), 1)
+    if step > limit:
         raise PermanentError("every follow-up slot on this lead was already used")
     return step
 
@@ -230,7 +267,7 @@ def _draft_takeover(d, p: dict, evidence: list[dict], kb: dict, st: dict,
     prospect = {**p, "language": language}
     rec: list = []
     site = "drafting.takeover" if language == "ja" else (
-        "drafting.takeover_followup" if kind == "followup" else "drafting.takeover_reply")
+        "drafting.takeover_followup" if kind in ("followup", "reengagement") else "drafting.takeover_reply")
     return composed(d.llm, site, rec, lambda llm: composer(
         prospect, evidence or [], kb, st, llm=llm,
         kind=kind, inbound=inbound, history=history,
@@ -293,6 +330,11 @@ def handle(d, job: dict) -> dict:
     if not ctx or not ctx.get("prospect"):
         return {"skipped": "prospect not found"}
     p, lead = ctx["prospect"], ctx.get("lead") or {}
+    if pl.get("scheduled") and p.get("type") == "indie_game_developer":
+        campaigns = (d.rpc("intel_agent_settings", {}) or {}).get("campaigns") or []
+        campaign = next((c for c in campaigns if c.get("type") == p.get("type")), None)
+        if not campaign or campaign.get("status") != "active":
+            return {"skipped": "campaign paused"}
     history = ctx.get("history") or []
     if not history:
         return {"skipped": "no pasted conversation"}
@@ -353,6 +395,11 @@ def _run(d, job, ctx, p, lead, history, hid, base, manual) -> dict:
     detected_language = "ja" if use_japanese else "en"
     # the model's read of intent can only add caution: re-decide with it
     out = decide(thread, ctx, st, intent=intent)
+    if out.get("kind") == "reengagement" and p.get("type") == "indie_game_developer":
+        from . import jobs
+        initial_turn = next((t for t in turns if t.get("who") == "us"), None)
+        if not initial_turn or not jobs._indie_reengagement_evidence_is_new(p, ctx.get("evidence") or [], str(initial_turn.get("at") or "")):
+            out = {"next_action": "none", "reason": "Re-engagement held: no verified, dated project update or marketing milestone newer than the original introduction."}
     res = {**base, "state": "ready", "summary": summary, "intent": intent, "open_questions": questions, "language": detected_language,
            "next_action": out["next_action"], "reason": out["reason"]}
     if out.get("due_on"):
@@ -364,7 +411,7 @@ def _run(d, job, ctx, p, lead, history, hid, base, manual) -> dict:
 
     kind = out["kind"]
     step = 0
-    if kind == "followup":
+    if kind in ("followup", "reengagement"):
         step = next_slot(p, lead, thread)
     key = f"takeover:{hid}:{kind}:{step}" + (f":{str(job.get('id', ''))[:8]}" if manual else "")
     if not manual and any(m.get("idempotency_key") == key for m in ctx.get("messages") or []):
@@ -395,7 +442,7 @@ def _run(d, job, ctx, p, lead, history, hid, base, manual) -> dict:
                     "reason": f"{language.upper()} individualized drafting requires review: {exc}"})
         _save(d, pid, res, notify=res["reason"])
         return {"next_action": "needs_human"}
-    email_kind = "followup" if kind == "followup" else "reply"
+    email_kind = "followup" if kind in ("followup", "reengagement") else "reply"
 
     localized = kb.get("policy.opt_out.ja", {}).get("body", "").strip() if use_japanese else None
     bad = policy.validate_outbound(mail["subject"], mail["body"], st, drafting.approved_urls(kb), email_kind, p.get("domain", ""), opt_out_text=localized)

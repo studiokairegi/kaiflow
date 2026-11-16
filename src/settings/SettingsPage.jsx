@@ -300,6 +300,8 @@ function FinanceTab({ form, set, errors, userId, onPrivacy }) {
         </div>
         <Field label="Payment instructions" hint="e.g. bank name, account number, M-Pesa till or PayPal address. Shown above the thank-you note."><textarea style={{ ...S.input, minHeight: 80 }} maxLength={600} value={form.invoicePaymentInstructions} onChange={(e) => set({ invoicePaymentInstructions: e.target.value })} /><Err msg={errors.invoicePaymentInstructions} /></Field>
         <Field label="Footer note" hint="An extra line at the bottom, such as late-payment terms."><input style={S.input} maxLength={300} value={form.invoiceFooterNote} onChange={(e) => set({ invoiceFooterNote: e.target.value })} /><Err msg={errors.invoiceFooterNote} /></Field>
+        <Field label="Payment instructions (Japanese)" hint="Printed instead of the text above on invoices sent in Japanese. Leave empty to print the English text."><textarea style={{ ...S.input, minHeight: 80 }} maxLength={600} lang="ja" value={form.invoicePaymentInstructionsJa} onChange={(e) => set({ invoicePaymentInstructionsJa: e.target.value })} /><Err msg={errors.invoicePaymentInstructionsJa} /></Field>
+        <Field label="Footer note (Japanese)" hint="Same idea for the footer note."><input style={S.input} maxLength={300} lang="ja" value={form.invoiceFooterNoteJa} onChange={(e) => set({ invoiceFooterNoteJa: e.target.value })} /><Err msg={errors.invoiceFooterNoteJa} /></Field>
       </Section>
       <Section title="Privacy" hint="Hides every financial amount across Finance and the dashboard. Applies immediately and is saved to your account.">
         <Switch checked={!!fin?.privacy_mode} disabled={privBusy || fin === undefined} onChange={togglePrivacy} label="Hide financial figures" />

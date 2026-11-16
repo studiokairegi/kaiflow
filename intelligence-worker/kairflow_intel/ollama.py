@@ -107,6 +107,10 @@ class OllamaClient:
     def chat_json(self, system: str, messages: list[dict], schema: dict, *, num_ctx: int = 8192, timeout: int = 300) -> dict:
         """Planner call for Agent Chat. `system` and the administrator's own messages are instructions; tool results must be
         passed inside <untrusted> tags by the caller. Output is schema-constrained and validated; the model has no tools of its own."""
+        # Ollama silently drops the START of a prompt that does not fit, and the start is the role and the tool list. Size the window to the prompt
+        # (about 3 characters per token, room for the schema and the answer), never below the default and never above 16384.
+        chars = len(system) + sum(len(str(m.get("content", ""))) for m in messages) + len(json.dumps(schema))
+        num_ctx = max(num_ctx, min(16384, chars // 3 + 1536))
         payload = {"model": self.cfg.ollama_model, "stream": False, "format": schema, "options": {"temperature": 0, "num_ctx": num_ctx},
                    "messages": [{"role": "system", "content": system}, *messages]}
         try:

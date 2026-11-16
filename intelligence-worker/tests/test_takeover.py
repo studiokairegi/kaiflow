@@ -118,18 +118,38 @@ class Decide(unittest.TestCase):
     def test_out_of_office_is_not_a_reply(self):
         ooo = entry("inbound", "I am out of office until next week.", "2026-10-06", "Automatic reply")
         late = entry("inbound", "I am out of office until next week.", "2026-10-16", "Automatic reply")
-        self.assertEqual(self.d([OUT1, late], last_contact="2026-10-16")["next_action"], "wait")     # still our turn, but not due yet
+        self.assertEqual(self.d([OUT1, late], last_contact="2026-10-16")["next_action"], "follow_up")  # auto-reply does not reset the original Indie sequence clock
         self.assertEqual(self.d([OUT1, ooo], last_contact="2026-10-05")["next_action"], "follow_up")  # due: the auto-reply did not count as an answer
         self.assertEqual(self.d([ooo])["next_action"], "none")
 
     def test_we_wrote_last_waits_then_follows_up(self):
-        w = self.d([OUT1], last_contact="2026-10-15")
-        self.assertEqual(w["next_action"], "wait"); self.assertEqual(w["due_on"], "2026-10-26")
+        recent = entry("outbound", "Initial note", "2026-10-16")
+        w = self.d([recent], last_contact="2026-10-16")
+        self.assertEqual(w["next_action"], "wait"); self.assertEqual(w["due_on"], "2026-10-23")
         self.assertEqual(self.d([OUT1], last_contact="2026-10-05")["next_action"], "follow_up")
+
+    def test_indie_day_ten_and_month_three_month_six_stages(self):
+        st = {**ST, "max_followups": 4, "today": "2026-10-20"}
+        two_sent = [OUT1, entry("outbound", "Follow-up one", "2026-10-12")]
+        c = ctx(two_sent, lead_extra={"sent_flags": [True, True, False, False, False]})
+        self.assertEqual(takeover.decide(takeover.build_transcript(c["history"], []), c, st, "no_response")["kind"], "followup")
+        three_sent = [OUT1, entry("outbound", "Follow-up one", "2026-10-12"), entry("outbound", "Follow-up two", "2026-10-19")]
+        c = ctx(three_sent, lead_extra={"sent_flags": [True, True, True, False, False]})
+        c["history"][0]["entries"] = three_sent
+        c["history"][0]["entries"][0]["at"] = "2026-07-01"
+        st3 = {**st, "today": "2026-10-02"}
+        result = takeover.decide(takeover.build_transcript(c["history"], []), c, st3, "no_response")
+        self.assertEqual((result["next_action"], result["kind"]), ("follow_up", "reengagement"))
+        c["history"][0]["entries"][0]["at"] = "2026-04-01"
+        st6 = {**st, "today": "2026-10-02"}
+        result = takeover.decide(takeover.build_transcript(c["history"], []), c, st6, "no_response")
+        self.assertEqual((result["next_action"], result["kind"]), ("follow_up", "reengagement"))
 
     def test_finished_sequence_and_limits(self):
         many = [entry("outbound", f"mail {i}", f"2026-09-{10 + i:02d}") for i in range(4)]
-        self.assertEqual(self.d(many, last_contact="2026-09-13")["next_action"], "stop")
+        c = ctx(many, last_contact="2026-09-13")
+        c["prospect"]["type"] = "animation_studio_support"
+        self.assertEqual(takeover.decide(takeover.build_transcript(c["history"], []), c, ST, "no_response")["next_action"], "stop")
         live = [{"kind": "followup", "state": "pending_approval"}]
         self.assertEqual(takeover.decide(takeover.build_transcript(ctx([OUT1])["history"], []), {**ctx([OUT1]), "messages": live}, ST, "no_response")["next_action"], "none")
 

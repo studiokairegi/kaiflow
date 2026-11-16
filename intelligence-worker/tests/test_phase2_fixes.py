@@ -191,7 +191,7 @@ class NameSwapWithOddNames(unittest.TestCase):
 
 class RegenerationAndTrace(unittest.TestCase):
     DUP = "Hello Sam,\n\nI saw your release Ember Trail on Steam, and we make anime-style promotional animation for game teams."
-    FRESH = "Hello Sam,\n\nFrostbyte released Ember Trail on Steam in 2023. Our reel is at https://studiokairegi.com/reel."
+    FRESH = "Hello Sam,\n\nFrostbyte released Ember Trail on Steam in 2023. We are a small 2D animation studio. Would animation support be useful?"
 
     def _run(self, bodies, rpc_fail=None):
         calls, prompts = [], []

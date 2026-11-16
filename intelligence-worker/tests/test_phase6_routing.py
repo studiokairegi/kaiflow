@@ -313,7 +313,7 @@ class AgentChatEndToEnd(unittest.TestCase):
     """chat.handle is unchanged; only the planner call's route changed. Safety (allowlist, untrusted tool results) is still enforced."""
 
     def test_forbidden_tool_from_gemini_is_never_executed(self):
-        g = G(plan={"action": "tool", "tool": "send_email", "args": {"to": "x@y.z"}}); rpc = ChatRpc()
+        g = G(plan={"action": "tool", "tool": "grant_admin", "args": {"user": "x@y.z"}}); rpc = ChatRpc()
         out = chat.handle(deps(rpc, llm_for(g, O())), {"thread_id": "t", "message_id": 1})
         self.assertEqual(rpc.tools_called(), []); self.assertTrue(out["replied"])
 

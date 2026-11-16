@@ -331,7 +331,7 @@ class SafetyBoundaries(unittest.TestCase):
     def test_a_forbidden_tool_name_is_refused(self):
         class Evil(Prov):
             def chat_json_ex(self, system, messages, schema, **kw):
-                return AIResult(data={"action": "tool", "tool": "send_email", "args": {"to": "x@y.z"}}, provider="gemini", model=MODEL, site="chat.plan")
+                return AIResult(data={"action": "tool", "tool": "grant_admin", "args": {"user": "x@y.z"}}, provider="gemini", model=MODEL, site="chat.plan")
         rpc = ChatRpc()
         chat.handle(deps(rpc, build(Evil("g"), Prov("o"), **self.ALL_GEMINI)), {"thread_id": "t", "message_id": 1})
         self.assertEqual(rpc.tools_called(), [])
@@ -429,8 +429,8 @@ class CallSiteCoverage(unittest.TestCase):
             for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
                 if raw.search(line) and "site=" not in line and "chat_json_ex" not in line:
                     offenders.append(f"{f.name}:{i}")
-        self.assertEqual([o.split(":")[0] for o in offenders], ["chat.py", "chat.py"],      # file and count, not line numbers: edits above them must not break this
-                         "only Agent Chat may call chat_json directly (the call and its one retry), and it is routed as chat.plan by FallbackLLM")
+        self.assertEqual([o.split(":")[0] for o in offenders], ["chat.py"],      # file and count, not line numbers: edits above them must not break this
+                         "only Agent Chat may call chat_json directly (one fallback call for clients without provenance, in _Trace.plan; the router path uses chat_json_ex as chat.plan)")
 
     def test_every_site_in_the_selftest_list_is_used_by_a_real_call_site(self):
         code = "\n".join(f.read_text(encoding="utf-8") for f in PKG.glob("*.py") if f.name != "main.py")

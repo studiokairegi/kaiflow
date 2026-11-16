@@ -266,3 +266,69 @@ test("shared Inbox token gateway enforces Zoho manual-correspondence purpose bef
   }), /not authorized for manual correspondence/);
   assert.equal(refreshed, false);
 });
+
+// ---- Zoho refresh-failure classification (regression: a throttled refresh used to disable the mailbox) ----
+function zohoTokenHarness(zohoReply, { cache } = {}) {
+  const updates = []; let fetches = 0;
+  const account = { id: ACCOUNT, provider_key: "zoho", external_account_id: "98765", mailbox: "hi@studiokairegi.com",
+    credentials_ciphertext: "cipher-zoho", status: "connected", is_enabled: true, send_enabled: true, data_center: "com" };
+  const service = {
+    async rpc() { return { data: true, error: null }; },
+    from(table) {
+      if (table === "intel_settings") return { select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: { organization_id: "33333333-3333-4333-8333-333333333333", agent_user_id: "agent-1" } }; } };
+      if (table === "intel_provider_accounts") return { select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: account }; },
+        update(v) { updates.push(v); return this; } };
+      if (table === "intel_email_provider_registry") return { select() { return this; }, eq() { return this; }, async maybeSingle() { return { data: { enabled: true, sending_enabled: true } }; } };
+      throw new Error(`unexpected table ${table}`);
+    },
+  };
+  const deps = {
+    env: (k) => ({ ZOHO_CLIENT_ID: "zid", ZOHO_CLIENT_SECRET: "zsecret" })[k],
+    createClient: () => ({ auth: { async getUser() { return { data: { user: { id: "agent-1" } }, error: null }; } } }),
+    service, fetch: async () => { fetches += 1; const r = typeof zohoReply === "function" ? zohoReply(fetches) : zohoReply; return new Response(JSON.stringify(r.body), { status: r.status }); },
+    encrypt: async (v) => v, decrypt: async () => JSON.stringify({ refresh_token: "zr", data_center: "com" }), now: () => NOW, tokenCache: cache,
+  };
+  const call = (extra = {}) => handleProviderToken(new Request("https://project.test/functions/v1/intel-provider-token", { method: "POST",
+    headers: { Authorization: "Bearer agent-jwt", "Content-Type": "application/json" }, body: JSON.stringify({ account_id: ACCOUNT, ...extra }) }), deps);
+  return { call, updates, fetches: () => fetches };
+}
+
+test("Zoho 'Access Denied: too many requests' (HTTP 400) is a retryable throttle and never disables the mailbox", async () => {
+  const h = zohoTokenHarness({ status: 400, body: { error: "Access Denied", error_description: "You have made too many requests continuously. Please try again after some time." } });
+  const res = await h.call();
+  assert.equal(res.status, 429);
+  assert.equal((await res.json()).retryable, true);
+  assert.ok(h.updates.length === 1 && h.updates[0].status === undefined, "account status must stay connected");
+  assert.equal(h.updates[0].health_status, "degraded");
+  assert.doesNotMatch(h.updates[0].last_error, /reconnect/i);
+});
+
+test("Zoho invalid_client or an unrecognised 4xx is a configuration fault, not a revoked grant", async () => {
+  for (const reply of [{ status: 400, body: { error: "invalid_client" } }, { status: 403, body: { error: "something_new" } }, { status: 200, body: { error: "invalid_client" } }]) {
+    const h = zohoTokenHarness(reply);
+    const res = await h.call();
+    assert.equal(res.status, 503, JSON.stringify(reply));
+    assert.equal(h.updates[0].status, undefined, JSON.stringify(reply));
+  }
+});
+
+test("Zoho definitive revocation (invalid_grant / invalid_code, even with HTTP 200, or 401) still asks for reconnect", async () => {
+  for (const reply of [{ status: 400, body: { error: "invalid_grant" } }, { status: 200, body: { error: "invalid_code" } }, { status: 401, body: {} }]) {
+    const h = zohoTokenHarness(reply);
+    const res = await h.call();
+    assert.equal(res.status, 409, JSON.stringify(reply));
+    assert.equal(h.updates[0].status, "error", JSON.stringify(reply));
+    assert.match(h.updates[0].last_error, /reconnect/i);
+  }
+});
+
+test("access tokens are reused until near expiry and `force` bypasses the cache", async () => {
+  const cache = new Map();
+  const h = zohoTokenHarness(() => ({ status: 200, body: { access_token: "zat", expires_in: 3600 } }), { cache });
+  assert.equal((await h.call()).status, 200);
+  const second = await (await h.call()).json();
+  assert.equal(second.access_token, "zat");
+  assert.equal(h.fetches(), 1, "second call must come from the cache, not Zoho");
+  assert.equal((await h.call({ force: true })).status, 200);
+  assert.equal(h.fetches(), 2, "force must hit Zoho again");
+});

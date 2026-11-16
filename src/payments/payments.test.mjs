@@ -44,9 +44,8 @@ test("config: missing mode, missing key and bad format disable payments and neve
 });
 test("supported channels map to Paystack channels; unsupported providers map to nothing", () => {
   assert.deepEqual(core.channelsFor("card"), ["card"]);
-  assert.deepEqual(core.channelsFor("bank_transfer"), ["bank_transfer"]);
   assert.deepEqual(core.channelsFor("apple_pay"), ["apple_pay"]);
-  for (const c of ["paypal", "payoneer", "ussd", "", undefined]) assert.equal(core.channelsFor(c), null);
+  for (const c of ["bank_transfer", "paypal", "payoneer", "ussd", "", undefined]) assert.equal(core.channelsFor(c), null);
 });
 
 // ---------------------------------------------------------------- amounts / currency / email

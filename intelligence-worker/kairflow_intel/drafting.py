@@ -22,8 +22,8 @@ def kb_map(kb: list[dict]) -> dict[str, dict]:
     return {e["key"]: e for e in kb or []}
 
 
-def require_kb(kb: dict, ptype: str) -> None:
-    need = [*REQUIRED, TYPE_KEY[ptype]]
+def require_kb(kb: dict, ptype: str, *, include_portfolio: bool = True) -> None:
+    need = ["studio.about", TYPE_KEY[ptype]] + (["portfolio.main"] if include_portfolio else [])
     missing = [k for k in need if not (kb.get(k) and kb[k]["body"].strip())]
     if missing:
         raise PermanentError(f"approved knowledge base is missing: {', '.join(missing)}")
@@ -149,15 +149,16 @@ def should_use_japanese(prospect: dict, history: list[dict] | None = None, inbou
     return country in {"japan", "jp", "jpn", "日本", "日本国"}
 
 
-def japanese_kb_keys(prospect: dict) -> tuple[str, ...]:
+def japanese_kb_keys(prospect: dict, *, include_portfolio: bool = True) -> tuple[str, ...]:
     service_key = TYPE_KEY.get(prospect.get("type"))
     if not service_key:
         raise PermanentError("Japanese drafting is unavailable for this prospect type")
-    return ("studio.about.ja", service_key + ".ja", "portfolio.main.ja", "policy.opt_out.ja")
+    base = ("studio.about.ja", service_key + ".ja", "policy.opt_out.ja")
+    return (base[0], base[1], "portfolio.main.ja", base[2]) if include_portfolio else base
 
 
-def require_japanese_kb_for(prospect: dict, kb: dict) -> None:
-    missing = [k for k in japanese_kb_keys(prospect) if not (kb.get(k) and str(kb[k].get("body") or "").strip())]
+def require_japanese_kb_for(prospect: dict, kb: dict, *, include_portfolio: bool = True) -> None:
+    missing = [k for k in japanese_kb_keys(prospect, include_portfolio=include_portfolio) if not (kb.get(k) and str(kb[k].get("body") or "").strip())]
     if missing:
         raise PermanentError("approved Japanese knowledge base is incomplete: " + ", ".join(missing))
 
@@ -206,37 +207,43 @@ def model_hook(prospect: dict, evidence: list[dict], llm) -> str | None:
 
 def build_initial(prospect: dict, evidence: list[dict], kb: dict, settings: dict, llm=None) -> dict:
     ptype = prospect["type"]
-    require_kb(kb, ptype)
+    require_kb(kb, ptype, include_portfolio=False)
     if is_japanese_animation_prospect(prospect):
-        require_japanese_kb(kb)
-        paragraph = "突然のご連絡失礼いたします。" + " ".join(kb[k]["body"].strip() for k in JAPANESE_REQUIRED[:3])
-        paragraph += " ご関心がございましたら、お気軽にご返信いただけますと幸いです。"
+        require_japanese_kb_for(prospect, kb, include_portfolio=False)
+        service_key = TYPE_KEY[ptype] + ".ja"
+        paragraph = "突然のご連絡失礼いたします。" + " ".join(kb[k]["body"].strip() for k in ("studio.about.ja", service_key))
+        paragraph += " アニメーションによる映像表現について、一度ご相談する機会をいただけますでしょうか。"
         body = greeting(prospect) + "\n\n" + paragraph
         body += "\n" + policy.compliance_footer(settings, opt_out_text=kb["policy.opt_out.ja"]["body"].strip())
         return {"subject": SUBJECT_JA.format(name=prospect["name"])[:120], "body": body}
     hook = model_hook(prospect, evidence, llm) or plain_hook(prospect, evidence)
     body = "\n\n".join([greeting(prospect), hook, kb["studio.about"]["body"].strip(), kb[TYPE_KEY[ptype]]["body"].strip(),
-                        kb["portfolio.main"]["body"].strip(), "If it would be useful, I would be glad to share more or answer any questions."])
+                        "Would a short discussion about a possible cinematic direction be useful?"])
     body += "\n" + policy.compliance_footer(settings)
     return {"subject": SUBJECT[ptype].format(name=prospect["name"])[:120], "body": body}
 
 
-MAX_STEP = 3
+MAX_STEP = 4
+
+def max_step(prospect: dict) -> int:
+    return 4 if prospect.get("type") == "indie_game_developer" else 3
+
 # Calibrated against tests/fixtures/phase2_similarity_pairs.json. Keep this value
 # centralized so drafting and reply checks cannot silently diverge.
 SIMILARITY_THRESHOLD = 0.55
 
 
 def next_step(prospect: dict, lead: dict | None, previous_followups: int) -> int:
-    """Which email slot (1..3) this follow-up fills. Adopted CRM leads may already have manual follow-ups: use the first unsent slot."""
+    """Which email slot this follow-up fills (Indie: 1..4; other campaigns: 1..3). Adopted CRM leads may already have manual follow-ups: use the first unsent slot."""
+    limit = max_step(prospect)
     if prospect.get("origin") == "crm_existing":
         flags = list((lead or {}).get("sent_flags") or [])
-        for i in range(1, MAX_STEP + 1):
+        for i in range(1, limit + 1):
             if i >= len(flags) or not flags[i]:
                 return i
         raise PermanentError("every follow-up slot on this lead was already used")
     step = 1 + previous_followups
-    if step > MAX_STEP:
+    if step > limit:
         raise PermanentError("follow-up limit reached")
     return step
 
@@ -251,16 +258,16 @@ def thread_parent(messages: list[dict]) -> dict | None:
 
 
 def build_followup(prospect: dict, kb: dict, settings: dict, sent_on: str, parent_subject: str | None = None) -> dict:
-    require_kb(kb, prospect["type"])
+    require_kb(kb, prospect["type"], include_portfolio=False)
     if is_japanese_animation_prospect(prospect):
-        require_japanese_kb(kb)
+        require_japanese_kb_for(prospect, kb, include_portfolio=False)
         paragraph = f"先日お送りしたアニメーション制作協力のご案内について、改めてご連絡いたしました。" \
-                    f"現在は外部スタッフのご協力が不要でしたら、どうぞご放念ください。{kb['portfolio.main.ja']['body'].strip()}"
+                    f"現在は外部スタッフのご協力が不要でしたら、どうぞご放念ください。"
         body = greeting(prospect) + "\n\n" + paragraph + "\n" + policy.compliance_footer(settings, opt_out_text=kb["policy.opt_out.ja"]["body"].strip())
     else:
         body = "\n\n".join([greeting(prospect),
                             f"I wanted to follow up briefly on the note I sent on {sent_on}. If animation support is not a priority right now, no problem at all.",
-                            kb["portfolio.main"]["body"].strip()]) + "\n" + policy.compliance_footer(settings)
+                            "If this is not a current priority, no reply is needed."]) + "\n" + policy.compliance_footer(settings)
     if parent_subject:   # joining a real thread: keep its subject, add Re: once
         subject = parent_subject if re.match(r"(?i)^re:", parent_subject) else f"Re: {parent_subject}"
     else:                # no thread to join (e.g. an email sent from the CRM by hand): do not fake a reply
@@ -353,8 +360,12 @@ def _evidence_catalog(evidence: list[dict], *, inbound: dict | None = None, hist
             if m.get("direction") == "inbound":
                 add(m.get("id") or f"history_inbound{i}", "conversation_inbound", _new_text(m.get("body_text") or m.get("body") or ""))
 
-    # Second priority: verified research evidence.
-    for i, e in enumerate(evidence or []):
+    # Second priority: verified research evidence. For re-engagement, dated project
+    # developments and marketing milestones must survive payload trimming.
+    research_rows = list(evidence or [])
+    if kind == "reengagement":
+        research_rows.sort(key=lambda e: 0 if str(e.get("fact_type") or "").lower() in INDIE_REENGAGEMENT_FACTS else 1)
+    for i, e in enumerate(research_rows):
         if e.get("verified") and isinstance(e.get("snippet"), str) and e["snippet"].strip():
             add(e.get("id") or _stable_evidence_id(e), str(e.get("fact_type") or "prospect_fact"), e["snippet"], e.get("url") or "")
 
@@ -692,19 +703,72 @@ def _ja_terms_grounded(sentence: str, source_text: str, ignore_names: list[str])
     return grounded, total
 
 
+INDIE_PROJECT_FACTS = {"project_identity", "project_description", "game_description", "game_store_page", "project_store_page", "steam_project", "itch_project", "project_announcement", "development_update", "devlog", "development_log", "project_update", "demo_update", "playtest_update", "build_update", "patch_update", "marketing_opportunity", "dlc_announcement", "major_update_announcement", "relaunch_announcement", "console_release_announcement"}
+INDIE_VISUAL_FACTS = {"anime_style_description", "official_anime_style_description", "official_visual_style", "anime_visual_screenshot", "anime_visual_artwork", "anime_visual_trailer", "anime_character_art"}
+INDIE_REENGAGEMENT_FACTS = {"development_update", "devlog", "development_log", "developer_progress_update", "project_update", "demo_update", "playtest_update", "build_update", "patch_update", "marketing_opportunity", "dlc_announcement", "major_update_announcement", "relaunch_announcement", "console_release_announcement"}
+
+
+def _validate_indie_initial(prospect: dict, catalog: list[dict], cited: list[dict], subject: str, body: str, *, language: str) -> None:
+    """Hard gate for project-specific, visually grounded first-contact emails."""
+    facts = prospect.get("facts") if isinstance(prospect.get("facts"), dict) else {}
+    verified = facts.get("verified") if isinstance(facts.get("verified"), dict) else {}
+    meta = prospect.get("meta") if isinstance(prospect.get("meta"), dict) and prospect.get("meta") else verified
+    title = re.sub(r"\s+", " ", str(prospect.get("project_title") or meta.get("project_title") or meta.get("game") or "")).strip()
+    if not title:
+        raise PermanentError("verified project title is missing; manual review required")
+    project_rows = [e for e in cited if str(e.get("fact_type") or "").lower() in INDIE_PROJECT_FACTS]
+    visual_rows = [e for e in cited if str(e.get("fact_type") or "").lower() in INDIE_VISUAL_FACTS]
+    if not project_rows or not visual_rows:
+        raise PermanentError("initial Indie email must cite both project-specific and human-verified visual evidence")
+    source_text = " ".join(str(e.get("snippet") or "") for e in project_rows).casefold()
+    if title.casefold() not in source_text and not any(title.casefold() in str(e.get("url") or "").casefold() for e in project_rows):
+        raise PermanentError("project evidence does not identify the exact game title")
+    detail_text = " ".join(str(e.get("snippet") or "") for e in (project_rows + visual_rows))
+    detail_tokens = _tokens(detail_text) - _tokens(title)
+    body_tokens = _tokens(body)
+    if len(detail_tokens & body_tokens) < 2:
+        raise PermanentError("initial email must mention a concrete project or visual detail from the cited evidence")
+    cited_ids = {str(e.get("id") or "") for e in cited}
+    if not cited_ids:
+        raise PermanentError("project and visual evidence IDs are required")
+    if "—" in subject or "—" in body:
+        raise PermanentError("em dashes are not permitted in initial outreach")
+    if policy.URL.search(body):
+        raise PermanentError("initial outreach must not contain portfolio or studio website links")
+    if language == "en":
+        if title.casefold() not in body.casefold():
+            raise PermanentError("initial email must name the exact game title")
+        if not re.search(r"\bStudio Kairegi\b", body, re.I) or not re.search(r"anime.{0,35}animation studio|animation studio.{0,35}anime", body, re.I):
+            raise PermanentError("initial email must introduce Studio Kairegi as an anime animation studio")
+        if not re.search(r"\b(?:cinematic|teaser|trailer|animated sequence|character animation|visual direction|motion)\b", body, re.I):
+            raise PermanentError("initial email must identify a grounded cinematic animation opportunity")
+        if not re.search(r"\?\s*$", body):
+            raise PermanentError("initial email must end with a natural question")
+    else:
+        if title not in body:
+            raise PermanentError("Japanese initial email must name the exact game title")
+        if "スタジオカイレギ" not in body or not re.search(r"アニメ.{0,30}アニメーション制作スタジオ|アニメーション制作スタジオ.{0,30}アニメ", body):
+            raise PermanentError("Japanese initial email must introduce Studio Kairegi as an anime animation studio")
+        if not re.search(r"シネマティック|ティザー|予告編|映像演出|キャラクターの動き|アニメーション映像", body):
+            raise PermanentError("Japanese initial email must identify a grounded cinematic animation opportunity")
+        if not re.search(r"[?？]\s*$", body):
+            raise PermanentError("Japanese initial email must end with a natural question")
+
+
 def compose_japanese(prospect: dict, evidence: list[dict], kb: dict, settings: dict, llm,
                      *, kind: str, inbound: dict | None = None, history: list[dict] | None = None,
                      sent_on: str | None = None, parent_subject: str | None = None, feedback: str | None = None) -> dict:
     """Compose individualized Japanese business email. No generic or literal-translation fallback."""
-    keys = japanese_kb_keys(prospect)
-    require_japanese_kb_for(prospect, kb)
+    allow_portfolio = kind == "reply" and (str((inbound or {}).get("class") or "") == "portfolio_request" or "portfolio" in policy.scan_inbound(str((inbound or {}).get("subject") or ""), str((inbound or {}).get("body") or (inbound or {}).get("body_text") or ""))["hits"])
+    keys = japanese_kb_keys(prospect, include_portfolio=allow_portfolio)
+    require_japanese_kb_for(prospect, kb, include_portfolio=allow_portfolio)
     if kind not in ("initial", "followup", "reply", "reengagement"):
         raise PermanentError(f"unsupported Japanese composition kind: {kind}")
     if kind == "reply" and _is_consequential_japanese_inbound(inbound):
         raise PermanentError("Japanese reply raises pricing, terms, complaint, scheduling, commitment or opt-out issues; manual review required")
     catalog = _evidence_catalog(evidence, inbound=inbound, history=history, kind=kind)
     factual = [e for e in catalog if e.get("fact_type") not in ("sent_outreach_history", "actual_incoming_message", "conversation_inbound")]
-    approved = {k: str(kb[k]["body"]).strip() for k in keys[:3]}
+    approved = {k: str(kb[k]["body"]).strip() for k in keys if k != "policy.opt_out.ja"}
     if not all(approved.values()):
         raise PermanentError("approved Japanese studio/service/portfolio facts are incomplete")
     if not factual:
@@ -713,15 +777,16 @@ def compose_japanese(prospect: dict, evidence: list[dict], kb: dict, settings: d
         # fixed introductory message enter the send-ready draft workflow.
         raise PermanentError("insufficient verified prospect research for individualized Japanese draft; research or manual review required")
     instructions = {
-        "initial": "初回の営業メールを作成してください。相手の実際の制作実績・活動に基づく個別の切り口にしてください。",
+        "initial": "初回の営業メールを作成してください。確認済みの正確なゲームタイトルと具体的なゲーム内容を取り上げ、その作品のビジュアルに根差したシネマティックなアニメーション機会を一つ提案してください。Studio Kairegiをアニメ制作スタジオとして簡潔に紹介し、自然で押しつけない質問で締めてください。",
         "followup": "実際に送信済みの前回メールと会話履歴を踏まえ、同じ売り込みを繰り返さず、自然で簡潔なフォローアップを作成してください。",
-        "reengagement": "過去の送信内容を踏まえつつ、以前に関心を示したと偽らず、新しい切り口の控えめな再連絡を作成してください。",
+        "reengagement": "過去の送信内容を踏まえつつ、初回連絡後に確認された新しい日付付きの開発更新またはマーケティング機会を具体的に取り上げ、以前に関心を示したと偽らず、控えめな再連絡を作成してください。",
         "reply": "受信したメールの質問・依頼に直接答えてください。受信文の内容を理解し、返答になっていることを確認してください。",
     }
     payload_obj = {
         "message_kind": kind, "approved_studio_facts": approved,
         "prospect": {"name": prospect.get("name"), "contact_name": prospect.get("contact_name"),
-                     "type": prospect.get("type"), "website": prospect.get("website"), "services": prospect.get("services")},
+                     "type": prospect.get("type"), "website": prospect.get("website"), "services": prospect.get("services"),
+                     "project_title": prospect.get("project_title") or (prospect.get("meta") or {}).get("project_title") or (prospect.get("meta") or {}).get("game") or ((prospect.get("facts") or {}).get("verified") or {}).get("project_title") or ((prospect.get("facts") or {}).get("verified") or {}).get("game")},
         "incoming_message": ({**inbound, "body": _new_text(str(inbound.get("body") or inbound.get("body_text") or ""))[:3000]} if inbound else {}),
         "sent_date": sent_on, "thread_subject": parent_subject, "verified_evidence": catalog,
         "conversation_history": [{k: (str(v)[:600] if isinstance(v, str) else v) for k, v in m.items()
@@ -737,7 +802,7 @@ def compose_japanese(prospect: dict, evidence: list[dict], kb: dict, settings: d
         + " 英語の直訳調、過剰に硬い表現、定型文の使い回しを避けてください。"
         " アニメ制作用語は意味を厳密に区別してください：レイアウト（画面構成・動きの設計）、原画（キーアニメーション）、動画（中割りを含む動画工程）、仕上げ（彩色工程）。"
         " 承認済みサービス情報の意味を変えたり、提供範囲を拡大したりしないでください。"
-        " 個別の事実主張はverified_evidenceに明記された内容だけに基づけてください。採用、外注需要、人員不足、関心、視聴・プレイ経験を推測しないでください。"
+        " 個別の事実主張はverified_evidenceに明記された内容だけに基づけてください。採用、外注需要、人員不足、関心、視聴・プレイ経験を推測しないでください。初回連絡・フォローアップ・再連絡ではポートフォリオやウェブサイトのリンクを含めないでください。ポートフォリオは明示的に依頼された返信の場合だけ共有できます。"
         " replyでは受信メールの質問に答え、価格・契約・納期・稼働状況・苦情・配信停止は回答せず、人による確認が必要です。"
         " 面識・過去のやり取り・ゲームのプレイや作品の視聴経験があるかのような表現（先日、お会いした、プレイいたしました等）、金額・料金に関する表現は使わないでください。"
         " 会社名・担当者名は入力の表記を正確に保ってください。件名と本文を日本語で作成し、配信停止文・住所・署名・フッターは本文に含めないでください。"
@@ -780,6 +845,10 @@ def compose_japanese(prospect: dict, evidence: list[dict], kb: dict, settings: d
     cited_facts = [e for e in cited if e.get("fact_type") not in ("sent_outreach_history", "actual_incoming_message", "conversation_inbound")]
     if not cited_facts:
         raise PermanentError("Japanese draft cites no verified prospect facts; manual review required")
+    if kind == "reengagement" and prospect.get("type") == "indie_game_developer" and not any(str(e.get("fact_type") or "").lower() in INDIE_REENGAGEMENT_FACTS for e in cited_facts):
+        raise PermanentError("Japanese re-engagement must cite a dated project update or marketing milestone; manual review required")
+    if kind == "initial" and prospect.get("type") == "indie_game_developer" and (prospect.get("project_title") or (prospect.get("meta") or {}).get("project_title") or ((prospect.get("facts") or {}).get("verified") or {}).get("project_title")):
+        _validate_indie_initial(prospect, catalog, cited_facts, subject, body, language="ja")
     cited_text = " ".join(e["snippet"] for e in cited_facts)
     source_tokens = _tokens(cited_text)
     approved_tokens = _tokens(" ".join(approved.values()))
@@ -845,21 +914,22 @@ def compose_english(prospect: dict, evidence: list[dict], kb: dict, settings: di
                     *, kind: str, inbound: dict | None = None, history: list[dict] | None = None,
                     sent_on: str | None = None, parent_subject: str | None = None, feedback: str | None = None) -> dict:
     """Compose an evidence-grounded English message for one recipient. No generic fallback."""
-    require_kb(kb, prospect["type"])
+    allow_portfolio = kind == "reply" and (str((inbound or {}).get("class") or "") == "portfolio_request" or "portfolio" in policy.scan_inbound(str((inbound or {}).get("subject") or ""), str((inbound or {}).get("body") or (inbound or {}).get("body_text") or ""))["hits"])
+    require_kb(kb, prospect["type"], include_portfolio=allow_portfolio)
     if not _english(prospect):
         raise PermanentError("Phase 2 English composer is not used for Japanese prospects")
     catalog = _evidence_catalog(evidence, inbound=inbound, history=history, kind=kind)
     if len(catalog) < 1:
         raise PermanentError("insufficient verified prospect evidence; manual review required")
     approved = {k: v["body"].strip() for k, v in kb.items() if isinstance(v, dict) and v.get("body", "").strip()
-                and (k in ("studio.about", "portfolio.main", TYPE_KEY[prospect["type"]]) or k.startswith("faq."))}
-    if not all(approved.get(k) for k in ("studio.about", "portfolio.main", TYPE_KEY[prospect["type"]])):
+                and (k in (("studio.about", TYPE_KEY[prospect["type"]], "portfolio.main") if allow_portfolio else ("studio.about", TYPE_KEY[prospect["type"]])) or k.startswith("faq."))}
+    if not all(approved.get(k) for k in (("studio.about", TYPE_KEY[prospect["type"]], "portfolio.main") if allow_portfolio else ("studio.about", TYPE_KEY[prospect["type"]]))):
         raise PermanentError("approved knowledge base is incomplete")
     kind_instruction = {
-        "initial": "Write a genuinely individualized first-contact email. Derive opening, collaboration angle, and phrasing from prospect evidence. Do not claim interest, watching/playing, unmet needs, hiring or outsourcing unless evidence explicitly supports it.",
-        "followup": "Write a concise follow-up that advances the actual previous outreach without repeating its pitch. Respect the real sent date and thread subject. If the conversation says no, stop or request review.",
+        "initial": "Write a genuinely individualized first-contact email about the exact game title in the verified evidence. Include one concrete game detail and a grounded cinematic animation opportunity. Introduce Studio Kairegi clearly as an anime animation studio, then ask one natural, low-pressure question. Do not claim interest, watching/playing, unmet needs, hiring or outsourcing unless evidence explicitly supports it. Do not include any portfolio or website link and do not mention portfolio availability.",
+        "followup": "Write a concise follow-up that advances the actual previous outreach without repeating its pitch. Do not include portfolio material or links unless explicitly requested. Respect the real sent date and thread subject. If the conversation says no, stop or request review.",
         "reply": "Answer the actual incoming email directly. Do not invent interest, commitments, prices, deadlines, availability, or prior agreements. If the message raises pricing, contracts, negotiation, complaint, unsubscribe, or other consequential issues, refuse to draft and require human review.",
-        "reengagement": "Write a genuinely new, low-pressure re-engagement message informed by actual prior outreach and the prospect's verified work. Do not pretend a conversation or interest occurred."
+        "reengagement": "Write a genuinely new, low-pressure re-engagement message grounded in a verified dated project update or upcoming marketing milestone that is different from the prior outreach. Do not pretend a conversation or interest occurred. Do not include portfolio material or links unless explicitly requested."
     }.get(kind)
     if not kind_instruction:
         raise PermanentError(f"unsupported English composition kind: {kind}")
@@ -870,7 +940,8 @@ def compose_english(prospect: dict, evidence: list[dict], kb: dict, settings: di
         return {"message_kind": kind, "approved_studio_facts": approved,
             "incoming_message": ({**inbound, "body": _new_text(str(inbound.get("body") or ""))[:3000]} if inbound else {}),
             "prospect": {"name": prospect.get("name"), "contact_name": prospect.get("contact_name"),
-                "type": prospect.get("type"), "website": prospect.get("website"), "services": prospect.get("services")},
+                "type": prospect.get("type"), "website": prospect.get("website"), "services": prospect.get("services"),
+                "project_title": prospect.get("project_title") or (prospect.get("meta") or {}).get("project_title") or (prospect.get("meta") or {}).get("game") or ((prospect.get("facts") or {}).get("verified") or {}).get("project_title") or ((prospect.get("facts") or {}).get("verified") or {}).get("game")},
             "sent_date": sent_on, "thread_subject": parent_subject, "verified_evidence": cat,
             "conversation_history": [{k: (str(v)[:600] if isinstance(v, str) else v) for k, v in m.items()
                                       if k in ("direction", "kind", "state", "subject", "body_text", "body", "sent_at")}
@@ -1008,6 +1079,8 @@ def compose_english(prospect: dict, evidence: list[dict], kb: dict, settings: di
         raise PermanentError("reply contains consequential pricing, terms, scheduling, or commitment language; manual review required")
     if kind == "reply" and not _reply_addresses_inbound(body, inbound):
         raise PermanentError("reply does not address the actual incoming request; manual review required")
+    if kind == "initial" and prospect.get("type") == "indie_game_developer" and (prospect.get("project_title") or (prospect.get("meta") or {}).get("project_title") or ((prospect.get("facts") or {}).get("verified") or {}).get("project_title")):
+        _validate_indie_initial(prospect, catalog, cited_fact_entries, subject, body, language="en")
     # The model must compose only relevant approved service information. Do not append
     # identical studio/service/portfolio blocks to every message; append only policy footer.
     body += "\n\n" + policy.compliance_footer(settings)

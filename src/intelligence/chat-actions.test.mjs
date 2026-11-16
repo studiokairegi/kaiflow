@@ -7,6 +7,8 @@ import { intelApi } from "./api.js";
 const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
 const sql = read("../../supabase/migrations/20261109160000_intelligence_chat_actions.sql");
 const body = sql.replace(/^\s*--.*$/gm, "");
+const sqlV2 = read("../../supabase/migrations/20270103100000_intelligence_emma_actions.sql").replace(/^\s*--.*$/gm, "");
+const fnsV2 = Object.fromEntries(sqlV2.split(/create or replace function public\./).slice(1).map((c) => [c.match(/^(\w+)\(/)[1], c]));
 const py = read("../../intelligence-worker/kairflow_intel/chat.py");
 const fns = Object.fromEntries(body.split(/create or replace function public\./).slice(1).map((c) => [c.match(/^(\w+)\(/)[1], c]));
 const NOW = Date.parse("2026-11-04T12:00:00Z");
@@ -23,11 +25,11 @@ test("cards: only a pending, unexpired action can be confirmed; expiry shows as 
 });
 
 test("every tool the assistant can propose has a label and an implementation", () => {
-  const sqlTools = [...fns.intel_agent_chat_propose.match(/p_tool not in \(([^)]*)\)/)[1].matchAll(/'(\w+)'/g)].map((m) => m[1]).sort();
+  const sqlTools = [...fnsV2.intel_agent_chat_propose.match(/p_tool not in \(([^)]*)\)/)[1].matchAll(/'(\w+)'/g)].map((m) => m[1]).sort();
   const pyTools = [...py.match(/PROPOSALS: dict[^=]*= \{([\s\S]*?)\n\}\n/)[1].matchAll(/^    "(\w+)":/gm)].map((m) => m[1]).sort();
   assert.deepEqual(pyTools, sqlTools);
-  for (const t of sqlTools) { assert.ok(TOOL_LABEL[t], `label for ${t}`); assert.ok(fns._intel_chat_prepare.includes(`'${t}'`), `${t} validated`); assert.ok(fns._intel_chat_exec.includes(`'${t}'`) || /approve_messages|discard_messages/.test(t), `${t} executed`); }
-  assert.deepEqual(sqlTools.sort(), ["add_suppression", "approve_messages", "discard_messages", "enable_sending", "resume_campaign", "review_prospect", "set_autonomy", "set_campaign_cap", "update_limits"]);
+  for (const t of sqlTools) { assert.ok(TOOL_LABEL[t], `label for ${t}`); assert.ok(fnsV2._intel_chat_prepare.includes(`'${t}'`), `${t} validated`); assert.ok(fnsV2._intel_chat_exec.includes(`'${t}'`) || /approve_messages|discard_messages/.test(t), `${t} executed`); }
+  assert.deepEqual(sqlTools.sort(), ["add_suppression", "approve_messages", "change_setting", "discard_messages", "edit_message", "enable_sending", "resume_campaign", "retire_knowledge", "review_prospect", "save_knowledge", "send_email", "set_autonomy", "set_campaign_cap", "update_limits"]);
 });
 
 test("the agent function can only PROPOSE: it re-checks the requester, caps proposals, and never executes", () => {
@@ -68,7 +70,7 @@ test("API wrappers call only the human-facing functions", async () => {
   const calls = [];
   const sb = { rpc: async (n, a) => { calls.push([n, a]); return { data: { ok: true }, error: null }; } };
   await intelApi.chatConfirm(sb, "a1"); await intelApi.chatCancel(sb, "a1");
-  assert.deepEqual(calls, [["intel_admin_chat_confirm", { p_action_id: "a1" }], ["intel_admin_chat_cancel", { p_action_id: "a1" }]]);
+  assert.deepEqual(calls, [["intel_admin_chat_confirm", { p_action_id: "a1", p_auto: false }], ["intel_admin_chat_cancel", { p_action_id: "a1" }]]);
 });
 
 test("migration order includes the chat actions migration last", () => {

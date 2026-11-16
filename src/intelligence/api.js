@@ -6,6 +6,9 @@ async function call(supabase, name, args) {
   return data;
 }
 
+/** The chat tab must keep working when a newer migration is not applied yet (deploy order is migrations first, but a lagging database must not blank the tab). */
+const missingObject = (e) => /PGRST20[0-9]|42703|42883|could not find|does not exist|schema cache/i.test(`${e?.code || ""} ${e?.message || ""}`);
+
 async function read(query) {
   const { data, error } = await query;
   if (error) throw new Error(error.message || "Could not load data");
@@ -23,6 +26,10 @@ export const intelApi = {
   enqueue: (s, kind, payload) => call(s, "intel_admin_enqueue_job", { p_kind: kind, p_payload: payload || {} }),
   requeueJob: (s, id) => call(s, "intel_admin_requeue_job", { p_job_id: id }),
   markProspectForReview: (s, id) => call(s, "intel_admin_mark_prospect_review", { p_prospect_id: id }),
+  addIndieEvidence: (s, a) => call(s, "intel_admin_add_indie_evidence", { p_prospect_id: a.prospectId, p_fact_type: a.factType, p_source_url: a.sourceUrl, p_snippet: a.snippet, p_event_date: a.eventDate || null, p_media_url: a.mediaUrl || "" }),
+  addIndieContactEvidence: (s, a) => call(s, "intel_admin_add_indie_contact_evidence", { p_prospect_id: a.prospectId, p_source_url: a.sourceUrl, p_snippet: a.snippet }),
+  verifyIndieIdentity: (s, a) => call(s, "intel_admin_verify_indie_identity", { p_prospect_id: a.prospectId, p_developer_name: a.developerName, p_developer_evidence_id: a.developerEvidenceId, p_project_evidence_id: a.projectEvidenceId, p_creator_role: a.creatorRole || "unknown" }),
+  verifyIndieContact: (s, a) => call(s, "intel_admin_verify_indie_contact", { p_prospect_id: a.prospectId, p_email: a.email, p_evidence_id: a.evidenceId }),
   reviewProspect: (s, id, action, leadId) => call(s, "intel_admin_review_prospect", { p_prospect_id: id, p_action: action, p_lead_id: leadId || null }),
   reviewMessage: (s, id, action, subject, body) => call(s, "intel_admin_review_message", { p_message_id: id, p_action: action, p_subject: subject ?? null, p_body: body ?? null }),
   resolveUnknown: (s, id, outcome) => call(s, "intel_admin_resolve_unknown", { p_message_id: id, p_outcome: outcome }),
@@ -50,6 +57,7 @@ export const intelApi = {
   setProfile: (s, type, p) => call(s, "intel_admin_set_profile", { p_type: type, p_description: p.description, p_terms_en: p.termsEn, p_terms_ja: p.termsJa, p_exclude: p.exclude }),
   approveProfile: (s, type, approved) => call(s, "intel_admin_approve_profile", { p_type: type, p_approved: approved }),
   addManualPost: (s, type, url, text) => call(s, "intel_admin_add_manual_post", { p_type: type, p_url: url || "", p_text: text || "" }),
+  addKickstarterProject: (s, project) => call(s, "intel_admin_add_kickstarter_project", { p_url: project.url, p_title: project.title, p_creator: project.creator, p_developer: project.developer || "", p_website: project.website || "", p_notes: project.notes || "", p_permission_reference: project.permissionReference || "", p_permission_confirmed: project.permissionConfirmed === true }),
   discoveryStats: (s) => call(s, "intel_admin_discovery_stats"),
   reevalStart: (s, a) => call(s, "intel_admin_reeval_start", {
     p_name: a.name, p_limit: a.limit ?? null, p_dry_run: a.dryRun ?? true,
@@ -72,10 +80,24 @@ export const intelApi = {
   chatNewThread: (s, title) => call(s, "intel_admin_chat_new_thread", { p_title: title || "New chat" }),
   chatSend: (s, threadId, text, clientKey) => call(s, "intel_admin_chat_send", { p_thread_id: threadId, p_text: text, p_client_key: clientKey }),
   chatThreads: (s) => read(s.from("intel_chat_threads").select("id,title,updated_at").order("updated_at", { ascending: false }).limit(30)),
-  chatMessages: (s, threadId) => read(s.from("intel_chat_messages").select("id,role,content,status,tool_name,reply_to,created_at").eq("thread_id", threadId).order("id").limit(300)),
+  // Newest rows, shown oldest-first: ascending + limit would return the OLDEST rows and freeze long threads.
+  chatMessages: async (s, threadId) => {
+    const load = (cols) => read(s.from("intel_chat_messages").select(cols).eq("thread_id", threadId).order("id", { ascending: false }).limit(300));
+    try { return (await load("id,role,content,status,tool_name,reply_to,created_at,ai_provider,ai_model,ai_route_reason,ai_latency_ms,ai_mode,kb_keys")).reverse(); }
+    catch (e) { if (!missingObject(e)) throw e; return (await load("id,role,content,status,tool_name,reply_to,created_at")).reverse(); }   // provenance migration not applied: no AI badge, but the conversation loads
+  },
 
-  chatActions: (s, threadId) => read(s.from("intel_chat_actions").select("id,message_id,tool,summary,status,result,created_at,expires_at").eq("thread_id", threadId).order("created_at").limit(100)),
-  chatConfirm: (s, actionId) => call(s, "intel_admin_chat_confirm", { p_action_id: actionId }),
+  chatActions: async (s, threadId) => {
+    const load = (cols) => read(s.from("intel_chat_actions").select(cols).eq("thread_id", threadId).order("created_at", { ascending: false }).limit(300)); // 300 = the message window: every card for a loaded message is included
+    try { return (await load("id,message_id,tool,args,summary,status,result,created_at,decided_at,expires_at,category,auto")).reverse(); }
+    catch (e) { if (!missingObject(e)) throw e; return (await load("id,message_id,tool,args,summary,status,result,created_at,decided_at,expires_at")).reverse(); }
+  },
+  chatConfirm: (s, actionId, auto = false) => call(s, "intel_admin_chat_confirm", { p_action_id: actionId, p_auto: auto === true }),
+  chatClaim: (s, actionId, auto = false) => call(s, "intel_admin_chat_claim", { p_action_id: actionId, p_auto: auto === true }),
+  chatFinish: (s, actionId, ok, result) => call(s, "intel_admin_chat_finish", { p_action_id: actionId, p_ok: ok === true, p_result: result || {} }),
+  setEmmaAuthority: (s, patch) => call(s, "intel_admin_set_emma_authority", { p_patch: patch }),
+  // A database without the recover function answers "not found" every time: report that once instead of failing, so the 3-second poll does not retry it forever.
+  chatRecoverStuck: async (s) => { try { return await call(s, "intel_admin_chat_recover_stuck", { p_minutes: 5 }); } catch (e) { if (missingObject(e)) return { ok: false, unavailable: true }; throw e; } },
   chatCancel: (s, actionId) => call(s, "intel_admin_chat_cancel", { p_action_id: actionId }),
 
   settings: async (s) => (await read(s.from("intel_settings").select("*").limit(1)))[0] || null,
@@ -84,7 +106,7 @@ export const intelApi = {
   evidence: (s, prospectId) => read(s.from("intel_evidence").select("*").eq("prospect_id", prospectId).order("fetched_at")),
   messages: (s) => read(s.from("intel_messages").select("*").order("created_at", { ascending: false }).limit(800)),
   actions: (s) => read(s.from("intel_actions").select("*").order("id", { ascending: false }).limit(300)),
-  jobs: (s) => read(s.from("intel_jobs").select("id,kind,state,attempts,max_attempts,last_error,run_after,updated_at").in("state", ["failed", "dead", "running", "queued"]).order("updated_at", { ascending: false }).limit(100)),
+  jobs: (s) => read(s.from("intel_jobs").select("id,kind,state,attempts,max_attempts,last_error,run_after,lease_until,updated_at").in("state", ["failed", "dead", "running", "queued"]).order("updated_at", { ascending: false }).limit(100)),
   kb: (s) => read(s.from("intel_kb").select("*").order("key")),
   suppressions: (s) => read(s.from("intel_suppressions").select("*").order("created_at", { ascending: false }).limit(500)),
   leadsFor: async (s, ids) => (ids.length ? read(s.from("leads").select("id,stage,source_kind,company_name").in("id", ids)) : []),

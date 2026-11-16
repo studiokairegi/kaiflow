@@ -32,8 +32,11 @@ $values = @{}
 Get-Content -LiteralPath $envFile | ForEach-Object {
   $line = $_.Trim()
   if ($line -and -not $line.StartsWith("#") -and $line.Contains("=")) {
+    if ($line -match '^export\s') { $line = $line.Substring(6).TrimStart() }   # same as controller.py read_env_file
     $k, $v = $line.Split("=", 2)
-    $values[$k.Trim()] = $v.Trim()
+    $v = $v.Trim()
+    if ($v.Length -ge 2 -and ($v[0] -eq '"' -or $v[0] -eq "'") -and $v[$v.Length - 1] -eq $v[0]) { $v = $v.Substring(1, $v.Length - 2) }
+    $values[$k.Trim()] = $v
   }
 }
 foreach ($name in $required) {

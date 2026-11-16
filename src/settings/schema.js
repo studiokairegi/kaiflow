@@ -97,6 +97,9 @@ export const DEFAULT_SETTINGS = {
   studioWebsite: "",
   invoicePaymentInstructions: "",
   invoiceFooterNote: "",
+  invoicePaymentInstructionsJa: "",   // printed instead of the English text on Japanese invoices (falls back to English when empty)
+  invoiceFooterNoteJa: "",
+  jaDocColumns: false,                // true once the database has the *_ja columns (not a form field)
   docDetailsColumns: false, // true once the database has the document-details columns (not a form field)
   currencySymbol: "$",
   milestoneDefaults: MILESTONE_DEFAULTS,
@@ -142,6 +145,7 @@ export const SETTING_REGISTRY = {
   studioEtimsNumber: ["studio", "finance"],
   studioEmail: ["studio", "finance"], studioPhone: ["studio", "finance"], studioWebsite: ["studio", "finance"],
   invoicePaymentInstructions: ["studio", "finance"], invoiceFooterNote: ["studio", "finance"],
+  invoicePaymentInstructionsJa: ["studio", "finance"], invoiceFooterNoteJa: ["studio", "finance"],
   notificationsEnabled: ["user", "alerts"], userPrefs: ["user", "alerts"],
   hasSeenTutorial: ["account", "account"], plan: ["account", "account"], isAdmin: ["account", "account"],
 };
@@ -199,6 +203,9 @@ export function settingsFromRow(row) {
     studioWebsite: row.studio_website || "",
     invoicePaymentInstructions: row.invoice_payment_instructions || "",
     invoiceFooterNote: row.invoice_footer_note || "",
+    invoicePaymentInstructionsJa: row.invoice_payment_instructions_ja || "",
+    invoiceFooterNoteJa: row.invoice_footer_note_ja || "",
+    jaDocColumns: Object.prototype.hasOwnProperty.call(row, "invoice_footer_note_ja"),
     docDetailsColumns: Object.prototype.hasOwnProperty.call(row, "studio_email"),
     currencySymbol: row.currency_symbol || D.currencySymbol,
     milestoneDefaults: (() => {
@@ -257,6 +264,11 @@ export function settingsToRow(s, userId) {
       invoice_payment_instructions: String(s.invoicePaymentInstructions || "").trim(),
       invoice_footer_note: String(s.invoiceFooterNote || "").trim(),
     } : {}),
+    // Same rule: a database that hasn't run the language migration still saves.
+    ...((s.jaDocColumns || s.invoicePaymentInstructionsJa || s.invoiceFooterNoteJa) ? {
+      invoice_payment_instructions_ja: String(s.invoicePaymentInstructionsJa || "").trim(),
+      invoice_footer_note_ja: String(s.invoiceFooterNoteJa || "").trim(),
+    } : {}),
     currency_symbol: s.currencySymbol,
     milestone_defaults: s.milestoneDefaults.map(Number),
     default_landing_tab: s.defaultLandingTab,
@@ -312,6 +324,8 @@ export function validateSettings(s) {
   if (String(s.studioPhone || "").length > 40) e.studioPhone = "Keep the phone number under 40 characters.";
   if (String(s.invoicePaymentInstructions || "").length > 600) e.invoicePaymentInstructions = "Keep payment instructions under 600 characters.";
   if (String(s.invoiceFooterNote || "").length > 300) e.invoiceFooterNote = "Keep the footer note under 300 characters.";
+  if (String(s.invoicePaymentInstructionsJa || "").length > 600) e.invoicePaymentInstructionsJa = "Keep the Japanese payment instructions under 600 characters.";
+  if (String(s.invoiceFooterNoteJa || "").length > 300) e.invoiceFooterNoteJa = "Keep the Japanese footer note under 300 characters.";
 
   const sched = s.followupSchedule || [];
   if (sched.length < 2 || sched.length > MAX_FOLLOWUPS + 1) e.followupSchedule = `Choose 1-${MAX_FOLLOWUPS} follow-ups.`;

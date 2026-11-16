@@ -1,3 +1,5 @@
+import { checkoutT } from "../i18n/checkoutStrings.js";
+
 // Wise / M-PESA manual transfer helpers (pure). Mirrors payments_normalize_phone in the migration; the
 // database re-validates everything, so this is for fast feedback and for tests.
 // Facts below come from Wise's own help pages (checked for this change): KES can be sent to M-Pesa wallets in
@@ -44,19 +46,20 @@ export const isWiseOffered = (methods = []) => methods.some((m) => m.provider ==
 // Wise must be last in the list of methods; everything else keeps its relative order.
 export const orderMethods = (methods = []) => [...methods.filter((m) => m.provider !== "wise"), ...methods.filter((m) => m.provider === "wise")];
 
-export function wiseInstructions(t) {
+export function wiseInstructions(t, lang = "en") {
+  const tr = checkoutT(lang);
+  // Same dynamic values go to every step; each language's template uses the ones it needs (the Japanese steps
+  // split country / provider / recipient details differently from English).
+  const country = lang === "ja" && /^kenya$/i.test(String(t.country || "").trim()) ? "ケニア（Kenya）" : t.country;
+  const params = { country, provider: t.mobile_provider, name: t.recipient_name, phone: t.phone };
   const steps = [
-    "Open Wise (website or app) and choose Send money.",
-    `Set the recipient's country to ${t.country} and choose Mobile wallet, then ${t.mobile_provider}. The amount delivered is in Kenyan shillings (KES).`,
-    `Enter the recipient exactly as shown below: name ${t.recipient_name}, number ${t.phone}.`,
-    "Choose the amount to send. Wise shows the exact fee, exchange rate and what the recipient gets before you confirm. Check them.",
-    "Pay Wise using any method Wise offers for your country and account.",
-    "Come back to this page, enter the transfer reference from Wise, and submit it so we can match the payment.",
+    tr("wise.step1", params),
+    tr("wise.step2", params),
+    tr("wise.step3", params),
+    tr("wise.step4", params),
+    tr("wise.step5", params),
+    tr("wise.step6", params),
   ];
-  const warnings = [
-    "Check the amount, fees and exchange rate Wise shows before you pay. We can’t see or control them.",
-    "Wise does not pass a reference to M-PESA recipients, so quote our reference below when you submit your transfer here.",
-    "Your invoice is marked paid only after we confirm the money has arrived. This can take a business day or more.",
-  ];
+  const warnings = [tr("wise.warn1"), tr("wise.warn2"), tr("wise.warn3")];
   return { steps, warnings };
 }

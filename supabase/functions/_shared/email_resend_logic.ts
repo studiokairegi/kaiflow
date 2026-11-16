@@ -50,11 +50,26 @@ export function pickConversation(i: PickInput): { conversationId: string | null;
 
 
 export async function handleSend(req: Request, deps: SendDeps): Promise<Response> {
+  // Diagnostics only: a request id and the last pipeline stage reached. Never a body, address, token or key.
+  const requestId = crypto.randomUUID();
+  let stage = "authenticate";
+  let authenticated = false;
+  const mark = <T extends (...a: any[]) => any>(name: string, fn: T): T => ((...a: any[]) => { stage = name; return fn(...a); }) as T;
+  const store = new Proxy(deps.store, {
+    get(t, p, r) { const v = Reflect.get(t, p, r); return typeof v === "function" ? mark(String(p), v.bind(t)) : v; },
+  });
+  const traced: SendDeps = {
+    ...deps, store,
+    authenticate: async (rq) => { const a = await deps.authenticate(rq); authenticated = true; stage = "validate"; return a; },
+    ...(deps.getProviderAccessToken ? { getProviderAccessToken: mark("getProviderAccessToken", deps.getProviderAccessToken) } : {}),
+  };
   try {
-    return await sendInner(req, deps);
+    return await sendInner(req, traced);
   } catch (e) {
     // Any unexpected failure (for example a database error) is a safe 500, never an unhandled crash and never a false "sent".
-    console.error("email-send failed:", safeMsg(e));
+    console.error("email-send failed:", safeMsg(e), JSON.stringify({ request_id: requestId, stage, error_name: (e as Error)?.name || "Error", frames: String((e as Error)?.stack || "").split("\n").slice(1, 7).map((l) => l.trim().replace(/https?:\/\/\S*\//g, "").slice(0, 160)) }));
+    // Before authentication completes nothing can have been sent, so do not tell the person to look in the Sent folder.
+    if (!authenticated) return refuse(500, "internal_error", "Could not verify your access right now. Nothing was sent. Try again shortly.");
     return refuse(500, "internal_error", "Could not send right now. Check the Sent folder before trying again.");
   }
 }
@@ -199,8 +214,11 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
   const auth = await deps.authenticate(req);
   if (!auth.ok) return refuse(auth.status, auth.status === 401 ? "unauthenticated" : "forbidden", auth.error);
 
-  const text = await req.text();
-  if (text.length > LIMITS.maxRequestBytes) return refuse(413, "request_too_large", "Request is too large");
+  // Bound the read BEFORE buffering: refuse on the declared length, and stop streaming as soon as the cap is crossed.
+  if (Number(req.headers.get("content-length") || 0) > LIMITS.maxRequestBytes) return refuse(413, "request_too_large", "Request is too large");
+  const bodyBytes = await readCapped(new Response(req.body), LIMITS.maxRequestBytes);
+  if (!bodyBytes) return refuse(413, "request_too_large", "Request is too large");
+  const text = new TextDecoder().decode(bodyBytes);
   let raw: unknown;
   try { raw = JSON.parse(text); } catch { return refuse(400, "invalid_request", "Invalid request"); }
   const v = validateSendRequest(raw);
@@ -281,7 +299,9 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
     }
   }
 
-  const daily = Number(deps.env(adapter.dailyLimitEnv || "") || adapter.defaultDailyLimit || 100);
+  // Only some adapters name a limit variable. Never call env("") : Deno.env.get("") throws "Key is an empty string."
+  const dailyOverride = adapter.dailyLimitEnv ? Number(deps.env(adapter.dailyLimitEnv)) : NaN;
+  const daily = Number.isFinite(dailyOverride) && dailyOverride > 0 ? dailyOverride : (adapter.defaultDailyLimit || 100);
   const parent = r.conversation_id ? await deps.store.getThreadParent(auth.organizationId, r.conversation_id, account.id) : null;
   const thread = buildThreadHeaders(parent);
 
@@ -390,6 +410,8 @@ async function sendInner(req: Request, deps: SendDeps): Promise<Response> {
     outcome = { ok: false as const, unknown: true, retryable: false, status: 0, message: "The email provider gave an unreadable answer", attempts: 0 };
   }
   const out = outcome.ok ? { ok: true as const, id: outcome.providerMessageId, rfcMessageId: outcome.rfcMessageId, providerThreadId: outcome.providerThreadId, attempts: outcome.attempts } : outcome;
+  // Diagnostics: adapters return fixed, user-safe messages and a numeric status. Never a response body, address, token or subject.
+  if (!outcome.ok) console.error("email-send: provider outcome", JSON.stringify({ provider: adapter.providerKey, status: (outcome as any).status ?? null, unknown: (outcome as any).unknown === true, message: String((outcome as any).message || "").slice(0, 160), attempts: (outcome as any).attempts ?? null }));
   audit({ event: "send_result", ...who, account_id: account.id, provider: adapter.providerKey, message_id: created.message_id, ...(out.ok ? { provider_message_id: out.id } : {}), status: out.ok ? "sent" : out.unknown ? "unknown" : "failed", attempts: out.attempts });
 
   if (out.ok) {

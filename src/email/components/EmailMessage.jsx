@@ -13,8 +13,13 @@ export default function EmailMessage({ m, convoSubject, supabase, active, onActi
   const name = inbound ? (m.from_name || m.from_email || "Unknown sender") : "You";
   const ts = m.received_at || m.sent_at || m.created_at;
   const showSubject = m.subject && normalizeSubject(m.subject) !== normalizeSubject(convoSubject);
+  // The tab is opened inside the click (before any await) so popup blockers allow it, then pointed at the short-lived signed URL.
   const open = async (att) => {
-    try { window.open(await emailApi.attachmentUrl(supabase, att.storage_path), "_blank", "noopener"); } catch (e) { window.alert(e.message); }
+    const win = window.open("about:blank", "_blank");
+    try {
+      const url = await emailApi.attachmentUrl(supabase, att.storage_path);
+      if (win) { win.opener = null; win.location.href = url; } else window.open(url, "_blank", "noopener");
+    } catch (e) { try { win?.close(); } catch { /* already closed */ } window.alert(e.message); }
   };
   return (
     <article className={`chat-msg ${inbound ? "theirs" : "mine"}${active ? " active" : ""}`} onClick={onActivate}>

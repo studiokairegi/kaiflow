@@ -358,3 +358,12 @@ test("Zoho does not skip unprocessed messages when more than five earlier rows d
   for (const id of ["u1", "u2", "u3", "u4", "u5"]) assert.ok(ids.includes(id), `${id} must not be skipped`);
   assert.deepEqual(ids, rows.map((r) => r.messageId));
 });
+
+test("Zoho does not send the generated thread-token ReplyTo (unverifiable at Zoho) but keeps an explicit one", async () => {
+  const bodies = [];
+  const ctx = { env: () => undefined, now: () => Date.now(), getProviderAccessToken: async () => ({ provider: "zoho", access_token: "short-lived", api_base: "https://mail.zoho.com/api", external_account_id: "123456789", mailbox: "studio@example.com", expires_in: 3600 }), fetch: async (url, init) => { bodies.push(JSON.parse(init.body)); return new Response(JSON.stringify({ data: { messageId: "m1" } }), { status: 200 }); } };
+  await zohoAdapter.send(ctx, account("zoho"), input({ replyTo: "studio+k0123456789ab@example.com" }));
+  assert.equal("replyTo" in bodies[0], false);
+  await zohoAdapter.send(ctx, account("zoho"), input({ replyTo: "desk@example.com" }));
+  assert.equal(bodies[1].replyTo, "desk@example.com");
+});

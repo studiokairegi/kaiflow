@@ -81,7 +81,10 @@ test('invoice-facing UI and PDFs show the Paystack payment reference instead of 
   const app = readFileSync(resolve(root, 'src/App.jsx'), 'utf8');
   const sales = readFileSync(resolve(root, 'src/finance/Sales.jsx'), 'utf8');
   const payments = readFileSync(resolve(root, 'src/payments/PaymentsModule.jsx'), 'utf8');
-  assert.ok(app.includes('"Payment ref."'));
+  // The PDF's labels now live in the client-language dictionary (src/i18n/invoiceStrings.js); the English text is unchanged.
+  const invoiceStrings = readFileSync(resolve(root, 'src/i18n/invoiceStrings.js'), 'utf8');
+  assert.ok(invoiceStrings.includes('"ref.invoice": "Payment ref."'));
+  assert.ok(app.includes('tx("ref.invoice")'));
   assert.ok(app.includes('doc.text(`${referenceLabel}: ${paystackRef}`'));
   assert.ok(!app.includes('doc.text(`${referenceLabel}: ${invoice.invoiceNumber'));
   assert.ok(sales.includes('label: "Payment ref."'));

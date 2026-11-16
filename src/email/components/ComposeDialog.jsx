@@ -31,10 +31,25 @@ export default function ComposeDialog({ supabase, accounts, providers = [], init
     : "";
   const problem = accountProblem || composeProblem(f) || attachmentProblem(files) || crmLinkProblem;
   const lists = () => ({ to: parseRecipients(f.to).valid, cc: parseRecipients(f.cc).valid, bcc: parseRecipients(f.bcc).valid });
+  // Unsaved work: anything typed or attached since the dialog opened or since the last successful "Save draft".
+  const formSig = JSON.stringify(f);
+  const savedSig = useRef(formSig);
+  const dirty = formSig !== savedSig.current || files.length > 0;
+  // Closing by accident (backdrop click, X) must never silently throw a half-written email away.
+  const requestClose = () => {
+    if (sendState.busy) return;
+    if (!dirty || confirmAction("Discard this message? Your changes have not been saved.")) onClose();
+  };
 
   const saveDraft = () => draftState.run(async () => {
+    // A draft stores only valid addresses. Dropping a mistyped one silently would make it vanish when the draft is reopened.
+    for (const [label, text] of [["To", f.to], ["Cc", f.cc], ["Bcc", f.bcc]]) {
+      const bad = parseRecipients(text).invalid[0];
+      if (bad) throw new Error(`${label}: "${bad}" is not a valid email address. Fix or remove it before saving the draft.`);
+    }
     const r = await emailApi.saveDraft(supabase, { draftId, conversationId, accountId: f.accountId, ...lists(), subject: f.subject, text: f.body, html: "", crmLeadId: crmLeadLinkId });
     setDraftId(r.draft_id); setConversationId(r.conversation_id);
+    savedSig.current = formSig;
   });
   const send = () => sendState.run(async () => {
     if (problem) throw new Error(problem);
@@ -59,15 +74,17 @@ export default function ComposeDialog({ supabase, accounts, providers = [], init
     await onSent();
   });
   const discard = async () => {
-    if (draftId && confirmAction("Delete this draft?")) { try { await emailApi.deleteDraft(supabase, draftId); } catch { /* already gone */ } onSent(); return; }
-    onClose();
+    if (!draftId) { onClose(); return; }   // nothing saved to delete: Discard is an explicit choice
+    if (!confirmAction("Delete this draft?")) return;   // cancelled: stay in the dialog with the text intact
+    try { await emailApi.deleteDraft(supabase, draftId); } catch { /* already gone */ }
+    onSent();
   };
   const err = sendState.error || draftState.error;
 
   return (
-    <div className="chat-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="chat-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) requestClose(); }}>
       <div className="chat-modal inbox-compose" role="dialog" aria-modal="true" aria-labelledby="inbox-compose-title">
-        <div className="chat-modal-head"><h2 id="inbox-compose-title">{initial.title || "New message"}</h2><button type="button" className="chat-icon-btn" onClick={onClose} aria-label="Close"><IconClose /></button></div>
+        <div className="chat-modal-head"><h2 id="inbox-compose-title">{initial.title || "New message"}</h2><button type="button" className="chat-icon-btn" onClick={requestClose} aria-label="Close"><IconClose /></button></div>
         <div className="chat-modal-body">
           {err && <div className="chat-alert error" role="alert"><span>{err}</span></div>}
           <label className="chat-field">From

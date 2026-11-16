@@ -98,6 +98,186 @@ class SourceRegistryEnforcement(unittest.TestCase):
             self.assertEqual(sources.discover(fetcher, "indie_game_developer", {"sources": ["steam"], "keywords": ["2d"]}, enabled_sources={"steam"}, reserve_source=lambda _: False), [])
         self.assertFalse(fetcher.called)
 
+class IndieProjectDiscoveryV3(unittest.TestCase):
+    STEAM_APP = '''<!doctype html><html><head><meta property="og:title" content="Moon Quest"><meta property="og:description" content="A small adventure."><meta property="og:image" content="https://cdn.example/moon.jpg"></head><body>
+      <div class="apphub_AppName">Moon Quest</div><div id="developers_list"><a>Pixel Moon</a></div>
+      <div id="publishers_list"><a>Big Publisher</a></div><div class="release_date"><div class="date">Coming Soon</div></div>
+      <div class="game_description_snippet">A small adventure.</div><a href="https://pixelmoon.example/">Official Website</a>
+      <a href="https://store.steampowered.com/genre/Action/">Action</a><div class="app_tag">Anime</div>
+      </body></html>'''
+
+    def test_steam_html_parser_retains_third_party_publisher_and_never_invents_activity(self):
+        row = sources.steam_candidate_from_html(self.STEAM_APP, "123")
+        self.assertEqual(row["name"], "Pixel Moon")
+        self.assertEqual(row["meta"]["publisher_name"], "Big Publisher")
+        self.assertEqual(row["meta"]["project_id"], "steam:123")
+        self.assertEqual(row["meta"]["project_url"], "https://store.steampowered.com/app/123/")
+        self.assertEqual(row["website"], "https://pixelmoon.example/")
+        self.assertNotIn("recent_activity", row["meta"])
+        self.assertNotIn("latest_activity_date", row["meta"])
+
+    def test_steam_parser_never_reads_publisher_from_shared_dev_row_class(self):
+        html = self.STEAM_APP.replace(
+            '<div id="developers_list"><a>Pixel Moon</a></div>\n      <div id="publishers_list"><a>Big Publisher</a></div>',
+            '<div class="dev_row"><div id="developers_list"><a>Pixel Moon</a></div></div>\n'
+            '<div class="dev_row"><div id="publishers_list"><a>Big Publisher</a></div></div>'
+        )
+        row = sources.steam_candidate_from_html(html, "123")
+        self.assertEqual(row["name"], "Pixel Moon")
+        self.assertEqual(row["meta"]["developer_names"], ["Pixel Moon"])
+        self.assertEqual(row["meta"]["publisher_names"], ["Big Publisher"])
+
+    def test_steam_page_paginates_public_store_search_and_preserves_project_ids(self):
+        class Fetcher:
+            def __init__(self): self.calls = []
+            def fetch(self, url):
+                self.calls.append(url)
+                if "/search/?" in url:
+                    return url, '<span id="search_results_count">3 results match your search</span><a class="search_result_row" data-ds-appid="123"></a><a class="search_result_row" data-ds-appid="456"></a>'
+                return url, IndieProjectDiscoveryV3.STEAM_APP
+        fetcher = Fetcher()
+        rows, cursor = sources.steam_page(fetcher, ["anime game"], None, 2)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(cursor, {"keyword_index": 0, "start": 2})
+        self.assertIn("start=0", fetcher.calls[0])
+        self.assertEqual([x["meta"]["steam_appid"] for x in rows], ["123", "456"])
+
+    def test_itch_discovery_keeps_multiple_projects_by_the_same_creator(self):
+        class Fetcher:
+            def fetch(self, url):
+                return url, '''<div class="game_cell"><div class="game_title"><a href="https://moondev.itch.io/one">One</a></div><div class="game_author"><a href="https://moondev.itch.io">Moon Dev</a></div></div>
+                <div class="game_cell"><div class="game_title"><a href="https://moondev.itch.io/two">Two</a></div><div class="game_author"><a href="https://moondev.itch.io">Moon Dev</a></div></div>
+                <div class="game_cell"><div class="game_title"><a href="https://moondev.itch.io/three">Three</a></div><div class="game_author"><a href="https://moondev.itch.io">Moon Dev</a></div></div>
+                <div class="pagination"><a rel="next" href="?page=2">Next</a></div>'''
+        rows, cursor = sources.itch_page(Fetcher(), ["anime game"], None, 2)
+        self.assertEqual([r["meta"]["project_title"] for r in rows], ["One", "Two"])
+        self.assertEqual(cursor, {"keyword_index": 0, "page": 1, "offset": 2})
+        self.assertEqual(rows[0]["name"], rows[1]["name"])
+        self.assertNotEqual(rows[0]["meta"]["project_id"], rows[1]["meta"]["project_id"])
+        self.assertNotIn("recent_activity", rows[0]["meta"])
+        self.assertEqual(rows[0]["website"], "")
+
+    def test_discover_batch_uses_registry_and_returns_resumable_source_cursors(self):
+        from unittest.mock import patch
+        calls, reservations = [], []
+        class Fetcher:
+            def fetch(self, url): calls.append(url); return url, "ok"
+        def steam_page(fetcher, keywords, cursor, limit):
+            fetcher.fetch("https://store.steampowered.com/search/")
+            return [{"name": "Dev", "website": "", "meta": {"project_title": "A"}}], {"keyword_index": 0, "start": 12}
+        def itch_page(fetcher, keywords, cursor, limit):
+            fetcher.fetch("https://itch.io/games/newest/tag-anime")
+            return [{"name": "Creator", "website": "", "meta": {"project_title": "B"}}], None
+        with patch("kairflow_intel.sources.steam_page", side_effect=steam_page), patch("kairflow_intel.sources.itch_page", side_effect=itch_page):
+            result = sources.discover_batch(Fetcher(), "indie_game_developer", {"sources": ["steam", "itch"], "keywords": ["anime"]},
+                cursor={"steam": {"keyword_index": 0, "start": 0}}, enabled_sources={"steam", "itch"},
+                reserve_source=lambda key: reservations.append(key) or True, limit=25)
+        self.assertEqual(len(result["candidates"]), 2)
+        self.assertEqual(result["next_cursor"], {
+            "steam": {"keyword_index": 0, "start": 12}, "itch": {"done": True}
+        })
+        self.assertEqual(reservations, ["steam", "itch"])
+
+    def test_completed_source_is_not_restarted_while_other_source_continues(self):
+        from unittest.mock import patch
+        calls = {"steam": 0, "itch": 0}
+        class Fetcher:
+            def fetch(self, url): return url, "ok"
+        def steam_page(fetcher, keywords, cursor, limit):
+            calls["steam"] += 1
+            self.assertEqual(cursor, {"keyword_index": 0, "start": 12})
+            return [{"name": "Steam Dev", "website": "", "meta": {}}], {"keyword_index": 0, "start": 24}
+        def itch_page(fetcher, keywords, cursor, limit):
+            calls["itch"] += 1
+            self.fail("completed itch source must not be restarted")
+        with patch("kairflow_intel.sources.steam_page", side_effect=steam_page), patch("kairflow_intel.sources.itch_page", side_effect=itch_page):
+            result = sources.discover_batch(Fetcher(), "indie_game_developer",
+                {"sources": ["steam", "itch"], "keywords": ["anime"]},
+                cursor={"steam": {"keyword_index": 0, "start": 12}, "itch": {"done": True}},
+                enabled_sources={"steam", "itch"}, reserve_source=lambda key: True)
+        self.assertEqual(calls, {"steam": 1, "itch": 0})
+        self.assertEqual(result["next_cursor"], {"steam": {"keyword_index": 0, "start": 24}, "itch": {"done": True}})
+
+    def test_all_sources_complete_without_creating_an_endless_continuation(self):
+        from unittest.mock import patch
+        class Fetcher:
+            def fetch(self, url): return url, "ok"
+        with patch("kairflow_intel.sources.steam_page", return_value=([{"name": "Dev", "meta": {}}], None)):
+            result = sources.discover_batch(Fetcher(), "indie_game_developer",
+                {"sources": ["steam"], "keywords": ["anime"]}, enabled_sources={"steam"},
+                reserve_source=lambda key: True)
+        self.assertEqual(result["next_cursor"], {})
+        self.assertIsNone(result["defer_seconds"])
+
+    def test_budget_exhaustion_preserves_cursor_until_next_daily_reset(self):
+        reports = []
+        current = {"keyword_index": 4, "start": 48}
+        result = sources.discover_batch(object(), "indie_game_developer", {"sources": ["steam"], "keywords": ["anime"]},
+            cursor={"steam": current}, enabled_sources={"steam"}, reserve_source=lambda key: self.fail("must not fetch at zero budget"),
+            report_source=lambda *args: reports.append(args),
+            source_status={"steam": {"enabled": True, "tos_status": "confirmed", "remaining": 0, "circuit_open": False}})
+        self.assertEqual(result["next_cursor"]["steam"], current)
+        self.assertEqual(result["defer_seconds"], 86400)
+        self.assertFalse(reports)  # a budget hold is not a source failure/circuit-breaker event
+
+    def test_open_source_circuit_preserves_cursor_until_retry_window(self):
+        current = {"keyword_index": 2, "page": 3, "offset": 12}
+        result = sources.discover_batch(object(), "indie_game_developer", {"sources": ["itch"], "keywords": ["anime"]},
+            cursor={"itch": current}, enabled_sources={"itch"}, reserve_source=lambda key: self.fail("must not fetch with open circuit"),
+            source_status={"itch": {"enabled": True, "tos_status": "confirmed", "remaining": 10, "circuit_open": True, "retry_after_seconds": 1800}})
+        self.assertEqual(result["next_cursor"]["itch"], current)
+        self.assertEqual(result["defer_seconds"], 1800)
+
+    def test_periodic_scan_does_not_restart_while_cursor_continuation_is_pending(self):
+        d = FakeD({
+            "intel_agent_settings": {"today": "2026-11-12", "kill_switch": True,
+                "campaigns": [{"type": "indie_game_developer", "status": "active"}]},
+            "intel_agent_discovery_has_pending": True,
+        })
+        worker = jobs.Worker(d, lease_thread=False)
+        worker.periodic()
+        self.assertFalse(d.named("intel_agent_enqueue_job") and any(x["p_kind"] == "discover" for x in d.named("intel_agent_enqueue_job")))
+
+    def test_transient_source_failure_bubbles_for_persistent_job_retry(self):
+        from unittest.mock import patch
+        with patch("kairflow_intel.sources.steam_page", side_effect=TransientError("temporary timeout")):
+            with self.assertRaises(TransientError):
+                sources.discover_batch(object(), "indie_game_developer", {"sources": ["steam"], "keywords": ["anime"]},
+                    enabled_sources={"steam"}, reserve_source=lambda key: True)
+
+    def test_discovery_handler_does_not_exclude_a_developer_for_a_protected_publisher(self):
+        from unittest.mock import patch
+        d = FakeD({
+            "intel_agent_settings": {"today": "2026-11-12", "campaigns": [{"type": "indie_game_developer", "status": "active", "criteria": {"sources": ["steam"], "keywords": ["anime"]}}]},
+            "intel_agent_sources": {"steam": {}}, "intel_agent_source_use": 1,
+            "intel_agent_upsert_prospect": {"prospect_id": "PROJECT-1", "created": True, "suppressed": False},
+            "intel_agent_record_item": {"new": True}, "intel_agent_enqueue_job": "job",
+        })
+        candidate = {"name": "Small Indie Team", "website": "", "meta": {"source": "steam", "source_key": "steam", "project_title": "Moon Quest",
+            "project_url": "https://store.steampowered.com/app/123/", "source_url": "https://store.steampowered.com/app/123/",
+            "project_id": "steam:123", "publisher_name": "Thermite Games", "developer_name": "Small Indie Team"}}
+        with patch("kairflow_intel.jobs.sources.discover_batch", return_value={"candidates": [candidate], "next_cursor": {}}):
+            out = jobs.h_discover(d, {"payload": {"type": "indie_game_developer", "limit": 25}})
+        self.assertEqual(out["new"], 1)
+        self.assertEqual(d.named("intel_agent_upsert_prospect")[0]["p_name"], "Small Indie Team")
+        self.assertEqual(d.named("intel_agent_record_item")[0]["p_type"], "game_project")
+        self.assertEqual(d.named("intel_agent_record_item")[0]["p_source"], "steam")
+        self.assertTrue(any(x["p_kind"] == "research" for x in d.named("intel_agent_enqueue_job")))
+
+    def test_phase3_migration_uses_project_identity_and_keeps_sources_disabled(self):
+        from pathlib import Path
+        migration = Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261112160000_intelligence_indie_project_discovery_v3.sql"
+        sql = migration.read_text()
+        self.assertIn("'project:' || md5", sql)
+        self.assertIn("game_project", sql)
+        self.assertIn("Confirm current Valve terms", sql)
+        self.assertNotIn("set enabled = true", sql.lower())
+        self.assertIn("enabled = false", sql.lower())
+        self.assertIn("tos_status = case", sql.lower())
+        self.assertIn("project_source_urls", sql)
+        self.assertIn("intel_agent_source_status", sql)
+        self.assertIn("intel_agent_discovery_has_pending", sql)
+
 
 class Entity(unittest.TestCase):
     def test_domains(self):
@@ -475,3 +655,135 @@ class Registry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KickstarterManualIntakeV4(unittest.TestCase):
+    def _deps(self, item):
+        calls = []
+        def rpc(name, args):
+            calls.append((name, args))
+            if name == "intel_agent_item":
+                return item
+            if name == "intel_agent_kickstarter_intake_allowed":
+                return True
+            if name == "intel_agent_kickstarter_commit_import":
+                return {"prospect_id": "prospect-123", "created": True, "suppressed": False, "blocked": False}
+            return {"ok": True}
+        return SimpleNamespace(rpc=rpc, clock=lambda: 1_800_000_000), calls
+
+    def test_manual_project_import_never_fetches_kickstarter_and_keeps_creator_unverified(self):
+        item = {"source_key": "kickstarter_manual", "url": "https://www.kickstarter.com/projects/moondev/moon-quest/",
+                "title": "Moon Quest", "first_seen": "2026-11-12T10:00:00Z",
+                "meta": {"project_title": "Moon Quest", "creator_name": "Moon Dev", "developer_name": "Moon Studio",
+                         "developer_website": "", "admin_notes": "Looks like a small RPG.", "permission_confirmed_by_admin": True, "permission_reference": "LEGAL-APPROVAL-42"}}
+        deps, calls = self._deps(item)
+        out = discovery.h_manual_kickstarter_project(deps, {"payload": {"item_id": "item-1"}}, item=item)
+        self.assertEqual(out["result"], "project_imported")
+        commit = next(args for name, args in calls if name == "intel_agent_kickstarter_commit_import")
+        self.assertEqual(commit["p_name"], "Moon Studio")
+        self.assertEqual(commit["p_website"], "")
+        self.assertEqual(commit["p_verified"]["developer_identity_status"], "admin_attributed_unverified")
+        self.assertEqual(commit["p_verified"]["kickstarter_creator_role"], "unverified")
+        self.assertEqual(commit["p_verified"]["project_url"], item["url"])
+        self.assertEqual(commit["p_item_id"], "item-1")
+        self.assertFalse(any("fetch" in name.lower() for name, _ in calls))
+        self.assertTrue(any(name == "intel_agent_flag_prospect" for name, _ in calls))
+
+    def test_manual_project_import_stops_when_kickstarter_is_excluded(self):
+        item = {"source_key": "kickstarter_manual", "url": "https://www.kickstarter.com/projects/moondev/moon-quest",
+                "title": "Moon Quest", "meta": {"project_title": "Moon Quest", "creator_name": "Moon Dev",
+                "developer_name": "Moon Studio", "permission_confirmed_by_admin": True, "permission_reference": "LEGAL-APPROVAL-42"}}
+        deps, calls = self._deps(item)
+        original_rpc = deps.rpc
+        def excluded_rpc(name, args):
+            if name == "intel_agent_kickstarter_intake_allowed":
+                calls.append((name, args))
+                return False
+            return original_rpc(name, args)
+        deps.rpc = excluded_rpc
+        out = discovery.h_manual_kickstarter_project(deps, {"payload": {"item_id": "item-excluded"}}, item=item)
+        self.assertEqual(out["result"], "blocked_source_excluded")
+        self.assertFalse(any(name == "intel_agent_kickstarter_commit_import" for name, _ in calls))
+        self.assertFalse(any(name == "intel_agent_record_item" for name, _ in calls))
+
+    def test_manual_project_import_uses_atomic_commit_and_honors_database_block(self):
+        item = {"source_key": "kickstarter_manual", "url": "https://www.kickstarter.com/projects/moondev/moon-quest",
+                "title": "Moon Quest", "meta": {"project_title": "Moon Quest", "creator_name": "Moon Dev",
+                "developer_name": "Moon Studio", "permission_confirmed_by_admin": True, "permission_reference": "LEGAL-APPROVAL-42"}}
+        deps, calls = self._deps(item)
+        original_rpc = deps.rpc
+        def raced_exclusion_rpc(name, args):
+            if name == "intel_agent_kickstarter_commit_import":
+                calls.append((name, args))
+                return {"blocked": True, "reason": "source_excluded_or_unconfigured"}
+            return original_rpc(name, args)
+        deps.rpc = raced_exclusion_rpc
+        out = discovery.h_manual_kickstarter_project(deps, {"payload": {"item_id": "item-race"}}, item=item)
+        self.assertEqual(out["result"], "blocked_source_excluded")
+        self.assertFalse(any(name == "intel_agent_enqueue_job" for name, _ in calls))
+
+    def test_manual_project_import_queues_only_official_website_research(self):
+        item = {"source_key": "kickstarter_manual", "url": "https://www.kickstarter.com/projects/moondev/moon-quest",
+                "title": "Moon Quest", "meta": {"project_title": "Moon Quest", "creator_name": "Moon Dev",
+                "developer_name": "Moon Studio", "developer_website": "https://moonstudio.example", "permission_confirmed_by_admin": True, "permission_reference": "LEGAL-APPROVAL-42"}}
+        deps, calls = self._deps(item)
+        out = discovery.h_manual_kickstarter_project(deps, {"payload": {"item_id": "item-2"}}, item=item)
+        self.assertTrue(out["research_queued"])
+        queued = next(args for name, args in calls if name == "intel_agent_enqueue_job")
+        self.assertEqual(queued["p_kind"], "research")
+        self.assertNotIn("kickstarter.com", str(queued["p_payload"]))
+
+    def test_manual_project_import_requires_permission_attestation_and_reference(self):
+        item = {"source_key": "kickstarter_manual", "url": "https://www.kickstarter.com/projects/moondev/moon-quest",
+                "title": "Moon Quest", "meta": {"project_title": "Moon Quest", "creator_name": "Moon Dev"}}
+        deps, calls = self._deps(item)
+        with self.assertRaises(PermanentError):
+            discovery.h_manual_kickstarter_project(deps, {"payload": {"item_id": "item-5"}}, item=item)
+        self.assertFalse(any(name == "intel_agent_kickstarter_commit_import" for name, _ in calls))
+
+    def test_manual_project_import_rejects_platform_or_social_urls_as_developer_websites(self):
+        for website in ("https://www.kickstarter.com/projects/moondev/moon-quest", "https://moondev.itch.io", "https://x.com/moondev"):
+            item = {"source_key": "kickstarter_manual", "url": "https://www.kickstarter.com/projects/moondev/moon-quest",
+                    "title": "Moon Quest", "meta": {"project_title": "Moon Quest", "creator_name": "Moon Dev", "developer_website": website, "permission_confirmed_by_admin": True, "permission_reference": "LEGAL-APPROVAL-42"}}
+            deps, _ = self._deps(item)
+            with self.subTest(website=website), self.assertRaises(PermanentError):
+                discovery.h_manual_kickstarter_project(deps, {"payload": {"item_id": "item-3"}}, item=item)
+
+    def test_manual_project_import_rejects_non_project_or_non_kickstarter_urls(self):
+        for url in ("https://kickstarter.com/discover", "https://evil.example/projects/a/b", "http://www.kickstarter.com/projects/a/b", "https://www.kickstarter.com/projects/a/b?ref=abc"):
+            item = {"source_key": "kickstarter_manual", "url": url, "title": "Moon Quest",
+                    "meta": {"project_title": "Moon Quest", "creator_name": "Moon Dev", "permission_confirmed_by_admin": True, "permission_reference": "LEGAL-APPROVAL-42"}}
+            deps, _ = self._deps(item)
+            with self.subTest(url=url), self.assertRaises(PermanentError):
+                discovery.h_manual_kickstarter_project(deps, {"payload": {"item_id": "item-3"}}, item=item)
+
+    def test_migration_keeps_kickstarter_automated_source_disabled_and_manual_rpc_admin_only(self):
+        from pathlib import Path
+        migration = Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261112170000_intelligence_kickstarter_manual_intake_v4.sql"
+        sql = migration.read_text()
+        for fragment in ("enabled = false", "'unverified'", "Automated crawling/spidering is prohibited",
+                         "intel_admin_add_kickstarter_project", "'manual_post'", "'kickstarter_manual'", "md5(v_url)",
+                         "developer_identity_status", "admin_attributed_unverified", "_intel_seed_sources",
+                         "Kickstarter intake is excluded by administrator", "Indie Game Developers campaign is not configured",
+                         "automated Kickstarter discovery is unavailable", "coalesce(p_enabled, s.enabled) is true",
+                         "prior written permission for commercial use is required", "p_permission_confirmed boolean default false",
+                         "revoke all on function public.intel_admin_add_kickstarter_project(text,text,text,text,text,text,text,boolean)", "to authenticated"):
+            self.assertIn(fragment, sql)
+        self.assertNotIn("create or replace function public.kickstarter", sql.lower())
+        self.assertNotIn("fetch(", sql.lower())
+        corrective = (Path(__file__).resolve().parents[2] / "supabase" / "migrations" / "20261112190000_intelligence_kickstarter_exclusion_identity_fixes.sql").read_text()
+        for fragment in ("intel_agent_kickstarter_intake_allowed", "intel_agent_kickstarter_commit_import",
+                         "state = 'cancelled'", "tos_status = 'excluded'", "for share",
+                         "developer_identity_status", "independently_verified", "kickstarter_creator_role_verified",
+                         "v_preserve", "developer_attribution_source", "state = 'cancelled'",
+                         "Cancelled: Kickstarter intake excluded by administrator",
+                         "grant execute on function public.intel_agent_kickstarter_commit_import", "to service_role"):
+            self.assertIn(fragment, corrective)
+
+    def test_existing_manual_post_handler_routes_kickstarter_item_without_model_or_fetch(self):
+        item = {"source_key": "kickstarter_manual", "url": "https://www.kickstarter.com/projects/moondev/moon-quest",
+                "title": "Moon Quest", "meta": {"project_title": "Moon Quest", "creator_name": "Moon Dev", "permission_confirmed_by_admin": True, "permission_reference": "LEGAL-APPROVAL-42"}}
+        deps, calls = self._deps(item)
+        out = discovery.h_manual_post(deps, {"payload": {"item_id": "item-4", "type": "indie_game_developer"}})
+        self.assertEqual(out["result"], "project_imported")
+        self.assertEqual(sum(1 for name, _ in calls if name == "intel_agent_item"), 1)

@@ -19,24 +19,26 @@ class RecordingRpc(ChatRpc):
 
 class Proposals(unittest.TestCase):
     def test_a_proposal_goes_only_to_the_propose_function(self):
-        rpc = RecordingRpc(); llm = FakeLLM([{"action": "tool", "tool": "approve_messages", "args": {"message_ids": [U, "junk"]}},
+        rpc = RecordingRpc(); rpc.ctx["request"] = "Approve that draft please"
+        llm = FakeLLM([{"action": "tool", "tool": "approve_messages", "intent_quote": "Approve that draft", "args": {"message_ids": [U, "junk"]}},
                                               {"action": "reply", "reply": "I prepared it. Please confirm on the card."}])
         out = chat.handle(deps(rpc, llm), {"thread_id": "t", "message_id": 1})
         self.assertTrue(out["replied"])
-        self.assertEqual([n for n in rpc.called() if n.startswith("intel_agent_chat_")], ["intel_agent_chat_context", "intel_agent_chat_propose", "intel_agent_chat_reply"])
-        self.assertEqual(rpc.calls[1][1]["p_args"], {"message_ids": [U]})                       # junk ids dropped before the call
+        self.assertEqual([n for n in rpc.called() if n.startswith("intel_agent_chat_") and n != "intel_agent_chat_snapshot"], ["intel_agent_chat_context", "intel_agent_chat_propose", "intel_agent_chat_reply"])
+        self.assertEqual(next(a for n, a in rpc.calls if n == "intel_agent_chat_propose")["p_args"], {"message_ids": [U]})                       # junk ids dropped before the call
         self.assertNotIn("intel_agent_chat_tool", rpc.called())
 
     def test_the_worker_has_no_way_to_confirm_or_to_call_admin_functions(self):
         src = inspect.getsource(chat)
         self.assertNotRegex(src, r"intel_admin_")
         self.assertNotRegex(src, r"confirm\(|chat_confirm|_exec")
-        self.assertEqual(set(re.findall(r'"(intel_[a-z_]+)"', src)), {"intel_agent_chat_context", "intel_agent_chat_propose", "intel_agent_chat_tool", "intel_agent_chat_reply"})
+        self.assertEqual(set(re.findall(r'"(intel_[a-z_]+)"', src)), {"intel_agent_chat_context", "intel_agent_chat_snapshot", "intel_agent_chat_propose", "intel_agent_chat_tool", "intel_agent_chat_read", "intel_agent_chat_reply"})
 
     def test_nothing_about_roles_permissions_or_removing_protections_exists(self):
         for name in chat.ALL_TOOLS:
             self.assertIsNone(re.search(r"role|admin|member|permission|grant|master|remove|unsuppress|delete|sql|shell|exec", name), name)
-        self.assertEqual(set(chat.PROPOSALS), {"approve_messages", "discard_messages", "resume_campaign", "set_campaign_cap", "enable_sending", "set_autonomy", "update_limits", "add_suppression", "review_prospect"})
+        self.assertEqual(set(chat.PROPOSALS), {"approve_messages", "discard_messages", "resume_campaign", "set_campaign_cap", "enable_sending", "set_autonomy", "update_limits", "add_suppression", "review_prospect",
+                                             "save_knowledge", "retire_knowledge", "change_setting", "edit_message", "send_email"})
         self.assertFalse(set(chat.TOOLS) & set(chat.PROPOSALS))
 
     def test_asking_for_a_role_change_calls_nothing(self):

@@ -8,12 +8,18 @@ import webpush from "npm:web-push@3.6.7";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
 import { rateLimitIpHash } from "../_shared/rate_limit_identity.ts";
 import {
-  buildPayload, cleanPrefs, isGone, namespacedKey, safeOpenUrl, shouldDeliver, validSubscription, validateJobs,
+  buildPayload, cleanPrefs, isGone, isStrike, MAX_FAIL_COUNT, namespacedKey, safeOpenUrl, shouldDeliver, validSubscription, validateJobs,
 } from "../_shared/push_logic.js";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json", "Cache-Control": "no-store" } });
+
+const SEND_TIMEOUT_MS = 10_000; // one slow push service must not stall the whole batch
+// supabase-js reports failures in `error` instead of throwing; log them (never the row contents).
+function logDbError(step: string, res: { error?: { message?: string; code?: string } | null }) {
+  if (res?.error) console.error(`push dispatch: ${step} failed`, res.error.code || "", res.error.message || "");
+}
 
 class HttpError extends Error { constructor(public status: number, public code: string) { super(code); } }
 
@@ -174,26 +180,38 @@ async function dispatchDue(admin: ReturnType<typeof createClient>, publicKey: st
   if (error) throw new HttpError(500, "unexpected_error");
   let sent = 0, skipped = 0, dropped = 0, failed = 0;
   for (const job of jobs || []) {
-    let query = admin.from("push_subscriptions").select("id, endpoint, p256dh, auth_secret, open_url, prefs");
+    let query = admin.from("push_subscriptions").select("id, endpoint, p256dh, auth_secret, open_url, prefs, fail_count");
     query = job.user_id ? query.eq("user_id", job.user_id) : query.eq("portal_thread_id", job.portal_thread_id);
     const { data: subs } = await query.limit(20);
+    // Devices that already received this job on an earlier attempt must not get it again.
+    const delivered = new Set<string>(Array.isArray(job.delivered_sub_ids) ? job.delivered_sub_ids : []);
     let retry = false;
     for (const sub of subs || []) {
+      if (delivered.has(sub.id)) continue;
       if (!shouldDeliver(sub.prefs, job.category)) { skipped++; continue; }
       try {
         await webpush.sendNotification(
           { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth_secret } },
           buildPayload(job, job.portal_thread_id ? sub.open_url : job.url),
-          { TTL: 3600, urgency: "high", topic: job.tag ? String(job.tag).replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32) || undefined : undefined },
+          { TTL: 3600, urgency: "high", timeout: SEND_TIMEOUT_MS, topic: job.tag ? String(job.tag).replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32) || undefined : undefined },
         );
         sent++;
+        delivered.add(sub.id);
+        // Persist right away: if this worker dies or times out, the next attempt must not resend to this device.
+        logDbError("record_delivery", await admin.from("push_jobs").update({ delivered_sub_ids: Array.from(delivered) }).eq("id", job.id));
+        if (sub.fail_count) logDbError("reset_fail_count", await admin.from("push_subscriptions").update({ fail_count: 0 }).eq("id", sub.id));
       } catch (err) {
         const status = Number((err as { statusCode?: number }).statusCode || 0);
-        if (isGone(status)) { await admin.from("push_subscriptions").delete().eq("id", sub.id); dropped++; }
-        else { failed++; retry = true; }
+        if (isGone(status)) { logDbError("prune_gone", await admin.from("push_subscriptions").delete().eq("id", sub.id)); dropped++; continue; }
+        if (isStrike(status)) {
+          const strikes = Number(sub.fail_count || 0) + 1;
+          if (strikes >= MAX_FAIL_COUNT) { logDbError("prune_failing", await admin.from("push_subscriptions").delete().eq("id", sub.id)); dropped++; continue; }
+          logDbError("record_strike", await admin.from("push_subscriptions").update({ fail_count: strikes }).eq("id", sub.id));
+        }
+        failed++; retry = true;
       }
     }
-    if (!retry) await admin.rpc("push_finish_job", { p_job_id: job.id });
+    if (!retry) { const fin = await admin.rpc("push_finish_job", { p_job_id: job.id }); logDbError("finish_job", fin); }
   }
   return { sent, skipped, dropped, failed };
 }
