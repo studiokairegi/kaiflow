@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   CONTRACT_STATUS, DEFAULT_CONTRACT_BODY, DEFAULT_REVISION_ROUNDS, DEFAULT_MILESTONE_PERCENTS, milestoneLabel, MILESTONE_MIN, MILESTONE_MAX,
   buildContractTerms, renderContractBody, compareTerms, validateMilestonePercents,
-  formatContractMoney, formatContractDate, formatProductionStage, contractSignLinkFor, contractEmail,
+  formatContractMoney, formatContractDate, contractSignLinkFor, contractEmail,
   DEFAULT_CONTRACT_BODY_JA, findUnfilled,
 } from "./contracts.js";
 import { DOC_LANGUAGES, languageLabel, normalizeLang, defaultLanguageFor, isJapanese } from "./i18n/languages.js";
@@ -272,7 +272,7 @@ export default function ContractsPanel({ contact, projects = [], cards = [], stu
               <div><span style={{ color: C.muted }}>Deadline: </span>{formatContractDate(terms.deadline, language) || <span style={{ color: C.amber }}>not set (contract will say "to be agreed")</span>}</div>
               <div><span style={{ color: C.muted }}>Deliverables: </span>{terms.deliverables.length ? `${terms.deliverables.length} shot(s)` : <span style={{ color: C.amber }}>none yet</span>}</div>
               <div><span style={{ color: C.muted }}>Scope notes: </span>{terms.scope ? (terms.scope.length > 90 ? `${terms.scope.slice(0, 90)}…` : terms.scope) : <span style={{ color: C.amber }}>empty</span>}</div>
-              <div><span style={{ color: C.muted }}>Stages: </span>{terms.stages.length ? terms.stages.map((stage) => formatProductionStage(stage, language)).join(" → ") : "to be agreed"}</div>
+              <div><span style={{ color: C.muted }}>Stages: </span>{terms.stages.length ? terms.stages.join(" → ") : "to be agreed"}</div>
               <p style={hint}>Change these on the project itself. The contract uses what is there when you click Create.</p>
             </div>
           )}

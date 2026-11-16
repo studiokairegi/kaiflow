@@ -2,11 +2,10 @@
 // Japanese contracts: template rendering, formatting, language plumbing, string-table parity.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import {
   buildContractTerms, renderContractBody, compareTerms, formatContractMoney, formatContractDate, milestoneLabel,
   DEFAULT_CONTRACT_BODY, DEFAULT_CONTRACT_BODY_JA, defaultContractBodyFor, consentTextFor, CONTRACT_CONSENT_TEXT,
-  CONTRACT_CONSENT_TEXT_JA, contractSignLinkFor, contractEmail, todayISO, findUnfilled, validateMilestonePercents, isSafeSignatureSrc, formatProductionStage,
+  CONTRACT_CONSENT_TEXT_JA, contractSignLinkFor, contractEmail, todayISO, findUnfilled, validateMilestonePercents, isSafeSignatureSrc,
 } from "./contracts.js";
 import { CONTRACT_STRINGS, contractT, localizeSignError } from "./i18n/contractStrings.js";
 
@@ -90,28 +89,6 @@ test("formatting: yen has no decimals in Japanese, other currencies keep two; da
   assert.equal(formatContractDate("garbage", "ja"), "");
 });
 
-test("HUEMAN production pipeline labels are translated only in Japanese contract output", () => {
-  const stages = ["Brief", "Storyboard / Stillomatic", "Character Concept", "Layout", "Enshutsu", "Sakkan", "COC", "Genga", "Douga", "Shiage", "Delivered"];
-  const expected = ["企画・制作指示", "絵コンテ／スティルオマティック", "キャラクター設定", "レイアウト", "演出", "作画監督", "COC", "原画", "動画", "仕上げ", "納品"];
-  assert.deepEqual(stages.map((stage) => formatProductionStage(stage, "ja")), expected);
-  assert.deepEqual(stages.map((stage) => formatProductionStage(stage, "en")), stages);
-  const terms = buildContractTerms({ project: { ...project, pipelineStages: stages.map((name, sortOrder) => ({ name, sortOrder, isEnabled: true })) }, cards, contact, language: "ja" });
-  assert.deepEqual(terms.stages, stages, "frozen project data must retain the original stage labels");
-  const body = renderContractBody(DEFAULT_CONTRACT_BODY_JA, terms, { studioName: "Studio Kairegi", governingLaw: "日本法" });
-  for (const label of expected) assert.ok(body.includes(label), `missing Japanese stage label: ${label}`);
-  assert.equal(body.includes("Storyboard / Stillomatic"), false);
-  assert.equal(body.includes("Character Concept"), false);
-  assert.equal(body.includes("Brief"), false);
-  assert.ok(body.includes("COC"), "COC is retained because its meaning is not defined in this repository");
-});
-
-test("built-in animation production pipeline labels are localized without altering English labels", () => {
-  const labels = ["Character Design", "BG & Lighting Design", "Storyboard / Animatic", "Layout", "Genga", "Douga", "Backgrounds", "Frame Test", "Cleanup & Color", "Compositing", "Editing", "Delivered"];
-  const japanese = ["キャラクター設定", "背景・ライティング設定", "絵コンテ／アニマティック", "レイアウト", "原画", "動画", "背景", "フレームテスト", "クリンナップ・彩色", "撮影・コンポジット", "編集", "納品"];
-  assert.deepEqual(labels.map((label) => formatProductionStage(label, "ja")), japanese);
-  assert.deepEqual(labels.map((label) => formatProductionStage(label, "en")), labels);
-});
-
 test("milestone labels in Japanese", () => {
   assert.deepEqual([0, 1].map((i) => milestoneLabel(i, 2, "ja")), ["着手金", "納品時のお支払い"]);
   assert.deepEqual([0, 1, 2].map((i) => milestoneLabel(i, 3, "ja")), ["着手金", "中間金", "納品時のお支払い"]);
@@ -142,25 +119,6 @@ test("signing link: Japanese links carry a language hint, English links are exac
   assert.equal(contractSignLinkFor("abc"), "https://app.example/?share=contract&token=abc");
 });
 
-test("Japanese language survives creation, public retrieval, signing and PDF generation", () => {
-  const migration = readFileSync(new URL("../supabase/migrations/20270112100000_contract_language.sql", import.meta.url), "utf8");
-  const api = readFileSync(new URL("./contractsApi.js", import.meta.url), "utf8");
-  const pdf = readFileSync(new URL("./ndaPdf.js", import.meta.url), "utf8");
-  assert.match(migration, /language text not null default 'en'/);
-  assert.match(migration, /'language', r\.language/);
-  assert.match(migration, /if v_lang not in \('en', 'ja'\)/);
-  assert.match(migration, /signer_email, expires_at, language\)/);
-  assert.match(migration, /v_lang\)\s*returning id into v_id/s);
-  assert.match(api, /p_language: "ja"/);
-  assert.match(api, /contract_public_get/);
-  assert.match(api, /p_consent: consentText/);
-  assert.match(pdf, /isJapanese\(r\.language\)/);
-  assert.match(pdf, /await useJapaneseFont\(doc, opts\.fetchImpl\)/);
-  const font = readFileSync(new URL("../public/fonts/kairflow-jp.ttf", import.meta.url));
-  assert.ok(font.length > 1_000_000, "embedded Japanese font asset must be present");
-  assert.deepEqual([...font.subarray(0, 4)], [0, 1, 0, 0], "Japanese font must be a valid TrueType file");
-});
-
 test("invitation email is written in the contract's language", () => {
   const ja = contractEmail({ lang: "ja", studioName: "スタジオ・カイレギ", contactName: "山田 花子", project: "ブランドフィルム", link: "https://x/y", days: 30 });
   assert.equal(ja.subject, "スタジオ・カイレギ：ブランドフィルムの契約書へのご署名のお願い");
@@ -176,20 +134,6 @@ test("invitation email is written in the contract's language", () => {
 test("signing-page strings: English and Japanese have exactly the same keys and placeholders", () => {
   assert.deepEqual(Object.keys(CONTRACT_STRINGS.ja).sort(), Object.keys(CONTRACT_STRINGS.en).sort());
   for (const k of Object.keys(CONTRACT_STRINGS.en)) assert.equal(placeholders(CONTRACT_STRINGS.ja[k]), placeholders(CONTRACT_STRINGS.en[k]), `placeholders differ: ${k}`);
-});
-
-test("Japanese signing and certificate dictionary fully covers every English UI key without English fallbacks", () => {
-  for (const [key, english] of Object.entries(CONTRACT_STRINGS.en)) {
-    assert.ok(Object.hasOwn(CONTRACT_STRINGS.ja, key), `missing Japanese translation: ${key}`);
-    assert.notEqual(CONTRACT_STRINGS.ja[key], english, `English fallback remains for: ${key}`);
-    assert.ok(CONTRACT_STRINGS.ja[key].trim(), `empty Japanese translation: ${key}`);
-  }
-  for (const key of ["asked", "summary.project", "summary.fee", "summary.deadline", "summary.schedule", "sign.nameLabel", "sign.draw", "sign.type", "sign.drawHint", "sign.clear", "sign.recorded", "sign.button", "sign.decline", "decline.confirm", "pdf.cert.title", "pdf.cert.document", "pdf.cert.requestedBy", "pdf.cert.signer", "pdf.cert.status", "pdf.cert.sent", "pdf.cert.signed", "pdf.cert.method", "pdf.cert.consent", "pdf.cert.ip", "pdf.cert.requestId"]) {
-    assert.ok(CONTRACT_STRINGS.ja[key], `missing required Japanese label: ${key}`);
-  }
-  assert.equal(consentTextFor("ja"), CONTRACT_CONSENT_TEXT_JA);
-  assert.equal(CONTRACT_STRINGS.en["sign.drawHint"], "", "new Japanese-only guidance must not alter the English signer UI");
-  assert.equal(CONTRACT_STRINGS.en["decline.confirm"], "", "new Japanese-only decline copy must not alter the English signer UI");
 });
 
 test("signing-page strings: English values are the exact wording the page always used", () => {

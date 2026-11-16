@@ -39,7 +39,7 @@ import { useNotifications } from "./notifications/useNotifications.js";
 import { summarizePayments } from "./payments/logic.js";
 import { ProjectPicker } from "./finance/ProjectPicker.jsx";
 import { useFinanceSummary } from "./finance/useLedger.js";
-import { displayMoney, codeToSymbol, formatTotalsByCurrency } from "./finance/currency.js";
+import { displayMoney, codeToSymbol, symbolToCode, formatTotalsByCurrency } from "./finance/currency.js";
 import { saveFxSnapshot, listBankAccounts } from "./finance/api.js";
 import DepartmentHome from "./studio/DepartmentHome.jsx";
 import { useTeamAccess, MemberAccessRow, AccessFeedback, DepartmentsDrawer } from "./studio/TeamAccessPanel.jsx";
@@ -4831,14 +4831,49 @@ export default function ShotTracker() {
     }
   };
 
+  // Records the remaining balance as a real payment through the finance RPC. Editing
+  // amount_paid/status directly is blocked by the ledger guard once an invoice is posted.
+  // The receiving account is the Finance default if it matches the invoice currency,
+  // otherwise the first active account in that currency.
+  const markPaidBusyRef = useRef(false);
   const handleMarkInvoicePaid = async (invoice) => {
-    const updated = {
-      ...invoice,
-      status: "paid",
-      amountPaid: invoice.amount,
-      paidDate: todayInZone(),
-    };
-    await handleSaveInvoice(updated);
+    if (markPaidBusyRef.current) return; // ignore double-clicks while a payment is being recorded
+    const outstanding = Math.round(((parseMoney(invoice.amount) || 0) - (parseMoney(invoice.amountPaid) || 0)) * 100) / 100;
+    if (!invoice.id || outstanding <= 0) return;
+    markPaidBusyRef.current = true;
+    setSaveState("saving");
+    try {
+      const code = symbolToCode(invoice.currency || settings.currencySymbol);
+      const [banks, st] = await Promise.all([
+        listBankAccounts(),
+        supabase.from("finance_settings").select("default_bank_account_id").maybeSingle(),
+      ]);
+      const inCcy = banks.filter((b) => b.currency === code);
+      const bank = inCcy.find((b) => b.id === st?.data?.default_bank_account_id) || inCcy[0];
+      if (!bank) {
+        window.alert(`There is no ${code} bank or cash account yet. Add one in Finance > Banking, then mark this invoice as paid.`);
+        setSaveState("idle");
+        return;
+      }
+      const { error } = await supabase.rpc("finance_record_invoice_payment", {
+        p_invoice: invoice.id,
+        p_amount: outstanding,
+        p_date: todayInZone(),
+        p_bank_account: bank.id,
+        p_method: "Marked as paid",
+        p_reference: "",
+      });
+      if (error) throw error;
+      await refreshFinanceSources();
+      flashSave(true);
+    } catch (e) {
+      console.error("Mark invoice paid failed:", e);
+      window.alert(e?.message || "Could not mark this invoice as paid.");
+      flashSave(false);
+      refreshFinanceSources(); // the server may have a newer balance than this screen
+    } finally {
+      markPaidBusyRef.current = false;
+    }
   };
 
   // Opens a prefilled New document form seeded from an existing proforma
