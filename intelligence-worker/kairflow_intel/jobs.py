@@ -750,8 +750,9 @@ HANDLERS = {"seed_sources": discovery.h_seed_sources, "analyze_site": discovery.
 
 class _Lease:
     """Renews a claimed lease and records any loss/uncertain renewal."""
-    def __init__(self, rpc, job, worker_id, every=60, heartbeat=None):
+    def __init__(self, rpc, job, worker_id, every=60, heartbeat=None, retry_delay=2):
         self.rpc, self.job, self.wid, self.every, self.heartbeat = rpc, job, worker_id, every, heartbeat
+        self.retry_delay = retry_delay
         self.stop, self.lost = threading.Event(), threading.Event()
         self.error = None
     def __enter__(self):
@@ -764,24 +765,47 @@ class _Lease:
             while not self.stop.wait(self.every):
                 try:
                     owned = self.rpc("intel_agent_extend_lease", {"p_job_id": self.job["id"], "p_worker_id": self.wid, "p_seconds": 300})
-                    if owned is not True:
-                        self.error = "lease renewal rejected"
+                except TransientError as exc:
+                    # A lost response does not prove that the database rejected
+                    # the renewal. Keep the job unsettled while making one retry.
+                    self.error = f"lease renewal uncertain ({type(exc).__name__})"
+                    self.lost.set()
+                    # Finish this bounded retry even if the handler has exited.
+                    threading.Event().wait(self.retry_delay)
+                    try:
+                        owned = self.rpc("intel_agent_extend_lease", {"p_job_id": self.job["id"], "p_worker_id": self.wid, "p_seconds": 300})
+                    except Exception as retry_exc:
+                        self.error = f"lease renewal uncertain ({type(retry_exc).__name__})"
                         self.lost.set()
                         return
-                    if self.heartbeat:
-                        try:
-                            self.heartbeat()
-                        except Exception:
-                            # Health telemetry must not invalidate a still-owned job lease.
-                            pass
                 except Exception as exc:
                     self.error = f"lease renewal uncertain ({type(exc).__name__})"
                     self.lost.set()
                     return
+
+                if owned is not True:
+                    self.error = "lease renewal rejected"
+                    self.lost.set()
+                    return
+
+                # A confirmed renewal resolves a preceding transient uncertainty.
+                self.error = None
+                self.lost.clear()
+                if self.heartbeat:
+                    try:
+                        self.heartbeat()
+                    except Exception:
+                        # Health telemetry must not invalidate a still-owned job lease.
+                        pass
         self.t = threading.Thread(target=beat, daemon=True); self.t.start(); return self
     def __exit__(self, *a):
         self.stop.set()
-        self.t.join(timeout=1)
+        # RPC calls have a 30-second timeout; allow an in-flight renewal and
+        # its single retry to finish before run_job decides whether to settle.
+        self.t.join(timeout=65)
+        if self.t.is_alive():
+            self.error = "lease renewal still in flight at job exit"
+            self.lost.set()
 
 
 class Worker:
@@ -1008,6 +1032,28 @@ class Worker:
                 return
             if isinstance(result, dict) and result.get("reason") in DEFER:
                 result = {**result, "deferred": True}
+
+            # An operator kill-switch pause is a real job deferral, not success.
+            # This also handles the race where the switch is enabled after claim.
+            if isinstance(result, dict) and result.get("reason") == "kill_switch":
+                try:
+                    deferred = self._settle("intel_agent_defer_job", {
+                        "p_job_id": job["id"],
+                        "p_worker_id": d.cfg.worker_id,
+                        "p_reason": "kill_switch",
+                        "p_retry_seconds": 300,
+                    })
+                except TransientError:
+                    self._last_job_error = "job deferral could not be recorded; lease will expire"
+                    return
+
+                if deferred is not True:
+                    self._last_job_error = "job deferral rejected because lease ownership was lost"
+                    return
+
+                self._last_job_error = None
+                return
+
             if isinstance(result, dict) and result.get("job_failure"):
                 try:
                     if result.get("terminal_failure"):

@@ -421,6 +421,49 @@ class WorkerLoop(unittest.TestCase):
         self.assertEqual(completion["p_result"]["reason"], "unknown")
         self.assertTrue(completion["p_result"]["deferred"])
 
+    def test_kill_switch_defers_claimed_send_job_instead_of_succeeding(self):
+        calls = []
+
+        def rpc(name, params=None):
+            params = params or {}
+            calls.append((name, params))
+            if name == "intel_agent_defer_job":
+                return True
+            return None
+
+        worker, _ = self.mk()
+        worker.d.rpc = rpc
+
+        original = jobs.HANDLERS.get("send")
+        jobs.HANDLERS["send"] = lambda d, j: {
+            "sent": False,
+            "reason": "kill_switch",
+        }
+
+        try:
+            worker.run_job({
+                "id": "kill-job",
+                "kind": "send",
+                "attempts": 1,
+                "payload": {"message_id": "m1"},
+            })
+        finally:
+            jobs.HANDLERS["send"] = original
+
+        names = [name for name, _ in calls]
+        self.assertIn("intel_agent_defer_job", names)
+        self.assertNotIn("intel_agent_complete_job", names)
+        self.assertNotIn("intel_agent_fail_job", names)
+        self.assertNotIn("intel_agent_fail_job_permanent", names)
+
+        params = next(
+            p for name, p in calls if name == "intel_agent_defer_job"
+        )
+        self.assertEqual(params["p_job_id"], "kill-job")
+        self.assertEqual(params["p_worker_id"], CFG.worker_id)
+        self.assertEqual(params["p_reason"], "kill_switch")
+        self.assertEqual(params["p_retry_seconds"], 300)
+
     def test_error_mapping(self):
         # Phase 4: background work backs off 1 min, 5 min, 15 min, 1 h, 2 h (jittered +-10% in production; Deps.rand is the real uniform here,
         # so assert the band). Permanent and definite database refusals are dead at once (fail_job_permanent, no p_retry_seconds).
@@ -452,6 +495,50 @@ class WorkerLoop(unittest.TestCase):
             self.assertEqual(lease.error, "lease renewal rejected")
         finally:
             jobs.HANDLERS["send"] = original
+
+    def test_transient_lease_renewal_retries_and_recovers(self):
+        import time
+        calls = []
+        def rpc(name, p=None):
+            if name == "intel_agent_extend_lease":
+                calls.append(name)
+                if len(calls) == 1:
+                    raise TransientError("temporary network error")
+                return True
+            return True
+
+        lease = jobs._Lease(rpc, {"id": "retry-job"}, "w", every=0.005, retry_delay=0.001)
+        lease.__enter__()
+        deadline = time.monotonic() + 1
+        while len(calls) < 1 and time.monotonic() < deadline:
+            time.sleep(0.001)
+
+        # Simulate the handler finishing while renewal recovery is pending.
+        lease.__exit__()
+
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(lease.lost.is_set())
+        self.assertIsNone(lease.error)
+
+    def test_persistent_lease_renewal_network_error_marks_lease_uncertain(self):
+        import time
+        calls = []
+        def rpc(name, p=None):
+            if name == "intel_agent_extend_lease":
+                calls.append(name)
+                raise TransientError("network unavailable")
+            return True
+
+        lease = jobs._Lease(rpc, {"id": "uncertain-job"}, "w", every=0.005, retry_delay=0.001)
+        lease.__enter__()
+        deadline = time.monotonic() + 1
+        while len(calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        lease.__exit__()
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(lease.lost.is_set())
+        self.assertEqual(lease.error, "lease renewal uncertain (TransientError)")
 
     def test_run_job_does_not_complete_or_fail_after_lease_loss(self):
         from unittest.mock import patch

@@ -183,7 +183,18 @@ class ProviderCannotChangeOutcome(unittest.TestCase):
                 self.assertEqual(ev, base_ev)
                 self.assertEqual(up["p_language"], base_up["p_language"])
                 model_fields = ("ai_extraction", "contact_role")          # the only verified fields the model can fill; contact_role is quote-checked against the page and no scorer reads it
-                self.assertEqual({k: v for k, v in up["p_verified"].items() if k not in model_fields}, {k: v for k, v in base_up["p_verified"].items() if k not in model_fields})
+                verified = {k: v for k, v in up["p_verified"].items() if k not in model_fields}
+                base_verified = {k: v for k, v in base_up["p_verified"].items() if k not in model_fields}
+
+                # Report generation time is expected to differ between provider runs.
+                for facts in (verified, base_verified):
+                    report = facts.get("research_report")
+                    if isinstance(report, dict):
+                        report = dict(report)
+                        report.pop("generated_at", None)
+                        facts["research_report"] = report
+
+                self.assertEqual(verified, base_verified)
                 self.assertEqual((res.score, res.decision, res.model, res.suitability), (base_res.score, base_res.decision, base_res.model, base_res.suitability))
                 self.assertEqual(res.model, scoring.STUDIO_MODEL)
 
