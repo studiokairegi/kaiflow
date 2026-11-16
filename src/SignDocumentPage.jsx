@@ -84,6 +84,7 @@ function SignaturePad({ onChange, t }) {
         />
         <div style={{ position: "absolute", left: 16, right: 16, bottom: 34, borderBottom: "1px solid #c9c5ba", pointerEvents: "none" }} />
       </div>
+      {t.lang === "ja" && <p style={{ color: muted, fontSize: 12, margin: "8px 0 0" }}>{t("sign.drawHint")}</p>}
       <button type="button" onClick={clear} style={linkBtn}>{t("sign.clear")}</button>
     </div>
   );
@@ -201,7 +202,7 @@ export default function SignDocumentPage({ token, docLabel = "document", api, do
 
       <article
         lang={lang}
-        style={{ background: sheet, color: sheetInk, borderRadius: 6, padding: "40px 44px", fontFamily: serif, fontSize: 16, lineHeight: 1.65, whiteSpace: "pre-wrap", lineBreak: lang === "ja" ? "strict" : "auto", boxShadow: "0 12px 32px rgba(0,0,0,0.4)" }}
+        style={{ ...(lang === "ja" ? { boxSizing: "border-box", width: "100%", minWidth: 0, overflowWrap: "anywhere", padding: "clamp(20px, 5vw, 40px)", lineHeight: 1.75 } : { padding: "40px 44px", lineHeight: 1.65 }), background: sheet, color: sheetInk, borderRadius: 6, fontFamily: serif, fontSize: 16, whiteSpace: "pre-wrap", lineBreak: lang === "ja" ? "strict" : "auto", boxShadow: "0 12px 32px rgba(0,0,0,0.4)" }}
       >
         {doc.body}
         {doc.status === "signed" && isSafeSignatureSrc(doc.signature_png) && (
@@ -254,6 +255,7 @@ export default function SignDocumentPage({ token, docLabel = "document", api, do
       {open && declining && (
         <section style={{ background: panel, border: `1px solid ${line}`, borderRadius: 10, padding: 20, marginTop: 20 }}>
           <h2 style={{ fontSize: 16, margin: "0 0 10px" }}>{t("decline.heading", { doc: noun })}</h2>
+          {t.lang === "ja" && <p style={{ color: muted, fontSize: 13 }}>{t("decline.confirm")}</p>}
           <textarea
             value={reason} onChange={(e) => setReason(e.target.value)} rows={3} placeholder={t("decline.placeholder")}
             style={{ width: "100%", boxSizing: "border-box", background: ink, border: `1px solid ${line}`, borderRadius: 8, color: "#EDEAE3", padding: 10, fontFamily: sans, fontSize: 14 }}

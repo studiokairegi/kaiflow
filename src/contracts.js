@@ -42,6 +42,49 @@ export function milestoneLabel(i, n, lang) {
 export const DEFAULT_MILESTONE_PERCENTS = [50, 50];
 export const DEFAULT_REVISION_ROUNDS = 2;
 
+// Translate known production-pipeline labels only when rendering a Japanese contract.
+// The project's stored stage names and the English UI remain untouched. COC is deliberately
+// preserved: no definition or workflow metadata for this acronym exists in this repository.
+const JAPANESE_PRODUCTION_STAGES = new Map([
+  ["brief", "企画・制作指示"],
+  ["pre-production", "プリプロダクション"],
+  ["storyboard / stillomatic", "絵コンテ／スティルオマティック"],
+  ["storyboard / animatic", "絵コンテ／アニマティック"],
+  ["storyboard", "絵コンテ"],
+  ["stillomatic", "スティルオマティック"],
+  ["animatic", "アニマティック"],
+  ["character concept", "キャラクター設定"],
+  ["character design", "キャラクター設定"],
+  ["bg & lighting design", "背景・ライティング設定"],
+  ["background art", "背景美術"],
+  ["backgrounds", "背景"],
+  ["layout", "レイアウト"],
+  ["enshutsu", "演出"],
+  ["sakkan", "作画監督"],
+  ["coc", "COC"],
+  ["genga", "原画"],
+  ["key animation", "キーアニメーション"],
+  ["douga", "動画"],
+  ["in-between / cleanup", "中割り／クリンナップ"],
+  ["cleanup & color", "クリンナップ・彩色"],
+  ["cleanup", "クリンナップ"],
+  ["shiage", "仕上げ"],
+  ["frame test", "フレームテスト"],
+  ["compositing", "撮影・コンポジット"],
+  ["editing", "編集"],
+  ["animation", "アニメーション"],
+  ["design", "デザイン"],
+  ["review / revisions", "確認・修正"],
+  ["sound", "音響"],
+  ["delivered", "納品"],
+]);
+
+export function formatProductionStage(stage, lang) {
+  const raw = String(stage ?? "");
+  if (!isJapanese(lang)) return raw;
+  return JAPANESE_PRODUCTION_STAGES.get(raw.trim().toLocaleLowerCase("en-US")) || raw;
+}
+
 // Starting point only. Have a lawyer review it for your jurisdiction.
 export const DEFAULT_CONTRACT_BODY = `SERVICES AGREEMENT
 
@@ -145,7 +188,6 @@ export const DEFAULT_CONTRACT_BODY_JA = `業務委託契約書
 1. 本契約は、その対象事項に関する甲乙間の完全な合意であり、甲乙が書面により合意した場合に限り変更することができる。
 2. 本契約は{{governing_law}}に準拠し、同法に従って解釈される。
 3. 電子署名による締結は、書面による署名と同一の効力を有するものとする。
-4. 本契約に定めのない事項または本契約の解釈に疑義が生じた事項については、甲乙誠意をもって協議し、解決する。
 
 乙の署名者：{{studio_signatory}}`;
 
@@ -313,7 +355,7 @@ function renderContract(template, terms, vars = {}) {
     scope: t.scope || w.scope,
     shot_count: (t.deliverables || []).length ? w.count((t.deliverables || []).length) : w.shotCount,
     deliverables,
-    stages: (t.stages || []).length ? t.stages.join(w.sep) : w.stages,
+    stages: (t.stages || []).length ? t.stages.map((stage) => formatProductionStage(stage, lang)).join(w.sep) : w.stages,
     fee: money(t.budget_total),
     currency: t.currency || "$",
     payment_schedule: schedule,
