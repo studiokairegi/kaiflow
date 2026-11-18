@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { supabase, functionUrl } from "./supabaseClient";
+import { uploadResumableDriveFile, pendingStorageKey } from "./resumableDriveUpload.js";
+
 import { lazyWithSuspense } from "./lazy.jsx";
 import { useInvoiceRefs, invoiceRefFor } from "./invoiceRefs.js";
 import { createAuthBootstrap } from "./authBootstrap.js";
@@ -52,6 +54,9 @@ import "./chat/chat.css";
 import "./email/styles/inbox-chat.css";
 import { leadComposeTarget, leadComposeBlockReason, mergeEmailTimeline, sortEmailTimelineForDisplay, EMAIL_TIMELINE_TYPES } from "./email/lib/logic.js";
 import AiGeneratedBadge, { isAiGeneratedLead } from "./intelligence/AiGeneratedBadge.jsx";
+
+// Per-file cap for shot attachments (must match MAX_UPLOAD_BYTES in supabase/functions/studio-drive-upload).
+const ATTACHMENT_MAX_BYTES = 3 * 1024 * 1024 * 1024;
 
 // Used only as a guaranteed-empty UUID filter when a studio has no mapped
 // business-data owners. It prevents a missing owner mapping from widening a query.
@@ -12200,6 +12205,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
   const [linkCopied, setLinkCopied] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [uploadProgress, setUploadProgress] = useState("");
   const fileInputRef = useRef(null);
 
   const handleGenerateShareLink = async () => {
@@ -12238,23 +12244,32 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
       } = await supabase.auth.getSession();
       if (!currentSession) throw new Error("Not signed in");
 
-      const body = new FormData();
-      body.append("projectId", form.projectId);
-      if (form.id) body.append("shotId", form.id);
-      body.append("file", file);
-
-      const res = await fetch(functionUrl("studio-drive-upload"), {
-        method: "POST",
-        headers: { Authorization: `Bearer ${currentSession.access_token}` },
-        body,
-      });
-      const result = await res.json();
-      if (!res.ok || !result?.success) {
-        if (result?.error === "not_connected") {
-          throw new Error(result?.message || "Connect Google Drive and create this project's folders first (from the project card), then try again.");
-        }
-        throw new Error(result?.error || "Upload failed");
+      // Direct-to-Drive resumable upload: the browser sends the bytes straight to Google Drive, so the
+      // limit is the 3 GB cap below rather than an Edge Function's request/memory ceiling. The function
+      // only authorizes, opens the session, verifies the Drive file and records it on the shot.
+      if (file.size > ATTACHMENT_MAX_BYTES) {
+        throw new Error(`${file.name} is too large. The limit is 3 GB per file.`);
       }
+      // Resolved for every request (init / recover / finalize) so a long transfer outliving the access
+      // token still finalizes with the refreshed session.
+      const getHeaders = async () => {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) throw new Error("Please sign in again.");
+        return { Authorization: `Bearer ${session.access_token}` };
+      };
+      const result = await uploadResumableDriveFile({
+        url: functionUrl("studio-drive-upload"),
+        headers: getHeaders,
+        actionPayload: { projectId: form.projectId, ...(form.id ? { shotId: form.id } : {}) },
+        storageKey: pendingStorageKey(`studio.attachment.${form.id}`),
+        file,
+        onProgress: (pct) => setUploadProgress(`${pct}%`),
+        onStatus: (phase, detail) => {
+          if (phase === "uploading") return;
+          setUploadProgress(phase === "verifying" ? `verifying ${detail ?? 0}%` : phase === "finalizing" ? "finishing" : "preparing");
+        },
+      });
+      if (!result?.success) throw new Error(result?.error || "Upload failed");
 
       const newAttachment = { name: result.name, url: result.url, driveFileId: result.driveFileId };
       const nextAttachments = [...(form.attachments || []), newAttachment];
@@ -12271,6 +12286,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
       setUploadError(err.message || "Upload failed");
     }
     setUploading(false);
+    setUploadProgress("");
   };
 
   const removeAttachment = async (index) => {
@@ -12581,7 +12597,7 @@ function CardEditor({ card, onCancel, onSave, onDelete, isNew, onPersistShareTok
               disabled={uploading}
             >
               <PlusIcon />
-              {uploading ? "Uploading..." : "Add attachment"}
+              {uploading ? `Uploading${uploadProgress ? ` (${uploadProgress})` : "..."}` : "Add attachment"}
             </button>
             {uploadError && <p style={{ ...styles.fieldHint, color: "#FF4D4D" }}>{uploadError}</p>}
           </>
