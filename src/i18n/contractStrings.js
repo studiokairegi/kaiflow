@@ -1,0 +1,143 @@
+// Every client-visible string on the public signing page (SignDocumentPage / ContractSignPage) and on the signed
+// PDF's certificate page. English values are the exact strings those screens used before this feature, so the
+// freelancer NDA flow (which has no language) is unchanged. Contract text itself, client names, project names, scope
+// and deliverable titles are printed as entered; the studio's own admin UI is not translated.
+import { makeTranslator } from "./languages.js";
+
+export const CONTRACT_STRINGS = {
+  en: {
+    "doc.contract": "contract",
+    "doc.NDA": "NDA",
+    "loading": "Loading document...",
+    "invalid.title": "This signing link isn't valid",
+    "invalid.body": "Ask the studio to send you a new one.",
+    "studioFallback": "Studio",
+    "asked": "{studio} has asked you to sign",
+    "closed.expired": "This link has expired. Ask the studio for a new one.",
+    "closed.voided": "The studio replaced or cancelled this request. Ask them for the latest link.",
+    "closed.declined": "You declined this {doc}. The studio has been notified.",
+    "signed.label": "Signed",
+    "signed.on": " on {date}. {studio} can now see your signed copy.",
+    "signed.download": "Download signed copy (PDF)",
+    "signature.alt": "Your signature",
+    "sign.heading": "Sign",
+    "sign.nameLabel": "Full legal name",
+    "sign.draw": "Draw",
+    "sign.type": "Type",
+    "sign.clear": "Clear",
+    "sign.padLabel": "Signature drawing area",
+    "sign.namePlaceholder": "Your name",
+    "sign.button": "Sign {doc}",
+    "sign.busy": "Signing...",
+    "sign.decline": "Decline",
+    "sign.recorded": "We record the time, your IP address and browser with your signature as proof of signing.",
+    "sign.error": "Signing failed. Please try again.",
+    "decline.heading": "Decline this {doc}",
+    "decline.placeholder": "Reason (optional)",
+    "decline.button": "Decline {doc}",
+    "decline.back": "Back",
+    "decline.error": "Couldn't decline. Please try again.",
+    "pdf.error": "Couldn't create the PDF. Please try again.",
+    "summary.aria": "Key terms",
+    "summary.project": "Project",
+    "summary.fee": "Total fee",
+    "summary.deadline": "Deadline",
+    "summary.deadlineNone": "To be agreed",
+    "summary.schedule": "Payment schedule",
+    "pdf.signedBy": "Signed electronically by:",
+    "pdf.cert.title": "Certificate of completion",
+    "pdf.cert.document": "Document",
+    "pdf.cert.requestedBy": "Requested by",
+    "pdf.cert.signer": "Signer",
+    "pdf.cert.status": "Status",
+    "pdf.cert.sent": "Sent",
+    "pdf.cert.signed": "Signed",
+    "pdf.cert.ip": "Signer IP address",
+    "pdf.cert.ipNone": "not recorded",
+    "pdf.cert.method": "Signature method",
+    "pdf.cert.method.draw": "Drawn",
+    "pdf.cert.method.type": "Typed",
+    "pdf.cert.hash": "Document fingerprint (SHA-256)",
+    "pdf.cert.consent": "Consent given",
+    "pdf.cert.requestId": "Request ID",
+    "pdf.defaultTitle": "Services Agreement",
+    "pdf.project": "Project",
+    "pdf.fee": "Contract fee",
+  },
+  ja: {
+    "doc.contract": "契約書",
+    "doc.NDA": "秘密保持契約書",
+    "loading": "文書を読み込んでいます…",
+    "invalid.title": "この署名リンクは無効です",
+    "invalid.body": "スタジオに新しいリンクの送付をご依頼ください。",
+    "studioFallback": "スタジオ",
+    "asked": "{studio}より署名のご依頼が届いています",
+    "closed.expired": "このリンクは有効期限が切れています。スタジオに新しいリンクの送付をご依頼ください。",
+    "closed.voided": "スタジオがこの依頼を差し替えたか、取り消しました。最新のリンクをスタジオにご確認ください。",
+    "closed.declined": "この{doc}への署名を辞退されました。スタジオに通知されています。",
+    "signed.label": "署名済み",
+    "signed.on": "（署名日時: {date}）。{studio}が署名済みの控えを確認できます。",
+    "signed.download": "署名済みの控えをダウンロード（PDF）",
+    "signature.alt": "あなたの署名",
+    "sign.heading": "署名",
+    "sign.nameLabel": "氏名（正式なお名前）",
+    "sign.draw": "手書き",
+    "sign.type": "入力",
+    "sign.clear": "消去",
+    "sign.padLabel": "署名の手書き欄",
+    "sign.namePlaceholder": "お名前",
+    "sign.button": "{doc}に署名する",
+    "sign.busy": "署名しています…",
+    "sign.decline": "辞退する",
+    "sign.recorded": "署名の証跡として、署名日時、IPアドレス、ブラウザ情報を記録します。",
+    "sign.error": "署名できませんでした。もう一度お試しください。",
+    "decline.heading": "この{doc}への署名を辞退する",
+    "decline.placeholder": "理由（任意）",
+    "decline.button": "{doc}を辞退する",
+    "decline.back": "戻る",
+    "decline.error": "辞退の手続きができませんでした。もう一度お試しください。",
+    "pdf.error": "PDFを作成できませんでした。もう一度お試しください。",
+    "summary.aria": "主な契約条件",
+    "summary.project": "プロジェクト",
+    "summary.fee": "報酬総額",
+    "summary.deadline": "納期",
+    "summary.deadlineNone": "別途協議",
+    "summary.schedule": "お支払いスケジュール",
+    "pdf.signedBy": "電子署名者:",
+    "pdf.cert.title": "完了証明書",
+    "pdf.cert.document": "文書",
+    "pdf.cert.requestedBy": "依頼元",
+    "pdf.cert.signer": "署名者",
+    "pdf.cert.status": "ステータス",
+    "pdf.cert.sent": "送付日時",
+    "pdf.cert.signed": "署名日時",
+    "pdf.cert.ip": "署名者のIPアドレス",
+    "pdf.cert.ipNone": "記録なし",
+    "pdf.cert.method": "署名方法",
+    "pdf.cert.method.draw": "手書き",
+    "pdf.cert.method.type": "入力",
+    "pdf.cert.hash": "文書フィンガープリント（SHA-256）",
+    "pdf.cert.consent": "同意内容",
+    "pdf.cert.requestId": "リクエストID",
+    "pdf.defaultTitle": "業務委託契約書",
+    "pdf.project": "プロジェクト",
+    "pdf.fee": "契約金額",
+  },
+};
+
+export const contractT = (lang) => makeTranslator(CONTRACT_STRINGS, lang);
+
+// Certificate "Status" values, in the document's language.
+export const CERT_STATUS_JA = { signed: "署名済み", sent: "署名待ち", viewed: "閲覧済み（未署名）", declined: "辞退", expired: "期限切れ", voided: "取消" };
+
+// The signing RPCs raise English messages (database side). Japanese signers get a Japanese sentence instead of an
+// English error; anything unrecognised falls back to the generic "try again" line.
+export function localizeSignError(message, lang, fallbackKey) {
+  const t = contractT(lang);
+  if (t.lang !== "ja") return message || t(fallbackKey);
+  const m = String(message || "");
+  if (/not valid/i.test(m)) return t("invalid.title");
+  if (/expired/i.test(m)) return t("closed.expired");
+  if (/no longer be (signed|declined)/i.test(m)) return "この契約書は、すでに署名・辞退・取消のいずれかが済んでいるため、操作できません。スタジオにご確認ください。";
+  return t(fallbackKey);
+}
