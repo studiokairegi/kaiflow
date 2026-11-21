@@ -137,7 +137,7 @@ To remove only the controller auto-start, run `.\windows\uninstall-controller.ps
 `python spikes/phase0_feasibility.py` makes about 60 small, polite, read-only requests to Wikidata, AniList, GDELT and Common Crawl, checks robots.txt on sample studios, and writes `phase0_report.json`. It needs no keys and does not touch Supabase.
 
 ## 5. Tests (no network, no Ollama, no Zoho or Gmail needed)
-`python -m unittest discover -s tests -t .`
+`pip install -r requirements-dev.txt` once, then `python -m pytest` (config in `pytest.ini`). The tests are `unittest`-style, so the original `python -m unittest discover -s tests -t .` still works too.
 
 ## What is NOT verified here
 The Zoho Mail endpoints in `kairflow_intel/zoho.py` and Gmail endpoints in `kairflow_intel/gmail.py` follow their public API contracts but still require read-only acceptance tests against real connected accounts. SMTP is send-only; it does not synchronize inbound replies. The separate Resend transactional integration is not an Emma prospect-mail provider.
