@@ -2039,6 +2039,7 @@ async function downloadInvoicePDF(invoice, project, settings = DEFAULT_SETTINGS)
   const doc = ja ? new jsPDF({ compress: true }) : new jsPDF();
   if (ja) {
     // jsPDF's built-in fonts cannot draw Japanese. Never hand the client a PDF full of blank boxes: fail loudly instead.
+    // eslint-disable-next-line react-hooks/rules-of-hooks -- useJapaneseFont is an async jsPDF font loader, not a React hook
     try { await useJapaneseFont(doc); }
     catch { throw new Error("The Japanese font could not be loaded, so the Japanese PDF was not created. Check your connection and try again."); }
   }

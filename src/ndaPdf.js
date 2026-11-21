@@ -24,6 +24,7 @@ export function buildSignedDocPdf(r, { defaultTitle = "Document", extraRows = []
 export async function buildSignedDocPdfLocalized(r, opts = {}) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const lang = isJapanese(r.language) ? "ja" : "en";
+  // eslint-disable-next-line react-hooks/rules-of-hooks -- useJapaneseFont is an async jsPDF font loader, not a React hook
   if (lang === "ja") await useJapaneseFont(doc, opts.fetchImpl);
   return layoutSignedDoc(doc, r, { ...opts, lang });
 }

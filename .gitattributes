@@ -1,0 +1,18 @@
+# Keep line endings identical on every machine and in CI (the Finance V2 baseline hashes raw bytes).
+* text=auto eol=lf
+*.sh text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
+*.pdf binary
+*.mp3 binary
+*.wav binary
+*.ogg binary

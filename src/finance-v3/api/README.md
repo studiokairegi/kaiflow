@@ -1,0 +1,1 @@
+Owner: Phases 2-4. Thin wrappers over `public.fin3_*` RPCs only. Each wrapper: validates input shape, calls the RPC, maps `V3xxx` errors via `contracts`. No business rules here; if a rule is needed, it belongs in the database.

@@ -1,0 +1,1 @@
+Owner: Phase 6. Read-only. Emma receives data via a dedicated authorized read RPC and can never post, pay or edit. Any proposed financial action returns a confirmation card handled by the normal secure workflow.

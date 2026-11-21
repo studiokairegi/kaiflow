@@ -18,3 +18,8 @@ __pycache__/
 /intelligence-worker/wmic
 /intelligence-worker/worker.log
 /supabase/functions/intel-provider-health/index.production-backup.ts
+
+# Playwright
+/playwright-report/
+/test-results/
+/blob-report/
