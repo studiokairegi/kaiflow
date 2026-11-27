@@ -12,7 +12,7 @@ const TABS = [["overview", "Overview", Overview], ["sales", "Sales", Sales], ["p
   ["coa", "Chart of accounts", ChartOfAccounts], ["gl", "General ledger", GeneralLedger], ["journal", "Journal entries", Journal], ["tb", "Trial balance", TrialBalance],
   ["pl", "Profit & loss", ProfitLoss], ["bs", "Balance sheet", BalanceSheet], ["cf", "Cash flow", CashFlow], ["tax", "Tax", Tax],
   ["ar", "Receivables", Sales.Aging], ["ap", "Payables", Purchases.Aging], ["recon", "Reconciliation", Reconciliation], ["audit", "Audit history", AuditHistory],
-  ["reports", "More reports", Reports], ["exports", "Exports", Exports], ["alerts", "Alerts", Alerts], ["settings", "Settings", Settings], ["payments", "Payment records", PaymentRecords], ["emails", "Email delivery", EmailAudit], ["legacy", "Legacy history", LegacyHistory]];
+  ["reports", "More reports", Reports], ["exports", "Exports", Exports], ["alerts", "Alerts", Alerts], ["settings", "Settings", Settings], ["payments", "Payment records", PaymentRecords], ["emails", "Email delivery", EmailAudit], ["legacy", "Legacy migration", LegacyHistory]];
 export default function AccountantMode() {
   const { can } = useFinance(); const [tab, setTab] = useState("overview"); const [jump, setJump] = useState(null);
   if (!can("finance.read")) return <Banner tone="info" title="Finance is not open to your role.">Ask a finance admin if you need access.</Banner>;
