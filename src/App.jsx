@@ -6713,6 +6713,12 @@ export default function ShotTracker() {
         </div>
       )}
 
+      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessEmail(emailAccess) && <InboxModule access={emailAccess} supabase={supabase} leads={leads} composeRequest={composeRequest} onComposeHandled={() => setComposeRequest(null)} openConversationRequest={openConversationRequest} onOpenConversationHandled={() => setOpenConversationRequest(null)} onUnreadChanged={emailInbox.refresh} onLeadEmailSent={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) refreshLeadTimeline(l); }} onOpenLead={async (leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { const fresh = await refreshLeadTimeline(l); setCrmTab("pipeline"); setEditingLead(fresh); } }} />}
+      {view === "projects" && workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
+          </div>
+        </div>
+      )}
+
       {view === "projects" && workspace === "finance" && FINANCE_V3_UI && (
         <FinanceV3Entry organizationId={activeStudioOrganizationId} />
       )}
@@ -6748,12 +6754,6 @@ export default function ShotTracker() {
             />
           )}
         </>
-      )}
-
-      {view === "projects" && workspace === "leads" && crmTab === "inbox" && canAccessEmail(emailAccess) && <InboxModule access={emailAccess} supabase={supabase} leads={leads} composeRequest={composeRequest} onComposeHandled={() => setComposeRequest(null)} openConversationRequest={openConversationRequest} onOpenConversationHandled={() => setOpenConversationRequest(null)} onUnreadChanged={emailInbox.refresh} onLeadEmailSent={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) refreshLeadTimeline(l); }} onOpenLead={async (leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { const fresh = await refreshLeadTimeline(l); setCrmTab("pipeline"); setEditingLead(fresh); } }} />}
-      {view === "projects" && workspace === "leads" && crmTab === "intelligence" && canAccessIntelligence(intelAccess) && <IntelligenceModule access={intelAccess} supabase={supabase} target={intelTarget} onOpenLead={(leadId) => { const l = leads.find((x) => x.id === leadId); if (l) { setCrmTab("pipeline"); setEditingLead(l); } }} />}
-          </div>
-        </div>
       )}
 
       {view === "projects" && workspace === "payments" && !canAccessPayments(settings) && <PaymentsRestricted />}
