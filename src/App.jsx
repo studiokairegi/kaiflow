@@ -87,6 +87,9 @@ const TasksPanel = lazyWithSuspense(() => import("./TasksPanel.jsx"), { label: "
 const NdaTab = lazyWithSuspense(() => import("./NdaTab.jsx"));
 const SettingsPage = lazyWithSuspense(() => import("./settings/SettingsPage.jsx"), { label: "Loading settings…" });
 const FinanceModule = lazyWithSuspense(() => import("./finance/FinanceModule.jsx"), { label: "Loading finance…", logo: true });
+// Finance V3 UI: off unless VITE_FINANCE_V3_UI="true". When off, V2 Finance below is exactly as before.
+const FinanceV3Entry = lazyWithSuspense(() => import("./finance-v3/ui/FinanceV3Entry.jsx"), { label: "Loading finance…", logo: true });
+const FINANCE_V3_UI = import.meta.env.VITE_FINANCE_V3_UI !== "false";
 const PortfolioTab = lazyWithSuspense(() => import("./portfolio/PortfolioTab.jsx"), { label: "Loading portfolio…" });
 const PaymentsModule = lazyWithSuspense(() => import("./payments/PaymentsModule.jsx"), { label: "Loading payments…", logo: true });
 const IntelligenceModule = lazyWithSuspense(() => import("./intelligence/IntelligenceModule.jsx"), { label: "Loading intelligence…" });
@@ -6400,6 +6403,7 @@ export default function ShotTracker() {
           onGoToIntelligence={canAccessIntelligence(intelAccess) ? () => { setCrmTab("intelligence"); setWorkspace("leads"); } : undefined}
           user={session?.user}
           userId={userId}
+          financeV3OrgId={FINANCE_V3_UI ? activeStudioOrganizationId : ""}
         />
       )}
 
@@ -6709,7 +6713,11 @@ export default function ShotTracker() {
         </div>
       )}
 
-      {view === "projects" && workspace === "finance" && (
+      {view === "projects" && workspace === "finance" && FINANCE_V3_UI && (
+        <FinanceV3Entry organizationId={activeStudioOrganizationId} />
+      )}
+
+      {view === "projects" && workspace === "finance" && !FINANCE_V3_UI && (
         <>
           {/* Finance ledger/payment writes remain user-scoped. Keep shared records
               out of its calculations until cross-owner read-only Finance is designed. */}
@@ -9634,7 +9642,7 @@ function computeNeedsAttentionCounts(leads, schedule) {
   return { followupsDueToday, hotAwaitingResponse, proposalsAwaitingResponse, approachingDeadline };
 }
 
-function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, onOpenProject, onGoToProjects, onGoToPayments, onGoToFinance, onGoToLeads, onGoToIntelligence, onOpenLead, onOpenShot, onOpenContact, onNewProject, onNewLead, onNewInvoice, onNewExpense, user, userId }) {
+function DashboardPanel({ projects, cards, leads, invoices, expenses = undefined, settings, fxRates, onOpenProject, onGoToProjects, onGoToPayments, onGoToFinance, onGoToLeads, onGoToIntelligence, onOpenLead, onOpenShot, onOpenContact, onNewProject, onNewLead, onNewInvoice, onNewExpense, user, userId, financeV3OrgId = "" }) {
   // Re-render when the calendar day rolls over so "today", the week strip and due dates never go stale.
   const [, setDayKey] = useState(todayInZone);
   useEffect(() => {
@@ -9645,6 +9653,17 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
   // Financial figures come from the accounting ledger (finance/reports.js), in the studio's
   // base currency using each transaction's own stored FX rate. Nothing is converted here.
   const fin = useFinanceSummary(userId, invoices, projects);
+  // Finance V3 (flag + ready studio books): the Finance tile and the overdue alert use the reporting service, not the V2 sums above.
+  // The bridge is loaded on demand, only when the flag is on, so V2-only builds never load any V3 code.
+  const [v3Bridge, setV3Bridge] = useState(null);
+  useEffect(() => {
+    if (!financeV3OrgId) { setV3Bridge(null); return undefined; }
+    let live = true;
+    import("./finance-v3/ui/useDashboardV3.js").then((m) => m.loadDashboardV3(supabase, financeV3OrgId)).then((b) => { if (live) setV3Bridge(b); }, () => { if (live) setV3Bridge(null); });
+    return () => { live = false; };
+  }, [financeV3OrgId]);
+  const v3Failed = !!v3Bridge?.failed;   // Finance V3 is switched on for this studio but could not be loaded: say so, do not pass V2 figures off as V3
+  const v3Tile = v3Bridge && !v3Failed ? v3Bridge.tile({ privacy: fin.privacy }) : null;
   const finBase = fin.summary?.baseCurrency || "USD";
   const cur = codeToSymbol(finBase);
   const money = (n) => (fin.summary ? displayMoney(finBase, n, fin.privacy) : "...");
@@ -9804,8 +9823,8 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       label: `${stats.overdueProjects.length} project${stats.overdueProjects.length === 1 ? "" : "s"} past the deadline`,
       onClick: onGoToProjects,
     },
-    fin.summary?.overdueCount > 0 && {
-      label: `${fin.summary.overdueCount} overdue invoice${fin.summary.overdueCount === 1 ? "" : "s"}`,
+    (v3Tile ? v3Tile.overdueCount : fin.summary?.overdueCount) > 0 && {
+      label: `${v3Tile ? v3Tile.overdueCount : fin.summary.overdueCount} overdue invoice${(v3Tile ? v3Tile.overdueCount : fin.summary.overdueCount) === 1 ? "" : "s"}`,
       onClick: onGoToFinance,
     },
     fin.summary?.upcomingCount > 0 && {
@@ -9892,11 +9911,13 @@ function DashboardPanel({ projects, cards, leads, invoices, settings, fxRates, o
       ],
     },
     {
-      title: "Finance", gradient: GRADIENTS.violet, iconColor: "#6A47F2", icon: "trend", spark: fin.summary?.series?.map((m) => m.revenue), value: money(fin.summary?.revenueMonth ?? 0), label: "revenue this month", delta: finDelta,
+      title: "Finance", gradient: GRADIENTS.violet, iconColor: "#6A47F2", icon: "trend", spark: v3Tile ? undefined : fin.summary?.series?.map((m) => m.revenue), value: v3Tile ? v3Tile.value : money(fin.summary?.revenueMonth ?? 0), label: "revenue this month", delta: v3Tile ? null : finDelta,
       onClick: onGoToFinance,
       chips: [
-        { icon: "invoice", label: `outstanding${fin.summary ? ` (${fin.summary.receivableCount})` : ""}`, value: fin.summary ? money(fin.summary.receivableBase) : "...", tone: "warn" },
-        ...(canAccessPayments(settings) ? [{ icon: "users", label: "owed to freelancers", value: payMoney(paySummary?.freelancerOwed), dim: isEmpty(paySummary?.freelancerOwed) }] : []),
+        { icon: "invoice", label: v3Tile ? "outstanding" : `outstanding${fin.summary ? ` (${fin.summary.receivableCount})` : ""}`, value: v3Tile ? v3Tile.outstanding : fin.summary ? money(fin.summary.receivableBase) : "...", tone: "warn" },
+        ...(v3Failed ? [{ icon: "invoice", label: "Finance V3 could not be loaded. These are the older figures.", value: "!" }] : []),
+        ...(v3Tile ? [{ icon: "users", label: "owed to animators", value: v3Tile.owedToAnimators }, { icon: "wallet", label: "safe to spend", value: v3Tile.safeToSpend }] : []),
+        ...(!v3Tile && canAccessPayments(settings) ? [{ icon: "users", label: "owed to freelancers", value: payMoney(paySummary?.freelancerOwed), dim: isEmpty(paySummary?.freelancerOwed) }] : []),
       ],
     },
     ...(!canAccessPayments(settings) ? [] : [{
