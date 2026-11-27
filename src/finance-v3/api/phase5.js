@@ -41,6 +41,8 @@ export function createFinanceApi(rpc) {
     getUiPrefs: (org) => call("fin3_get_ui_prefs", { p_org: org }),
     setUiMode: (org, mode) => { if (!UI_MODES.includes(mode)) throw bad("Mode must be simple or accountant"); return call("fin3_set_ui_prefs", { p_org: org, p_prefs: { mode } }); },
     myPermissions: (org) => call("fin3_my_permissions", { p_org: org }),
+    legacyHistoryReport: (org) => call("fin3_migration_legacy_history_report", { p_org: org }),
+    importLegacyHistory: (org) => call("fin3_migration_import_legacy_history", { p_org: org }),
     // Simple Mode
     overview: (org, currency = null) => call("fin3_overview", { p_org: org, p_currency: currency }),
     explainSafeToSpend: (org, currency = null) => call("fin3_explain_safe_to_spend", { p_org: org, p_currency: currency }),
