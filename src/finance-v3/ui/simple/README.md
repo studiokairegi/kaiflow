@@ -1,1 +1,2 @@
-Owner: Phase 5. Plain-language owner experience. Default mode for new users. Shows the same figures as Accountant Mode (single API), simplified wording only.
+Phase 5 (built). Simple Mode: Home (overview, warnings, "how is this worked out", 12 quick actions), Invoices (create, approve, issue, email composer, payment link, receipts, activity timeline), Payments, Projects.
+Plain-language wording only; every figure comes from the same `fin3_*` functions Accountant Mode reads. Money rules live in the database; screens never compute balances or safe-to-spend.

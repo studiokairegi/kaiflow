@@ -1,0 +1,2959 @@
+{
+    "fin3_overview": {
+        "currency": "KES",
+        "warnings": [
+            {
+                "code": "cash_shortfall",
+                "amount": "12600.00",
+                "message": "Your commitments are higher than the cash you have. Do not spend until money comes in.",
+                "severity": "critical"
+            },
+            {
+                "code": "overdue_invoices",
+                "count": 1,
+                "amount": "500.00",
+                "message": "1 invoice(s) are past their due date.",
+                "severity": "warning"
+            },
+            {
+                "code": "reserve_below_minimum",
+                "count": 1,
+                "message": "1 reserve(s) are below the minimum you set.",
+                "severity": "warning"
+            },
+            {
+                "code": "payments_awaiting_verification",
+                "count": 1,
+                "message": "1 payment(s) are waiting for you to check them. They are not counted as cash yet.",
+                "severity": "info"
+            }
+        ],
+        "shortfall": "12600.00",
+        "base_currency": "KES",
+        "money_in_bank": "2400.00",
+        "safe_to_spend": "0.00",
+        "available_cash": "2400.00",
+        "clients_overdue": "500.00",
+        "clients_owe_you": "3760.00",
+        "recent_activity": [
+            {
+                "at": "2026-11-26T22:25:09.648411+03:00",
+                "action": "queue_email",
+                "object_id": "f564aca1-eb77-42e1-ace1-e9b3cb8bdc72",
+                "object_type": "email_message"
+            },
+            {
+                "at": "2026-11-26T22:25:09.648411+03:00",
+                "action": "issue_invoice",
+                "object_id": "f96951b7-626c-4c25-b893-6678ce5321bc",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.648411+03:00",
+                "action": "post_entry",
+                "object_id": "75f3c42c-5585-4690-aff0-d2f4500bbfa4",
+                "object_type": "journal_entry"
+            },
+            {
+                "at": "2026-11-26T22:25:09.648411+03:00",
+                "action": "approve_invoice",
+                "object_id": "f96951b7-626c-4c25-b893-6678ce5321bc",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.648411+03:00",
+                "action": "create_invoice_draft",
+                "object_id": "f96951b7-626c-4c25-b893-6678ce5321bc",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "action": "update_protection_settings",
+                "object_id": "65dd2417-d92d-d4ef-94d9-964330fe5a34",
+                "object_type": "protection_settings"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "action": "record_owner_payment",
+                "object_id": "3bcfb60a-0808-4d48-8701-e037c7861b63",
+                "object_type": "owner_payment"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "action": "post_entry",
+                "object_id": "6116c514-d4d6-41f7-a50a-f4665c319dc3",
+                "object_type": "journal_entry"
+            }
+        ],
+        "recent_invoices": [
+            {
+                "id": "f96951b7-626c-4c25-b893-6678ce5321bc",
+                "total": "2500.00",
+                "status": "issued",
+                "currency": "KES",
+                "due_date": "2026-12-10",
+                "invoice_no": "INV-000003",
+                "client_name": "Acme Films",
+                "outstanding": "2500.00"
+            },
+            {
+                "id": "5be90fab-444b-41d2-b9af-e53d185cc207",
+                "total": "500.00",
+                "status": "issued",
+                "currency": "KES",
+                "due_date": "2026-11-06",
+                "invoice_no": "INV-000002",
+                "client_name": "Acme Films",
+                "outstanding": "500.00"
+            },
+            {
+                "id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "total": "1160.00",
+                "status": "partially_paid",
+                "currency": "KES",
+                "due_date": "2026-12-10",
+                "invoice_no": "INV-000001",
+                "client_name": "Acme Films",
+                "outstanding": "760.00"
+            }
+        ],
+        "recent_payments": [
+            {
+                "id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+                "amount": "400.00",
+                "method": "bank_transfer",
+                "currency": "KES",
+                "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "invoice_no": "INV-000001",
+                "received_at": "2026-11-26T03:00:00+03:00",
+                "verification_status": "verified"
+            },
+            {
+                "id": "9d47bd38-a781-4bcd-848d-2acbb1f41c17",
+                "amount": "160.00",
+                "method": "bank_transfer",
+                "currency": "KES",
+                "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "invoice_no": "INV-000001",
+                "received_at": "2026-11-26T03:00:00+03:00",
+                "verification_status": "pending_verification"
+            }
+        ],
+        "business_reserve": "10000.00",
+        "owed_to_animators": "5000.00",
+        "other_bills_outstanding": "0.00",
+        "money_received_last_30_days": "400.00"
+    },
+    "fin3_dashboard": {
+        "to": "2026-11-26",
+        "from": "2026-11-01",
+        "profit": "-4500.00",
+        "source": "finance_v3.ledger",
+        "revenue": "3500.00",
+        "currency": "KES",
+        "expenses": "8000.00",
+        "warnings": [
+            {
+                "code": "cash_shortfall",
+                "amount": "12600.00",
+                "message": "Your commitments are higher than the cash you have. Do not spend until money comes in.",
+                "severity": "critical"
+            },
+            {
+                "code": "overdue_invoices",
+                "count": 1,
+                "amount": "500.00",
+                "message": "1 invoice(s) are past their due date.",
+                "severity": "warning"
+            },
+            {
+                "code": "reserve_below_minimum",
+                "count": 1,
+                "message": "1 reserve(s) are below the minimum you set.",
+                "severity": "warning"
+            },
+            {
+                "code": "payments_awaiting_verification",
+                "count": 1,
+                "message": "1 payment(s) are waiting for you to check them. They are not counted as cash yet.",
+                "severity": "info"
+            }
+        ],
+        "shortfall": "12600.00",
+        "money_in_bank": "2400.00",
+        "safe_to_spend": "0.00",
+        "business_reserve": "10000.00",
+        "overdue_invoices": "500.00",
+        "received_payments": "400.00",
+        "animator_obligations": "5000.00",
+        "outstanding_invoices": "3760.00",
+        "unread_notifications": 9,
+        "overdue_invoice_count": 1,
+        "received_payments_window": "last_30_days",
+        "excluded_entries_missing_fx": 0
+    },
+    "fin3_list_audit": {
+        "items": [
+            {
+                "at": "2026-11-26T22:25:09.648411+03:00",
+                "id": 264,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "queue_email",
+                "reason": null,
+                "object_id": "f564aca1-eb77-42e1-ace1-e9b3cb8bdc72",
+                "object_type": "email_message"
+            },
+            {
+                "at": "2026-11-26T22:25:09.648411+03:00",
+                "id": 263,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "issue_invoice",
+                "reason": null,
+                "object_id": "f96951b7-626c-4c25-b893-6678ce5321bc",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.648411+03:00",
+                "id": 262,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "post_entry",
+                "reason": null,
+                "object_id": "75f3c42c-5585-4690-aff0-d2f4500bbfa4",
+                "object_type": "journal_entry"
+            },
+            {
+                "at": "2026-11-26T22:25:09.648411+03:00",
+                "id": 261,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "approve_invoice",
+                "reason": null,
+                "object_id": "f96951b7-626c-4c25-b893-6678ce5321bc",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.648411+03:00",
+                "id": 260,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "create_invoice_draft",
+                "reason": null,
+                "object_id": "f96951b7-626c-4c25-b893-6678ce5321bc",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "id": 259,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "update_protection_settings",
+                "reason": null,
+                "object_id": "65dd2417-d92d-d4ef-94d9-964330fe5a34",
+                "object_type": "protection_settings"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "id": 258,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "record_owner_payment",
+                "reason": null,
+                "object_id": "3bcfb60a-0808-4d48-8701-e037c7861b63",
+                "object_type": "owner_payment"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "id": 257,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "post_entry",
+                "reason": null,
+                "object_id": "6116c514-d4d6-41f7-a50a-f4665c319dc3",
+                "object_type": "journal_entry"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "id": 256,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "protection_overridden",
+                "reason": "Testing the shortfall warning path",
+                "object_id": null,
+                "object_type": "owner_draw"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "id": 255,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "update_protection_settings",
+                "reason": null,
+                "object_id": "65dd2417-d92d-d4ef-94d9-964330fe5a34",
+                "object_type": "protection_settings"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "id": 254,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "issue_invoice",
+                "reason": null,
+                "object_id": "5be90fab-444b-41d2-b9af-e53d185cc207",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "id": 253,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "post_entry",
+                "reason": null,
+                "object_id": "be10c194-1dc2-4d4f-82dd-cfdf02440166",
+                "object_type": "journal_entry"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "id": 252,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "approve_invoice",
+                "reason": null,
+                "object_id": "5be90fab-444b-41d2-b9af-e53d185cc207",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.544885+03:00",
+                "id": 251,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "create_invoice_draft",
+                "reason": null,
+                "object_id": "5be90fab-444b-41d2-b9af-e53d185cc207",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 250,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "reserve_contribution",
+                "reason": null,
+                "object_id": "01140ef1-ef8c-4729-85e5-4dc3ea934e42",
+                "object_type": "reserve"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 249,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "upsert_reserve",
+                "reason": null,
+                "object_id": "01140ef1-ef8c-4729-85e5-4dc3ea934e42",
+                "object_type": "reserve"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 248,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "approve_animator_work",
+                "reason": null,
+                "object_id": "638f53ee-b07c-4091-a4db-82ee8b4a33f8",
+                "object_type": "animator_work"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 247,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "post_entry",
+                "reason": null,
+                "object_id": "f0e42ac5-d5b6-4c5c-85f1-1613db41b129",
+                "object_type": "journal_entry"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 246,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "submit_animator_work",
+                "reason": null,
+                "object_id": "638f53ee-b07c-4091-a4db-82ee8b4a33f8",
+                "object_type": "animator_work"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 245,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "upsert_animator_assignment",
+                "reason": null,
+                "object_id": "1403dbbe-79a2-454d-b686-d67ec681481e",
+                "object_type": "animator_assignment"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 244,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "record_expense",
+                "reason": null,
+                "object_id": "0a2a3eb5-2466-4c3a-a280-27e6e6d9e17b",
+                "object_type": "expense"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 243,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "post_entry",
+                "reason": null,
+                "object_id": "fd202108-b606-401c-b0e0-6f91f6303698",
+                "object_type": "journal_entry"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 242,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "record_manual_payment",
+                "reason": null,
+                "object_id": "9d47bd38-a781-4bcd-848d-2acbb1f41c17",
+                "object_type": "payment"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 241,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "queue_email",
+                "reason": null,
+                "object_id": "2f0e9b90-ffa8-4414-a085-af9d45a0eb1b",
+                "object_type": "email_message"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 240,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "record_payment",
+                "reason": null,
+                "object_id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+                "object_type": "payment"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 239,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "post_entry",
+                "reason": null,
+                "object_id": "c7fe68e8-a1cc-49d3-80f0-ebe28b7283ba",
+                "object_type": "journal_entry"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 238,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "record_manual_payment",
+                "reason": null,
+                "object_id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+                "object_type": "payment"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 237,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "issue_invoice",
+                "reason": null,
+                "object_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 236,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "post_entry",
+                "reason": null,
+                "object_id": "4a385bcf-45b0-4aed-a958-7a35cb673e11",
+                "object_type": "journal_entry"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 235,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "approve_invoice",
+                "reason": null,
+                "object_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 234,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "create_invoice_draft",
+                "reason": null,
+                "object_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "object_type": "receivable"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 233,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "post_entry",
+                "reason": null,
+                "object_id": "cb23fe04-0235-4f77-afcd-36b512273c5b",
+                "object_type": "journal_entry"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 232,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "create_contact",
+                "reason": null,
+                "object_id": "762670fd-a44a-4823-a2d9-9e8eac06398e",
+                "object_type": "contact"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 231,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "create_contact",
+                "reason": null,
+                "object_id": "6621205b-6584-48c3-9029-7647be48c8b6",
+                "object_type": "contact"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 230,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "update_org_profile",
+                "reason": null,
+                "object_id": "65dd2417-d92d-d4ef-94d9-964330fe5a34",
+                "object_type": "org_settings"
+            },
+            {
+                "at": "2026-11-26T22:25:09.413345+03:00",
+                "id": 229,
+                "actor": "ea1569aa-4beb-8750-35dd-aa52b6764611",
+                "action": "init_organization",
+                "reason": null,
+                "object_id": "65dd2417-d92d-d4ef-94d9-964330fe5a34",
+                "object_type": "org_settings"
+            }
+        ],
+        "limit": 50,
+        "total": 36,
+        "offset": 0
+    },
+    "fin3_list_bills": [
+    ],
+    "fin3_export_rows": {
+        "kind": "invoices",
+        "rows": [
+            [
+                "INV-000002",
+                "Acme Films",
+                "issued",
+                "KES",
+                "2026-10-17",
+                "2026-11-06",
+                "500.00",
+                "0.00",
+                "0.00",
+                "500.00",
+                null
+            ],
+            [
+                "INV-000001",
+                "Acme Films",
+                "partially_paid",
+                "KES",
+                "2026-11-26",
+                "2026-12-10",
+                "1160.00",
+                "400.00",
+                "0.00",
+                "760.00",
+                null
+            ],
+            [
+                "INV-000003",
+                "Acme Films",
+                "issued",
+                "KES",
+                "2026-11-26",
+                "2026-12-10",
+                "2500.00",
+                "0.00",
+                "0.00",
+                "2500.00",
+                null
+            ]
+        ],
+        "columns": [
+            "invoice_no",
+            "client",
+            "status",
+            "currency",
+            "issue_date",
+            "due_date",
+            "total",
+            "amount_paid",
+            "credit_total",
+            "outstanding",
+            "project_id"
+        ],
+        "row_count": 3,
+        "truncated": false
+    },
+    "fin3_get_invoice": {
+        "id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+        "lines": [
+            {
+                "line_no": 1,
+                "quantity": "1.0000",
+                "tax_rate": "16.0000",
+                "account_id": "881ccc47-3dbd-4971-9d75-a10cd128e1fc",
+                "line_total": "1160.00",
+                "net_amount": "1000.00",
+                "tax_amount": "160.00",
+                "unit_price": "1000.0000",
+                "description": "Animation",
+                "discount_pct": "0.0000",
+                "gross_amount": "1000.00",
+                "discount_amount": "0.00"
+            }
+        ],
+        "notes": null,
+        "total": "1160.00",
+        "client": {
+            "id": "6621205b-6584-48c3-9029-7647be48c8b6",
+            "name": "Acme Films",
+            "email": "pay@acme.test"
+        },
+        "origin": "native",
+        "status": "partially_paid",
+        "credits": [
+        ],
+        "currency": "KES",
+        "due_date": "2026-12-10",
+        "payments": [
+            {
+                "id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+                "amount": "400.00",
+                "method": "bank_transfer",
+                "status": "recorded",
+                "reference": "REF-1",
+                "received_at": "2026-11-26T03:00:00+03:00",
+                "refunded_amount": "0.00",
+                "verification_status": "verified"
+            },
+            {
+                "id": "9d47bd38-a781-4bcd-848d-2acbb1f41c17",
+                "amount": "160.00",
+                "method": "bank_transfer",
+                "status": "recorded",
+                "reference": "REF-2",
+                "received_at": "2026-11-26T03:00:00+03:00",
+                "refunded_amount": "0.00",
+                "verification_status": "pending_verification"
+            }
+        ],
+        "revision": 1,
+        "subtotal": "1000.00",
+        "issued_at": "2026-11-26T22:25:09.413345+03:00",
+        "tax_total": "160.00",
+        "voided_at": null,
+        "created_at": "2026-11-26T22:25:09.413345+03:00",
+        "invoice_no": "INV-000001",
+        "is_overdue": false,
+        "issue_date": "2026-11-26",
+        "project_id": null,
+        "amount_paid": "400.00",
+        "approved_at": "2026-11-26T22:25:09.413345+03:00",
+        "ledger_mode": "full",
+        "outstanding": "760.00",
+        "void_reason": null,
+        "credit_total": "0.00",
+        "days_overdue": 0,
+        "po_reference": null,
+        "void_entry_id": null,
+        "discount_total": "0.00",
+        "issued_entry_id": "4a385bcf-45b0-4aed-a958-7a35cb673e11",
+        "payment_terms_days": 14,
+        "payment_terms_text": null
+    },
+    "fin3_list_emails": [
+        {
+            "id": "f564aca1-eb77-42e1-ace1-e9b3cb8bdc72",
+            "status": "queued",
+            "sent_at": null,
+            "subject": null,
+            "client_id": "6621205b-6584-48c3-9029-7647be48c8b6",
+            "failed_at": null,
+            "recipient": "pay@acme.test",
+            "refund_id": null,
+            "resend_of": null,
+            "created_at": "2026-11-26T22:25:09.648411+03:00",
+            "email_type": "invoice",
+            "invoice_id": "f96951b7-626c-4c25-b893-6678ce5321bc",
+            "payment_id": null,
+            "receipt_id": null,
+            "delivered_at": null,
+            "failure_code": null,
+            "attempt_count": 0,
+            "delivery_flags": [
+            ],
+            "failure_detail": null,
+            "unknown_outcome": false
+        },
+        {
+            "id": "2f0e9b90-ffa8-4414-a085-af9d45a0eb1b",
+            "status": "queued",
+            "sent_at": null,
+            "subject": null,
+            "client_id": "6621205b-6584-48c3-9029-7647be48c8b6",
+            "failed_at": null,
+            "recipient": "pay@acme.test",
+            "refund_id": null,
+            "resend_of": null,
+            "created_at": "2026-11-26T22:25:09.413345+03:00",
+            "email_type": "payment_receipt",
+            "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+            "payment_id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+            "receipt_id": "d518a27a-611c-4cfa-ad64-05676265846e",
+            "delivered_at": null,
+            "failure_code": null,
+            "attempt_count": 0,
+            "delivery_flags": [
+            ],
+            "failure_detail": null,
+            "unknown_outcome": false
+        }
+    ],
+    "fin3_get_ui_prefs": {
+        "mode": "simple",
+        "is_default": false
+    },
+    "fin3_list_entries": {
+        "items": [
+            {
+                "id": "75f3c42c-5585-4690-aff0-d2f4500bbfa4",
+                "date": "2026-11-26",
+                "kind": "invoice_issued",
+                "memo": "Invoice INV-000003 - Acme Films",
+                "lines": [
+                    {
+                        "memo": null,
+                        "side": "debit",
+                        "amount": "2500.00",
+                        "line_no": 1,
+                        "currency": "KES",
+                        "amount_base": "2500.00",
+                        "account_code": "1100",
+                        "account_name": "Accounts Receivable"
+                    },
+                    {
+                        "memo": null,
+                        "side": "credit",
+                        "amount": "2500.00",
+                        "line_no": 2,
+                        "currency": "KES",
+                        "amount_base": "2500.00",
+                        "account_code": "4000",
+                        "account_name": "Animation Services Revenue"
+                    }
+                ],
+                "entry_no": 8,
+                "reversed": false,
+                "fx_status": "native",
+                "reference": "INV-000003",
+                "reversal_reason": null,
+                "reverses_entry_id": null
+            },
+            {
+                "id": "6116c514-d4d6-41f7-a50a-f4665c319dc3",
+                "date": "2026-11-26",
+                "kind": "owner_draw",
+                "memo": "big draw",
+                "lines": [
+                    {
+                        "memo": null,
+                        "side": "debit",
+                        "amount": "95000.00",
+                        "line_no": 1,
+                        "currency": "KES",
+                        "amount_base": "95000.00",
+                        "account_code": "3200",
+                        "account_name": "Owner Draws"
+                    },
+                    {
+                        "memo": null,
+                        "side": "credit",
+                        "amount": "95000.00",
+                        "line_no": 2,
+                        "currency": "KES",
+                        "amount_base": "95000.00",
+                        "account_code": "1010",
+                        "account_name": "Operating Bank Account"
+                    }
+                ],
+                "entry_no": 7,
+                "reversed": false,
+                "fx_status": "native",
+                "reference": null,
+                "reversal_reason": null,
+                "reverses_entry_id": null
+            },
+            {
+                "id": "f0e42ac5-d5b6-4c5c-85f1-1613db41b129",
+                "date": "2026-11-26",
+                "kind": "animator_obligation",
+                "memo": "Animator work SH-010 - Amani Animator",
+                "lines": [
+                    {
+                        "memo": null,
+                        "side": "debit",
+                        "amount": "5000.00",
+                        "line_no": 1,
+                        "currency": "KES",
+                        "amount_base": "5000.00",
+                        "account_code": "5000",
+                        "account_name": "Animator Costs"
+                    },
+                    {
+                        "memo": null,
+                        "side": "credit",
+                        "amount": "5000.00",
+                        "line_no": 2,
+                        "currency": "KES",
+                        "amount_base": "5000.00",
+                        "account_code": "2100",
+                        "account_name": "Animator and Freelancer Payables"
+                    }
+                ],
+                "entry_no": 5,
+                "reversed": false,
+                "fx_status": "native",
+                "reference": "SH-010",
+                "reversal_reason": null,
+                "reverses_entry_id": null
+            },
+            {
+                "id": "fd202108-b606-401c-b0e0-6f91f6303698",
+                "date": "2026-11-26",
+                "kind": "expense_paid",
+                "memo": "Render credits",
+                "lines": [
+                    {
+                        "memo": null,
+                        "side": "debit",
+                        "amount": "3000.00",
+                        "line_no": 1,
+                        "currency": "KES",
+                        "amount_base": "3000.00",
+                        "account_code": "6200",
+                        "account_name": "Software Subscriptions"
+                    },
+                    {
+                        "memo": null,
+                        "side": "credit",
+                        "amount": "3000.00",
+                        "line_no": 2,
+                        "currency": "KES",
+                        "amount_base": "3000.00",
+                        "account_code": "1010",
+                        "account_name": "Operating Bank Account"
+                    }
+                ],
+                "entry_no": 4,
+                "reversed": false,
+                "fx_status": "native",
+                "reference": "EXP-000001",
+                "reversal_reason": null,
+                "reverses_entry_id": null
+            },
+            {
+                "id": "c7fe68e8-a1cc-49d3-80f0-ebe28b7283ba",
+                "date": "2026-11-26",
+                "kind": "client_payment",
+                "memo": "Payment for invoice INV-000001",
+                "lines": [
+                    {
+                        "memo": null,
+                        "side": "debit",
+                        "amount": "400.00",
+                        "line_no": 1,
+                        "currency": "KES",
+                        "amount_base": "400.00",
+                        "account_code": "1010",
+                        "account_name": "Operating Bank Account"
+                    },
+                    {
+                        "memo": null,
+                        "side": "credit",
+                        "amount": "400.00",
+                        "line_no": 2,
+                        "currency": "KES",
+                        "amount_base": "400.00",
+                        "account_code": "1100",
+                        "account_name": "Accounts Receivable"
+                    }
+                ],
+                "entry_no": 3,
+                "reversed": false,
+                "fx_status": "native",
+                "reference": "INV-000001",
+                "reversal_reason": null,
+                "reverses_entry_id": null
+            },
+            {
+                "id": "4a385bcf-45b0-4aed-a958-7a35cb673e11",
+                "date": "2026-11-26",
+                "kind": "invoice_issued",
+                "memo": "Invoice INV-000001 - Acme Films",
+                "lines": [
+                    {
+                        "memo": null,
+                        "side": "debit",
+                        "amount": "1160.00",
+                        "line_no": 1,
+                        "currency": "KES",
+                        "amount_base": "1160.00",
+                        "account_code": "1100",
+                        "account_name": "Accounts Receivable"
+                    },
+                    {
+                        "memo": null,
+                        "side": "credit",
+                        "amount": "1000.00",
+                        "line_no": 2,
+                        "currency": "KES",
+                        "amount_base": "1000.00",
+                        "account_code": "4000",
+                        "account_name": "Animation Services Revenue"
+                    },
+                    {
+                        "memo": null,
+                        "side": "credit",
+                        "amount": "160.00",
+                        "line_no": 3,
+                        "currency": "KES",
+                        "amount_base": "160.00",
+                        "account_code": "2300",
+                        "account_name": "Sales Tax / VAT Payable"
+                    }
+                ],
+                "entry_no": 2,
+                "reversed": false,
+                "fx_status": "native",
+                "reference": "INV-000001",
+                "reversal_reason": null,
+                "reverses_entry_id": null
+            },
+            {
+                "id": "cb23fe04-0235-4f77-afcd-36b512273c5b",
+                "date": "2026-11-26",
+                "kind": "manual_journal",
+                "memo": "Opening cash",
+                "lines": [
+                    {
+                        "memo": null,
+                        "side": "debit",
+                        "amount": "100000.00",
+                        "line_no": 1,
+                        "currency": "KES",
+                        "amount_base": "100000.00",
+                        "account_code": "1010",
+                        "account_name": "Operating Bank Account"
+                    },
+                    {
+                        "memo": null,
+                        "side": "credit",
+                        "amount": "100000.00",
+                        "line_no": 2,
+                        "currency": "KES",
+                        "amount_base": "100000.00",
+                        "account_code": "3100",
+                        "account_name": "Owner Contributions"
+                    }
+                ],
+                "entry_no": 1,
+                "reversed": false,
+                "fx_status": "native",
+                "reference": null,
+                "reversal_reason": null,
+                "reverses_entry_id": null
+            },
+            {
+                "id": "be10c194-1dc2-4d4f-82dd-cfdf02440166",
+                "date": "2026-10-17",
+                "kind": "invoice_issued",
+                "memo": "Invoice INV-000002 - Acme Films",
+                "lines": [
+                    {
+                        "memo": null,
+                        "side": "debit",
+                        "amount": "500.00",
+                        "line_no": 1,
+                        "currency": "KES",
+                        "amount_base": "500.00",
+                        "account_code": "1100",
+                        "account_name": "Accounts Receivable"
+                    },
+                    {
+                        "memo": null,
+                        "side": "credit",
+                        "amount": "500.00",
+                        "line_no": 2,
+                        "currency": "KES",
+                        "amount_base": "500.00",
+                        "account_code": "4000",
+                        "account_name": "Animation Services Revenue"
+                    }
+                ],
+                "entry_no": 6,
+                "reversed": false,
+                "fx_status": "native",
+                "reference": "INV-000002",
+                "reversal_reason": null,
+                "reverses_entry_id": null
+            }
+        ],
+        "limit": 50,
+        "total": 8,
+        "offset": 0
+    },
+    "fin3_list_refunds": [
+    ],
+    "fin3_set_ui_prefs": {
+        "mode": "accountant",
+        "is_default": false
+    },
+    "fin3_list_accounts": [
+        {
+            "id": "fd88d7fc-db03-4e25-bb51-c986fee6fc55",
+            "code": "1000",
+            "name": "Cash and Bank",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "cash_and_bank",
+            "description": "Parent of all bank, cash and clearing accounts.",
+            "is_postable": false,
+            "account_type": "asset",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "fa8a8069-4c8f-4eb3-8ad8-e59f322434ad",
+            "code": "1010",
+            "name": "Operating Bank Account",
+            "currency": "KES",
+            "is_active": true,
+            "is_system": false,
+            "parent_id": "fd88d7fc-db03-4e25-bb51-c986fee6fc55",
+            "system_key": null,
+            "description": "Main studio bank account (base currency).",
+            "is_postable": true,
+            "account_type": "asset",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "cdf27c62-0742-4529-96d6-ec1a0f888f1e",
+            "code": "1020",
+            "name": "Cash on Hand",
+            "currency": "KES",
+            "is_active": true,
+            "is_system": false,
+            "parent_id": "fd88d7fc-db03-4e25-bb51-c986fee6fc55",
+            "system_key": null,
+            "description": "Physical cash.",
+            "is_postable": true,
+            "account_type": "asset",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "26450fa9-c4f4-4ab8-9de0-5afbbf989001",
+            "code": "1030",
+            "name": "Business Reserve Account",
+            "currency": "KES",
+            "is_active": true,
+            "is_system": false,
+            "parent_id": "fd88d7fc-db03-4e25-bb51-c986fee6fc55",
+            "system_key": null,
+            "description": "Optional physical account for the operating reserve. The reserve itself is a logical allocation, not a ledger account.",
+            "is_postable": true,
+            "account_type": "asset",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "8a253180-fc73-4f43-a655-09a3682e83de",
+            "code": "1050",
+            "name": "Online Payments Clearing",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": "fd88d7fc-db03-4e25-bb51-c986fee6fc55",
+            "system_key": "payment_clearing",
+            "description": "Money collected by a payment provider and not yet settled to the bank. Provider-neutral. Accepts any currency (each currency balances by itself).",
+            "is_postable": true,
+            "account_type": "asset",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "69465bb7-edf7-4929-9780-37e76730588e",
+            "code": "1100",
+            "name": "Accounts Receivable",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "accounts_receivable",
+            "description": "Amounts clients owe for issued invoices.",
+            "is_postable": true,
+            "account_type": "asset",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "d0d4883f-d205-46ee-bfde-0ffeae5b4084",
+            "code": "1200",
+            "name": "Prepaid Expenses and Deposits",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "asset",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "38a2141a-482d-4ac0-b78f-d1fe2174aa8a",
+            "code": "1300",
+            "name": "Freelancer Advances",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "Money advanced to freelancers or animators before work is approved.",
+            "is_postable": true,
+            "account_type": "asset",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "dacccc1a-a649-4b6c-bf5a-7aadcced371b",
+            "code": "1500",
+            "name": "Equipment and Computers",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "Workstations, tablets, screens and other equipment.",
+            "is_postable": true,
+            "account_type": "asset",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "22979b09-c505-4c59-b95f-31bdb38e9a82",
+            "code": "2000",
+            "name": "Accounts Payable",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "accounts_payable",
+            "description": "Supplier and contractor bills approved but unpaid.",
+            "is_postable": true,
+            "account_type": "liability",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "7263e744-f58e-4a80-b880-f0b88f37130c",
+            "code": "2100",
+            "name": "Animator and Freelancer Payables",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "animator_payables",
+            "description": "Approved animator work not yet paid.",
+            "is_postable": true,
+            "account_type": "liability",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "43a95a09-cf8e-464c-87d6-b8d1c4faa3f0",
+            "code": "2200",
+            "name": "Client Deposits and Unearned Revenue",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "client_deposits",
+            "description": "Money received before work is delivered.",
+            "is_postable": true,
+            "account_type": "liability",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "c90a1d93-5259-4356-af7a-0fd91a2526d2",
+            "code": "2300",
+            "name": "Sales Tax / VAT Payable",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "tax_payable",
+            "description": "Tax collected from clients and owed to the tax authority.",
+            "is_postable": true,
+            "account_type": "liability",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "a0904b19-3101-440d-a26e-3e6f60377996",
+            "code": "2400",
+            "name": "Accrued Expenses",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "liability",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "08ff8236-fed2-4ccc-b6a9-87829f8eb086",
+            "code": "2500",
+            "name": "Owner Payable",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "owner_payable",
+            "description": "Business costs the owner paid personally and is owed back.",
+            "is_postable": true,
+            "account_type": "liability",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "c07d949f-8031-41ad-908b-957afe2323fe",
+            "code": "2600",
+            "name": "Loans Payable",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "liability",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "f398e914-ae79-4cad-b383-110799c6ca2e",
+            "code": "3100",
+            "name": "Owner Contributions",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "owner_contributions",
+            "description": "Money the owner put into the business.",
+            "is_postable": true,
+            "account_type": "equity",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "5482db2c-0e05-4564-ba07-90e1140d30d2",
+            "code": "3200",
+            "name": "Owner Draws",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "owner_draws",
+            "description": "Money the owner took out of the business.",
+            "is_postable": true,
+            "account_type": "equity",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "410fab8f-820f-40a0-9688-6505c68f1839",
+            "code": "3300",
+            "name": "Opening Balance Equity",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "opening_balance",
+            "description": "Balancing account for opening balances.",
+            "is_postable": true,
+            "account_type": "equity",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "62911d08-99d7-473a-8036-e7361b433b22",
+            "code": "3900",
+            "name": "Retained Earnings",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "retained_earnings",
+            "description": "Accumulated profit from closed periods. Current-period profit is computed by reports.",
+            "is_postable": true,
+            "account_type": "equity",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "881ccc47-3dbd-4971-9d75-a10cd128e1fc",
+            "code": "4000",
+            "name": "Animation Services Revenue",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "revenue_animation",
+            "description": "Animation production work invoiced to clients.",
+            "is_postable": true,
+            "account_type": "revenue",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "30edef72-f50c-470a-b701-e32900866c09",
+            "code": "4100",
+            "name": "Pre-production Revenue",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "Concept, storyboard and design work.",
+            "is_postable": true,
+            "account_type": "revenue",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "7420869a-cab8-496f-819e-7ec2485c1954",
+            "code": "4200",
+            "name": "Post-production Revenue",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "Compositing, editing and finishing work.",
+            "is_postable": true,
+            "account_type": "revenue",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "6a9e84a8-3a4e-427b-91e9-77feb2ac51d1",
+            "code": "4300",
+            "name": "Licensing and Royalties",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "revenue",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "150403ed-c621-4680-9bfd-d18c6df6de1e",
+            "code": "5000",
+            "name": "Animator Costs",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "cos_animator",
+            "description": "Cost of animators working on client projects.",
+            "is_postable": true,
+            "account_type": "cost_of_sales",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "b6b2e093-6fcc-4352-8f6d-8d293e53a38f",
+            "code": "5100",
+            "name": "Freelancer and Contractor Costs",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "cost_of_sales",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "0df74432-132c-4c38-bb4c-70783a525256",
+            "code": "5200",
+            "name": "Voice, Music and Sound Costs",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "cost_of_sales",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "39ae60b6-3de0-49fe-a965-3ab015e461de",
+            "code": "5300",
+            "name": "Rendering and Production Software Costs",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "cost_of_sales",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "14515362-869e-41e9-a9cf-f5bedb576f70",
+            "code": "5400",
+            "name": "Other Direct Production Costs",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "cost_of_sales",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "9871b0a1-8036-47e5-aeb4-82f49fc792e4",
+            "code": "6000",
+            "name": "Owner Salary",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "owner_salary",
+            "description": "Salary paid to the owner as an expense.",
+            "is_postable": true,
+            "account_type": "operating_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "83ebba45-5edf-475c-b3b8-77a3673379ce",
+            "code": "6100",
+            "name": "Rent and Utilities",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "operating_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "cd8c5ab5-75ab-44a5-b4cf-24e371f15f44",
+            "code": "6200",
+            "name": "Software Subscriptions",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "operating_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "0f6e9f02-6005-4898-8ece-799e3efe2612",
+            "code": "6300",
+            "name": "Internet and Telecommunications",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "operating_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "965b599e-d5bf-4978-b2fd-129f1a53ea6e",
+            "code": "6400",
+            "name": "Marketing and Advertising",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "operating_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "4bb776ee-cd30-4723-b36b-37c36534ca81",
+            "code": "6500",
+            "name": "Professional Fees",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "Accounting, legal and consulting fees.",
+            "is_postable": true,
+            "account_type": "operating_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "c11d005f-50e3-47c9-b73c-32ed289f75ab",
+            "code": "6600",
+            "name": "Bank and Payment Processing Fees",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "bank_fees",
+            "description": "Bank charges, payment provider fees and transfer fees.",
+            "is_postable": true,
+            "account_type": "operating_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "919400c5-203b-4803-b5df-3fbc8af159ab",
+            "code": "6700",
+            "name": "Travel and Meals",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "operating_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "88279a50-89b1-45f6-8e42-c3673e21f122",
+            "code": "6800",
+            "name": "Equipment and Supplies",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "Small equipment and office supplies.",
+            "is_postable": true,
+            "account_type": "operating_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "30d66ff6-bc51-4a66-99f3-2ac63e02fb56",
+            "code": "6900",
+            "name": "Miscellaneous Expenses",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "operating_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "f052743a-600f-4b9a-a5f4-cd099f83bd70",
+            "code": "7000",
+            "name": "Interest Income",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "other_income",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "3056a101-54d3-4a45-a393-5320b6aace56",
+            "code": "7100",
+            "name": "Realized Foreign Exchange Gain",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "fx_gain",
+            "description": "Gain when a foreign-currency amount is settled at a better rate than it was recorded.",
+            "is_postable": true,
+            "account_type": "other_income",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "73dbb55c-4d45-4ad3-a299-0bdbcd126d68",
+            "code": "7900",
+            "name": "Other Income",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "other_income",
+            "normal_balance": "credit"
+        },
+        {
+            "id": "cf09a2db-4d35-4791-b8a2-e04620de97d1",
+            "code": "8000",
+            "name": "Interest and Finance Charges",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "other_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "9b7bfadf-11de-4969-840a-56e4008558b3",
+            "code": "8100",
+            "name": "Realized Foreign Exchange Loss",
+            "currency": null,
+            "is_active": true,
+            "is_system": true,
+            "parent_id": null,
+            "system_key": "fx_loss",
+            "description": "Loss when a foreign-currency amount is settled at a worse rate than it was recorded.",
+            "is_postable": true,
+            "account_type": "other_expense",
+            "normal_balance": "debit"
+        },
+        {
+            "id": "df71fc3b-5e66-4f22-9e60-749af8b9daeb",
+            "code": "8900",
+            "name": "Other Expenses",
+            "currency": null,
+            "is_active": true,
+            "is_system": false,
+            "parent_id": null,
+            "system_key": null,
+            "description": "",
+            "is_postable": true,
+            "account_type": "other_expense",
+            "normal_balance": "debit"
+        }
+    ],
+    "fin3_list_contacts": [
+        {
+            "id": "6621205b-6584-48c3-9029-7647be48c8b6",
+            "kind": "client",
+            "name": "Acme Films",
+            "email": "pay@acme.test",
+            "phone": null,
+            "tax_id": null,
+            "address": null,
+            "is_active": true,
+            "default_currency": null,
+            "source_legacy_id": null
+        },
+        {
+            "id": "762670fd-a44a-4823-a2d9-9e8eac06398e",
+            "kind": "freelancer",
+            "name": "Amani Animator",
+            "email": null,
+            "phone": null,
+            "tax_id": null,
+            "address": null,
+            "is_active": true,
+            "default_currency": null,
+            "source_legacy_id": null
+        }
+    ],
+    "fin3_list_expenses": [
+        {
+            "id": "0a2a3eb5-2466-4c3a-a280-27e6e6d9e17b",
+            "amount": "3000.00",
+            "currency": "KES",
+            "entry_id": "fd202108-b606-401c-b0e0-6f91f6303698",
+            "reference": null,
+            "tax_class": "none",
+            "vendor_id": null,
+            "expense_no": "EXP-000001",
+            "project_id": null,
+            "category_id": "67a4d476-1ceb-42ac-a123-5ecfbf31e15d",
+            "description": "Render credits",
+            "vendor_name": null,
+            "expense_date": "2026-11-26",
+            "pay_account_id": "fa8a8069-4c8f-4eb3-8ad8-e59f322434ad",
+            "payment_status": "paid",
+            "attachment_count": 0
+        }
+    ],
+    "fin3_list_invoices": {
+        "items": [
+            {
+                "id": "f96951b7-626c-4c25-b893-6678ce5321bc",
+                "lines": [
+                ],
+                "notes": null,
+                "total": "2500.00",
+                "client": {
+                    "id": "6621205b-6584-48c3-9029-7647be48c8b6",
+                    "name": "Acme Films",
+                    "email": "pay@acme.test"
+                },
+                "origin": "native",
+                "status": "issued",
+                "currency": "KES",
+                "due_date": "2026-12-10",
+                "revision": 1,
+                "subtotal": "2500.00",
+                "issued_at": "2026-11-26T22:25:09.648411+03:00",
+                "tax_total": "0.00",
+                "voided_at": null,
+                "created_at": "2026-11-26T22:25:09.648411+03:00",
+                "invoice_no": "INV-000003",
+                "is_overdue": false,
+                "issue_date": "2026-11-26",
+                "project_id": null,
+                "amount_paid": "0.00",
+                "approved_at": "2026-11-26T22:25:09.648411+03:00",
+                "ledger_mode": "full",
+                "outstanding": "2500.00",
+                "void_reason": null,
+                "credit_total": "0.00",
+                "days_overdue": 0,
+                "po_reference": null,
+                "void_entry_id": null,
+                "discount_total": "0.00",
+                "issued_entry_id": "75f3c42c-5585-4690-aff0-d2f4500bbfa4",
+                "payment_terms_days": 14,
+                "payment_terms_text": null
+            },
+            {
+                "id": "5be90fab-444b-41d2-b9af-e53d185cc207",
+                "lines": [
+                ],
+                "notes": null,
+                "total": "500.00",
+                "client": {
+                    "id": "6621205b-6584-48c3-9029-7647be48c8b6",
+                    "name": "Acme Films",
+                    "email": "pay@acme.test"
+                },
+                "origin": "native",
+                "status": "issued",
+                "currency": "KES",
+                "due_date": "2026-11-06",
+                "revision": 1,
+                "subtotal": "500.00",
+                "issued_at": "2026-11-26T22:25:09.544885+03:00",
+                "tax_total": "0.00",
+                "voided_at": null,
+                "created_at": "2026-11-26T22:25:09.544885+03:00",
+                "invoice_no": "INV-000002",
+                "is_overdue": true,
+                "issue_date": "2026-10-17",
+                "project_id": null,
+                "amount_paid": "0.00",
+                "approved_at": "2026-11-26T22:25:09.544885+03:00",
+                "ledger_mode": "full",
+                "outstanding": "500.00",
+                "void_reason": null,
+                "credit_total": "0.00",
+                "days_overdue": 20,
+                "po_reference": null,
+                "void_entry_id": null,
+                "discount_total": "0.00",
+                "issued_entry_id": "be10c194-1dc2-4d4f-82dd-cfdf02440166",
+                "payment_terms_days": 14,
+                "payment_terms_text": null
+            },
+            {
+                "id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "lines": [
+                ],
+                "notes": null,
+                "total": "1160.00",
+                "client": {
+                    "id": "6621205b-6584-48c3-9029-7647be48c8b6",
+                    "name": "Acme Films",
+                    "email": "pay@acme.test"
+                },
+                "origin": "native",
+                "status": "partially_paid",
+                "currency": "KES",
+                "due_date": "2026-12-10",
+                "revision": 1,
+                "subtotal": "1000.00",
+                "issued_at": "2026-11-26T22:25:09.413345+03:00",
+                "tax_total": "160.00",
+                "voided_at": null,
+                "created_at": "2026-11-26T22:25:09.413345+03:00",
+                "invoice_no": "INV-000001",
+                "is_overdue": false,
+                "issue_date": "2026-11-26",
+                "project_id": null,
+                "amount_paid": "400.00",
+                "approved_at": "2026-11-26T22:25:09.413345+03:00",
+                "ledger_mode": "full",
+                "outstanding": "760.00",
+                "void_reason": null,
+                "credit_total": "0.00",
+                "days_overdue": 0,
+                "po_reference": null,
+                "void_entry_id": null,
+                "discount_total": "0.00",
+                "issued_entry_id": "4a385bcf-45b0-4aed-a958-7a35cb673e11",
+                "payment_terms_days": 14,
+                "payment_terms_text": null
+            }
+        ],
+        "next_cursor": null
+    },
+    "fin3_list_payments": [
+        {
+            "id": "9d47bd38-a781-4bcd-848d-2acbb1f41c17",
+            "amount": "160.00",
+            "method": "bank_transfer",
+            "status": "recorded",
+            "currency": "KES",
+            "provider": null,
+            "reference": "REF-2",
+            "fee_amount": null,
+            "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+            "environment": "live",
+            "received_at": "2026-11-26T03:00:00+03:00",
+            "accounting_date": "2026-11-26",
+            "ledger_entry_id": null,
+            "refunded_amount": "0.00",
+            "provider_reference": null,
+            "verification_status": "pending_verification"
+        },
+        {
+            "id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+            "amount": "400.00",
+            "method": "bank_transfer",
+            "status": "recorded",
+            "currency": "KES",
+            "provider": null,
+            "reference": "REF-1",
+            "fee_amount": null,
+            "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+            "environment": "live",
+            "received_at": "2026-11-26T03:00:00+03:00",
+            "accounting_date": "2026-11-26",
+            "ledger_entry_id": "c7fe68e8-a1cc-49d3-80f0-ebe28b7283ba",
+            "refunded_amount": "0.00",
+            "provider_reference": null,
+            "verification_status": "verified"
+        }
+    ],
+    "fin3_list_receipts": {
+        "items": [
+            {
+                "id": "d518a27a-611c-4cfa-ad64-05676265846e",
+                "amount": "400.00",
+                "status": "issued",
+                "currency": "KES",
+                "issued_at": "2026-11-26T22:25:09.413345+03:00",
+                "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "invoice_no": "INV-000001",
+                "payment_id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+                "receipt_no": "RCT-000001",
+                "email_status": "queued"
+            }
+        ],
+        "limit": 50,
+        "total": 1,
+        "offset": 0
+    },
+    "fin3_list_reserves": [
+        {
+            "id": "01140ef1-ef8c-4729-85e5-4dc3ea934e42",
+            "mode": "logical",
+            "name": "Tax reserve",
+            "status": "below_minimum",
+            "target": "20000.00",
+            "current": "10000.00",
+            "minimum": "15000.00",
+            "purpose": null,
+            "currency": "KES",
+            "is_active": true,
+            "gap_to_target": "10000.00",
+            "ledger_account_id": null,
+            "percent_of_target": "50.0"
+        }
+    ],
+    "fin3_trial_balance": {
+        "as_of": "2026-11-26",
+        "basis": "base",
+        "accounts": [
+            {
+                "code": "1010",
+                "name": "Operating Bank Account",
+                "debit": "100400.0000",
+                "credit": "98000.0000",
+                "balance": "2400.0000",
+                "account_id": "fa8a8069-4c8f-4eb3-8ad8-e59f322434ad",
+                "account_type": "asset",
+                "balance_side": "debit"
+            },
+            {
+                "code": "1100",
+                "name": "Accounts Receivable",
+                "debit": "4160.0000",
+                "credit": "400.0000",
+                "balance": "3760.0000",
+                "account_id": "69465bb7-edf7-4929-9780-37e76730588e",
+                "account_type": "asset",
+                "balance_side": "debit"
+            },
+            {
+                "code": "2100",
+                "name": "Animator and Freelancer Payables",
+                "debit": "0",
+                "credit": "5000.0000",
+                "balance": "5000.0000",
+                "account_id": "7263e744-f58e-4a80-b880-f0b88f37130c",
+                "account_type": "liability",
+                "balance_side": "credit"
+            },
+            {
+                "code": "2300",
+                "name": "Sales Tax / VAT Payable",
+                "debit": "0",
+                "credit": "160.0000",
+                "balance": "160.0000",
+                "account_id": "c90a1d93-5259-4356-af7a-0fd91a2526d2",
+                "account_type": "liability",
+                "balance_side": "credit"
+            },
+            {
+                "code": "3100",
+                "name": "Owner Contributions",
+                "debit": "0",
+                "credit": "100000.0000",
+                "balance": "100000.0000",
+                "account_id": "f398e914-ae79-4cad-b383-110799c6ca2e",
+                "account_type": "equity",
+                "balance_side": "credit"
+            },
+            {
+                "code": "3200",
+                "name": "Owner Draws",
+                "debit": "95000.0000",
+                "credit": "0",
+                "balance": "-95000.0000",
+                "account_id": "5482db2c-0e05-4564-ba07-90e1140d30d2",
+                "account_type": "equity",
+                "balance_side": "credit"
+            },
+            {
+                "code": "4000",
+                "name": "Animation Services Revenue",
+                "debit": "0",
+                "credit": "4000.0000",
+                "balance": "4000.0000",
+                "account_id": "881ccc47-3dbd-4971-9d75-a10cd128e1fc",
+                "account_type": "revenue",
+                "balance_side": "credit"
+            },
+            {
+                "code": "5000",
+                "name": "Animator Costs",
+                "debit": "5000.0000",
+                "credit": "0",
+                "balance": "5000.0000",
+                "account_id": "150403ed-c621-4680-9bfd-d18c6df6de1e",
+                "account_type": "cost_of_sales",
+                "balance_side": "debit"
+            },
+            {
+                "code": "6200",
+                "name": "Software Subscriptions",
+                "debit": "3000.0000",
+                "credit": "0",
+                "balance": "3000.0000",
+                "account_id": "cd8c5ab5-75ab-44a5-b4cf-24e371f15f44",
+                "account_type": "operating_expense",
+                "balance_side": "debit"
+            }
+        ],
+        "balanced": true,
+        "currency": "KES",
+        "total_debits": "207560.0000",
+        "base_currency": "KES",
+        "total_credits": "207560.0000",
+        "excluded_entries": 0
+    },
+    "fin3_my_permissions": [
+        "finance.admin",
+        "finance.approve",
+        "finance.collect",
+        "finance.override",
+        "finance.owner_pay",
+        "finance.pay",
+        "finance.post",
+        "finance.read",
+        "finance.refund",
+        "finance.send_email",
+        "finance.verify_payment",
+        "finance.view_integrations"
+    ],
+    "fin3_payables_aging": {
+        "as_of": "2026-11-26",
+        "totals": [
+        ],
+        "suppliers": [
+        ]
+    },
+    "fin3_report_reserves": {
+        "items": [
+            {
+                "id": "01140ef1-ef8c-4729-85e5-4dc3ea934e42",
+                "mode": "logical",
+                "name": "Tax reserve",
+                "target": "20000.00",
+                "balance": "10000.00",
+                "minimum": "15000.00",
+                "purpose": null,
+                "currency": "KES",
+                "below_target": true,
+                "below_minimum": true
+            }
+        ]
+    },
+    "fin3_get_org_settings": {
+        "engine": "v2",
+        "base_currency": "KES",
+        "last_entry_no": 8,
+        "default_ui_mode": "simple",
+        "organization_id": "65dd2417-d92d-d4ef-94d9-964330fe5a34",
+        "fx_lookback_days": 0,
+        "period_lock_date": null
+    },
+    "fin3_report_cash_flow": {
+        "to": "2026-11-26",
+        "from": "2026-09-27",
+        "note": "Cash accounts are those counted by safe-to-spend: active accounts under Cash and Bank, excluding Online Payments Clearing and account reserves.",
+        "rows": [
+            {
+                "net": "400.00",
+                "kind": "client_payment",
+                "class": "operating",
+                "inflow": "400.00",
+                "outflow": "0.00"
+            },
+            {
+                "net": "-3000.00",
+                "kind": "expense_paid",
+                "class": "operating",
+                "inflow": "0.00",
+                "outflow": "3000.00"
+            },
+            {
+                "net": "100000.00",
+                "kind": "manual_journal",
+                "class": "operating",
+                "inflow": "100000.00",
+                "outflow": "0.00"
+            },
+            {
+                "net": "-95000.00",
+                "kind": "owner_draw",
+                "class": "financing",
+                "inflow": "0.00",
+                "outflow": "95000.00"
+            }
+        ],
+        "basis": "base",
+        "currency": "KES",
+        "net_change": "2400.00",
+        "reconciles": true,
+        "closing_cash": "2400.00",
+        "opening_cash": "0.00"
+    },
+    "fin3_report_integrity": {
+        "as_of": "2026-11-26",
+        "all_ok": true,
+        "checks": [
+            {
+                "ok": true,
+                "code": "trial_balance",
+                "label": "Total debits equal total credits",
+                "actual": "207560.0000",
+                "currency": null,
+                "expected": "207560.0000"
+            },
+            {
+                "ok": true,
+                "code": "ar_matches_ledger",
+                "label": "Money clients owe matches the receivables account",
+                "actual": "3760.00",
+                "currency": "KES",
+                "expected": "3760.00"
+            },
+            {
+                "ok": true,
+                "code": "ap_matches_ledger",
+                "label": "Bills owed match the payables account",
+                "actual": "0.00",
+                "currency": "KES",
+                "expected": "0.00"
+            },
+            {
+                "ok": true,
+                "code": "animators_match_ledger",
+                "label": "Money owed to animators matches the animator payables account",
+                "actual": "5000.00",
+                "currency": "KES",
+                "expected": "5000.00"
+            }
+        ]
+    },
+    "fin3_scheduler_status": {
+        "configured": false,
+        "last_error": null,
+        "last_run_at": "2026-11-26T22:25:10.319798+03:00",
+        "last_finished_at": "2026-11-26T22:25:10.319798+03:00",
+        "open_notifications": 9
+    },
+    "fin3_receivables_aging": {
+        "as_of": "2026-11-26",
+        "totals": [
+            {
+                "total": "3760.00",
+                "current": "3260.00",
+                "currency": "KES",
+                "days_1_30": "500.00",
+                "days_31_60": "0.00",
+                "days_61_90": "0.00",
+                "days_over_90": "0.00",
+                "invoice_count": 3
+            }
+        ],
+        "clients": [
+            {
+                "total": "3760.00",
+                "current": "3260.00",
+                "currency": "KES",
+                "client_id": "6621205b-6584-48c3-9029-7647be48c8b6",
+                "days_1_30": "500.00",
+                "days_31_60": "0.00",
+                "days_61_90": "0.00",
+                "client_name": "Acme Films",
+                "days_over_90": "0.00",
+                "invoice_count": 3
+            }
+        ]
+    },
+    "fin3_get_alert_settings": {
+        "auto_receipts": false,
+        "due_soon_days": 3,
+        "max_reminders": 3,
+        "reminders_enabled": false,
+        "budget_warn_percent": 90,
+        "reminder_repeat_days": 7,
+        "pending_payment_minutes": 30,
+        "reminder_first_after_days": 3
+    },
+    "fin3_list_bank_accounts": [
+    ],
+    "fin3_list_notifications": {
+        "items": [
+            {
+                "id": "4ed12c07-fe00-46e8-ac0d-b63714536100",
+                "body": "Balance 10000.00 KES is under the minimum of 15000.00.",
+                "data": {
+                },
+                "kind": "reserve_below_minimum",
+                "read": false,
+                "title": "Reserve \"Tax reserve\" is below its minimum",
+                "category": "reserve",
+                "resolved": false,
+                "severity": "warning",
+                "object_id": "01140ef1-ef8c-4729-85e5-4dc3ea934e42",
+                "created_at": "2026-11-26T22:25:10.319798+03:00",
+                "object_type": "reserve"
+            },
+            {
+                "id": "7dfb0f0b-618a-4f29-81e5-18b44164fbf2",
+                "body": "5000.00 KES is approved and unpaid.",
+                "data": {
+                },
+                "kind": "animator_payment_due",
+                "read": false,
+                "title": "Animator payment owed",
+                "category": "payables",
+                "resolved": false,
+                "severity": "info",
+                "object_id": "638f53ee-b07c-4091-a4db-82ee8b4a33f8",
+                "created_at": "2026-11-26T22:25:10.319798+03:00",
+                "object_type": "work_item"
+            },
+            {
+                "id": "ab97a962-0af5-4908-9288-1de52afba3c7",
+                "body": "Short by 12600.00 KES after animators, bills and reserves.",
+                "data": {
+                    "shortfall": "12600.0000"
+                },
+                "kind": "cash_shortfall",
+                "read": false,
+                "title": "Commitments are higher than cash (KES)",
+                "category": "cash",
+                "resolved": false,
+                "severity": "critical",
+                "object_id": "KES",
+                "created_at": "2026-11-26T22:25:10.319798+03:00",
+                "object_type": "cash"
+            },
+            {
+                "id": "e63ca5ee-c495-46d9-bf25-6fb031575140",
+                "body": "500.00 KES was due on 2026-11-06.",
+                "data": {
+                    "due_date": "2026-11-06"
+                },
+                "kind": "invoice_overdue",
+                "read": false,
+                "title": "Invoice INV-000002 is overdue",
+                "category": "invoice",
+                "resolved": false,
+                "severity": "warning",
+                "object_id": "5be90fab-444b-41d2-b9af-e53d185cc207",
+                "created_at": "2026-11-26T22:25:10.319798+03:00",
+                "object_type": "invoice"
+            },
+            {
+                "id": "4a7100ae-b39c-4366-b0e9-1d6eed25a546",
+                "body": "95000.00 KES was more than safe-to-spend.",
+                "data": {
+                    "rule": "exceeds_safe_to_spend",
+                    "outcome": "overridden"
+                },
+                "kind": "unsafe_withdrawal",
+                "read": false,
+                "title": "A safety check was overridden",
+                "category": "safety",
+                "resolved": false,
+                "severity": "critical",
+                "object_id": "4",
+                "created_at": "2026-11-26T22:25:09.544885+03:00",
+                "object_type": "protection_event"
+            },
+            {
+                "id": "11175eb3-4acb-47a1-9417-5aa652b47ef7",
+                "body": "160.00 KES on INV-000001 needs to be verified before it counts.",
+                "data": {
+                    "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd"
+                },
+                "kind": "payment_pending_verification",
+                "read": false,
+                "title": "Payment waiting for verification",
+                "category": "payment",
+                "resolved": false,
+                "severity": "warning",
+                "object_id": "9d47bd38-a781-4bcd-848d-2acbb1f41c17",
+                "created_at": "2026-11-26T22:25:09.413345+03:00",
+                "object_type": "payment"
+            },
+            {
+                "id": "2e85265b-3cda-4856-ab97-339e84c255b5",
+                "body": "400.00 KES received on INV-000001.",
+                "data": {
+                    "provider": null,
+                    "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd"
+                },
+                "kind": "payment_confirmed",
+                "read": false,
+                "title": "Payment confirmed",
+                "category": "payment",
+                "resolved": false,
+                "severity": "info",
+                "object_id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+                "created_at": "2026-11-26T22:25:09.413345+03:00",
+                "object_type": "payment"
+            },
+            {
+                "id": "69336d27-a1fb-4f31-acda-0849c2b7e4dc",
+                "body": "400.00 KES on INV-000001 needs to be verified before it counts.",
+                "data": {
+                    "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd"
+                },
+                "kind": "payment_pending_verification",
+                "read": false,
+                "title": "Payment waiting for verification",
+                "category": "payment",
+                "resolved": false,
+                "severity": "warning",
+                "object_id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+                "created_at": "2026-11-26T22:25:09.413345+03:00",
+                "object_type": "payment"
+            },
+            {
+                "id": "9c501234-0c85-4f0e-8763-9ebdf1724795",
+                "body": "400.00 KES received on INV-000001. 760.00 KES is still owed.",
+                "data": {
+                    "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd"
+                },
+                "kind": "payment_partial",
+                "read": false,
+                "title": "Part payment received",
+                "category": "payment",
+                "resolved": false,
+                "severity": "info",
+                "object_id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+                "created_at": "2026-11-26T22:25:09.413345+03:00",
+                "object_type": "payment"
+            }
+        ]
+    },
+    "fin3_report_profit_loss": {
+        "to": "2026-11-26",
+        "from": "2026-09-27",
+        "basis": "base",
+        "revenue": {
+            "rows": [
+                {
+                    "code": "4000",
+                    "name": "Animation Services Revenue",
+                    "amount": "4000.00",
+                    "account_id": "881ccc47-3dbd-4971-9d75-a10cd128e1fc",
+                    "account_type": "revenue"
+                }
+            ],
+            "total": "4000.00"
+        },
+        "currency": "KES",
+        "net_profit": "-4000.00",
+        "gross_profit": "-1000.00",
+        "other_income": {
+            "rows": [
+            ],
+            "total": "0.00"
+        },
+        "cost_of_sales": {
+            "rows": [
+                {
+                    "code": "5000",
+                    "name": "Animator Costs",
+                    "amount": "5000.00",
+                    "account_id": "150403ed-c621-4680-9bfd-d18c6df6de1e",
+                    "account_type": "cost_of_sales"
+                }
+            ],
+            "total": "5000.00"
+        },
+        "other_expenses": {
+            "rows": [
+            ],
+            "total": "0.00"
+        },
+        "operating_profit": "-4000.00",
+        "operating_expenses": {
+            "rows": [
+                {
+                    "code": "6200",
+                    "name": "Software Subscriptions",
+                    "amount": "3000.00",
+                    "account_id": "cd8c5ab5-75ab-44a5-b4cf-24e371f15f44",
+                    "account_type": "operating_expense"
+                }
+            ],
+            "total": "3000.00"
+        },
+        "excluded_entries_missing_fx": 0
+    },
+    "fin3_report_tax_summary": {
+        "to": "2026-11-26",
+        "from": "2026-09-27",
+        "basis": "invoice documents in their own currency (not converted)",
+        "sales": {
+            "tax": "160.00",
+            "rows": [
+                {
+                    "tax": "0.00",
+                    "invoices": 2,
+                    "tax_rate": "0.0000",
+                    "taxable_net": "3000.00",
+                    "classification": "zero_rated_or_exempt"
+                },
+                {
+                    "tax": "160.00",
+                    "invoices": 1,
+                    "tax_rate": "16.0000",
+                    "taxable_net": "1000.00",
+                    "classification": "standard"
+                }
+            ],
+            "taxable_net": "4000.00"
+        },
+        "currency": "KES",
+        "purchases": {
+            "note": "Supplier bills do not carry a tax split in Finance V3 yet.",
+            "tracked": false
+        }
+    },
+    "fin3_set_alert_settings": {
+        "auto_receipts": false,
+        "due_soon_days": 3,
+        "max_reminders": 3,
+        "reminders_enabled": false,
+        "budget_warn_percent": 90,
+        "reminder_repeat_days": 7,
+        "pending_payment_minutes": 30,
+        "reminder_first_after_days": 3
+    },
+    "fin3_notification_counts": {
+        "total": 9,
+        "unread": 9,
+        "critical_unread": 2
+    },
+    "fin3_report_balance_sheet": {
+        "as_of": "2026-11-26",
+        "basis": "base",
+        "assets": {
+            "rows": [
+                {
+                    "code": "1010",
+                    "name": "Operating Bank Account",
+                    "amount": "2400.00",
+                    "account_id": "fa8a8069-4c8f-4eb3-8ad8-e59f322434ad",
+                    "account_type": "asset"
+                },
+                {
+                    "code": "1100",
+                    "name": "Accounts Receivable",
+                    "amount": "3760.00",
+                    "account_id": "69465bb7-edf7-4929-9780-37e76730588e",
+                    "account_type": "asset"
+                }
+            ],
+            "total": "6160.00"
+        },
+        "equity": {
+            "rows": [
+                {
+                    "code": "3100",
+                    "name": "Owner Contributions",
+                    "amount": "100000.00",
+                    "account_id": "f398e914-ae79-4cad-b383-110799c6ca2e",
+                    "account_type": "equity"
+                },
+                {
+                    "code": "3200",
+                    "name": "Owner Draws",
+                    "amount": "-95000.00",
+                    "account_id": "5482db2c-0e05-4564-ba07-90e1140d30d2",
+                    "account_type": "equity"
+                }
+            ],
+            "total": "1000.00",
+            "current_earnings": "-4000.00"
+        },
+        "balanced": true,
+        "currency": "KES",
+        "difference": "0.00",
+        "liabilities": {
+            "rows": [
+                {
+                    "code": "2100",
+                    "name": "Animator and Freelancer Payables",
+                    "amount": "5000.00",
+                    "account_id": "7263e744-f58e-4a80-b880-f0b88f37130c",
+                    "account_type": "liability"
+                },
+                {
+                    "code": "2300",
+                    "name": "Sales Tax / VAT Payable",
+                    "amount": "160.00",
+                    "account_id": "c90a1d93-5259-4356-af7a-0fd91a2526d2",
+                    "account_type": "liability"
+                }
+            ],
+            "total": "5160.00"
+        },
+        "excluded_entries_missing_fx": 0,
+        "total_liabilities_and_equity": "6160.00"
+    },
+    "fin3_explain_safe_to_spend": {
+        "raw": "-12600.00",
+        "items": {
+            "allocations": [
+            ],
+            "approved_bills": [
+            ],
+            "animator_obligations": [
+                {
+                    "id": "638f53ee-b07c-4091-a4db-82ee8b4a33f8",
+                    "ref": "SH-010",
+                    "description": "Shot 10",
+                    "outstanding": "5000.00",
+                    "ledger_account": "2100 Animator Payables"
+                }
+            ],
+            "scheduled_owner_payments": [
+            ]
+        },
+        "currency": "KES",
+        "reserves": [
+            {
+                "mode": "logical",
+                "name": "Tax reserve",
+                "balance": "10000.00",
+                "treatment": "subtracted",
+                "reserve_id": "01140ef1-ef8c-4729-85e5-4dc3ea934e42"
+            }
+        ],
+        "shortfall": "12600.00",
+        "deductions": [
+            {
+                "key": "animator_obligations",
+                "label": "Approved animator work not yet paid",
+                "amount": "5000.00",
+                "source": "animator_work_items"
+            },
+            {
+                "key": "approved_bills",
+                "label": "Approved bills not yet paid",
+                "amount": "0.00",
+                "source": "payables (account 2000)"
+            },
+            {
+                "key": "scheduled_owner_payments",
+                "label": "Owner payments scheduled soon",
+                "amount": "0.00",
+                "source": "owner_payments"
+            },
+            {
+                "key": "production_allocations",
+                "label": "Set aside for production",
+                "amount": "0.00",
+                "source": "fund_allocations"
+            },
+            {
+                "key": "operations_allocations",
+                "label": "Set aside for business operations",
+                "amount": "0.00",
+                "source": "fund_allocations"
+            },
+            {
+                "key": "reserves",
+                "label": "Protected business reserve",
+                "amount": "10000.00",
+                "source": "reserves (logical)"
+            }
+        ],
+        "cash_accounts": [
+            {
+                "code": "1010",
+                "name": "Operating Bank Account",
+                "balance": "2400.00",
+                "account_id": "fa8a8069-4c8f-4eb3-8ad8-e59f322434ad"
+            },
+            {
+                "code": "1020",
+                "name": "Cash on Hand",
+                "balance": "0.00",
+                "account_id": "cdf27c62-0742-4529-96d6-ec1a0f888f1e"
+            },
+            {
+                "code": "1030",
+                "name": "Business Reserve Account",
+                "balance": "0.00",
+                "account_id": "26450fa9-c4f4-4ab8-9de0-5afbbf989001"
+            }
+        ],
+        "safe_to_spend": "0.00",
+        "available_cash": "2400.00",
+        "not_counted_as_cash": {
+            "unpaid_client_invoices": "3760.00",
+            "online_payments_clearing": "0.00",
+            "manual_payments_awaiting_verification": "160.00"
+        },
+        "how_it_is_worked_out": "Available cash, minus every deduction listed, gives the raw figure. Safe to spend is the raw figure, never below zero.",
+        "commitment_horizon_days": 30
+    },
+    "fin3_preview_invoice_email": {
+        "valid": true,
+        "invoice": {
+            "id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+            "total": "1160.00",
+            "status": "partially_paid",
+            "currency": "KES",
+            "due_date": "2026-12-10",
+            "invoice_no": "INV-000001",
+            "issue_date": "2026-11-26",
+            "outstanding": "760.00"
+        },
+        "message": null,
+        "subject": "Invoice INV-000001 from P5 Studio",
+        "problems": [
+        ],
+        "recipient": "pay@acme.test",
+        "attachments": [
+            {
+                "kind": "invoice_pdf",
+                "filename": "INV-000001.pdf"
+            }
+        ],
+        "client_name": "Acme Films",
+        "payment_link": {
+            "reason": null,
+            "included": true,
+            "expires_in_days": 30
+        },
+        "already_queued": null,
+        "default_subject": "Invoice INV-000001 from P5 Studio",
+        "will_issue_invoice": false
+    },
+    "fin3_report_general_ledger": {
+        "to": "2026-11-26",
+        "from": null,
+        "basis": "base",
+        "limit": 50,
+        "lines": [
+            {
+                "date": "2026-11-26",
+                "memo": "Opening cash",
+                "debit": "100000.00",
+                "credit": null,
+                "balance": "100000.00",
+                "entry_id": "cb23fe04-0235-4f77-afcd-36b512273c5b",
+                "entry_no": 1,
+                "reference": null
+            },
+            {
+                "date": "2026-11-26",
+                "memo": "Payment for invoice INV-000001",
+                "debit": "400.00",
+                "credit": null,
+                "balance": "100400.00",
+                "entry_id": "c7fe68e8-a1cc-49d3-80f0-ebe28b7283ba",
+                "entry_no": 3,
+                "reference": "INV-000001"
+            },
+            {
+                "date": "2026-11-26",
+                "memo": "Render credits",
+                "debit": null,
+                "credit": "3000.00",
+                "balance": "97400.00",
+                "entry_id": "fd202108-b606-401c-b0e0-6f91f6303698",
+                "entry_no": 4,
+                "reference": "EXP-000001"
+            },
+            {
+                "date": "2026-11-26",
+                "memo": "big draw",
+                "debit": null,
+                "credit": "95000.00",
+                "balance": "2400.00",
+                "entry_id": "6116c514-d4d6-41f7-a50a-f4665c319dc3",
+                "entry_no": 7,
+                "reference": null
+            }
+        ],
+        "offset": 0,
+        "account": {
+            "id": "fa8a8069-4c8f-4eb3-8ad8-e59f322434ad",
+            "code": "1010",
+            "name": "Operating Bank Account",
+            "account_type": "asset",
+            "normal_balance": "debit"
+        },
+        "currency": "KES",
+        "total_lines": 4,
+        "closing_balance": "2400.00",
+        "opening_balance": "0.00"
+    },
+    "fin3_report_invoice_status": {
+        "to": "2026-11-26",
+        "from": "2026-09-27",
+        "currency": "KES",
+        "by_status": [
+            {
+                "count": 2,
+                "total": "3000.00",
+                "status": "issued",
+                "outstanding": "3000.00"
+            },
+            {
+                "count": 1,
+                "total": "1160.00",
+                "status": "partially_paid",
+                "outstanding": "760.00"
+            }
+        ],
+        "overdue_count": 1,
+        "overdue_amount": "500.00"
+    },
+    "fin3_get_intent_for_invoice": [
+    ],
+    "fin3_report_payment_history": {
+        "to": "2026-11-26",
+        "from": "2026-09-27",
+        "items": [
+            {
+                "id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+                "date": "2026-11-26",
+                "amount": "400.00",
+                "client": "Acme Films",
+                "method": "bank_transfer",
+                "status": "recorded",
+                "provider": null,
+                "refunded": "0.00",
+                "reference": "REF-1",
+                "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "invoice_no": "INV-000001",
+                "verification": "verified"
+            },
+            {
+                "id": "9d47bd38-a781-4bcd-848d-2acbb1f41c17",
+                "date": "2026-11-26",
+                "amount": "160.00",
+                "client": "Acme Films",
+                "method": "bank_transfer",
+                "status": "recorded",
+                "provider": null,
+                "refunded": "0.00",
+                "reference": "REF-2",
+                "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "invoice_no": "INV-000001",
+                "verification": "pending_verification"
+            }
+        ],
+        "currency": "KES",
+        "total_verified": "400.00"
+    },
+    "fin3_list_expense_categories": [
+        {
+            "id": "989673c4-a727-45b5-9f30-5487ea37e104",
+            "name": "Bank and payment fees",
+            "is_active": true,
+            "account_id": "c11d005f-50e3-47c9-b73c-32ed289f75ab",
+            "account_code": "6600"
+        },
+        {
+            "id": "463e70ff-34b6-45a2-9f8e-8836a17e60e3",
+            "name": "Equipment and supplies",
+            "is_active": true,
+            "account_id": "88279a50-89b1-45f6-8e42-c3673e21f122",
+            "account_code": "6800"
+        },
+        {
+            "id": "e4110810-715d-4299-8cc5-5a1fe70a0c0b",
+            "name": "Internet and phone",
+            "is_active": true,
+            "account_id": "0f6e9f02-6005-4898-8ece-799e3efe2612",
+            "account_code": "6300"
+        },
+        {
+            "id": "45665aa6-a551-4b3f-922f-f3ad78588f09",
+            "name": "Marketing",
+            "is_active": true,
+            "account_id": "965b599e-d5bf-4978-b2fd-129f1a53ea6e",
+            "account_code": "6400"
+        },
+        {
+            "id": "556fb30d-76e2-45fc-a5bd-5dff44d93a21",
+            "name": "Other expenses",
+            "is_active": true,
+            "account_id": "30d66ff6-bc51-4a66-99f3-2ac63e02fb56",
+            "account_code": "6900"
+        },
+        {
+            "id": "9973ff64-82ad-45f7-87ca-2316c5864b20",
+            "name": "Professional fees",
+            "is_active": true,
+            "account_id": "4bb776ee-cd30-4723-b36b-37c36534ca81",
+            "account_code": "6500"
+        },
+        {
+            "id": "d90e23c1-d3f7-4491-b45d-c20ac8d1a3b9",
+            "name": "Rent and utilities",
+            "is_active": true,
+            "account_id": "83ebba45-5edf-475c-b3b8-77a3673379ce",
+            "account_code": "6100"
+        },
+        {
+            "id": "67a4d476-1ceb-42ac-a123-5ecfbf31e15d",
+            "name": "Software subscriptions",
+            "is_active": true,
+            "account_id": "cd8c5ab5-75ab-44a5-b4cf-24e371f15f44",
+            "account_code": "6200"
+        },
+        {
+            "id": "5a8f73c9-571a-4fe3-a25c-6f6d7470d787",
+            "name": "Travel and meals",
+            "is_active": true,
+            "account_id": "919400c5-203b-4803-b5df-3fbc8af159ab",
+            "account_code": "6700"
+        }
+    ],
+    "fin3_list_project_financials": [
+    ],
+    "fin3_mark_notifications_read": {
+        "total": 9,
+        "unread": 9,
+        "critical_unread": 2
+    },
+    "fin3_list_animator_assignments": [
+        {
+            "id": "1403dbbe-79a2-454d-b686-d67ec681481e",
+            "notes": null,
+            "status": "active",
+            "currency": "KES",
+            "rate_unit": "shot",
+            "legacy_ref": null,
+            "project_id": "a0a97a32-5633-4cb6-3ff2-299396445b7a",
+            "role_label": null,
+            "agreed_rate": "500.0000",
+            "animator_id": "762670fd-a44a-4823-a2d9-9e8eac06398e",
+            "animator_name": "Amani Animator"
+        }
+    ],
+    "fin3_list_animator_obligations": [
+        {
+            "id": "638f53ee-b07c-4091-a4db-82ee8b4a33f8",
+            "rate": "500.0000",
+            "status": "approved",
+            "currency": "KES",
+            "due_date": null,
+            "work_ref": "SH-010",
+            "rate_unit": "shot",
+            "is_overdue": false,
+            "project_id": "a0a97a32-5633-4cb6-3ff2-299396445b7a",
+            "amount_paid": "0.00",
+            "animator_id": "762670fd-a44a-4823-a2d9-9e8eac06398e",
+            "approved_at": "2026-11-26T22:25:09.413345+03:00",
+            "description": "Shot 10",
+            "outstanding": "5000.00",
+            "submitted_on": "2026-11-26",
+            "animator_name": "Amani Animator",
+            "assignment_id": "1403dbbe-79a2-454d-b686-d67ec681481e",
+            "payment_status": "unpaid",
+            "approved_amount": "5000.00",
+            "decision_reason": null,
+            "submitted_amount": "5000.00",
+            "approved_quantity": "10.0000",
+            "submitted_quantity": "10.0000"
+        }
+    ],
+    "fin3_list_invoice_communications": [
+        {
+            "at": "2026-11-26T22:25:09.413345+03:00",
+            "kind": "receipt",
+            "status": "issued",
+            "receipt_id": "d518a27a-611c-4cfa-ad64-05676265846e",
+            "receipt_no": "RCT-000001"
+        },
+        {
+            "at": "2026-11-26T22:25:09.413345+03:00",
+            "kind": "payment",
+            "payment": {
+                "id": "9d47bd38-a781-4bcd-848d-2acbb1f41c17",
+                "amount": "160.00",
+                "method": "bank_transfer",
+                "status": "recorded",
+                "currency": "KES",
+                "provider": null,
+                "reference": "REF-2",
+                "fee_amount": null,
+                "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "environment": "live",
+                "received_at": "2026-11-26T03:00:00+03:00",
+                "accounting_date": "2026-11-26",
+                "ledger_entry_id": null,
+                "refunded_amount": "0.00",
+                "provider_reference": null,
+                "verification_status": "pending_verification"
+            }
+        },
+        {
+            "at": "2026-11-26T22:25:09.413345+03:00",
+            "kind": "payment",
+            "payment": {
+                "id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+                "amount": "400.00",
+                "method": "bank_transfer",
+                "status": "recorded",
+                "currency": "KES",
+                "provider": null,
+                "reference": "REF-1",
+                "fee_amount": null,
+                "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "environment": "live",
+                "received_at": "2026-11-26T03:00:00+03:00",
+                "accounting_date": "2026-11-26",
+                "ledger_entry_id": "c7fe68e8-a1cc-49d3-80f0-ebe28b7283ba",
+                "refunded_amount": "0.00",
+                "provider_reference": null,
+                "verification_status": "verified"
+            }
+        },
+        {
+            "at": "2026-11-26T22:25:09.413345+03:00",
+            "kind": "email",
+            "email": {
+                "id": "2f0e9b90-ffa8-4414-a085-af9d45a0eb1b",
+                "status": "queued",
+                "sent_at": null,
+                "subject": null,
+                "client_id": "6621205b-6584-48c3-9029-7647be48c8b6",
+                "failed_at": null,
+                "recipient": "pay@acme.test",
+                "refund_id": null,
+                "resend_of": null,
+                "created_at": "2026-11-26T22:25:09.413345+03:00",
+                "email_type": "payment_receipt",
+                "invoice_id": "fedc2b5e-7a37-40de-aaf9-16ca7b0ab1fd",
+                "payment_id": "4e40338b-c725-49b7-841b-041500d9e7f4",
+                "receipt_id": "d518a27a-611c-4cfa-ad64-05676265846e",
+                "delivered_at": null,
+                "failure_code": null,
+                "attempt_count": 0,
+                "delivery_flags": [
+                ],
+                "failure_detail": null,
+                "unknown_outcome": false
+            },
+            "provider_message_id": null
+        },
+        {
+            "at": "2026-11-26T22:25:09.413345+03:00",
+            "kind": "invoice_event",
+            "action": "issue_invoice"
+        },
+        {
+            "at": "2026-11-26T22:25:09.413345+03:00",
+            "kind": "invoice_event",
+            "action": "approve_invoice"
+        },
+        {
+            "at": "2026-11-26T22:25:09.413345+03:00",
+            "kind": "invoice_event",
+            "action": "create_invoice_draft"
+        }
+    ],
+    "fin3_report_animator_obligations": {
+        "overdue": "0",
+        "currency": "KES",
+        "by_project": [
+            {
+                "items": 1,
+                "project_id": "a0a97a32-5633-4cb6-3ff2-299396445b7a",
+                "outstanding": "5000.00"
+            }
+        ],
+        "by_animator": [
+            {
+                "paid": "0.00",
+                "items": 1,
+                "animator": "Amani Animator",
+                "approved": "5000.00",
+                "oldest_due": null,
+                "animator_id": "762670fd-a44a-4823-a2d9-9e8eac06398e",
+                "outstanding": "5000.00"
+            }
+        ],
+        "total_outstanding": "5000.00"
+    }
+}

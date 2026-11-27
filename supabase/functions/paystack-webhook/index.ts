@@ -15,6 +15,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { paystackFetch } from "../_shared/paystack_api.ts";
 import { identifyWebhookEnvironment, interpretVerification, isHandledEvent, loadKeyRing, toMinor, webhookEventKey } from "../_shared/paystack_core.ts";
+import { handleFinanceV3PaystackEvent, isV3Reference } from "../_shared/finance_v3_paystack.ts";   // Finance V3 (Phase 3): references KRL3-*
 
 const MAX_BODY = 256 * 1024;
 const reply = (status: number, body: Record<string, unknown> = {}) =>
@@ -51,6 +52,17 @@ Deno.serve(async (req) => {
   const key = `${cfg.environment}:${await webhookEventKey(rawBody, parsed)}`;
   const service = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   const reference = String(parsed?.data?.reference || parsed?.data?.transaction_reference || "") || null;
+
+  // Finance V3 (Phase 3): a KRL3-* reference belongs to the Finance V3 ledger. Same endpoint, same signature check above; the event is
+  // recorded and processed in finance_v3.provider_events, never in paystack_webhook_events, and no V2 table is touched.
+  if (isV3Reference(reference)) {
+    const out = await handleFinanceV3PaystackEvent({
+      rpc: async (name, args) => await service.rpc(name, args),
+      verify: (ref) => paystackFetch(cfg, `/transaction/verify/${encodeURIComponent(ref)}`),
+      environment: cfg.environment, eventKey: key, event, reference: reference!, parsed, handled: isHandledEvent(event),
+    });
+    return reply(out.status, out.body);
+  }
 
   // Record (or find) the event. A unique event_key makes retries and duplicates collapse.
   let { data: ev } = await service.from("paystack_webhook_events")

@@ -510,6 +510,9 @@ export interface WebhookStore {
   applyDeliveryEvent(a: { provider_message_id: string; status: string; event_type: string; provider_event_id: string; occurred_at: string | null; detail: Record<string, unknown> }): Promise<{ found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean }>;
   /** OPTIONAL extra delivery sink plugged in by the endpoint wiring (resend-webhook/index.ts). General Email does not implement or import it;
    *  it exists so Intelligence can apply the same signed event to its own rows without general Email depending on intel_* objects. */
+  /** OPTIONAL Finance V3 delivery sink (Phase 3), plugged in by resend-webhook/index.ts. Called BEFORE the provider-enabled gate and with
+   *  its own fault isolation (a Finance failure never blocks Inbox or Intelligence handling, and the reverse). Idempotent. */
+  applyFinanceDeliveryEvent?(a: { provider_event_id: string; event_type: string; provider_message_id: string; tags: unknown; occurred_at: string | null; bounce_type: string }): Promise<{ found: boolean; applied: boolean; duplicate: boolean }>;
   applyIntelDeliveryEvent?(a: { provider_message_id: string; event_type: string; provider_event_id: string; occurred_at: string | null; recipient: string; reason: string; bounce_type: string }): Promise<{ found: boolean; ambiguous?: boolean; duplicate?: boolean; applied?: boolean }>;
 }
 export interface WebhookDeps {
@@ -732,6 +735,18 @@ export async function handleWebhook(req: Request, d: WebhookDeps): Promise<Respo
   let event: any;
   try { event = JSON.parse(body); } catch { return json({ error: "Invalid payload" }, 400); }
   const type = String(event?.type || "");
+
+  // Finance V3 sink (Phase 3). Runs first, isolated: Finance delivery truth must not depend on the CRM Inbox provider switch, and a
+  // Finance error is logged without changing how Inbox/Intelligence events are acknowledged (the reconcile pass repairs Finance).
+  if (type !== "email.received" && d.store.applyFinanceDeliveryEvent) {
+    try {
+      await d.store.applyFinanceDeliveryEvent({
+        provider_event_id: id, event_type: type, provider_message_id: typeof event?.data?.email_id === "string" ? event.data.email_id : "",
+        tags: event?.data?.tags, occurred_at: event?.created_at || null,
+        bounce_type: String(event?.data?.bounce?.type || event?.data?.bounce?.subType || ""),
+      });
+    } catch (e) { console.error("resend-webhook: Finance delivery sink failed:", safeMsg(e)); }
+  }
 
   try {
     if (!(await webhookProviderAllowed(d.store))) return json({ ok: true, ignored: "provider disabled" });   // acknowledged on purpose so Resend stops retrying

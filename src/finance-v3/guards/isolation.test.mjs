@@ -57,11 +57,15 @@ test("V3 source never imports V2 finance code, App.jsx, or the payments, email o
   assert.deepEqual(bad, []);
 });
 
-test("nothing outside src/finance-v3 imports V3 yet (integration is Phase 5/6 work)", () => {
+test("outside src/finance-v3 only App.jsx references V3, through one lazy, flag-gated import (off by default)", () => {
   const offenders = walk("src")
     .filter((p) => /\.(js|jsx|mjs)$/.test(p) && !p.startsWith("src/finance-v3/"))
     .filter((p) => /finance-v3/.test(read(p).toString("utf8")) && !p.endsWith(".test.mjs"));
-  assert.deepEqual(offenders, [], "Phase 1 must not wire V3 into the running app");
+  assert.deepEqual(offenders, ["src/App.jsx"]);
+  const app = read("src/App.jsx").toString("utf8");
+  assert.equal((app.match(/finance-v3/g) || []).length, 2, "two references: the lazy page and the lazy dashboard bridge");
+  assert.match(app, /lazyWithSuspense\(\(\) => import\("\.\/finance-v3\/ui\/FinanceV3Entry\.jsx"\)/);
+  assert.match(app, /import\("\.\/finance-v3\/ui\/useDashboardV3\.js"\)/); assert.match(app, /VITE_FINANCE_V3_UI === "true"/); assert.match(app, /workspace === "finance" && !FINANCE_V3_UI/);
 });
 
 test("V3 migrations: named finance_v3, sort after all other migrations, never touch V2/legacy tables", () => {
@@ -78,7 +82,10 @@ test("V3 migrations: named finance_v3, sort after all other migrations, never to
     `\\b(drop\\s+table|alter\\s+table|truncate|delete\\s+from|insert\\s+into|update|create\\s+(?:or\\s+replace\\s+)?trigger[^;]*?\\bon)\\s+(?:if\\s+exists\\s+)?(?:only\\s+)?(?:public\\.)?(?:(?:${integTables})\\b|(?:${integPrefixes})[a-z0-9_]+)`, "i");
   for (const f of v3) {
     assert.ok(f.slice(0, 14) > maxOther, `${f} must be timestamped after the newest existing migration (${maxOther})`);
-    const sql = read(`supabase/migrations/${f}`).toString("utf8");
+    let sql = read(`supabase/migrations/${f}`).toString("utf8");
+    // The ONE documented exception (Phase 6): the body of Emma's read-only function writes the same single tool-trace row into
+    // intel_chat_messages that Intelligence's own intel_agent_chat_read writes. phase6-parity.test.mjs proves that is the only intel table it writes.
+    if (f.endsWith("_finance_v3_emma_read.sql")) sql = sql.replace(/create or replace function public\.intel_agent_finance_read[\s\S]*?end \$\$;/, "");
     assert.doesNotMatch(sql, forbidden, `${f} modifies a protected V2/legacy table`);
     assert.doesNotMatch(sql, forbiddenIntegration, `${f} modifies a protected Resend/Inbox/Intelligence/Paystack table`);
   }

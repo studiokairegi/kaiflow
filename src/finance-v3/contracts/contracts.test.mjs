@@ -26,7 +26,7 @@ test("default UI mode is simple and is a valid mode", () => {
 
 test("money wire format accepts decimal strings and rejects exponents, separators and over-scale", () => {
   for (const ok of ["0", "12", "-12.5", "1234567.1234", "999999999999999.9999"]) assert.match(ok, c.MONEY.amountPattern);
-  for (const bad of ["1e3", "1,000.00", ".5", "12.34567", "", "abc", "1234567890123456"]) assert.doesNotMatch(bad, c.MONEY.amountPattern);
+  for (const bad of ["007", "-01", "00.5", "1e3", "1,000.00", ".5", "12.34567", "", "abc", "1234567890123456"]) assert.doesNotMatch(bad, c.MONEY.amountPattern);
   assert.equal(c.MONEY.storageScale, 4);
 });
 

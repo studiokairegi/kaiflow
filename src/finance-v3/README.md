@@ -1,6 +1,7 @@
 # Finance V3 (source)
 
-Status: **Phase 1 foundation only.** Nothing here is wired into the running app.
+Status: **Phase 2 (accounting engine) complete in the database; the JavaScript side is still contracts only.** Nothing here is wired into the running app.
+Phase 2 reference: `docs/finance-v3/FINANCE_V3_PHASE2_ENGINE.md`. SQL tests: `supabase/tests/finance_v3/`.
 Authoritative design: `docs/finance-v3/FINANCE_V3_MASTER_ARCHITECTURE.md`.
 
 ## Rules (enforced by `guards/isolation.test.mjs`)
@@ -12,7 +13,7 @@ Authoritative design: `docs/finance-v3/FINANCE_V3_MASTER_ARCHITECTURE.md`.
 ## Layout and owning phase
 | Folder | Purpose | Built in |
 |---|---|---|
-| `contracts/` | Names, enums, error codes, money conventions (no logic) | Phase 1 (done) |
+| `contracts/` | Names, enums, error codes, money conventions (no logic). Phase 2 added permissions, event kinds, RPC names and `phase2-parity.test.mjs` (SQL <-> JS drift guard) | Phase 1, extended in Phase 2 (done) |
 | `guards/` | Isolation and V2-intact tests | Phase 1 (done) |
 | `api/` | Thin typed wrappers over `fin3_*` RPCs, error mapping | Phase 2-4 (grows per phase) |
 | `domain/` | Pure presentation helpers (labels, formatting of decimal strings). No arithmetic | Phase 5 |

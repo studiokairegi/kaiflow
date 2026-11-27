@@ -1,1 +1,2 @@
-Owner: Phase 5. Full accounting UI: ledger, journals, statements, reconciliation, audit. Every Simple Mode figure must be traceable to accounts here.
+Phase 5 (built). Accountant Mode: 20 tabs (Overview, Sales, Purchases, Expenses, Banking, Chart of accounts, General ledger, Journal entries, Trial balance, Profit & loss, Balance sheet, Cash flow, Tax, Receivables, Payables, Reconciliation, Audit history, Settings, Payment records, Email delivery).
+Date filters, account codes, debit/credit columns and journal references throughout. Read-only except reconciliation start and the invoice screens shared with Simple Mode.
