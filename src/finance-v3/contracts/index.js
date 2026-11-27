@@ -472,7 +472,9 @@ export const PHASE5_RPCS = Object.freeze([
   "fin3_report_general_ledger",
   "fin3_report_profit_loss",
   "fin3_report_tax_summary",
-  "fin3_set_ui_prefs"
+  "fin3_set_ui_prefs",
+  "fin3_migration_import_legacy_history",
+  "fin3_migration_legacy_history_report"
 ]);
 // Phase 3 RPC replaced in Phase 5 (same signature): fin3_queue_invoice_email now accepts optional `subject` and `message` options.
 export const PHASE5_REDEFINED_RPCS = Object.freeze(["fin3_queue_invoice_email"]);
