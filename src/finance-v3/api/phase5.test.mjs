@@ -19,6 +19,11 @@ test("every Phase 5 RPC is reachable through a wrapper with the right parameter 
   const seen = new Set(calls.map((c) => c.name)); for (const n of PHASE5_RPCS) assert.ok(seen.has(n), `${n} has a wrapper`);
   assert.deepEqual(calls.find((c) => c.name === "fin3_set_ui_prefs").args, { p_org: ORG, p_prefs: { mode: "accountant" } });
   assert.equal(calls.find((c) => c.name === "fin3_report_general_ledger").args.p_limit, 10);
+  assert.deepEqual(calls.find((c) => c.name === "fin3_migration_start_run").args, { p_org: ORG, p_cutoff_date: "2026-11-27", p_note: "test" });
+  assert.deepEqual(calls.find((c) => c.name === "fin3_migration_stage").args, { p_org: ORG, p_run: "run-id", p_records: [{ source_id: "legacy-id" }] });
+  assert.deepEqual(calls.find((c) => c.name === "fin3_migration_import").args, { p_org: ORG, p_run: "run-id", p_retry_failed: false });
+  assert.deepEqual(calls.find((c) => c.name === "fin3_migration_report").args, { p_org: ORG, p_run: "run-id" });
+
 });
 test("the mode must be simple or accountant", () => { const { api } = rec(); assert.throws(() => api.setUiMode(ORG, "expert"), /Mode must be/); });
 test("the email edit is limited to a single-line subject of 150 and a message of 2000 characters", () => {
