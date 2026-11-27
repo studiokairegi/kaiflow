@@ -43,6 +43,12 @@ export function createFinanceApi(rpc) {
     myPermissions: (org) => call("fin3_my_permissions", { p_org: org }),
     legacyHistoryReport: (org) => call("fin3_migration_legacy_history_report", { p_org: org }),
     importLegacyHistory: (org) => call("fin3_migration_import_legacy_history", { p_org: org }),
+    startLegacyInvoiceRun: (org, cutoffDate, note = null) => call("fin3_migration_start_run", { p_org: org, p_cutoff_date: cutoffDate, p_note: note }),
+    extractLegacyInvoices: (org) => call("fin3_migration_extract_legacy_invoices", { p_org: org }),
+    stageLegacyInvoices: (org, runId, records) => call("fin3_migration_stage", { p_org: org, p_run: runId, p_records: records }),
+    validateLegacyInvoiceRun: (org, runId) => call("fin3_migration_validate", { p_org: org, p_run: runId }),
+    importLegacyInvoiceRun: (org, runId, retryFailed = false) => call("fin3_migration_import", { p_org: org, p_run: runId, p_retry_failed: retryFailed }),
+    legacyInvoiceMigrationReport: (org, runId) => call("fin3_migration_report", { p_org: org, p_run: runId }),
     // Simple Mode
     overview: (org, currency = null) => call("fin3_overview", { p_org: org, p_currency: currency }),
     explainSafeToSpend: (org, currency = null) => call("fin3_explain_safe_to_spend", { p_org: org, p_currency: currency }),
