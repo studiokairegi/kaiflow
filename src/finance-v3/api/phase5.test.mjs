@@ -12,6 +12,10 @@ test("every Phase 5 RPC is reachable through a wrapper with the right parameter 
   await api.balanceSheet(ORG, "2026-01-31"); await api.cashFlow(ORG, "2026-01-01", "2026-01-31"); await api.generalLedger(ORG, "acc", { limit: 10 }); await api.taxSummary(ORG, "2026-01-01", "2026-01-31");
   await api.listEntries(ORG, { search: "x" }); await api.listAudit(ORG, { objectType: "payment" }); await api.listReceipts(ORG, "inv"); await api.previewInvoiceEmail(ORG, "inv", "a@b.co", { subject: "Hi" });
   await api.legacyHistoryReport(ORG); await api.importLegacyHistory(ORG);
+  const run = await api.startLegacyInvoiceRun(ORG, "2026-11-27", "test");
+  await api.extractLegacyInvoices(ORG); await api.stageLegacyInvoices(ORG, "run-id", [{ source_id: "legacy-id" }]);
+  await api.validateLegacyInvoiceRun(ORG, "run-id"); await api.importLegacyInvoiceRun(ORG, "run-id");
+  await api.legacyInvoiceMigrationReport(ORG, "run-id");
   const seen = new Set(calls.map((c) => c.name)); for (const n of PHASE5_RPCS) assert.ok(seen.has(n), `${n} has a wrapper`);
   assert.deepEqual(calls.find((c) => c.name === "fin3_set_ui_prefs").args, { p_org: ORG, p_prefs: { mode: "accountant" } });
   assert.equal(calls.find((c) => c.name === "fin3_report_general_ledger").args.p_limit, 10);
